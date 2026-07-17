@@ -36,6 +36,13 @@ cargo install ping-rust --locked
 sudo ping-rust
 ```
 
+直接从已公开的 GitHub `main` 安装：
+
+```bash
+cargo install --git https://github.com/Jyanbai/ping-rust.git --locked
+sudo ping-rust
+```
+
 从当前源码安装：
 
 ```bash

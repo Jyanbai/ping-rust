@@ -22,7 +22,7 @@
 | Clash Meta、sing-box、Nekobox 客户端导出 | 已实现，Debian 实测 | `src/client.rs` | 三协议共 9 份导出均成功解析；逐值检查 Reality 服务端私钥泄漏为 0 |
 | Ubuntu 22.04/24.04、Debian 12、Rocky/Alma 9 x86_64 | 远程构建/测试通过；Ubuntu 运行态待实机 | `.github/workflows/ci.yml`、交叉构建证据 | CI run `29597417851` 的 Ubuntu 22.04/24.04、Debian 12、Rocky 9、AlmaLinux 9 共 5/5 jobs 成功；Debian 12 x86_64 另有原生 systemd/公网验收；Linux GNU ELF 最高 GLIBC 2.34 |
 | ARM64 次优先支持 | 构建已证实，待运行 | `src/installer.rs`、交叉构建证据 | aarch64 Linux GNU ELF，最高 GLIBC 2.34；Release target 选择含 GNU/musl |
-| README、MIT、cargo install 发布准备 | 已实现 | `README.md`、`LICENSE`、`scripts/install.sh` | release build、doc、隔离 `cargo package` 门禁（最终修改后重跑） |
+| README、MIT、cargo install 发布准备 | 已实现 | `README.md`、`LICENSE`、`scripts/install.sh` | release build、doc、隔离 `cargo package` 门禁；公开 GitHub `main` 已通过 `cargo install --git ... --locked` 完整安装并运行 0.1.0 |
 | GitHub 源码开源 | 已发布 | `Cargo.toml`、GitHub `main` | `Jyanbai/ping-rust` 已为 Public/非空并建立 `main`；首个提交与跨平台 CI 修复均已推送 |
 | 公开 `cargo install ping-rust` | 等待 crates.io 认证 | 发布包 | crates.io API 当前显示 `ping-rust` 名称未占用，publish dry-run 已通过；尚未真实发布 crate，不能宣称该安装命令已上线 |
 | 干净 Ubuntu 24.04 三分钟部署并公网连通 | Debian 路径通过，Ubuntu 待实机 | `README.md` 验收清单 | Debian 12 上已安装 ping-rust 后，Release + 三协议生成远低于 3 分钟；Windows 外部 Reality 客户端经代理观察到 VPS 公网出口；提供的 VPS 不是 Ubuntu |
@@ -73,9 +73,9 @@
 - `cargo build --locked --release`
 - `cargo doc --locked --no-deps`
 - `cargo install --path . --locked` 后执行 `ping-rust --help`
-- `cargo package --locked --allow-dirty` / `cargo publish --dry-run`：23 文件，47,188 bytes，SHA-256 `D6B35A6BBAB64E4665A0AF68B260056448FBCF99BC1A12428BD946A8C82B2EE1`，隔离解包重编译通过
+- `cargo package --locked` / `cargo publish --dry-run --locked`：干净工作区下打包 23 个文件，隔离解包重编译与上传前校验均通过（包内 VCS 提交信息会随提交变化，避免在同一提交中记录自引用哈希）
 - `cargo audit`：扫描 Cargo.lock 的 240 个依赖，RustSec 1166 条 advisory 中无命中
-- `SOURCE_SNAPSHOT.md`：11/11 section、109,839 bytes，逐节与真实源文件一致
+- `SOURCE_SNAPSHOT.md`：11/11 section、109,984 bytes，逐节与真实源文件一致
 - actionlint v1.7.12：`.github/workflows/ci.yml` 语义检查零诊断；工作流已推送并由 GitHub runner 实际执行
 - GitHub Actions CI run `29597417851`：Ubuntu 22.04/24.04、Debian 12、Rocky Linux 9、AlmaLinux 9 共 5/5 jobs 成功
 
