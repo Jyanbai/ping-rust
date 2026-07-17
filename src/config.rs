@@ -383,10 +383,23 @@ fn commit_managed(
     yaml: &str,
     state: &ManagedState,
 ) -> Result<()> {
+    commit_managed_with_state_writer(config_path, state_path, yaml, state, save_state_to)
+}
+
+fn commit_managed_with_state_writer<F>(
+    config_path: &Path,
+    state_path: &Path,
+    yaml: &str,
+    state: &ManagedState,
+    write_state: F,
+) -> Result<()>
+where
+    F: FnOnce(&Path, &ManagedState) -> Result<()>,
+{
     let old_config = read_optional(config_path)?;
     let old_state = read_optional(state_path)?;
     utils::atomic_write(config_path, yaml.as_bytes(), 0o600)?;
-    if let Err(error) = save_state_to(state_path, state) {
+    if let Err(error) = write_state(state_path, state) {
         let state_rollback = restore_snapshot(state_path, old_state.as_deref(), 0o600);
         let config_rollback = restore_snapshot(config_path, old_config.as_deref(), 0o600);
         if let Err(rollback_error) = state_rollback.and(config_rollback) {
@@ -825,13 +838,17 @@ mod tests {
     fn managed_commit_restores_exact_config_when_state_write_fails() {
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("config.yaml");
-        let blocker = dir.path().join("not-a-directory");
-        let state = blocker.join("state.json");
+        let state = dir.path().join("state.json");
         fs::write(&config, b"old-config").unwrap();
-        fs::write(&blocker, b"block directory creation").unwrap();
 
-        let error =
-            commit_managed(&config, &state, "new-config", &ManagedState::default()).unwrap_err();
+        let error = commit_managed_with_state_writer(
+            &config,
+            &state,
+            "new-config",
+            &ManagedState::default(),
+            |_, _| Err(anyhow::anyhow!("injected state write failure")),
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("已回滚"));
         assert_eq!(fs::read(&config).unwrap(), b"old-config");
         assert!(!state.exists());
