@@ -1,0 +1,13 @@
+- address: 0.0.0.0:443
+  transport: quic
+  quic_settings:
+    cert: /etc/shoes/cert.pem
+    key: /etc/shoes/key.pem
+    alpn_protocols:
+      - h3
+  protocol:
+    type: hysteria2
+    password: replace-with-a-random-password
+    udp_enabled: true
+  rules:
+    - allow-all-direct

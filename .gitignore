@@ -1,0 +1,10 @@
+/target/
+*.log
+*.bak
+.idea/
+.vscode/
+.DS_Store
+/shoes-master/
+/task_plan.md
+/findings.md
+/progress.md

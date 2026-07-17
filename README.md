@@ -1,0 +1,263 @@
+# ping-rust
+
+`ping-rust` 是一个纯 Rust 编写的 [cfal/shoes](https://github.com/cfal/shoes) 安装与管理工具。它提供类似 233boy 脚本的数字菜单，在 Linux VPS 上完成 shoes 安装、VLESS-Reality/Hysteria2/TUIC 配置、systemd 管理和日常运维。
+
+核心逻辑全部位于 Rust 源码中；`scripts/install.sh` 只负责首次调用 `cargo install`。
+
+## 功能
+
+- 从 GitHub Release 下载 shoes，自动匹配 x86_64/aarch64 与 GNU/musl，强制校验官方 SHA-256 digest；GNU 资产不兼容时安全回退 static musl
+- 使用 `cargo install shoes` 从 crates.io 编译安装；低于 1 GiB 内存时自动单任务并关闭 LTO，避免换页风暴
+- 生成 VLESS-Reality-Vision、Hysteria2、TUIC v5 服务端配置
+- 在 Rust 内生成 X25519 Reality 密钥、UUID、short ID、随机密码和自签名证书
+- 在同目录候选文件上调用 `shoes --dry-run`，通过后才原子提交并启用 systemd 服务
+- 多配置添加、列表、删除、端口冲突保护
+- 跨进程配置锁、配置/sidecar 精确回滚，更新与恢复保留服务原运行状态
+- 服务启停、重启、状态、journalctl 日志、更新与卸载
+- BBR、TCP/UDP 端口检查、敏感配置备份与安全恢复
+- 导出 Clash Meta、sing-box 和 Nekobox 分享链接
+
+## 支持环境
+
+| 系统 | 架构 | Release 安装 | cargo 安装 |
+|---|---|---:|---:|
+| Ubuntu 22.04 / 24.04 | x86_64 / aarch64 | 是 | 是 |
+| Debian 12 | x86_64 / aarch64 | 是 | 是 |
+| Rocky Linux 9 / AlmaLinux 9 | x86_64 / aarch64 | 是 | 是 |
+
+要求系统使用 systemd。Release 安装不要求服务器预装 Rust；安装 `ping-rust` 本身以及 cargo 模式需要稳定版 Rust 工具链。
+
+## 安装
+
+crate 发布到 crates.io 后：
+
+```bash
+cargo install ping-rust --locked
+sudo ping-rust
+```
+
+从当前源码安装：
+
+```bash
+git clone https://github.com/Jyanbai/ping-rust.git
+cd ping-rust
+cargo install --path . --locked
+sudo ping-rust
+```
+
+也可以运行极简入口：
+
+```bash
+./scripts/install.sh --path . --locked
+sudo ping-rust
+```
+
+首次启动、生成系统配置、管理 systemd、BBR、备份恢复和卸载都需要 root。生成到自定义路径、查看帮助和本地端口检查不要求 root。
+
+## 三分钟 Reality 部署
+
+```text
+$ sudo ping-rust
+
+ping-rust · shoes 管理工具
+────────────────────────────
+请选择操作
+  1. 安装 shoes
+  2. 添加代理配置
+  3. 查看配置信息
+  4. 删除配置
+  5. 服务管理
+  6. 更新 shoes
+  7. 运维工具
+  8. 卸载
+  9. 退出
+请输入序号 [1-9]:
+```
+
+1. 选择“安装 shoes” → “GitHub Release（推荐）”。
+2. 选择“添加代理配置” → “VLESS-Reality-Vision（推荐）”。
+3. 输入配置名、端口、SNI 和 fallback；通常可接受 `443`、`www.cloudflare.com` 和 `www.cloudflare.com:443`。
+4. 工具写入配置，运行 `shoes --dry-run`，创建/启用 `shoes.service`。
+5. 记录输出的 UUID、公钥和 short ID。Reality 私钥只应留在服务器。
+6. 在“运维工具”中导出客户端配置，并填写 VPS 公网 IP 或域名。
+
+非交互方式：
+
+```bash
+sudo ping-rust install --method release
+sudo ping-rust generate reality \
+  --name reality-main \
+  --port 443 \
+  --server-name www.cloudflare.com \
+  --dest www.cloudflare.com:443
+```
+
+## Hysteria2 与 TUIC
+
+快速生成：
+
+```bash
+sudo ping-rust generate hysteria2 --name hy2 --port 8443 --server-name proxy.example.com
+sudo ping-rust generate tuic --name tuic --port 10443 --server-name proxy.example.com
+```
+
+未指定证书时会创建自签名证书。工具导出客户端配置时会设置相应的跳过校验字段，并显示风险提示；生产环境推荐使用受信任证书：
+
+```bash
+sudo ping-rust generate hysteria2 \
+  --name hy2 \
+  --port 8443 \
+  --server-name proxy.example.com \
+  --cert /etc/letsencrypt/live/proxy.example.com/fullchain.pem \
+  --key /etc/letsencrypt/live/proxy.example.com/privkey.pem
+```
+
+`--cert` 与 `--key` 必须同时提供。
+
+## 常用命令
+
+```bash
+ping-rust --help
+sudo ping-rust info
+sudo ping-rust service status
+sudo ping-rust service restart
+sudo ping-rust logs -n 200
+ping-rust check-port 443 --kind both
+sudo ping-rust enable-bbr
+sudo ping-rust update --method release
+```
+
+多个配置使用不同端口。查看 ID 后删除：
+
+```bash
+sudo ping-rust info
+sudo ping-rust delete <配置-UUID> --yes
+```
+
+## 客户端导出
+
+```bash
+sudo ping-rust export clash-meta --profile <配置-UUID> --server 203.0.113.10 --output clash.yaml
+sudo ping-rust export sing-box --profile <配置-UUID> --server proxy.example.com --output sing-box.json
+sudo ping-rust export nekobox --profile <配置-UUID> --server 203.0.113.10
+```
+
+只有一个配置时可以省略 `--profile`。导出内容包含客户端连接所需凭据，但 Reality 导出永远不包含服务器私钥。
+
+## 备份与恢复
+
+```bash
+sudo ping-rust backup ./shoes-backup.tar.gz
+sudo ping-rust restore ./shoes-backup.tar.gz
+```
+
+备份包含私钥、UUID 和密码，文件权限为 `0600`，请加密保存。恢复过程拒绝绝对路径、`..`、符号链接和特殊文件；新配置未通过 shoes 校验时会自动恢复旧目录。成功恢复后，旧目录仍保留为 `/etc/shoes.pre-restore-<时间戳>`，确认无误后再手动清理。
+
+## 文件位置与权限
+
+| 路径 | 用途 | 权限 |
+|---|---|---:|
+| `/usr/local/bin/shoes` | shoes 内核 | `0755` |
+| `/etc/shoes/config.yaml` | shoes 配置 | `0600` |
+| `/etc/shoes/ping-rust-state.json` | 多配置元数据与客户端导出凭据 | `0600` |
+| `/etc/shoes/cert-*.pem` | 自动生成证书 | `0644` |
+| `/etc/shoes/key-*.pem` | 自动生成证书私钥 | `0600` |
+| `/run/lock/ping-rust.lock` | 配置操作进程间互斥 | `0600` |
+| `/etc/systemd/system/shoes.service` | systemd unit | `0644` |
+
+卸载默认保留 `/etc/shoes`。只有 `uninstall --purge` 或菜单二次确认才会删除配置。
+
+## 故障排查
+
+查看服务和日志：
+
+```bash
+sudo systemctl status shoes --no-pager
+sudo journalctl -u shoes -n 200 --no-pager
+sudo /usr/local/bin/shoes --dry-run /etc/shoes/config.yaml
+```
+
+- `Address already in use`：运行 `ping-rust check-port <端口>`，换用未占用端口。
+- Reality 连接失败：检查 VPS 防火墙、安全组、UUID、公钥、short ID、SNI 和 fallback 是否一致，并用 `timedatectl status` 确认客户端与服务端时钟已同步。
+- Hysteria2/TUIC 失败：确认 UDP 端口已放行，并检查证书域名。
+- `systemctl` 不存在：当前系统不是 systemd 环境，服务管理功能无法使用。
+- GitHub API 限流：稍后重试，或使用 `install --method cargo`。
+- cargo 安装版本较旧：GitHub Release 与 crates.io 的发布时间可能不同，优先选择 Release。
+- cargo 编译很慢：低内存 VPS 上源码模式可能需要数十分钟；这是回退通道，默认部署应优先使用 Release。
+
+## 开发与验证
+
+```bash
+cargo fmt --all -- --check
+cargo test
+cargo clippy --all-targets -- -D warnings
+cargo build --release
+cargo doc --no-deps
+```
+
+本仓库开发阶段已完成：
+
+- Rust 单元测试覆盖密钥/YAML、归档解包、原子写入、systemd unit、端口检查、客户端三格式和恢复路径安全。
+- 使用 shoes 0.2.8 对 ping-rust 实际生成的 Reality、Hysteria2、TUIC 三份配置执行联合 `--dry-run`，解析成功并加载证书。
+- 通过 cargo-zigbuild + Zig 生成 x86_64/aarch64 Linux GNU release ELF，最高 GLIBC 需求为 2.34，覆盖 Rocky/Alma 9 及更新的目标发行版基线。
+- CI 定义覆盖 Ubuntu 22.04/24.04，并在 Debian 12、Rocky Linux 9、AlmaLinux 9 容器中执行锁定依赖测试和 release 构建；工作流实际结果需在推送 GitHub 后确认。
+- 使用 RustSec `cargo audit` 扫描锁定依赖，当前未报告安全公告。
+- 在一台干净代理环境的 Debian 12 x86_64 VPS 上完成原生安装与运行验收：Release 路径约 2 秒完成 shoes v0.2.7 musl 安装，三协议同时通过 dry-run 并由 systemd 启动，外部 Reality 客户端的代理出口与 VPS 公网 IP 一致。
+- 实机完成 9 份客户端导出解析、BBR、端口检查、日志、备份恢复、inactive 状态保持和 Release 更新；详细证据见完成度审计。
+
+逐项需求、修复记录、ELF 哈希和外部验收边界见 [COMPLETION_AUDIT.md](COMPLETION_AUDIT.md)。
+
+发布前应在全新 Ubuntu 24.04 x86_64 VPS 执行以下实机验收：
+
+1. `cargo install --path . --locked`。
+2. Release 与 cargo 两种 shoes 安装方式各测试一次。
+3. 三种协议分别生成、启动，并从外部客户端连接。
+4. 重启 VPS，确认 `shoes.service` 自动启动。
+5. 验证更新、日志、BBR、备份恢复、删除和卸载。
+
+当前 Debian 12 VPS 证据可以证明 Linux/systemd 与公网 Reality 路径可用，但不能替代成功标准指定的 Ubuntu 24.04 实机；完成上述 Ubuntu 清单前，不宣称“Ubuntu 24.04 实机全部通过”。
+
+## 截图建议
+
+发布 README 时建议补充三张终端截图：
+
+1. 主数字菜单全景。
+2. Reality 生成完成画面（必须遮盖私钥、UUID 和 short ID）。
+3. `systemctl status shoes` 与客户端连通性测试。
+
+## 仓库结构
+
+```text
+ping-rust/
+├── Cargo.toml
+├── Cargo.lock
+├── README.md
+├── LICENSE
+├── .gitignore
+├── src/
+│   ├── main.rs
+│   ├── cli.rs
+│   ├── menu.rs
+│   ├── installer.rs
+│   ├── config.rs
+│   ├── service.rs
+│   ├── client.rs
+│   ├── operations.rs
+│   └── utils.rs
+├── examples/
+│   ├── reality.yaml
+│   ├── hysteria2.yaml
+│   └── tuic.yaml
+├── systemd/
+│   └── ping-rust.service
+└── scripts/
+    └── install.sh
+```
+
+## 项目仓库
+
+源码仓库：[Jyanbai/ping-rust](https://github.com/Jyanbai/ping-rust)
+
+## 许可证
+
+[MIT License](LICENSE)

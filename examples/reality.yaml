@@ -1,0 +1,16 @@
+# 示例凭据仅用于展示；部署时请用 `ping-rust generate reality` 重新生成。
+- address: 0.0.0.0:443
+  protocol:
+    type: tls
+    reality_targets:
+      www.cloudflare.com:
+        private_key: AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE
+        short_ids:
+          - 0123456789abcdef
+        dest: www.cloudflare.com:443
+        max_time_diff: 60000
+        vision: true
+        protocol:
+          type: vless
+          user_id: b85798ef-e9dc-46a4-9a87-8da4499d36d0
+          udp_enabled: true
