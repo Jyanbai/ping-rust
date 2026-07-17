@@ -20,10 +20,10 @@
 | 更新与卸载 | 已实现，Debian 实测 | `src/installer.rs`、`src/service.rs` | Release/cargo 更新、active/inactive 状态保持、逐配置删除、最后一条自动停服、默认卸载保留配置及重装恢复均通过 |
 | BBR、端口检查、备份恢复 | 已实现，Debian 实测 | `src/operations.rs` | BBR 当前算法为 bbr；TCP/UDP 端口判断正确；0600 备份 round-trip、marker 清理、哈希一致及 active/inactive 恢复均通过 |
 | Clash Meta、sing-box、Nekobox 客户端导出 | 已实现，Debian 实测 | `src/client.rs` | 三协议共 9 份导出均成功解析；逐值检查 Reality 服务端私钥泄漏为 0 |
-| Ubuntu 22.04/24.04、Debian 12、Rocky/Alma 9 x86_64 | Debian 已运行，远程 CI 修复复测中 | `.github/workflows/ci.yml`、交叉构建证据 | Debian 12 x86_64 原生运行通过；x86_64 Linux GNU ELF 最高 GLIBC 2.34；首轮远程矩阵暴露跨平台测试夹具与 RPM curl 包冲突，已按根因修复待复测 |
+| Ubuntu 22.04/24.04、Debian 12、Rocky/Alma 9 x86_64 | 远程构建/测试通过；Ubuntu 运行态待实机 | `.github/workflows/ci.yml`、交叉构建证据 | CI run `29597417851` 的 Ubuntu 22.04/24.04、Debian 12、Rocky 9、AlmaLinux 9 共 5/5 jobs 成功；Debian 12 x86_64 另有原生 systemd/公网验收；Linux GNU ELF 最高 GLIBC 2.34 |
 | ARM64 次优先支持 | 构建已证实，待运行 | `src/installer.rs`、交叉构建证据 | aarch64 Linux GNU ELF，最高 GLIBC 2.34；Release target 选择含 GNU/musl |
 | README、MIT、cargo install 发布准备 | 已实现 | `README.md`、`LICENSE`、`scripts/install.sh` | release build、doc、隔离 `cargo package` 门禁（最终修改后重跑） |
-| GitHub 源码开源 | 已发布 | `Cargo.toml`、GitHub `main` | `Jyanbai/ping-rust` 已为 Public/非空，首个提交 `824e3edfbee92f9a525f2cdcd149834c96403002` 已推送 |
+| GitHub 源码开源 | 已发布 | `Cargo.toml`、GitHub `main` | `Jyanbai/ping-rust` 已为 Public/非空并建立 `main`；首个提交与跨平台 CI 修复均已推送 |
 | 公开 `cargo install ping-rust` | 等待 crates.io 认证 | 发布包 | crates.io API 当前显示 `ping-rust` 名称未占用，publish dry-run 已通过；尚未真实发布 crate，不能宣称该安装命令已上线 |
 | 干净 Ubuntu 24.04 三分钟部署并公网连通 | Debian 路径通过，Ubuntu 待实机 | `README.md` 验收清单 | Debian 12 上已安装 ping-rust 后，Release + 三协议生成远低于 3 分钟；Windows 外部 Reality 客户端经代理观察到 VPS 公网出口；提供的 VPS 不是 Ubuntu |
 
@@ -76,10 +76,11 @@
 - `cargo package --locked --allow-dirty` / `cargo publish --dry-run`：23 文件，47,188 bytes，SHA-256 `D6B35A6BBAB64E4665A0AF68B260056448FBCF99BC1A12428BD946A8C82B2EE1`，隔离解包重编译通过
 - `cargo audit`：扫描 Cargo.lock 的 240 个依赖，RustSec 1166 条 advisory 中无命中
 - `SOURCE_SNAPSHOT.md`：11/11 section、109,839 bytes，逐节与真实源文件一致
-- actionlint v1.7.12：`.github/workflows/ci.yml` 语义检查零诊断；远程矩阵仍需推送 GitHub 后实际执行
+- actionlint v1.7.12：`.github/workflows/ci.yml` 语义检查零诊断；工作流已推送并由 GitHub runner 实际执行
+- GitHub Actions CI run `29597417851`：Ubuntu 22.04/24.04、Debian 12、Rocky Linux 9、AlmaLinux 9 共 5/5 jobs 成功
 
 ## 剩余的外部发布与验收
 
 仍需要一台允许 root/systemd/公网入站的全新 Ubuntu 24.04 x86_64 VPS 重复 README 清单。Debian 12 已给出 Linux/systemd/公网路径的强证据，但不能替代明确指定的 Ubuntu 24.04 成功标准。
 
-公开源码已推送到 `Jyanbai/ping-rust` 的 `main`，且远程 CI 已实际启动；当前修复首轮矩阵发现的问题。`cargo publish --dry-run` 已通过，真正发布 crates.io 仍需用户提供发布授权与登录凭据；在发布前，`cargo install ping-rust --locked` 不能作为已上线命令宣称。
+公开源码已推送到 `Jyanbai/ping-rust` 的 `main`，首轮矩阵发现的问题已按根因修复，第二轮远程 CI 5/5 jobs 全部成功。`cargo publish --dry-run` 已通过，真正发布 crates.io 仍需用户提供发布授权与登录凭据；在发布前，`cargo install ping-rust --locked` 不能作为已上线命令宣称。
