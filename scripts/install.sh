@@ -3,6 +3,7 @@ set -Eeuo pipefail
 
 readonly REPOSITORY="Jyanbai/ping-rust"
 readonly PROGRAM="ping-rust"
+readonly SHORT_COMMAND="sb"
 
 VERSION="latest"
 INSTALL_DIR="${PING_RUST_INSTALL_DIR:-/usr/local/bin}"
@@ -141,6 +142,8 @@ require_command curl
 require_command grep
 require_command install
 require_command mktemp
+require_command ln
+require_command readlink
 require_command sha256sum
 require_command tar
 require_command uname
@@ -197,7 +200,35 @@ privileged install -m 0755 "${TEMP_DIR}/unpacked/${PROGRAM}" "${STAGED_PATH}"
 privileged mv -f -- "${STAGED_PATH}" "${INSTALL_DIR}/${PROGRAM}"
 STAGED_PATH=""
 
+install_short_command() {
+  local alias_path="${INSTALL_DIR}/${SHORT_COMMAND}"
+  local existing_target=""
+  if [ -L "${alias_path}" ]; then
+    existing_target="$(readlink -- "${alias_path}")"
+    case "${existing_target}" in
+      "${PROGRAM}" | "${INSTALL_DIR}/${PROGRAM}") return 0 ;;
+      *)
+        printf '警告：保留已有符号链接 %s -> %s；请使用 %s。\n' \
+          "${alias_path}" "${existing_target}" "${PROGRAM}" >&2
+        return 1
+        ;;
+    esac
+  fi
+  if [ -e "${alias_path}" ]; then
+    printf '警告：保留已有命令 %s；请使用 %s。\n' \
+      "${alias_path}" "${PROGRAM}" >&2
+    return 1
+  fi
+  privileged ln -s -- "${PROGRAM}" "${alias_path}"
+}
+
+if install_short_command; then
+  RUN_COMMAND="${SHORT_COMMAND}"
+else
+  RUN_COMMAND="${PROGRAM}"
+fi
+
 INSTALLED_VERSION="$("${INSTALL_DIR}/${PROGRAM}" --version)" \
   || die "安装后的版本验证失败。"
 printf '安装成功：%s\n' "${INSTALLED_VERSION}"
-printf '运行：sudo %s\n' "${PROGRAM}"
+printf '运行：sudo %s\n' "${RUN_COMMAND}"

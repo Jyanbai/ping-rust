@@ -9,21 +9,31 @@ use crate::{
         self, AnyTlsMode, AnyTlsUser, GenerationOptions, GenerationRequest, Protocol,
         ShadowsocksCipher,
     },
+    deployment, fast_add,
     installer::{self, InstallMethod},
     operations,
     service::{self, ServiceAction},
 };
 
-const MENU_ITEMS: &[&str] = &[
-    "安装 shoes",
-    "添加代理配置",
-    "查看配置信息",
-    "删除配置",
-    "服务管理",
-    "更新 shoes",
-    "运维工具",
-    "卸载",
-    "退出",
+const MAIN_MENU_ITEMS: &[(usize, &str)] = &[
+    (1, "添加配置"),
+    (2, "更改配置"),
+    (3, "查看配置"),
+    (4, "删除配置"),
+    (5, "运行管理"),
+    (6, "更新"),
+    (7, "卸载"),
+    (8, "帮助"),
+    (9, "其他"),
+    (10, "关于"),
+];
+
+const PROTOCOL_MENU_ITEMS: &[(usize, &str)] = &[
+    (1, "TUIC"),
+    (3, "Hysteria2"),
+    (8, "Shadowsocks"),
+    (18, "VLESS-REALITY（推荐）"),
+    (20, "AnyTLS"),
 ];
 
 fn select_numbered<T: AsRef<str>>(prompt: &str, items: &[T]) -> Result<usize> {
@@ -49,29 +59,73 @@ fn select_numbered<T: AsRef<str>>(prompt: &str, items: &[T]) -> Result<usize> {
     Ok(selected - 1)
 }
 
-pub async fn run() -> Result<()> {
+fn select_keyed(prompt: &str, items: &[(usize, &str)], empty_exits: bool) -> Result<Option<usize>> {
+    println!("{prompt}");
+    for (key, label) in items {
+        println!("  {key}. {label}");
+    }
     loop {
-        println!();
-        println!("{}", "ping-rust · shoes 管理工具".bright_cyan().bold());
-        println!("{}", "────────────────────────────".bright_black());
-
-        let selected = select_numbered("请选择操作", MENU_ITEMS)?;
-
-        match selected {
-            0 => install_menu().await?,
-            1 => add_config_menu().await?,
-            2 => cli::show_info().await?,
-            3 => delete_config_menu().await?,
-            4 => service_menu()?,
-            5 => update_menu().await?,
-            6 => operations_menu().await?,
-            7 => uninstall_menu()?,
-            8 => {
-                println!("{}", "已退出。".green());
-                return Ok(());
-            }
-            _ => anyhow::bail!("菜单返回了无效选项"),
+        let value = Input::<String>::with_theme(&ColorfulTheme::default())
+            .with_prompt(if empty_exits {
+                "请输入序号（直接回车退出）"
+            } else {
+                "请输入序号"
+            })
+            .allow_empty(empty_exits)
+            .interact_text()?;
+        if value.trim().is_empty() && empty_exits {
+            return Ok(None);
         }
+        let Ok(key) = value.trim().parse::<usize>() else {
+            println!("请输入有效数字。");
+            continue;
+        };
+        if items.iter().any(|(candidate, _)| *candidate == key) {
+            return Ok(Some(key));
+        }
+        println!(
+            "无效序号；可选 {}。",
+            items
+                .iter()
+                .map(|(key, _)| key.to_string())
+                .collect::<Vec<_>>()
+                .join("、")
+        );
+    }
+}
+
+pub async fn run() -> Result<()> {
+    println!();
+    println!("{}", "ping-rust · shoes 管理工具".bright_cyan().bold());
+    println!("{}", "────────────────────────────".bright_black());
+    let Some(selected) = select_keyed("请选择操作", MAIN_MENU_ITEMS, true)? else {
+        println!("{}", "已退出。".green());
+        return Ok(());
+    };
+    match selected {
+        1 => fast_add_config_menu().await,
+        2 => {
+            println!("更改配置请使用完整 generate 参数，或删除后通过快速添加安全重建。");
+            Ok(())
+        }
+        3 => cli::show_info(None).await,
+        4 => delete_config_menu().await,
+        5 => service_menu(),
+        6 => update_menu().await,
+        7 => uninstall_menu(),
+        8 => {
+            println!("常用命令：sb add reality、sb add ss、sb info、sb url、sb qr");
+            println!("高级帮助：ping-rust --help");
+            Ok(())
+        }
+        9 => operations_menu().await,
+        10 => {
+            println!("ping-rust {}", env!("CARGO_PKG_VERSION"));
+            println!("Rust 实现的 shoes 菜单式安装与管理工具");
+            println!("https://github.com/Jyanbai/ping-rust");
+            Ok(())
+        }
+        _ => anyhow::bail!("菜单返回了无效选项"),
     }
 }
 
@@ -120,6 +174,7 @@ async fn delete_config_menu() -> Result<()> {
 
 async fn operations_menu() -> Result<()> {
     let choices = [
+        "高级添加配置",
         "查看日志",
         "端口检查",
         "开启 BBR",
@@ -131,8 +186,9 @@ async fn operations_menu() -> Result<()> {
     ];
     let selected = select_numbered("运维工具", &choices)?;
     match selected {
-        0 => service::logs(100),
-        1 => {
+        0 => advanced_add_config_menu().await,
+        1 => service::logs(100),
+        2 => {
             let port = Input::<u16>::with_theme(&ColorfulTheme::default())
                 .with_prompt("检查端口")
                 .default(443)
@@ -140,7 +196,7 @@ async fn operations_menu() -> Result<()> {
             cli::print_port_status(port, operations::check_port(port, true, true));
             Ok(())
         }
-        2 => {
+        3 => {
             if Confirm::with_theme(&ColorfulTheme::default())
                 .with_prompt("写入 sysctl 配置并启用 BBR？")
                 .default(true)
@@ -151,13 +207,13 @@ async fn operations_menu() -> Result<()> {
             }
             Ok(())
         }
-        3 => {
+        4 => {
             let path = operations::backup(None)?;
             println!("备份已创建：{}", path.display());
             println!("备份含私钥和密码，请安全保管。");
             Ok(())
         }
-        4 => {
+        5 => {
             let archive = Input::<String>::with_theme(&ColorfulTheme::default())
                 .with_prompt("备份文件路径")
                 .interact_text()?;
@@ -174,8 +230,8 @@ async fn operations_menu() -> Result<()> {
             }
             Ok(())
         }
-        5 => export_menu(),
-        6 => cli::run_self_update(None, false).await,
+        6 => export_menu(),
+        7 => cli::run_self_update(None, false).await,
         _ => Ok(()),
     }
 }
@@ -212,7 +268,51 @@ fn export_menu() -> Result<()> {
     Ok(())
 }
 
-async fn add_config_menu() -> Result<()> {
+async fn fast_add_config_menu() -> Result<()> {
+    cli::ensure_shoes_for_add(false).await?;
+    let protocol_number = select_keyed("选择协议", PROTOCOL_MENU_ITEMS, false)?
+        .ok_or_else(|| anyhow::anyhow!("未选择协议"))?;
+    let protocol = fast_add::protocol_from_reference_number(protocol_number)?;
+    let port_text = Input::<String>::with_theme(&ColorfulTheme::default())
+        .with_prompt("输入端口（直接回车自动选择随机端口）")
+        .allow_empty(true)
+        .validate_with(|value: &String| {
+            if value.trim().is_empty() {
+                return Ok(());
+            }
+            match value.trim().parse::<u16>() {
+                Ok(port) if port > 0 => Ok(()),
+                _ => Err("端口必须在 1..=65535 范围内，或直接回车"),
+            }
+        })
+        .interact_text()?;
+    let port = if port_text.trim().is_empty() {
+        None
+    } else {
+        Some(port_text.trim().parse::<u16>()?)
+    };
+    let server_address = match fast_add::resolve_server_address(None).await {
+        Ok(address) => address,
+        Err(error) => {
+            eprintln!("自动检测公网地址失败：{error:#}");
+            Input::<String>::with_theme(&ColorfulTheme::default())
+                .with_prompt("请输入 VPS 公网域名或 IP")
+                .interact_text()?
+        }
+    };
+    let result = fast_add::execute(fast_add::AddRequest {
+        name: None,
+        protocol,
+        port,
+        server_address: Some(server_address),
+        server_name: None,
+    })
+    .await?;
+    cli::print_add_result(&result);
+    Ok(())
+}
+
+async fn advanced_add_config_menu() -> Result<()> {
     let choices = [
         "VLESS-Reality-Vision（推荐）",
         "Hysteria2",
@@ -378,11 +478,12 @@ async fn add_config_menu() -> Result<()> {
         (None, None)
     };
 
-    let result = config::generate(GenerationRequest {
+    let result = deployment::generate_and_activate(GenerationRequest {
         name: Some(name),
         protocol,
         port,
         output: crate::utils::CONFIG_FILE.into(),
+        server_address: None,
         server_name,
         reality_dest,
         certificate,
@@ -391,23 +492,7 @@ async fn add_config_menu() -> Result<()> {
     })
     .await?;
     cli::print_credentials(&result);
-    service::install_unit(true)?;
     println!("{}", "配置验证通过，服务已启动。".green());
-    Ok(())
-}
-
-async fn install_menu() -> Result<()> {
-    let choices = ["GitHub Release（推荐）", "cargo install shoes", "返回"];
-    let selected = select_numbered("选择安装方式", &choices)?;
-    let method = match selected {
-        0 => InstallMethod::Release,
-        1 => InstallMethod::Cargo,
-        _ => return Ok(()),
-    };
-    let report = installer::install(method, false).await?;
-    service::install_unit(false)?;
-    println!("{} {}", "安装成功：".green(), report.version);
-    println!("下一步请选择“添加代理配置”。");
     Ok(())
 }
 
@@ -458,12 +543,37 @@ fn uninstall_menu() -> Result<()> {
         .interact()?;
     let unit_removed = service::uninstall_unit()?;
     let binary_removed = installer::uninstall_binary()?;
+    let alias_removed = crate::utils::remove_sb_alias()?;
     if purge && std::path::Path::new(crate::utils::CONFIG_DIR).exists() {
         std::fs::remove_dir_all(crate::utils::CONFIG_DIR)?;
     }
     println!(
-        "卸载完成：二进制={}，systemd={}，配置清理={}",
-        binary_removed, unit_removed, purge
+        "卸载完成：二进制={}，systemd={}，sb 别名={}，配置清理={}",
+        binary_removed, unit_removed, alias_removed, purge
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preserves_reference_main_and_protocol_numbers() {
+        assert_eq!(MAIN_MENU_ITEMS.first().unwrap().0, 1);
+        assert_eq!(MAIN_MENU_ITEMS.last().unwrap().0, 10);
+        for (number, protocol) in [
+            (1, Protocol::Tuic),
+            (3, Protocol::Hysteria2),
+            (8, Protocol::Shadowsocks),
+            (18, Protocol::Reality),
+            (20, Protocol::AnyTls),
+        ] {
+            assert!(PROTOCOL_MENU_ITEMS.iter().any(|item| item.0 == number));
+            assert_eq!(
+                fast_add::protocol_from_reference_number(number).unwrap(),
+                protocol
+            );
+        }
+    }
 }

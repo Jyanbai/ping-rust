@@ -11,6 +11,12 @@ const ENABLE_NOW_COMMAND: &[&str] = &["enable", "--now", SERVICE_NAME];
 const START_COMMAND: &[&str] = &["start", SERVICE_NAME];
 const RESTART_COMMAND: &[&str] = &["restart", SERVICE_NAME];
 
+pub struct ServiceSnapshot {
+    unit_contents: Option<Vec<u8>>,
+    was_active: bool,
+    was_enabled: bool,
+}
+
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum ServiceAction {
     Install,
@@ -70,6 +76,67 @@ pub fn install_unit(enable_now: bool) -> Result<()> {
     if enable_now {
         for command in activation_commands(was_active, was_failed) {
             systemctl(command)?;
+        }
+    }
+    Ok(())
+}
+
+pub fn activate_and_verify() -> Result<()> {
+    install_unit(true)?;
+    if !systemctl_is_active()? {
+        bail!("systemd 命令已返回成功，但 shoes.service 未处于 active 状态");
+    }
+    Ok(())
+}
+
+pub fn capture_snapshot() -> Result<ServiceSnapshot> {
+    utils::require_linux_root()?;
+    ensure_systemctl()?;
+    let path = Path::new(utils::SERVICE_FILE);
+    let unit_contents = match fs::read(path) {
+        Ok(contents) => Some(contents),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error).context("读取现有 systemd unit 失败"),
+    };
+    let unit_exists = unit_contents.is_some();
+    Ok(ServiceSnapshot {
+        unit_contents,
+        was_active: unit_exists && systemctl_is_active()?,
+        was_enabled: unit_exists && systemctl_is_enabled()?,
+    })
+}
+
+pub fn restore_snapshot(snapshot: ServiceSnapshot) -> Result<()> {
+    utils::require_linux_root()?;
+    ensure_systemctl()?;
+    let path = Path::new(utils::SERVICE_FILE);
+
+    if path.exists() {
+        let _ = Command::new("systemctl")
+            .args(["disable", "--now", SERVICE_NAME])
+            .status();
+    }
+    if let Some(contents) = snapshot.unit_contents {
+        utils::atomic_write(path, &contents, 0o644)?;
+    } else if path.exists() {
+        fs::remove_file(path).context("删除回滚 systemd unit 失败")?;
+    }
+    systemctl(&["daemon-reload"])?;
+
+    if path.exists() {
+        if snapshot.was_enabled {
+            systemctl(&["enable", SERVICE_NAME])?;
+        } else {
+            let _ = Command::new("systemctl")
+                .args(["disable", SERVICE_NAME])
+                .status();
+        }
+        if snapshot.was_active {
+            systemctl_after_reset(START_COMMAND)?;
+        } else {
+            let _ = Command::new("systemctl")
+                .args(["stop", SERVICE_NAME])
+                .status();
         }
     }
     Ok(())
@@ -153,6 +220,14 @@ fn systemctl_is_failed() -> Result<bool> {
         .args(["is-failed", "--quiet", SERVICE_NAME])
         .status()
         .context("无法查询 systemd 服务失败状态")?
+        .success())
+}
+
+fn systemctl_is_enabled() -> Result<bool> {
+    Ok(Command::new("systemctl")
+        .args(["is-enabled", "--quiet", SERVICE_NAME])
+        .status()
+        .context("无法查询 systemd 服务启用状态")?
         .success())
 }
 

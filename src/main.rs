@@ -1,6 +1,8 @@
 mod cli;
 mod client;
 mod config;
+mod deployment;
+mod fast_add;
 mod installer;
 mod menu;
 mod operations;

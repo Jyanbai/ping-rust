@@ -25,9 +25,12 @@ pub const DEFAULT_SNI: &str = "www.cloudflare.com";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum Protocol {
+    #[value(alias = "r", alias = "vless")]
     Reality,
+    #[value(alias = "hy", alias = "hy2", alias = "hysteria")]
     Hysteria2,
     Tuic,
+    #[value(alias = "ss")]
     Shadowsocks,
     #[value(name = "anytls")]
     AnyTls,
@@ -162,6 +165,7 @@ pub struct GenerationRequest {
     pub protocol: Protocol,
     pub port: u16,
     pub output: PathBuf,
+    pub server_address: Option<String>,
     pub server_name: String,
     pub reality_dest: Option<String>,
     pub certificate: Option<PathBuf>,
@@ -175,6 +179,53 @@ pub struct GenerationResult {
     pub certificate_path: Option<PathBuf>,
     pub certificate_key_path: Option<PathBuf>,
     pub credentials: Credentials,
+    pub profile: ManagedProfile,
+    rollback: Option<ManagedRollback>,
+    _lock: Option<utils::ExclusiveLock>,
+}
+
+struct ManagedRollback {
+    config: Option<Vec<u8>>,
+    state: Option<Vec<u8>>,
+    generated_certificate: Option<PathBuf>,
+    generated_certificate_key: Option<PathBuf>,
+}
+
+impl GenerationResult {
+    pub fn rollback_managed(&mut self) -> Result<()> {
+        let rollback = self
+            .rollback
+            .take()
+            .context("该生成结果不包含可回滚的系统配置事务")?;
+        rollback.restore_to(Path::new(utils::CONFIG_FILE), Path::new(utils::STATE_FILE))
+    }
+}
+
+impl ManagedRollback {
+    fn restore_to(self, config_path: &Path, state_path: &Path) -> Result<()> {
+        let state_result = restore_snapshot(state_path, self.state.as_deref(), 0o600);
+        let config_result = restore_snapshot(config_path, self.config.as_deref(), 0o600);
+        for path in [
+            self.generated_certificate.as_deref(),
+            self.generated_certificate_key.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if path.exists() {
+                fs::remove_file(path)
+                    .with_context(|| format!("删除回滚凭据 {} 失败", path.display()))?;
+            }
+        }
+        match (state_result, config_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(state), Ok(())) => Err(state.context("恢复管理状态失败")),
+            (Ok(()), Err(config)) => Err(config.context("恢复 shoes 配置失败")),
+            (Err(state), Err(config)) => {
+                bail!("恢复管理状态和 shoes 配置均失败：状态={state:#}；配置={config:#}")
+            }
+        }
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -249,6 +300,8 @@ pub struct ManagedProfile {
     pub id: Uuid,
     pub name: String,
     pub port: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_address: Option<String>,
     pub credentials: Credentials,
     pub certificate_path: Option<PathBuf>,
     pub certificate_key_path: Option<PathBuf>,
@@ -380,7 +433,7 @@ async fn generate_inner(
     if managed {
         utils::require_linux_root()?;
     }
-    let _lock = managed
+    let lock = managed
         .then(|| utils::exclusive_lock(Path::new(utils::LOCK_FILE)))
         .transpose()?;
     let mut state = if managed {
@@ -465,6 +518,7 @@ async fn generate_inner(
             .clone()
             .unwrap_or_else(|| default_profile_name(request.protocol, profile_id)),
         port: request.port,
+        server_address: request.server_address.clone(),
         credentials: credentials.clone(),
         certificate_path: certificate_path.clone(),
         certificate_key_path: certificate_key_path.clone(),
@@ -485,13 +539,23 @@ async fn generate_inner(
         bail!("配置文件与管理状态不一致；请先备份并修复，ping-rust 不会覆盖现有配置");
     }
     servers.push(server);
-    state.profiles.push(profile);
+    state.profiles.push(profile.clone());
 
     let yaml = serde_yaml::to_string(&servers).context("序列化 shoes YAML 失败")?;
     validate_yaml(&yaml)?;
     if validate_with_shoes {
         validate_candidate_with_shoes(&yaml, parent).await?;
     }
+    let rollback = if managed {
+        Some(ManagedRollback {
+            config: read_optional(Path::new(utils::CONFIG_FILE))?,
+            state: read_optional(Path::new(utils::STATE_FILE))?,
+            generated_certificate: self_signed.then(|| certificate_path.clone()).flatten(),
+            generated_certificate_key: self_signed.then(|| certificate_key_path.clone()).flatten(),
+        })
+    } else {
+        None
+    };
     if managed {
         commit_managed(&request.output, Path::new(utils::STATE_FILE), &yaml, &state)?;
     } else {
@@ -505,6 +569,9 @@ async fn generate_inner(
         certificate_path,
         certificate_key_path,
         credentials,
+        profile,
+        rollback,
+        _lock: lock,
     })
 }
 
@@ -1261,6 +1328,7 @@ mod tests {
             protocol,
             port: 443,
             output,
+            server_address: None,
             server_name: "www.cloudflare.com".to_owned(),
             reality_dest: None,
             certificate: None,
@@ -1451,6 +1519,57 @@ mod tests {
         assert!(error.to_string().contains("已回滚"));
         assert_eq!(fs::read(&config).unwrap(), b"old-config");
         assert!(!state.exists());
+    }
+
+    #[test]
+    fn managed_activation_rollback_restores_exact_files_and_removes_new_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.yaml");
+        let state = dir.path().join("state.json");
+        let certificate = dir.path().join("new.pem");
+        let certificate_key = dir.path().join("new-key.pem");
+        fs::write(&config, b"new-config").unwrap();
+        fs::write(&state, b"new-state").unwrap();
+        fs::write(&certificate, b"certificate").unwrap();
+        fs::write(&certificate_key, b"private-key").unwrap();
+
+        ManagedRollback {
+            config: Some(b"old-config\n".to_vec()),
+            state: None,
+            generated_certificate: Some(certificate.clone()),
+            generated_certificate_key: Some(certificate_key.clone()),
+        }
+        .restore_to(&config, &state)
+        .unwrap();
+
+        assert_eq!(fs::read(config).unwrap(), b"old-config\n");
+        assert!(!state.exists());
+        assert!(!certificate.exists());
+        assert!(!certificate_key.exists());
+    }
+
+    #[test]
+    fn old_managed_profiles_without_server_address_still_deserialize() {
+        let profile = ManagedProfile {
+            id: Uuid::nil(),
+            name: "legacy".to_owned(),
+            port: 443,
+            server_address: None,
+            credentials: Credentials::Reality {
+                user_id: Uuid::nil(),
+                private_key: "private".to_owned(),
+                public_key: "public".to_owned(),
+                short_id: "0123456789abcdef".to_owned(),
+                server_name: "www.cloudflare.com".to_owned(),
+            },
+            certificate_path: None,
+            certificate_key_path: None,
+            self_signed_certificate: false,
+        };
+        let mut value = serde_json::to_value(profile).unwrap();
+        value.as_object_mut().unwrap().remove("server_address");
+        let restored: ManagedProfile = serde_json::from_value(value).unwrap();
+        assert!(restored.server_address.is_none());
     }
 
     #[tokio::test]

@@ -1,8 +1,14 @@
-use std::path::PathBuf;
+use std::{
+    io::Write,
+    io::{self, IsTerminal},
+    path::{Path, PathBuf},
+    process::{Command as ProcessCommand, Stdio},
+};
 
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use colored::Colorize;
+use dialoguer::{theme::ColorfulTheme, Confirm};
 use uuid::Uuid;
 
 use crate::{
@@ -11,6 +17,7 @@ use crate::{
         self, AnyTlsMode, AnyTlsUser, GenerationOptions, GenerationRequest, Protocol,
         ShadowsocksCipher,
     },
+    deployment, fast_add,
     installer::{self, InstallMethod},
     menu, operations, self_update,
     service::{self, ServiceAction},
@@ -35,13 +42,36 @@ pub enum Command {
     },
     /// 生成服务端配置
     Generate(Box<GenerateArgs>),
+    /// 像 233boy 一样快速添加配置并直接输出分享链接
+    #[command(alias = "a")]
+    Add(AddArgs),
     /// 管理 shoes systemd 服务
     Service {
         #[arg(value_enum)]
         action: ServiceAction,
     },
     /// 查看安装、配置和服务信息
-    Info,
+    #[command(alias = "i")]
+    Info {
+        /// 配置 UUID 或名称；省略时显示全部配置
+        profile: Option<String>,
+    },
+    /// 重新输出配置的分享链接
+    Url {
+        /// 配置 UUID 或名称；只有一个配置时可省略
+        profile: Option<String>,
+        /// 覆盖保存的服务器公网 IP 或域名
+        #[arg(long)]
+        server_address: Option<String>,
+    },
+    /// 显示配置分享链接的终端二维码
+    Qr {
+        /// 配置 UUID 或名称；只有一个配置时可省略
+        profile: Option<String>,
+        /// 覆盖保存的服务器公网 IP 或域名
+        #[arg(long)]
+        server_address: Option<String>,
+    },
     /// 删除一个由 ping-rust 管理的配置
     Delete {
         profile: Uuid,
@@ -98,6 +128,36 @@ pub enum Command {
         #[arg(long)]
         purge: bool,
     },
+}
+
+#[derive(Debug, Args)]
+pub struct AddArgs {
+    #[arg(value_enum)]
+    pub protocol: Protocol,
+    /// 兼容 233boy：位置参数端口，例如 `sb add reality 443`
+    #[arg(value_name = "PORT", conflicts_with_all = ["port", "random_port"])]
+    pub legacy_port: Option<u16>,
+    /// 指定监听端口
+    #[arg(long, conflicts_with_all = ["legacy_port", "random_port"])]
+    pub port: Option<u16>,
+    /// 显式要求随机可用端口（未指定端口时本来就是默认行为）
+    #[arg(long)]
+    pub random_port: bool,
+    /// 配置名称；默认自动生成
+    #[arg(long)]
+    pub name: Option<String>,
+    /// 客户端连接使用的服务器公网 IP 或域名
+    #[arg(long)]
+    pub server_address: Option<String>,
+    /// Reality SNI 或 TLS 证书名称
+    #[arg(long)]
+    pub server_name: Option<String>,
+    /// shoes 未安装时自动确认安装
+    #[arg(long)]
+    pub yes: bool,
+    /// stdout 只输出一行分享 URI
+    #[arg(long)]
+    pub plain: bool,
 }
 
 #[derive(Debug, Args)]
@@ -203,11 +263,13 @@ pub async fn run(cli: Cli) -> Result<()> {
                 anytls_users.push(config::generated_anytls_user("default"));
             }
             let output = output.unwrap_or_else(|| PathBuf::from(crate::utils::CONFIG_FILE));
-            let result = config::generate(GenerationRequest {
+            let managed = output == Path::new(crate::utils::CONFIG_FILE);
+            let request = GenerationRequest {
                 name,
                 protocol,
                 port,
                 output,
+                server_address: None,
                 server_name,
                 reality_dest: dest,
                 certificate: cert,
@@ -225,18 +287,30 @@ pub async fn run(cli: Cli) -> Result<()> {
                     anytls_padding_scheme: (!anytls_padding.is_empty()).then_some(anytls_padding),
                     anytls_fallback: fallback,
                 },
-            })
-            .await?;
+            };
+            let result = if managed {
+                deployment::generate_and_activate(request).await?
+            } else {
+                config::generate(request).await?
+            };
             print_credentials(&result);
-            if result.config_path == std::path::Path::new(crate::utils::CONFIG_FILE) {
-                service::install_unit(true)?;
+            if managed {
                 println!("{}", "配置验证通过，shoes 已启用并启动。".green());
             }
             Ok(())
         }
+        Command::Add(args) => run_add(args).await,
         Command::Service { action } => service::execute(action),
         Command::Logs { lines } => service::logs(lines),
-        Command::Info => show_info().await,
+        Command::Info { profile } => show_info(profile.as_deref()).await,
+        Command::Url {
+            profile,
+            server_address,
+        } => print_saved_url(profile.as_deref(), server_address.as_deref()),
+        Command::Qr {
+            profile,
+            server_address,
+        } => print_saved_qr(profile.as_deref(), server_address.as_deref()),
         Command::Delete { profile, yes } => {
             if !yes {
                 anyhow::bail!("删除配置需要显式添加 --yes；也可使用交互菜单确认");
@@ -311,6 +385,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Uninstall { purge } => {
             let unit_removed = service::uninstall_unit()?;
             let binary_removed = installer::uninstall_binary()?;
+            let alias_removed = crate::utils::remove_sb_alias()?;
             if purge {
                 let config_dir = std::path::Path::new(crate::utils::CONFIG_DIR);
                 if config_dir.exists() {
@@ -318,12 +393,61 @@ pub async fn run(cli: Cli) -> Result<()> {
                 }
             }
             println!(
-                "卸载完成：二进制={}，systemd={}，配置清理={}",
-                binary_removed, unit_removed, purge
+                "卸载完成：二进制={}，systemd={}，sb 别名={}，配置清理={}",
+                binary_removed, unit_removed, alias_removed, purge
             );
             Ok(())
         }
     }
+}
+
+async fn run_add(args: AddArgs) -> Result<()> {
+    ensure_shoes_for_add(args.yes).await?;
+    let result = fast_add::execute(fast_add::AddRequest {
+        name: args.name,
+        protocol: args.protocol,
+        port: args.port.or(args.legacy_port),
+        server_address: args.server_address,
+        server_name: args.server_name,
+    })
+    .await?;
+    if args.plain {
+        println!("{}", result.share_uri);
+        return Ok(());
+    }
+    print_add_result(&result);
+    Ok(())
+}
+
+pub(crate) fn print_add_result(result: &fast_add::AddResult) {
+    let profile = &result.generation.profile;
+    println!("{}", "部署成功，shoes 服务已启动。".green().bold());
+    println!("配置：{} ({})", profile.name, profile.id);
+    println!("协议：{}", profile.protocol_name());
+    println!("端口：{}", profile.port);
+    println!("\n------------- URL 链接 -------------\n");
+    println!("{}", result.share_uri.underline());
+    println!("\n复制上方链接即可导入客户端。");
+    println!("{}", "安全提示：分享链接包含访问凭据，请勿公开。".yellow());
+}
+
+pub(crate) async fn ensure_shoes_for_add(yes: bool) -> Result<()> {
+    if Path::new(crate::utils::SHOES_BIN).is_file() {
+        return Ok(());
+    }
+    let approved = yes
+        || (io::stdin().is_terminal()
+            && Confirm::with_theme(&ColorfulTheme::default())
+                .with_prompt("shoes 尚未安装，是否从 GitHub Release 自动安装并继续？")
+                .default(true)
+                .interact()?);
+    if !approved {
+        bail!("shoes 尚未安装；请先运行 ping-rust install，或添加 --yes 自动安装");
+    }
+    let report = installer::install(InstallMethod::Release, false).await?;
+    service::install_unit(false)?;
+    eprintln!("shoes 安装成功：{}（{}）", report.version, report.source);
+    Ok(())
 }
 
 pub async fn run_self_update(version: Option<&str>, force: bool) -> Result<()> {
@@ -348,7 +472,7 @@ pub async fn run_self_update(version: Option<&str>, force: bool) -> Result<()> {
     Ok(())
 }
 
-pub async fn show_info() -> Result<()> {
+pub async fn show_info(selector: Option<&str>) -> Result<()> {
     let version = installer::installed_version()
         .await
         .unwrap_or_else(|_| "未安装".to_owned());
@@ -364,8 +488,13 @@ pub async fn show_info() -> Result<()> {
         if state.profiles.is_empty() {
             println!("配置：无");
         } else {
-            println!("配置数量：{}", state.profiles.len());
-            for profile in state.profiles {
+            let profiles = if let Some(selector) = selector {
+                vec![client::select_profile(&state.profiles, Some(selector))?]
+            } else {
+                state.profiles.iter().collect::<Vec<_>>()
+            };
+            println!("配置数量：{}", profiles.len());
+            for profile in profiles {
                 println!(
                     "- {} | {} | 0.0.0.0:{} | {} | {}",
                     profile.id,
@@ -374,8 +503,51 @@ pub async fn show_info() -> Result<()> {
                     profile.protocol_name(),
                     profile.server_name()
                 );
+                if let Some(server) = profile.server_address.as_deref() {
+                    println!("  客户端地址：{server}");
+                    match client::share_uri(profile, server) {
+                        Ok(uri) => println!("  URL：{uri}"),
+                        Err(error) => println!("  URL：无法生成（{error}）"),
+                    }
+                } else {
+                    println!("  URL：未保存公网地址，可用 url --server-address 指定");
+                }
             }
         }
+    }
+    Ok(())
+}
+
+fn print_saved_url(selector: Option<&str>, server_address: Option<&str>) -> Result<()> {
+    let state = config::load_state()?;
+    let profile = client::select_profile(&state.profiles, selector)?;
+    println!("{}", client::stored_share_uri(profile, server_address)?);
+    Ok(())
+}
+
+fn print_saved_qr(selector: Option<&str>, server_address: Option<&str>) -> Result<()> {
+    let state = config::load_state()?;
+    let profile = client::select_profile(&state.profiles, selector)?;
+    let uri = client::stored_share_uri(profile, server_address)?;
+    if !crate::utils::command_exists("qrencode") {
+        println!("{uri}");
+        eprintln!("未安装 qrencode；请安装后重新运行 qr，URL 已输出供复制。");
+        return Ok(());
+    }
+    let mut child = ProcessCommand::new("qrencode")
+        .args(["-t", "ANSIUTF8"])
+        .stdin(Stdio::piped())
+        .spawn()
+        .context("无法启动 qrencode")?;
+    child
+        .stdin
+        .take()
+        .context("无法打开 qrencode 标准输入")?
+        .write_all(uri.as_bytes())
+        .context("写入二维码内容失败")?;
+    let status = child.wait().context("等待 qrencode 失败")?;
+    if !status.success() {
+        bail!("qrencode 执行失败（退出码：{status}）");
     }
     Ok(())
 }
@@ -576,5 +748,55 @@ mod tests {
         };
         assert_eq!(args.protocol, Protocol::AnyTls);
         assert_eq!(args.anytls_mode, AnyTlsMode::Reality);
+    }
+
+    #[test]
+    fn parses_233boy_style_add_aliases_and_output_controls() {
+        let cli = Cli::try_parse_from([
+            "sb",
+            "a",
+            "r",
+            "443",
+            "--server-address",
+            "203.0.113.9",
+            "--yes",
+            "--plain",
+        ])
+        .unwrap();
+        let Some(Command::Add(args)) = cli.command else {
+            panic!("expected add command");
+        };
+        assert_eq!(args.protocol, Protocol::Reality);
+        assert_eq!(args.legacy_port, Some(443));
+        assert!(args.yes);
+        assert!(args.plain);
+
+        let cli = Cli::try_parse_from(["sb", "add", "ss", "--random-port"]).unwrap();
+        let Some(Command::Add(args)) = cli.command else {
+            panic!("expected add command");
+        };
+        assert_eq!(args.protocol, Protocol::Shadowsocks);
+        assert!(args.random_port);
+    }
+
+    #[test]
+    fn rejects_conflicting_fast_add_port_options() {
+        assert!(Cli::try_parse_from(["sb", "add", "reality", "443", "--random-port"]).is_err());
+    }
+
+    #[test]
+    fn parses_info_url_and_qr_commands() {
+        assert!(matches!(
+            Cli::try_parse_from(["sb", "i", "main"]).unwrap().command,
+            Some(Command::Info { profile: Some(profile) }) if profile == "main"
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["sb", "url", "main"]).unwrap().command,
+            Some(Command::Url { profile: Some(profile), .. }) if profile == "main"
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["sb", "qr", "main"]).unwrap().command,
+            Some(Command::Qr { profile: Some(profile), .. }) if profile == "main"
+        ));
     }
 }

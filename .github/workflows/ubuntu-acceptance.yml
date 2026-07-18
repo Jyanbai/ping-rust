@@ -9,12 +9,13 @@ on:
       - Cargo.toml
       - Cargo.lock
       - src/**
+      - scripts/install.sh
 
 permissions:
   contents: read
 
 env:
-  PUBLIC_VERSION: 0.1.3
+  PUBLIC_VERSION: 0.1.4
 
 jobs:
   root-systemd:
@@ -28,6 +29,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+
+      - name: Install PTY test dependency
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends expect
 
       - name: Verify clean Ubuntu 24.04 x86_64 baseline
         shell: bash
@@ -61,8 +68,10 @@ jobs:
           current_root="$RUNNER_TEMP/ping-rust-current"
           cargo install --path . --locked --root "$current_root"
           ping_rust="$current_root/bin/ping-rust"
+          ln -s ping-rust "$current_root/bin/sb"
           "$ping_rust" --version
           printf 'PING_RUST=%s\n' "$ping_rust" >> "$GITHUB_ENV"
+          printf 'SB=%s\n' "$current_root/bin/sb" >> "$GITHUB_ENV"
 
       - name: Deploy Reality within three minutes
         id: reality
@@ -71,14 +80,21 @@ jobs:
           set -euo pipefail
           started_at="$(date +%s)"
 
-          sudo "$PING_RUST" install --method release
-          reality_output="$RUNNER_TEMP/reality-generation.txt"
-          sudo "$PING_RUST" generate reality \
+          reality_uri="$(sudo "$PING_RUST" add reality \
             --name acceptance-reality \
             --port 24443 \
+            --server-address 203.0.113.10 \
             --server-name www.cloudflare.com \
-            --dest www.cloudflare.com:443 \
-            | sudo tee "$reality_output" >/dev/null
+            --yes \
+            --plain)"
+          printf '%s' "$reality_uri" | grep -q '^vless://'
+          for parameter in security=reality flow=xtls-rprx-vision pbk= sid=; do
+            printf '%s' "$reality_uri" | grep -q "$parameter"
+          done
+          test "$(sudo "$PING_RUST" url acceptance-reality)" = "$reality_uri"
+          test "$(sudo "$PING_RUST" qr acceptance-reality 2>/dev/null)" = "$reality_uri"
+          info_output="$(sudo "$PING_RUST" info acceptance-reality)"
+          printf '%s' "$info_output" | grep -q '客户端地址：203.0.113.10'
 
           elapsed="$(( $(date +%s) - started_at ))"
           test "$elapsed" -le 180
@@ -94,13 +110,9 @@ jobs:
           done
           sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)24443$'
 
-          reality_profile="$(
-            grep -Eo '[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}' \
-              "$reality_output" | head -n 1
-          )"
+          reality_profile="$(printf '%s' "$reality_uri" | sed -E 's#^vless://([^@]+)@.*#\1#')"
           test -n "$reality_profile"
           printf 'REALITY_PROFILE=%s\n' "$reality_profile" >> "$GITHUB_ENV"
-          sudo rm -f "$reality_output"
 
       - name: Add Hysteria2 and confirm service reload
         shell: bash
@@ -219,6 +231,78 @@ jobs:
           printf 'ANYTLS_PROFILE=%s\n' "$anytls_profile" >> "$GITHUB_ENV"
           sudo rm -f "$anytls_output"
 
+      - name: Verify sb numeric PTY flow for Reality and Shadowsocks
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_menu_add() {
+            local protocol_number="$1"
+            local port="$2"
+            local scheme="$3"
+            sudo env SB_COMMAND="$SB" PROTOCOL_NUMBER="$protocol_number" \
+              MENU_PORT="$port" SHARE_SCHEME="$scheme" expect <<'EXPECT'
+          log_user 0
+          set timeout 180
+          spawn -- $env(SB_COMMAND)
+          expect -re {请输入序号}
+          send -- "1\r"
+          expect -re {请输入序号}
+          send -- "$env(PROTOCOL_NUMBER)\r"
+          expect -re {输入端口}
+          send -- "$env(MENU_PORT)\r"
+          expect -re "$env(SHARE_SCHEME)://"
+          expect eof
+          EXPECT
+          }
+
+          run_menu_add 18 25448 vless
+          run_menu_add 8 25449 ss
+          sudo systemctl is-active --quiet shoes.service
+          sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)25448$'
+          sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)25449$'
+          sudo ss -H -lun | awk '{print $4}' | grep -Eq '(^|:)25449$'
+
+      - name: Roll back config and systemd state when activation fails
+        shell: bash
+        run: |
+          set -euo pipefail
+          config_before="$(sudo sha256sum /etc/shoes/config.yaml | awk '{print $1}')"
+          state_before="$(sudo sha256sum /etc/shoes/ping-rust-state.json | awk '{print $1}')"
+          unit_before="$(sudo sha256sum /etc/systemd/system/shoes.service | awk '{print $1}')"
+          sudo systemctl is-active --quiet shoes.service
+          sudo systemctl is-enabled --quiet shoes.service
+
+          sudo mv /usr/local/bin/shoes /usr/local/bin/shoes.real
+          sudo tee /usr/local/bin/shoes >/dev/null <<'FAKE_SHOES'
+          #!/usr/bin/env bash
+          if [ "${1:-}" = "--dry-run" ]; then
+            exit 0
+          fi
+          mv /usr/local/bin/shoes.real /usr/local/bin/shoes
+          exit 42
+          FAKE_SHOES
+          sudo chmod 0755 /usr/local/bin/shoes
+
+          failure_log="$RUNNER_TEMP/activation-failure.txt"
+          if sudo "$PING_RUST" add ss \
+            --name must-rollback \
+            --port 25450 \
+            --server-address 203.0.113.10 \
+            --plain >"$failure_log" 2>&1; then
+            echo 'activation failure injection unexpectedly succeeded' >&2
+            exit 1
+          fi
+          grep -q '回滚' "$failure_log"
+          ! grep -q 'ss://' "$failure_log"
+          sudo test ! -e /usr/local/bin/shoes.real
+          test "$(sudo sha256sum /etc/shoes/config.yaml | awk '{print $1}')" = "$config_before"
+          test "$(sudo sha256sum /etc/shoes/ping-rust-state.json | awk '{print $1}')" = "$state_before"
+          test "$(sudo sha256sum /etc/systemd/system/shoes.service | awk '{print $1}')" = "$unit_before"
+          sudo systemctl is-active --quiet shoes.service
+          sudo systemctl is-enabled --quiet shoes.service
+          ! sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)25450$'
+          rm -f "$failure_log"
+
       - name: Verify client exports and operations
         shell: bash
         run: |
@@ -291,6 +375,7 @@ jobs:
           fi
           sudo systemctl disable --now shoes.service 2>/dev/null || true
           sudo rm -f /etc/systemd/system/shoes.service /usr/local/bin/shoes
+          rm -f "${SB:-}"
           sudo rm -rf /etc/shoes
           sudo systemctl daemon-reload
           set -e

@@ -1,13 +1,13 @@
 [package]
 name = "ping-rust"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 description = "Menu-driven installer and manager for the shoes proxy server"
 license = "MIT"
 readme = "README.md"
 documentation = "https://docs.rs/ping-rust"
 repository = "https://github.com/Jyanbai/ping-rust"
-exclude = ["task_plan.md", "findings.md", "progress.md", "SOURCE_SNAPSHOT.md", "COMPLETION_AUDIT.md"]
+exclude = ["task_plan.md", "findings.md", "progress.md", "SOURCE_SNAPSHOT.md", "COMPLETION_AUDIT.md", "sing-box-main"]
 keywords = ["proxy", "shoes", "reality", "vless", "cli"]
 categories = ["command-line-utilities", "network-programming"]
 

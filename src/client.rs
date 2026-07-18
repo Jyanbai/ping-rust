@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{net::IpAddr, path::Path};
 
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
@@ -25,9 +25,6 @@ pub fn export(
     server: &str,
     output: Option<&Path>,
 ) -> Result<String> {
-    if server.trim().is_empty() || server.contains(char::is_whitespace) {
-        bail!("客户端 server 地址无效");
-    }
     let state = config::load_state()?;
     let profile = match profile_id {
         Some(id) => state
@@ -45,11 +42,41 @@ pub fn export(
     Ok(content)
 }
 
+pub fn select_profile<'a>(
+    profiles: &'a [ManagedProfile],
+    selector: Option<&str>,
+) -> Result<&'a ManagedProfile> {
+    match selector {
+        Some(selector) => {
+            let selector = selector.trim();
+            let id = Uuid::parse_str(selector).ok();
+            profiles
+                .iter()
+                .find(|profile| {
+                    id.is_some_and(|id| profile.id == id)
+                        || profile.name.eq_ignore_ascii_case(selector)
+                })
+                .with_context(|| format!("未找到配置 {selector}"))
+        }
+        None if profiles.len() == 1 => Ok(&profiles[0]),
+        None if profiles.is_empty() => bail!("没有可用配置"),
+        None => bail!("存在多个配置，请指定配置 UUID 或名称"),
+    }
+}
+
+pub fn stored_share_uri(profile: &ManagedProfile, override_server: Option<&str>) -> Result<String> {
+    let server = override_server
+        .or(profile.server_address.as_deref())
+        .context("该配置没有保存公网地址；请使用 --server-address 指定")?;
+    share_uri(profile, server)
+}
+
 pub fn render(profile: &ManagedProfile, format: ClientFormat, server: &str) -> Result<String> {
+    let server = normalize_server_address(server)?;
     match format {
-        ClientFormat::ClashMeta => clash_meta(profile, server),
-        ClientFormat::SingBox => sing_box(profile, server),
-        ClientFormat::Nekobox => share_uri(profile, server),
+        ClientFormat::ClashMeta => clash_meta(profile, &server),
+        ClientFormat::SingBox => sing_box(profile, &server),
+        ClientFormat::Nekobox => share_uri(profile, &server),
     }
 }
 
@@ -258,8 +285,9 @@ fn sing_box(profile: &ManagedProfile, server: &str) -> Result<String> {
         .context("生成 sing-box JSON 失败")
 }
 
-fn share_uri(profile: &ManagedProfile, server: &str) -> Result<String> {
-    let host = authority_host(server);
+pub fn share_uri(profile: &ManagedProfile, server: &str) -> Result<String> {
+    let server = normalize_server_address(server)?;
+    let host = authority_host(&server);
     let fragment = encode(&profile.name);
     match &profile.credentials {
         Credentials::Reality {
@@ -353,6 +381,37 @@ fn share_uri(profile: &ManagedProfile, server: &str) -> Result<String> {
     }
 }
 
+pub fn normalize_server_address(server: &str) -> Result<String> {
+    let value = server.trim();
+    let value = value
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(value);
+    if value.is_empty() || value.len() > 253 || value.contains(char::is_whitespace) {
+        bail!("客户端 server 地址无效");
+    }
+    if let Ok(address) = value.parse::<IpAddr>() {
+        if address.is_unspecified() || address.is_multicast() {
+            bail!("客户端 server 地址不能是未指定或组播地址");
+        }
+        return Ok(address.to_string());
+    }
+    if !value.contains('.')
+        || value.split('.').any(|label| {
+            label.is_empty()
+                || label.len() > 63
+                || label.starts_with('-')
+                || label.ends_with('-')
+                || !label
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric() || character == '-')
+        })
+    {
+        bail!("客户端 server 地址必须是公网 IP 或有效域名");
+    }
+    Ok(value.to_ascii_lowercase())
+}
+
 fn first_anytls_password(users: &[config::AnyTlsUser]) -> Result<&str> {
     users
         .first()
@@ -382,6 +441,7 @@ mod tests {
             id: Uuid::nil(),
             name: "reality-test".to_owned(),
             port: 443,
+            server_address: None,
             credentials: Credentials::Reality {
                 user_id: Uuid::nil(),
                 private_key: "private".to_owned(),
@@ -410,6 +470,61 @@ mod tests {
     }
 
     #[test]
+    fn stored_reality_uri_contains_all_v2rayn_reality_parameters() {
+        let mut profile = reality_profile();
+        profile.server_address = Some("203.0.113.8".to_owned());
+        let uri = stored_share_uri(&profile, None).unwrap();
+        assert!(uri.starts_with("vless://00000000-0000-0000-0000-000000000000@203.0.113.8:443?"));
+        for parameter in [
+            "encryption=none",
+            "flow=xtls-rprx-vision",
+            "security=reality",
+            "sni=www.cloudflare.com",
+            "fp=chrome",
+            "pbk=public",
+            "sid=0123456789abcdef",
+            "type=tcp",
+        ] {
+            assert!(uri.contains(parameter), "missing {parameter}: {uri}");
+        }
+        assert!(!uri.contains("private"));
+    }
+
+    #[test]
+    fn profile_selection_accepts_name_or_uuid_and_requires_disambiguation() {
+        let first = reality_profile();
+        let mut second = reality_profile();
+        second.id = Uuid::new_v4();
+        second.name = "Second".to_owned();
+        let profiles = vec![first, second.clone()];
+        assert_eq!(
+            select_profile(&profiles, Some("second")).unwrap().id,
+            second.id
+        );
+        assert_eq!(
+            select_profile(&profiles, Some(&second.id.to_string()))
+                .unwrap()
+                .id,
+            second.id
+        );
+        assert!(select_profile(&profiles, None).is_err());
+    }
+
+    #[test]
+    fn normalizes_domains_ipv6_and_local_test_addresses() {
+        assert_eq!(
+            normalize_server_address(" EXAMPLE.COM ").unwrap(),
+            "example.com"
+        );
+        assert_eq!(
+            normalize_server_address("[2001:db8::1]").unwrap(),
+            "2001:db8::1"
+        );
+        assert_eq!(normalize_server_address("127.0.0.1").unwrap(), "127.0.0.1");
+        assert!(normalize_server_address("not-a-domain").is_err());
+    }
+
+    #[test]
     fn wraps_ipv6_authority() {
         let output = render(&reality_profile(), ClientFormat::Nekobox, "2001:db8::1").unwrap();
         assert!(output.contains("@[2001:db8::1]:443"));
@@ -421,6 +536,7 @@ mod tests {
             id: Uuid::nil(),
             name: "hy2".to_owned(),
             port: 8443,
+            server_address: None,
             credentials: Credentials::Hysteria2 {
                 password: "secret".to_owned(),
                 server_name: "proxy.example.com".to_owned(),
@@ -442,6 +558,7 @@ mod tests {
             id: Uuid::nil(),
             name: "tuic".to_owned(),
             port: 443,
+            server_address: None,
             credentials: Credentials::Tuic {
                 user_id: Uuid::nil(),
                 password: "secret".to_owned(),
@@ -465,6 +582,7 @@ mod tests {
             id: Uuid::nil(),
             name: "ss-2022".to_owned(),
             port: 8388,
+            server_address: None,
             credentials: Credentials::Shadowsocks {
                 cipher: ShadowsocksCipher::Chacha20IetfPoly13052022,
                 password: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_owned(),
@@ -491,6 +609,7 @@ mod tests {
             id: Uuid::nil(),
             name: "anytls-test".to_owned(),
             port: 443,
+            server_address: None,
             credentials: Credentials::AnyTls {
                 users: vec![AnyTlsUser {
                     name: "alice".to_owned(),

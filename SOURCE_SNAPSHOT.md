@@ -1,20 +1,20 @@
 # ping-rust 完整源码快照
 
-> 由真实仓库文件逐个合并并校验；实际构建仍使用原始文件。
+> 由真实仓库文件逐个机械合并并校验；实际构建仍使用原始文件。
 
 ## `Cargo.toml`
 
 ````toml
 [package]
 name = "ping-rust"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 description = "Menu-driven installer and manager for the shoes proxy server"
 license = "MIT"
 readme = "README.md"
 documentation = "https://docs.rs/ping-rust"
 repository = "https://github.com/Jyanbai/ping-rust"
-exclude = ["task_plan.md", "findings.md", "progress.md", "SOURCE_SNAPSHOT.md", "COMPLETION_AUDIT.md"]
+exclude = ["task_plan.md", "findings.md", "progress.md", "SOURCE_SNAPSHOT.md", "COMPLETION_AUDIT.md", "sing-box-main"]
 keywords = ["proxy", "shoes", "reality", "vless", "cli"]
 categories = ["command-line-utilities", "network-programming"]
 
@@ -60,6 +60,8 @@ strip = true
 mod cli;
 mod client;
 mod config;
+mod deployment;
+mod fast_add;
 mod installer;
 mod menu;
 mod operations;
@@ -79,11 +81,17 @@ async fn main() -> Result<()> {
 ## `src/cli.rs`
 
 ````rust
-use std::path::PathBuf;
+use std::{
+    io::Write,
+    io::{self, IsTerminal},
+    path::{Path, PathBuf},
+    process::{Command as ProcessCommand, Stdio},
+};
 
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use colored::Colorize;
+use dialoguer::{theme::ColorfulTheme, Confirm};
 use uuid::Uuid;
 
 use crate::{
@@ -92,6 +100,7 @@ use crate::{
         self, AnyTlsMode, AnyTlsUser, GenerationOptions, GenerationRequest, Protocol,
         ShadowsocksCipher,
     },
+    deployment, fast_add,
     installer::{self, InstallMethod},
     menu, operations, self_update,
     service::{self, ServiceAction},
@@ -116,13 +125,36 @@ pub enum Command {
     },
     /// 生成服务端配置
     Generate(Box<GenerateArgs>),
+    /// 像 233boy 一样快速添加配置并直接输出分享链接
+    #[command(alias = "a")]
+    Add(AddArgs),
     /// 管理 shoes systemd 服务
     Service {
         #[arg(value_enum)]
         action: ServiceAction,
     },
     /// 查看安装、配置和服务信息
-    Info,
+    #[command(alias = "i")]
+    Info {
+        /// 配置 UUID 或名称；省略时显示全部配置
+        profile: Option<String>,
+    },
+    /// 重新输出配置的分享链接
+    Url {
+        /// 配置 UUID 或名称；只有一个配置时可省略
+        profile: Option<String>,
+        /// 覆盖保存的服务器公网 IP 或域名
+        #[arg(long)]
+        server_address: Option<String>,
+    },
+    /// 显示配置分享链接的终端二维码
+    Qr {
+        /// 配置 UUID 或名称；只有一个配置时可省略
+        profile: Option<String>,
+        /// 覆盖保存的服务器公网 IP 或域名
+        #[arg(long)]
+        server_address: Option<String>,
+    },
     /// 删除一个由 ping-rust 管理的配置
     Delete {
         profile: Uuid,
@@ -179,6 +211,36 @@ pub enum Command {
         #[arg(long)]
         purge: bool,
     },
+}
+
+#[derive(Debug, Args)]
+pub struct AddArgs {
+    #[arg(value_enum)]
+    pub protocol: Protocol,
+    /// 兼容 233boy：位置参数端口，例如 `sb add reality 443`
+    #[arg(value_name = "PORT", conflicts_with_all = ["port", "random_port"])]
+    pub legacy_port: Option<u16>,
+    /// 指定监听端口
+    #[arg(long, conflicts_with_all = ["legacy_port", "random_port"])]
+    pub port: Option<u16>,
+    /// 显式要求随机可用端口（未指定端口时本来就是默认行为）
+    #[arg(long)]
+    pub random_port: bool,
+    /// 配置名称；默认自动生成
+    #[arg(long)]
+    pub name: Option<String>,
+    /// 客户端连接使用的服务器公网 IP 或域名
+    #[arg(long)]
+    pub server_address: Option<String>,
+    /// Reality SNI 或 TLS 证书名称
+    #[arg(long)]
+    pub server_name: Option<String>,
+    /// shoes 未安装时自动确认安装
+    #[arg(long)]
+    pub yes: bool,
+    /// stdout 只输出一行分享 URI
+    #[arg(long)]
+    pub plain: bool,
 }
 
 #[derive(Debug, Args)]
@@ -284,11 +346,13 @@ pub async fn run(cli: Cli) -> Result<()> {
                 anytls_users.push(config::generated_anytls_user("default"));
             }
             let output = output.unwrap_or_else(|| PathBuf::from(crate::utils::CONFIG_FILE));
-            let result = config::generate(GenerationRequest {
+            let managed = output == Path::new(crate::utils::CONFIG_FILE);
+            let request = GenerationRequest {
                 name,
                 protocol,
                 port,
                 output,
+                server_address: None,
                 server_name,
                 reality_dest: dest,
                 certificate: cert,
@@ -306,18 +370,30 @@ pub async fn run(cli: Cli) -> Result<()> {
                     anytls_padding_scheme: (!anytls_padding.is_empty()).then_some(anytls_padding),
                     anytls_fallback: fallback,
                 },
-            })
-            .await?;
+            };
+            let result = if managed {
+                deployment::generate_and_activate(request).await?
+            } else {
+                config::generate(request).await?
+            };
             print_credentials(&result);
-            if result.config_path == std::path::Path::new(crate::utils::CONFIG_FILE) {
-                service::install_unit(true)?;
+            if managed {
                 println!("{}", "配置验证通过，shoes 已启用并启动。".green());
             }
             Ok(())
         }
+        Command::Add(args) => run_add(args).await,
         Command::Service { action } => service::execute(action),
         Command::Logs { lines } => service::logs(lines),
-        Command::Info => show_info().await,
+        Command::Info { profile } => show_info(profile.as_deref()).await,
+        Command::Url {
+            profile,
+            server_address,
+        } => print_saved_url(profile.as_deref(), server_address.as_deref()),
+        Command::Qr {
+            profile,
+            server_address,
+        } => print_saved_qr(profile.as_deref(), server_address.as_deref()),
         Command::Delete { profile, yes } => {
             if !yes {
                 anyhow::bail!("删除配置需要显式添加 --yes；也可使用交互菜单确认");
@@ -392,6 +468,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Uninstall { purge } => {
             let unit_removed = service::uninstall_unit()?;
             let binary_removed = installer::uninstall_binary()?;
+            let alias_removed = crate::utils::remove_sb_alias()?;
             if purge {
                 let config_dir = std::path::Path::new(crate::utils::CONFIG_DIR);
                 if config_dir.exists() {
@@ -399,12 +476,61 @@ pub async fn run(cli: Cli) -> Result<()> {
                 }
             }
             println!(
-                "卸载完成：二进制={}，systemd={}，配置清理={}",
-                binary_removed, unit_removed, purge
+                "卸载完成：二进制={}，systemd={}，sb 别名={}，配置清理={}",
+                binary_removed, unit_removed, alias_removed, purge
             );
             Ok(())
         }
     }
+}
+
+async fn run_add(args: AddArgs) -> Result<()> {
+    ensure_shoes_for_add(args.yes).await?;
+    let result = fast_add::execute(fast_add::AddRequest {
+        name: args.name,
+        protocol: args.protocol,
+        port: args.port.or(args.legacy_port),
+        server_address: args.server_address,
+        server_name: args.server_name,
+    })
+    .await?;
+    if args.plain {
+        println!("{}", result.share_uri);
+        return Ok(());
+    }
+    print_add_result(&result);
+    Ok(())
+}
+
+pub(crate) fn print_add_result(result: &fast_add::AddResult) {
+    let profile = &result.generation.profile;
+    println!("{}", "部署成功，shoes 服务已启动。".green().bold());
+    println!("配置：{} ({})", profile.name, profile.id);
+    println!("协议：{}", profile.protocol_name());
+    println!("端口：{}", profile.port);
+    println!("\n------------- URL 链接 -------------\n");
+    println!("{}", result.share_uri.underline());
+    println!("\n复制上方链接即可导入客户端。");
+    println!("{}", "安全提示：分享链接包含访问凭据，请勿公开。".yellow());
+}
+
+pub(crate) async fn ensure_shoes_for_add(yes: bool) -> Result<()> {
+    if Path::new(crate::utils::SHOES_BIN).is_file() {
+        return Ok(());
+    }
+    let approved = yes
+        || (io::stdin().is_terminal()
+            && Confirm::with_theme(&ColorfulTheme::default())
+                .with_prompt("shoes 尚未安装，是否从 GitHub Release 自动安装并继续？")
+                .default(true)
+                .interact()?);
+    if !approved {
+        bail!("shoes 尚未安装；请先运行 ping-rust install，或添加 --yes 自动安装");
+    }
+    let report = installer::install(InstallMethod::Release, false).await?;
+    service::install_unit(false)?;
+    eprintln!("shoes 安装成功：{}（{}）", report.version, report.source);
+    Ok(())
 }
 
 pub async fn run_self_update(version: Option<&str>, force: bool) -> Result<()> {
@@ -429,7 +555,7 @@ pub async fn run_self_update(version: Option<&str>, force: bool) -> Result<()> {
     Ok(())
 }
 
-pub async fn show_info() -> Result<()> {
+pub async fn show_info(selector: Option<&str>) -> Result<()> {
     let version = installer::installed_version()
         .await
         .unwrap_or_else(|_| "未安装".to_owned());
@@ -445,8 +571,13 @@ pub async fn show_info() -> Result<()> {
         if state.profiles.is_empty() {
             println!("配置：无");
         } else {
-            println!("配置数量：{}", state.profiles.len());
-            for profile in state.profiles {
+            let profiles = if let Some(selector) = selector {
+                vec![client::select_profile(&state.profiles, Some(selector))?]
+            } else {
+                state.profiles.iter().collect::<Vec<_>>()
+            };
+            println!("配置数量：{}", profiles.len());
+            for profile in profiles {
                 println!(
                     "- {} | {} | 0.0.0.0:{} | {} | {}",
                     profile.id,
@@ -455,8 +586,51 @@ pub async fn show_info() -> Result<()> {
                     profile.protocol_name(),
                     profile.server_name()
                 );
+                if let Some(server) = profile.server_address.as_deref() {
+                    println!("  客户端地址：{server}");
+                    match client::share_uri(profile, server) {
+                        Ok(uri) => println!("  URL：{uri}"),
+                        Err(error) => println!("  URL：无法生成（{error}）"),
+                    }
+                } else {
+                    println!("  URL：未保存公网地址，可用 url --server-address 指定");
+                }
             }
         }
+    }
+    Ok(())
+}
+
+fn print_saved_url(selector: Option<&str>, server_address: Option<&str>) -> Result<()> {
+    let state = config::load_state()?;
+    let profile = client::select_profile(&state.profiles, selector)?;
+    println!("{}", client::stored_share_uri(profile, server_address)?);
+    Ok(())
+}
+
+fn print_saved_qr(selector: Option<&str>, server_address: Option<&str>) -> Result<()> {
+    let state = config::load_state()?;
+    let profile = client::select_profile(&state.profiles, selector)?;
+    let uri = client::stored_share_uri(profile, server_address)?;
+    if !crate::utils::command_exists("qrencode") {
+        println!("{uri}");
+        eprintln!("未安装 qrencode；请安装后重新运行 qr，URL 已输出供复制。");
+        return Ok(());
+    }
+    let mut child = ProcessCommand::new("qrencode")
+        .args(["-t", "ANSIUTF8"])
+        .stdin(Stdio::piped())
+        .spawn()
+        .context("无法启动 qrencode")?;
+    child
+        .stdin
+        .take()
+        .context("无法打开 qrencode 标准输入")?
+        .write_all(uri.as_bytes())
+        .context("写入二维码内容失败")?;
+    let status = child.wait().context("等待 qrencode 失败")?;
+    if !status.success() {
+        bail!("qrencode 执行失败（退出码：{status}）");
     }
     Ok(())
 }
@@ -658,6 +832,56 @@ mod tests {
         assert_eq!(args.protocol, Protocol::AnyTls);
         assert_eq!(args.anytls_mode, AnyTlsMode::Reality);
     }
+
+    #[test]
+    fn parses_233boy_style_add_aliases_and_output_controls() {
+        let cli = Cli::try_parse_from([
+            "sb",
+            "a",
+            "r",
+            "443",
+            "--server-address",
+            "203.0.113.9",
+            "--yes",
+            "--plain",
+        ])
+        .unwrap();
+        let Some(Command::Add(args)) = cli.command else {
+            panic!("expected add command");
+        };
+        assert_eq!(args.protocol, Protocol::Reality);
+        assert_eq!(args.legacy_port, Some(443));
+        assert!(args.yes);
+        assert!(args.plain);
+
+        let cli = Cli::try_parse_from(["sb", "add", "ss", "--random-port"]).unwrap();
+        let Some(Command::Add(args)) = cli.command else {
+            panic!("expected add command");
+        };
+        assert_eq!(args.protocol, Protocol::Shadowsocks);
+        assert!(args.random_port);
+    }
+
+    #[test]
+    fn rejects_conflicting_fast_add_port_options() {
+        assert!(Cli::try_parse_from(["sb", "add", "reality", "443", "--random-port"]).is_err());
+    }
+
+    #[test]
+    fn parses_info_url_and_qr_commands() {
+        assert!(matches!(
+            Cli::try_parse_from(["sb", "i", "main"]).unwrap().command,
+            Some(Command::Info { profile: Some(profile) }) if profile == "main"
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["sb", "url", "main"]).unwrap().command,
+            Some(Command::Url { profile: Some(profile), .. }) if profile == "main"
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["sb", "qr", "main"]).unwrap().command,
+            Some(Command::Qr { profile: Some(profile), .. }) if profile == "main"
+        ));
+    }
 }
 ````
 
@@ -675,21 +899,31 @@ use crate::{
         self, AnyTlsMode, AnyTlsUser, GenerationOptions, GenerationRequest, Protocol,
         ShadowsocksCipher,
     },
+    deployment, fast_add,
     installer::{self, InstallMethod},
     operations,
     service::{self, ServiceAction},
 };
 
-const MENU_ITEMS: &[&str] = &[
-    "安装 shoes",
-    "添加代理配置",
-    "查看配置信息",
-    "删除配置",
-    "服务管理",
-    "更新 shoes",
-    "运维工具",
-    "卸载",
-    "退出",
+const MAIN_MENU_ITEMS: &[(usize, &str)] = &[
+    (1, "添加配置"),
+    (2, "更改配置"),
+    (3, "查看配置"),
+    (4, "删除配置"),
+    (5, "运行管理"),
+    (6, "更新"),
+    (7, "卸载"),
+    (8, "帮助"),
+    (9, "其他"),
+    (10, "关于"),
+];
+
+const PROTOCOL_MENU_ITEMS: &[(usize, &str)] = &[
+    (1, "TUIC"),
+    (3, "Hysteria2"),
+    (8, "Shadowsocks"),
+    (18, "VLESS-REALITY（推荐）"),
+    (20, "AnyTLS"),
 ];
 
 fn select_numbered<T: AsRef<str>>(prompt: &str, items: &[T]) -> Result<usize> {
@@ -715,29 +949,73 @@ fn select_numbered<T: AsRef<str>>(prompt: &str, items: &[T]) -> Result<usize> {
     Ok(selected - 1)
 }
 
-pub async fn run() -> Result<()> {
+fn select_keyed(prompt: &str, items: &[(usize, &str)], empty_exits: bool) -> Result<Option<usize>> {
+    println!("{prompt}");
+    for (key, label) in items {
+        println!("  {key}. {label}");
+    }
     loop {
-        println!();
-        println!("{}", "ping-rust · shoes 管理工具".bright_cyan().bold());
-        println!("{}", "────────────────────────────".bright_black());
-
-        let selected = select_numbered("请选择操作", MENU_ITEMS)?;
-
-        match selected {
-            0 => install_menu().await?,
-            1 => add_config_menu().await?,
-            2 => cli::show_info().await?,
-            3 => delete_config_menu().await?,
-            4 => service_menu()?,
-            5 => update_menu().await?,
-            6 => operations_menu().await?,
-            7 => uninstall_menu()?,
-            8 => {
-                println!("{}", "已退出。".green());
-                return Ok(());
-            }
-            _ => anyhow::bail!("菜单返回了无效选项"),
+        let value = Input::<String>::with_theme(&ColorfulTheme::default())
+            .with_prompt(if empty_exits {
+                "请输入序号（直接回车退出）"
+            } else {
+                "请输入序号"
+            })
+            .allow_empty(empty_exits)
+            .interact_text()?;
+        if value.trim().is_empty() && empty_exits {
+            return Ok(None);
         }
+        let Ok(key) = value.trim().parse::<usize>() else {
+            println!("请输入有效数字。");
+            continue;
+        };
+        if items.iter().any(|(candidate, _)| *candidate == key) {
+            return Ok(Some(key));
+        }
+        println!(
+            "无效序号；可选 {}。",
+            items
+                .iter()
+                .map(|(key, _)| key.to_string())
+                .collect::<Vec<_>>()
+                .join("、")
+        );
+    }
+}
+
+pub async fn run() -> Result<()> {
+    println!();
+    println!("{}", "ping-rust · shoes 管理工具".bright_cyan().bold());
+    println!("{}", "────────────────────────────".bright_black());
+    let Some(selected) = select_keyed("请选择操作", MAIN_MENU_ITEMS, true)? else {
+        println!("{}", "已退出。".green());
+        return Ok(());
+    };
+    match selected {
+        1 => fast_add_config_menu().await,
+        2 => {
+            println!("更改配置请使用完整 generate 参数，或删除后通过快速添加安全重建。");
+            Ok(())
+        }
+        3 => cli::show_info(None).await,
+        4 => delete_config_menu().await,
+        5 => service_menu(),
+        6 => update_menu().await,
+        7 => uninstall_menu(),
+        8 => {
+            println!("常用命令：sb add reality、sb add ss、sb info、sb url、sb qr");
+            println!("高级帮助：ping-rust --help");
+            Ok(())
+        }
+        9 => operations_menu().await,
+        10 => {
+            println!("ping-rust {}", env!("CARGO_PKG_VERSION"));
+            println!("Rust 实现的 shoes 菜单式安装与管理工具");
+            println!("https://github.com/Jyanbai/ping-rust");
+            Ok(())
+        }
+        _ => anyhow::bail!("菜单返回了无效选项"),
     }
 }
 
@@ -786,6 +1064,7 @@ async fn delete_config_menu() -> Result<()> {
 
 async fn operations_menu() -> Result<()> {
     let choices = [
+        "高级添加配置",
         "查看日志",
         "端口检查",
         "开启 BBR",
@@ -797,8 +1076,9 @@ async fn operations_menu() -> Result<()> {
     ];
     let selected = select_numbered("运维工具", &choices)?;
     match selected {
-        0 => service::logs(100),
-        1 => {
+        0 => advanced_add_config_menu().await,
+        1 => service::logs(100),
+        2 => {
             let port = Input::<u16>::with_theme(&ColorfulTheme::default())
                 .with_prompt("检查端口")
                 .default(443)
@@ -806,7 +1086,7 @@ async fn operations_menu() -> Result<()> {
             cli::print_port_status(port, operations::check_port(port, true, true));
             Ok(())
         }
-        2 => {
+        3 => {
             if Confirm::with_theme(&ColorfulTheme::default())
                 .with_prompt("写入 sysctl 配置并启用 BBR？")
                 .default(true)
@@ -817,13 +1097,13 @@ async fn operations_menu() -> Result<()> {
             }
             Ok(())
         }
-        3 => {
+        4 => {
             let path = operations::backup(None)?;
             println!("备份已创建：{}", path.display());
             println!("备份含私钥和密码，请安全保管。");
             Ok(())
         }
-        4 => {
+        5 => {
             let archive = Input::<String>::with_theme(&ColorfulTheme::default())
                 .with_prompt("备份文件路径")
                 .interact_text()?;
@@ -840,8 +1120,8 @@ async fn operations_menu() -> Result<()> {
             }
             Ok(())
         }
-        5 => export_menu(),
-        6 => cli::run_self_update(None, false).await,
+        6 => export_menu(),
+        7 => cli::run_self_update(None, false).await,
         _ => Ok(()),
     }
 }
@@ -878,7 +1158,51 @@ fn export_menu() -> Result<()> {
     Ok(())
 }
 
-async fn add_config_menu() -> Result<()> {
+async fn fast_add_config_menu() -> Result<()> {
+    cli::ensure_shoes_for_add(false).await?;
+    let protocol_number = select_keyed("选择协议", PROTOCOL_MENU_ITEMS, false)?
+        .ok_or_else(|| anyhow::anyhow!("未选择协议"))?;
+    let protocol = fast_add::protocol_from_reference_number(protocol_number)?;
+    let port_text = Input::<String>::with_theme(&ColorfulTheme::default())
+        .with_prompt("输入端口（直接回车自动选择随机端口）")
+        .allow_empty(true)
+        .validate_with(|value: &String| {
+            if value.trim().is_empty() {
+                return Ok(());
+            }
+            match value.trim().parse::<u16>() {
+                Ok(port) if port > 0 => Ok(()),
+                _ => Err("端口必须在 1..=65535 范围内，或直接回车"),
+            }
+        })
+        .interact_text()?;
+    let port = if port_text.trim().is_empty() {
+        None
+    } else {
+        Some(port_text.trim().parse::<u16>()?)
+    };
+    let server_address = match fast_add::resolve_server_address(None).await {
+        Ok(address) => address,
+        Err(error) => {
+            eprintln!("自动检测公网地址失败：{error:#}");
+            Input::<String>::with_theme(&ColorfulTheme::default())
+                .with_prompt("请输入 VPS 公网域名或 IP")
+                .interact_text()?
+        }
+    };
+    let result = fast_add::execute(fast_add::AddRequest {
+        name: None,
+        protocol,
+        port,
+        server_address: Some(server_address),
+        server_name: None,
+    })
+    .await?;
+    cli::print_add_result(&result);
+    Ok(())
+}
+
+async fn advanced_add_config_menu() -> Result<()> {
     let choices = [
         "VLESS-Reality-Vision（推荐）",
         "Hysteria2",
@@ -1044,11 +1368,12 @@ async fn add_config_menu() -> Result<()> {
         (None, None)
     };
 
-    let result = config::generate(GenerationRequest {
+    let result = deployment::generate_and_activate(GenerationRequest {
         name: Some(name),
         protocol,
         port,
         output: crate::utils::CONFIG_FILE.into(),
+        server_address: None,
         server_name,
         reality_dest,
         certificate,
@@ -1057,23 +1382,7 @@ async fn add_config_menu() -> Result<()> {
     })
     .await?;
     cli::print_credentials(&result);
-    service::install_unit(true)?;
     println!("{}", "配置验证通过，服务已启动。".green());
-    Ok(())
-}
-
-async fn install_menu() -> Result<()> {
-    let choices = ["GitHub Release（推荐）", "cargo install shoes", "返回"];
-    let selected = select_numbered("选择安装方式", &choices)?;
-    let method = match selected {
-        0 => InstallMethod::Release,
-        1 => InstallMethod::Cargo,
-        _ => return Ok(()),
-    };
-    let report = installer::install(method, false).await?;
-    service::install_unit(false)?;
-    println!("{} {}", "安装成功：".green(), report.version);
-    println!("下一步请选择“添加代理配置”。");
     Ok(())
 }
 
@@ -1124,14 +1433,39 @@ fn uninstall_menu() -> Result<()> {
         .interact()?;
     let unit_removed = service::uninstall_unit()?;
     let binary_removed = installer::uninstall_binary()?;
+    let alias_removed = crate::utils::remove_sb_alias()?;
     if purge && std::path::Path::new(crate::utils::CONFIG_DIR).exists() {
         std::fs::remove_dir_all(crate::utils::CONFIG_DIR)?;
     }
     println!(
-        "卸载完成：二进制={}，systemd={}，配置清理={}",
-        binary_removed, unit_removed, purge
+        "卸载完成：二进制={}，systemd={}，sb 别名={}，配置清理={}",
+        binary_removed, unit_removed, alias_removed, purge
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preserves_reference_main_and_protocol_numbers() {
+        assert_eq!(MAIN_MENU_ITEMS.first().unwrap().0, 1);
+        assert_eq!(MAIN_MENU_ITEMS.last().unwrap().0, 10);
+        for (number, protocol) in [
+            (1, Protocol::Tuic),
+            (3, Protocol::Hysteria2),
+            (8, Protocol::Shadowsocks),
+            (18, Protocol::Reality),
+            (20, Protocol::AnyTls),
+        ] {
+            assert!(PROTOCOL_MENU_ITEMS.iter().any(|item| item.0 == number));
+            assert_eq!(
+                fast_add::protocol_from_reference_number(number).unwrap(),
+                protocol
+            );
+        }
+    }
 }
 ````
 
@@ -1561,9 +1895,12 @@ pub const DEFAULT_SNI: &str = "www.cloudflare.com";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum Protocol {
+    #[value(alias = "r", alias = "vless")]
     Reality,
+    #[value(alias = "hy", alias = "hy2", alias = "hysteria")]
     Hysteria2,
     Tuic,
+    #[value(alias = "ss")]
     Shadowsocks,
     #[value(name = "anytls")]
     AnyTls,
@@ -1698,6 +2035,7 @@ pub struct GenerationRequest {
     pub protocol: Protocol,
     pub port: u16,
     pub output: PathBuf,
+    pub server_address: Option<String>,
     pub server_name: String,
     pub reality_dest: Option<String>,
     pub certificate: Option<PathBuf>,
@@ -1711,6 +2049,53 @@ pub struct GenerationResult {
     pub certificate_path: Option<PathBuf>,
     pub certificate_key_path: Option<PathBuf>,
     pub credentials: Credentials,
+    pub profile: ManagedProfile,
+    rollback: Option<ManagedRollback>,
+    _lock: Option<utils::ExclusiveLock>,
+}
+
+struct ManagedRollback {
+    config: Option<Vec<u8>>,
+    state: Option<Vec<u8>>,
+    generated_certificate: Option<PathBuf>,
+    generated_certificate_key: Option<PathBuf>,
+}
+
+impl GenerationResult {
+    pub fn rollback_managed(&mut self) -> Result<()> {
+        let rollback = self
+            .rollback
+            .take()
+            .context("该生成结果不包含可回滚的系统配置事务")?;
+        rollback.restore_to(Path::new(utils::CONFIG_FILE), Path::new(utils::STATE_FILE))
+    }
+}
+
+impl ManagedRollback {
+    fn restore_to(self, config_path: &Path, state_path: &Path) -> Result<()> {
+        let state_result = restore_snapshot(state_path, self.state.as_deref(), 0o600);
+        let config_result = restore_snapshot(config_path, self.config.as_deref(), 0o600);
+        for path in [
+            self.generated_certificate.as_deref(),
+            self.generated_certificate_key.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if path.exists() {
+                fs::remove_file(path)
+                    .with_context(|| format!("删除回滚凭据 {} 失败", path.display()))?;
+            }
+        }
+        match (state_result, config_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(state), Ok(())) => Err(state.context("恢复管理状态失败")),
+            (Ok(()), Err(config)) => Err(config.context("恢复 shoes 配置失败")),
+            (Err(state), Err(config)) => {
+                bail!("恢复管理状态和 shoes 配置均失败：状态={state:#}；配置={config:#}")
+            }
+        }
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -1785,6 +2170,8 @@ pub struct ManagedProfile {
     pub id: Uuid,
     pub name: String,
     pub port: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_address: Option<String>,
     pub credentials: Credentials,
     pub certificate_path: Option<PathBuf>,
     pub certificate_key_path: Option<PathBuf>,
@@ -1916,7 +2303,7 @@ async fn generate_inner(
     if managed {
         utils::require_linux_root()?;
     }
-    let _lock = managed
+    let lock = managed
         .then(|| utils::exclusive_lock(Path::new(utils::LOCK_FILE)))
         .transpose()?;
     let mut state = if managed {
@@ -2001,6 +2388,7 @@ async fn generate_inner(
             .clone()
             .unwrap_or_else(|| default_profile_name(request.protocol, profile_id)),
         port: request.port,
+        server_address: request.server_address.clone(),
         credentials: credentials.clone(),
         certificate_path: certificate_path.clone(),
         certificate_key_path: certificate_key_path.clone(),
@@ -2021,13 +2409,23 @@ async fn generate_inner(
         bail!("配置文件与管理状态不一致；请先备份并修复，ping-rust 不会覆盖现有配置");
     }
     servers.push(server);
-    state.profiles.push(profile);
+    state.profiles.push(profile.clone());
 
     let yaml = serde_yaml::to_string(&servers).context("序列化 shoes YAML 失败")?;
     validate_yaml(&yaml)?;
     if validate_with_shoes {
         validate_candidate_with_shoes(&yaml, parent).await?;
     }
+    let rollback = if managed {
+        Some(ManagedRollback {
+            config: read_optional(Path::new(utils::CONFIG_FILE))?,
+            state: read_optional(Path::new(utils::STATE_FILE))?,
+            generated_certificate: self_signed.then(|| certificate_path.clone()).flatten(),
+            generated_certificate_key: self_signed.then(|| certificate_key_path.clone()).flatten(),
+        })
+    } else {
+        None
+    };
     if managed {
         commit_managed(&request.output, Path::new(utils::STATE_FILE), &yaml, &state)?;
     } else {
@@ -2041,6 +2439,9 @@ async fn generate_inner(
         certificate_path,
         certificate_key_path,
         credentials,
+        profile,
+        rollback,
+        _lock: lock,
     })
 }
 
@@ -2797,6 +3198,7 @@ mod tests {
             protocol,
             port: 443,
             output,
+            server_address: None,
             server_name: "www.cloudflare.com".to_owned(),
             reality_dest: None,
             certificate: None,
@@ -2989,6 +3391,57 @@ mod tests {
         assert!(!state.exists());
     }
 
+    #[test]
+    fn managed_activation_rollback_restores_exact_files_and_removes_new_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.yaml");
+        let state = dir.path().join("state.json");
+        let certificate = dir.path().join("new.pem");
+        let certificate_key = dir.path().join("new-key.pem");
+        fs::write(&config, b"new-config").unwrap();
+        fs::write(&state, b"new-state").unwrap();
+        fs::write(&certificate, b"certificate").unwrap();
+        fs::write(&certificate_key, b"private-key").unwrap();
+
+        ManagedRollback {
+            config: Some(b"old-config\n".to_vec()),
+            state: None,
+            generated_certificate: Some(certificate.clone()),
+            generated_certificate_key: Some(certificate_key.clone()),
+        }
+        .restore_to(&config, &state)
+        .unwrap();
+
+        assert_eq!(fs::read(config).unwrap(), b"old-config\n");
+        assert!(!state.exists());
+        assert!(!certificate.exists());
+        assert!(!certificate_key.exists());
+    }
+
+    #[test]
+    fn old_managed_profiles_without_server_address_still_deserialize() {
+        let profile = ManagedProfile {
+            id: Uuid::nil(),
+            name: "legacy".to_owned(),
+            port: 443,
+            server_address: None,
+            credentials: Credentials::Reality {
+                user_id: Uuid::nil(),
+                private_key: "private".to_owned(),
+                public_key: "public".to_owned(),
+                short_id: "0123456789abcdef".to_owned(),
+                server_name: "www.cloudflare.com".to_owned(),
+            },
+            certificate_path: None,
+            certificate_key_path: None,
+            self_signed_certificate: false,
+        };
+        let mut value = serde_json::to_value(profile).unwrap();
+        value.as_object_mut().unwrap().remove("server_address");
+        let restored: ManagedProfile = serde_json::from_value(value).unwrap();
+        assert!(restored.server_address.is_none());
+    }
+
     #[tokio::test]
     async fn rejected_candidate_is_removed_without_touching_live_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -3016,6 +3469,288 @@ mod tests {
 }
 ````
 
+## `src/deployment.rs`
+
+````rust
+use anyhow::{bail, Result};
+
+use crate::{
+    config::{self, GenerationRequest, GenerationResult},
+    service,
+};
+
+pub async fn generate_and_activate(request: GenerationRequest) -> Result<GenerationResult> {
+    let service_snapshot = service::capture_snapshot()?;
+    let mut result = config::generate(request).await?;
+    if let Err(activation) = service::activate_and_verify() {
+        let config_rollback = result.rollback_managed();
+        let service_rollback = service::restore_snapshot(service_snapshot);
+        return match (config_rollback, service_rollback) {
+            (Ok(()), Ok(())) => {
+                Err(activation.context("shoes 激活失败，配置和服务状态已回滚"))
+            }
+            (Err(config), Ok(())) => bail!(
+                "shoes 激活失败，服务状态已恢复，但配置回滚失败：激活={activation:#}；配置={config:#}"
+            ),
+            (Ok(()), Err(service)) => bail!(
+                "shoes 激活失败，配置已回滚，但服务状态恢复失败：激活={activation:#}；服务={service:#}"
+            ),
+            (Err(config), Err(service)) => bail!(
+                "shoes 激活失败，配置与服务状态回滚均失败：激活={activation:#}；配置={config:#}；服务={service:#}"
+            ),
+        };
+    }
+    Ok(result)
+}
+````
+
+## `src/fast_add.rs`
+
+````rust
+use std::{net::IpAddr, path::Path, time::Duration};
+
+use anyhow::{bail, Context, Result};
+use rand::Rng;
+use reqwest::Client;
+
+use crate::{
+    client,
+    config::{self, GenerationOptions, GenerationRequest, Protocol, ShadowsocksCipher},
+    deployment, operations, utils,
+};
+
+const RANDOM_PORT_MIN: u16 = 445;
+const RANDOM_PORT_ATTEMPTS: usize = 233;
+const ADDRESS_ENDPOINTS: &[&str] = &[
+    "https://api.ipify.org",
+    "https://api64.ipify.org",
+    "https://icanhazip.com",
+    "https://one.one.one.one/cdn-cgi/trace",
+];
+
+pub struct AddRequest {
+    pub name: Option<String>,
+    pub protocol: Protocol,
+    pub port: Option<u16>,
+    pub server_address: Option<String>,
+    pub server_name: Option<String>,
+}
+
+pub struct AddResult {
+    pub generation: config::GenerationResult,
+    pub share_uri: String,
+}
+
+pub async fn execute(request: AddRequest) -> Result<AddResult> {
+    utils::require_linux_root()?;
+    if !Path::new(utils::SHOES_BIN).is_file() {
+        bail!("shoes 尚未安装；请先运行 ping-rust install，或为 add 添加 --yes 自动安装");
+    }
+
+    let server_address = resolve_server_address(request.server_address.as_deref()).await?;
+    let port = select_port(request.protocol, request.port)?;
+    let server_name = request
+        .server_name
+        .unwrap_or_else(|| config::DEFAULT_SNI.to_owned());
+    let mut options = GenerationOptions::default();
+    if matches!(request.protocol, Protocol::Shadowsocks) {
+        options.shadowsocks_cipher = ShadowsocksCipher::default();
+    }
+    if matches!(request.protocol, Protocol::AnyTls) {
+        options
+            .anytls_users
+            .push(config::generated_anytls_user("default"));
+        options.anytls_padding_scheme = Some(vec![
+            "stop=8".to_owned(),
+            "0=30-30".to_owned(),
+            "1=50-100".to_owned(),
+        ]);
+    }
+
+    let generation = deployment::generate_and_activate(GenerationRequest {
+        name: request.name,
+        protocol: request.protocol,
+        port,
+        output: utils::CONFIG_FILE.into(),
+        server_address: Some(server_address.clone()),
+        server_name: server_name.clone(),
+        reality_dest: is_reality_outer(request.protocol).then(|| format!("{server_name}:443")),
+        certificate: None,
+        certificate_key: None,
+        options,
+    })
+    .await?;
+    let share_uri = client::share_uri(&generation.profile, &server_address)?;
+    Ok(AddResult {
+        generation,
+        share_uri,
+    })
+}
+
+pub fn protocol_from_reference_number(number: usize) -> Result<Protocol> {
+    match number {
+        1 => Ok(Protocol::Tuic),
+        3 => Ok(Protocol::Hysteria2),
+        8 => Ok(Protocol::Shadowsocks),
+        18 => Ok(Protocol::Reality),
+        20 => Ok(Protocol::AnyTls),
+        _ => bail!("协议编号无效；可选 1、3、8、18、20"),
+    }
+}
+
+#[cfg(test)]
+fn reference_number(protocol: Protocol) -> usize {
+    match protocol {
+        Protocol::Tuic => 1,
+        Protocol::Hysteria2 => 3,
+        Protocol::Shadowsocks => 8,
+        Protocol::Reality => 18,
+        Protocol::AnyTls => 20,
+    }
+}
+
+pub async fn resolve_server_address(explicit: Option<&str>) -> Result<String> {
+    if let Some(explicit) = explicit {
+        return client::normalize_server_address(explicit);
+    }
+    let client = Client::builder()
+        .user_agent(concat!("ping-rust/", env!("CARGO_PKG_VERSION")))
+        .https_only(true)
+        .connect_timeout(Duration::from_secs(4))
+        .timeout(Duration::from_secs(8))
+        .build()
+        .context("创建公网地址探测客户端失败")?;
+    let mut failures = Vec::new();
+    for endpoint in ADDRESS_ENDPOINTS {
+        match detect_from_endpoint(&client, endpoint).await {
+            Ok(address) => return Ok(address),
+            Err(error) => failures.push(format!("{endpoint}: {error}")),
+        }
+    }
+    bail!(
+        "自动检测服务器公网 IP 失败；请使用 --server-address 指定。探测结果：{}",
+        failures.join("；")
+    )
+}
+
+async fn detect_from_endpoint(client: &Client, endpoint: &str) -> Result<String> {
+    let body = client
+        .get(endpoint)
+        .send()
+        .await
+        .context("请求失败")?
+        .error_for_status()
+        .context("服务器返回错误")?
+        .text()
+        .await
+        .context("读取响应失败")?;
+    parse_detected_address(&body).context("响应中没有有效公网 IP")
+}
+
+fn parse_detected_address(body: &str) -> Option<String> {
+    body.lines().find_map(|line| {
+        let line = line.trim();
+        let value = line.strip_prefix("ip=").unwrap_or(line);
+        let address = value.parse::<IpAddr>().ok()?;
+        (!address.is_unspecified()
+            && !address.is_loopback()
+            && !address.is_multicast()
+            && !is_private_address(address))
+        .then(|| address.to_string())
+    })
+}
+
+fn is_private_address(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(address) => address.is_private() || address.is_link_local(),
+        IpAddr::V6(address) => address.is_unique_local() || address.is_unicast_link_local(),
+    }
+}
+
+fn select_port(protocol: Protocol, requested: Option<u16>) -> Result<u16> {
+    if let Some(port) = requested {
+        ensure_port_available(protocol, port)?;
+        return Ok(port);
+    }
+    let mut random = rand::rng();
+    for _ in 0..RANDOM_PORT_ATTEMPTS {
+        let port = random.random_range(RANDOM_PORT_MIN..=u16::MAX);
+        if ensure_port_available(protocol, port).is_ok() {
+            return Ok(port);
+        }
+    }
+    bail!("自动获取可用端口失败次数达到 233 次，请检查端口占用情况")
+}
+
+fn ensure_port_available(protocol: Protocol, port: u16) -> Result<()> {
+    if port == 0 {
+        bail!("端口必须在 1..=65535 范围内");
+    }
+    if Path::new(utils::STATE_FILE).exists()
+        && config::load_state()?
+            .profiles
+            .iter()
+            .any(|profile| profile.port == port)
+    {
+        bail!("端口 {port} 已由 ping-rust 配置使用");
+    }
+    let (tcp, udp) = required_sockets(protocol);
+    let status = operations::check_port(port, tcp, udp);
+    if status.tcp_available.is_some_and(|result| result.is_err()) {
+        bail!("TCP 端口 {port} 已被占用或无法绑定");
+    }
+    if status.udp_available.is_some_and(|result| result.is_err()) {
+        bail!("UDP 端口 {port} 已被占用或无法绑定");
+    }
+    Ok(())
+}
+
+fn required_sockets(protocol: Protocol) -> (bool, bool) {
+    match protocol {
+        Protocol::Reality | Protocol::AnyTls => (true, false),
+        Protocol::Hysteria2 | Protocol::Tuic => (false, true),
+        Protocol::Shadowsocks => (true, true),
+    }
+}
+
+fn is_reality_outer(protocol: Protocol) -> bool {
+    matches!(protocol, Protocol::Reality)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preserves_reference_protocol_numbers() {
+        for (number, protocol) in [
+            (1, Protocol::Tuic),
+            (3, Protocol::Hysteria2),
+            (8, Protocol::Shadowsocks),
+            (18, Protocol::Reality),
+            (20, Protocol::AnyTls),
+        ] {
+            assert_eq!(protocol_from_reference_number(number).unwrap(), protocol);
+            assert_eq!(reference_number(protocol), number);
+        }
+        assert!(protocol_from_reference_number(2).is_err());
+    }
+
+    #[test]
+    fn parses_plain_and_cloudflare_addresses() {
+        assert_eq!(
+            parse_detected_address("203.0.113.7\n"),
+            Some("203.0.113.7".to_owned())
+        );
+        assert_eq!(
+            parse_detected_address("fl=1\nip=2001:4860:4860::8888\nts=1\n"),
+            Some("2001:4860:4860::8888".to_owned())
+        );
+        assert_eq!(parse_detected_address("ip=127.0.0.1"), None);
+    }
+}
+````
+
 ## `src/service.rs`
 
 ````rust
@@ -3031,6 +3766,12 @@ const RESET_FAILED_COMMAND: &[&str] = &["reset-failed", SERVICE_NAME];
 const ENABLE_NOW_COMMAND: &[&str] = &["enable", "--now", SERVICE_NAME];
 const START_COMMAND: &[&str] = &["start", SERVICE_NAME];
 const RESTART_COMMAND: &[&str] = &["restart", SERVICE_NAME];
+
+pub struct ServiceSnapshot {
+    unit_contents: Option<Vec<u8>>,
+    was_active: bool,
+    was_enabled: bool,
+}
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum ServiceAction {
@@ -3091,6 +3832,67 @@ pub fn install_unit(enable_now: bool) -> Result<()> {
     if enable_now {
         for command in activation_commands(was_active, was_failed) {
             systemctl(command)?;
+        }
+    }
+    Ok(())
+}
+
+pub fn activate_and_verify() -> Result<()> {
+    install_unit(true)?;
+    if !systemctl_is_active()? {
+        bail!("systemd 命令已返回成功，但 shoes.service 未处于 active 状态");
+    }
+    Ok(())
+}
+
+pub fn capture_snapshot() -> Result<ServiceSnapshot> {
+    utils::require_linux_root()?;
+    ensure_systemctl()?;
+    let path = Path::new(utils::SERVICE_FILE);
+    let unit_contents = match fs::read(path) {
+        Ok(contents) => Some(contents),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error).context("读取现有 systemd unit 失败"),
+    };
+    let unit_exists = unit_contents.is_some();
+    Ok(ServiceSnapshot {
+        unit_contents,
+        was_active: unit_exists && systemctl_is_active()?,
+        was_enabled: unit_exists && systemctl_is_enabled()?,
+    })
+}
+
+pub fn restore_snapshot(snapshot: ServiceSnapshot) -> Result<()> {
+    utils::require_linux_root()?;
+    ensure_systemctl()?;
+    let path = Path::new(utils::SERVICE_FILE);
+
+    if path.exists() {
+        let _ = Command::new("systemctl")
+            .args(["disable", "--now", SERVICE_NAME])
+            .status();
+    }
+    if let Some(contents) = snapshot.unit_contents {
+        utils::atomic_write(path, &contents, 0o644)?;
+    } else if path.exists() {
+        fs::remove_file(path).context("删除回滚 systemd unit 失败")?;
+    }
+    systemctl(&["daemon-reload"])?;
+
+    if path.exists() {
+        if snapshot.was_enabled {
+            systemctl(&["enable", SERVICE_NAME])?;
+        } else {
+            let _ = Command::new("systemctl")
+                .args(["disable", SERVICE_NAME])
+                .status();
+        }
+        if snapshot.was_active {
+            systemctl_after_reset(START_COMMAND)?;
+        } else {
+            let _ = Command::new("systemctl")
+                .args(["stop", SERVICE_NAME])
+                .status();
         }
     }
     Ok(())
@@ -3177,6 +3979,14 @@ fn systemctl_is_failed() -> Result<bool> {
         .success())
 }
 
+fn systemctl_is_enabled() -> Result<bool> {
+    Ok(Command::new("systemctl")
+        .args(["is-enabled", "--quiet", SERVICE_NAME])
+        .status()
+        .context("无法查询 systemd 服务启用状态")?
+        .success())
+}
+
 fn systemctl(args: &[&str]) -> Result<()> {
     let status = Command::new("systemctl")
         .args(args)
@@ -3243,6 +4053,47 @@ pub const CONFIG_FILE: &str = "/etc/shoes/config.yaml";
 pub const STATE_FILE: &str = "/etc/shoes/ping-rust-state.json";
 pub const LOCK_FILE: &str = "/run/lock/ping-rust.lock";
 pub const SERVICE_FILE: &str = "/etc/systemd/system/shoes.service";
+
+pub fn remove_sb_alias() -> Result<bool> {
+    let executable = env::current_exe().context("无法确定 ping-rust 当前路径")?;
+    let Some(parent) = executable.parent() else {
+        return Ok(false);
+    };
+    remove_owned_alias(&parent.join("sb"), &executable)
+}
+
+#[cfg(unix)]
+fn remove_owned_alias(alias: &Path, executable: &Path) -> Result<bool> {
+    if !alias.is_symlink() {
+        return Ok(false);
+    }
+    let target =
+        fs::read_link(alias).with_context(|| format!("读取符号链接 {} 失败", alias.display()))?;
+    let resolved = if target.is_absolute() {
+        target
+    } else {
+        alias
+            .parent()
+            .context("sb 符号链接没有父目录")?
+            .join(target)
+    };
+    let resolved = resolved
+        .canonicalize()
+        .with_context(|| format!("解析符号链接 {} 失败", alias.display()))?;
+    let executable = executable
+        .canonicalize()
+        .with_context(|| format!("解析可执行文件 {} 失败", executable.display()))?;
+    if resolved != executable {
+        return Ok(false);
+    }
+    fs::remove_file(alias).with_context(|| format!("删除 {} 失败", alias.display()))?;
+    Ok(true)
+}
+
+#[cfg(not(unix))]
+fn remove_owned_alias(_alias: &Path, _executable: &Path) -> Result<bool> {
+    Ok(false)
+}
 
 pub fn require_linux() -> Result<()> {
     if cfg!(target_os = "linux") {
@@ -3424,6 +4275,27 @@ mod tests {
         let path = dir.path().join("lock");
         drop(exclusive_lock(&path).unwrap());
         drop(exclusive_lock(&path).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn removes_only_alias_owned_by_the_executable() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir.path().join("ping-rust");
+        let other = dir.path().join("other");
+        fs::write(&executable, b"binary").unwrap();
+        fs::write(&other, b"other").unwrap();
+
+        let alias = dir.path().join("sb");
+        symlink("ping-rust", &alias).unwrap();
+        assert!(remove_owned_alias(&alias, &executable).unwrap());
+        assert!(!alias.exists());
+
+        symlink("other", &alias).unwrap();
+        assert!(!remove_owned_alias(&alias, &executable).unwrap());
+        assert!(alias.is_symlink());
     }
 }
 ````
@@ -3733,7 +4605,7 @@ mod tests {
 ## `src/client.rs`
 
 ````rust
-use std::path::Path;
+use std::{net::IpAddr, path::Path};
 
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
@@ -3760,9 +4632,6 @@ pub fn export(
     server: &str,
     output: Option<&Path>,
 ) -> Result<String> {
-    if server.trim().is_empty() || server.contains(char::is_whitespace) {
-        bail!("客户端 server 地址无效");
-    }
     let state = config::load_state()?;
     let profile = match profile_id {
         Some(id) => state
@@ -3780,11 +4649,41 @@ pub fn export(
     Ok(content)
 }
 
+pub fn select_profile<'a>(
+    profiles: &'a [ManagedProfile],
+    selector: Option<&str>,
+) -> Result<&'a ManagedProfile> {
+    match selector {
+        Some(selector) => {
+            let selector = selector.trim();
+            let id = Uuid::parse_str(selector).ok();
+            profiles
+                .iter()
+                .find(|profile| {
+                    id.is_some_and(|id| profile.id == id)
+                        || profile.name.eq_ignore_ascii_case(selector)
+                })
+                .with_context(|| format!("未找到配置 {selector}"))
+        }
+        None if profiles.len() == 1 => Ok(&profiles[0]),
+        None if profiles.is_empty() => bail!("没有可用配置"),
+        None => bail!("存在多个配置，请指定配置 UUID 或名称"),
+    }
+}
+
+pub fn stored_share_uri(profile: &ManagedProfile, override_server: Option<&str>) -> Result<String> {
+    let server = override_server
+        .or(profile.server_address.as_deref())
+        .context("该配置没有保存公网地址；请使用 --server-address 指定")?;
+    share_uri(profile, server)
+}
+
 pub fn render(profile: &ManagedProfile, format: ClientFormat, server: &str) -> Result<String> {
+    let server = normalize_server_address(server)?;
     match format {
-        ClientFormat::ClashMeta => clash_meta(profile, server),
-        ClientFormat::SingBox => sing_box(profile, server),
-        ClientFormat::Nekobox => share_uri(profile, server),
+        ClientFormat::ClashMeta => clash_meta(profile, &server),
+        ClientFormat::SingBox => sing_box(profile, &server),
+        ClientFormat::Nekobox => share_uri(profile, &server),
     }
 }
 
@@ -3993,8 +4892,9 @@ fn sing_box(profile: &ManagedProfile, server: &str) -> Result<String> {
         .context("生成 sing-box JSON 失败")
 }
 
-fn share_uri(profile: &ManagedProfile, server: &str) -> Result<String> {
-    let host = authority_host(server);
+pub fn share_uri(profile: &ManagedProfile, server: &str) -> Result<String> {
+    let server = normalize_server_address(server)?;
+    let host = authority_host(&server);
     let fragment = encode(&profile.name);
     match &profile.credentials {
         Credentials::Reality {
@@ -4088,6 +4988,37 @@ fn share_uri(profile: &ManagedProfile, server: &str) -> Result<String> {
     }
 }
 
+pub fn normalize_server_address(server: &str) -> Result<String> {
+    let value = server.trim();
+    let value = value
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(value);
+    if value.is_empty() || value.len() > 253 || value.contains(char::is_whitespace) {
+        bail!("客户端 server 地址无效");
+    }
+    if let Ok(address) = value.parse::<IpAddr>() {
+        if address.is_unspecified() || address.is_multicast() {
+            bail!("客户端 server 地址不能是未指定或组播地址");
+        }
+        return Ok(address.to_string());
+    }
+    if !value.contains('.')
+        || value.split('.').any(|label| {
+            label.is_empty()
+                || label.len() > 63
+                || label.starts_with('-')
+                || label.ends_with('-')
+                || !label
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric() || character == '-')
+        })
+    {
+        bail!("客户端 server 地址必须是公网 IP 或有效域名");
+    }
+    Ok(value.to_ascii_lowercase())
+}
+
 fn first_anytls_password(users: &[config::AnyTlsUser]) -> Result<&str> {
     users
         .first()
@@ -4117,6 +5048,7 @@ mod tests {
             id: Uuid::nil(),
             name: "reality-test".to_owned(),
             port: 443,
+            server_address: None,
             credentials: Credentials::Reality {
                 user_id: Uuid::nil(),
                 private_key: "private".to_owned(),
@@ -4145,6 +5077,61 @@ mod tests {
     }
 
     #[test]
+    fn stored_reality_uri_contains_all_v2rayn_reality_parameters() {
+        let mut profile = reality_profile();
+        profile.server_address = Some("203.0.113.8".to_owned());
+        let uri = stored_share_uri(&profile, None).unwrap();
+        assert!(uri.starts_with("vless://00000000-0000-0000-0000-000000000000@203.0.113.8:443?"));
+        for parameter in [
+            "encryption=none",
+            "flow=xtls-rprx-vision",
+            "security=reality",
+            "sni=www.cloudflare.com",
+            "fp=chrome",
+            "pbk=public",
+            "sid=0123456789abcdef",
+            "type=tcp",
+        ] {
+            assert!(uri.contains(parameter), "missing {parameter}: {uri}");
+        }
+        assert!(!uri.contains("private"));
+    }
+
+    #[test]
+    fn profile_selection_accepts_name_or_uuid_and_requires_disambiguation() {
+        let first = reality_profile();
+        let mut second = reality_profile();
+        second.id = Uuid::new_v4();
+        second.name = "Second".to_owned();
+        let profiles = vec![first, second.clone()];
+        assert_eq!(
+            select_profile(&profiles, Some("second")).unwrap().id,
+            second.id
+        );
+        assert_eq!(
+            select_profile(&profiles, Some(&second.id.to_string()))
+                .unwrap()
+                .id,
+            second.id
+        );
+        assert!(select_profile(&profiles, None).is_err());
+    }
+
+    #[test]
+    fn normalizes_domains_ipv6_and_local_test_addresses() {
+        assert_eq!(
+            normalize_server_address(" EXAMPLE.COM ").unwrap(),
+            "example.com"
+        );
+        assert_eq!(
+            normalize_server_address("[2001:db8::1]").unwrap(),
+            "2001:db8::1"
+        );
+        assert_eq!(normalize_server_address("127.0.0.1").unwrap(), "127.0.0.1");
+        assert!(normalize_server_address("not-a-domain").is_err());
+    }
+
+    #[test]
     fn wraps_ipv6_authority() {
         let output = render(&reality_profile(), ClientFormat::Nekobox, "2001:db8::1").unwrap();
         assert!(output.contains("@[2001:db8::1]:443"));
@@ -4156,6 +5143,7 @@ mod tests {
             id: Uuid::nil(),
             name: "hy2".to_owned(),
             port: 8443,
+            server_address: None,
             credentials: Credentials::Hysteria2 {
                 password: "secret".to_owned(),
                 server_name: "proxy.example.com".to_owned(),
@@ -4177,6 +5165,7 @@ mod tests {
             id: Uuid::nil(),
             name: "tuic".to_owned(),
             port: 443,
+            server_address: None,
             credentials: Credentials::Tuic {
                 user_id: Uuid::nil(),
                 password: "secret".to_owned(),
@@ -4200,6 +5189,7 @@ mod tests {
             id: Uuid::nil(),
             name: "ss-2022".to_owned(),
             port: 8388,
+            server_address: None,
             credentials: Credentials::Shadowsocks {
                 cipher: ShadowsocksCipher::Chacha20IetfPoly13052022,
                 password: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_owned(),
@@ -4226,6 +5216,7 @@ mod tests {
             id: Uuid::nil(),
             name: "anytls-test".to_owned(),
             port: 443,
+            server_address: None,
             credentials: Credentials::AnyTls {
                 users: vec![AnyTlsUser {
                     name: "alice".to_owned(),
@@ -4790,7 +5781,7 @@ mod tests {
 
 核心逻辑全部位于 Rust 源码中；`scripts/install.sh` 只负责下载、校验并安装官方预编译二进制。
 
-> v0.1.4 已包含 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks 和 AnyTLS 五协议支持。
+> v0.1.5 已包含 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks 和 AnyTLS 五协议，并提供与 233boy 日常操作一致的 `sb` 快速入口。
 
 ## 一键安装（推荐）
 
@@ -4799,7 +5790,7 @@ mod tests {
 ```bash
 bash <(curl --proto '=https' --tlsv1.2 -fsSL \
   https://raw.githubusercontent.com/Jyanbai/ping-rust/main/scripts/install.sh)
-sudo ping-rust
+sudo sb
 ```
 
 安装指定版本或目录：
@@ -4807,20 +5798,21 @@ sudo ping-rust
 ```bash
 bash <(curl --proto '=https' --tlsv1.2 -fsSL \
   https://raw.githubusercontent.com/Jyanbai/ping-rust/main/scripts/install.sh) \
-  --version v0.1.4
+  --version v0.1.5
 
 bash <(curl --proto '=https' --tlsv1.2 -fsSL \
   https://raw.githubusercontent.com/Jyanbai/ping-rust/main/scripts/install.sh) \
   --install-dir /usr/local/bin --quiet
 ```
 
-安装器自动识别 x86_64/aarch64，从 GitHub Releases 下载对应 musl 静态包，强制验证 `SHA256SUMS` 和二进制版本后原子安装到 `/usr/local/bin/ping-rust`。写入系统目录时会调用 `sudo`；令牌、密码和代理配置都不会被上传。
+安装器自动识别 x86_64/aarch64，从 GitHub Releases 下载对应 musl 静态包，强制验证 `SHA256SUMS` 和二进制版本后原子安装到 `/usr/local/bin/ping-rust`，并安全创建 `sb → ping-rust` 符号链接。若系统已有其它 `sb` 命令，安装器会保留它并提示改用 `ping-rust`，绝不强制覆盖。写入系统目录时会调用 `sudo`；令牌、密码和代理配置都不会被上传。
 
 ## 功能
 
 - 从 GitHub Release 下载 shoes，自动匹配 x86_64/aarch64 与 GNU/musl，强制校验官方 SHA-256 digest；GNU 资产不兼容时安全回退 static musl
 - 使用 `cargo install shoes` 从 crates.io 编译安装；低于 1 GiB 内存时自动单任务并关闭 LTO，避免换页风暴
 - 生成 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks、AnyTLS 服务端配置
+- `sb` 数字菜单与 `sb add/a` 快捷命令：自动端口、自动凭据、部署完成直接输出分享链接
 - 在 Rust 内生成 X25519 Reality 密钥、UUID、short ID、随机密码和自签名证书
 - 在同目录候选文件上调用 `shoes --dry-run`，通过后才原子提交并启用 systemd 服务
 - 多配置添加、列表、删除、端口冲突保护
@@ -4853,7 +5845,7 @@ sudo apt-get install -y build-essential pkg-config git ca-certificates
 sudo dnf install -y gcc gcc-c++ make pkgconf-pkg-config git ca-certificates
 ```
 
-从 [crates.io](https://crates.io/crates/ping-rust) 安装已发布的 `0.1.4`：
+从 [crates.io](https://crates.io/crates/ping-rust) 安装已发布的 `0.1.5`：
 
 ```bash
 cargo install ping-rust --locked
@@ -4878,43 +5870,67 @@ sudo ping-rust
 
 首次启动、生成系统配置、管理 systemd、BBR、备份恢复和卸载都需要 root。生成到自定义路径、查看帮助和本地端口检查不要求 root。
 
-## 三分钟 Reality 部署
+## 233boy 风格快速部署
 
 ```text
-$ sudo ping-rust
+$ sudo sb
 
 ping-rust · shoes 管理工具
 ────────────────────────────
 请选择操作
-  1. 安装 shoes
-  2. 添加代理配置
-  3. 查看配置信息
+  1. 添加配置
+  2. 更改配置
+  3. 查看配置
   4. 删除配置
-  5. 服务管理
-  6. 更新 shoes
-  7. 运维工具
-  8. 卸载
-  9. 退出
-请输入序号 [1-9]:
+  5. 运行管理
+  6. 更新
+  7. 卸载
+  8. 帮助
+  9. 其他
+  10. 关于
+请输入序号（直接回车退出）: 1
+
+选择协议
+  1. TUIC
+  3. Hysteria2
+  8. Shadowsocks
+  18. VLESS-REALITY（推荐）
+  20. AnyTLS
+请输入序号: 18
+输入端口（直接回车自动选择随机端口）:
+
+部署成功，shoes 服务已启动。
+------------- URL 链接 -------------
+vless://...security=reality...pbk=...&sid=...
 ```
 
-1. 选择“安装 shoes” → “GitHub Release（推荐）”。
-2. 选择“添加代理配置” → “VLESS-Reality-Vision（推荐）”。
-3. 输入配置名、端口、SNI 和 fallback；通常可接受 `443`、`www.cloudflare.com` 和 `www.cloudflare.com:443`。
-4. 工具写入配置，运行 `shoes --dry-run`，创建/启用 `shoes.service`。
-5. 记录输出的 UUID、公钥和 short ID。Reality 私钥只应留在服务器。
-6. 在“运维工具”中导出客户端配置，并填写 VPS 公网 IP 或域名。
+实际日常流程就是：`sb → 1 → 18（VLESS）或 8（SS）→ 输入端口/直接回车随机 → 复制 URL 到 v2rayN`。首次使用时若 shoes 未安装，菜单会询问是否自动从 Release 安装；UUID、Reality 密钥、short ID 或 SS 2022 密码全部安全随机生成。链接只会在配置通过 `shoes --dry-run`、原子写入、systemd 启动且确认为 active 后输出；失败会恢复原配置和服务状态。
 
 非交互方式：
 
 ```bash
-sudo ping-rust install --method release
-sudo ping-rust generate reality \
-  --name reality-main \
-  --port 443 \
-  --server-name www.cloudflare.com \
-  --dest www.cloudflare.com:443
+# 自动安装 shoes、随机端口和凭据；标准输出只返回一行链接
+sudo sb add reality --yes --plain
+
+# 233boy 风格短别名和指定端口
+sudo sb a r 443
+sudo sb add ss 8388
+
+# 自动随机端口也可显式写出；指定公网地址可跳过自动探测
+sudo sb add reality --random-port --server-address 203.0.113.10
 ```
+
+高级用户原有的 `generate` 命令全部保留，可精细指定 cipher、证书、Reality fallback、AnyTLS 用户等参数。
+
+重新显示已保存链接（多个配置时使用名称或 UUID）：
+
+```bash
+sudo sb info
+sudo sb url reality-main
+sudo sb qr reality-main
+```
+
+`qr` 使用本机 `qrencode` 在终端生成二维码，不会把含凭据的 URL 发送给第三方网站；未安装 `qrencode` 时会退化为原样输出 URL。
 
 ## Hysteria2 与 TUIC
 
@@ -4986,6 +6002,8 @@ sudo ping-rust generate anytls \
 ```bash
 ping-rust --help
 sudo ping-rust info
+sudo sb url <配置名或 UUID>
+sudo sb qr <配置名或 UUID>
 sudo ping-rust service status
 sudo ping-rust service restart
 sudo ping-rust logs -n 200
@@ -4998,8 +6016,8 @@ sudo ping-rust self-update
 `update` 只更新 shoes 内核；`self-update` 更新 ping-rust 本身。默认安装最新 Release，也可以指定版本；显式指定旧版本表示受控降级：
 
 ```bash
-sudo ping-rust self-update --version v0.1.4
-sudo ping-rust self-update --version v0.1.4 --force
+sudo ping-rust self-update --version v0.1.5
+sudo ping-rust self-update --version v0.1.5 --force
 ```
 
 自更新支持 Linux x86_64/aarch64，下载对应 musl 静态包，校验 GitHub API digest 与 `SHA256SUMS`，确认新二进制版本后才替换当前程序。程序位于 `/usr/local/bin` 时通常需要 `sudo`；用户目录内可写的 cargo 安装则不需要。
@@ -5035,6 +6053,7 @@ sudo ping-rust restore ./shoes-backup.tar.gz
 | 路径 | 用途 | 权限 |
 |---|---|---:|
 | `/usr/local/bin/shoes` | shoes 内核 | `0755` |
+| `/usr/local/bin/sb` | 指向 ping-rust 的安全短命令符号链接 | symlink |
 | `/etc/shoes/config.yaml` | shoes 配置 | `0600` |
 | `/etc/shoes/ping-rust-state.json` | 多配置元数据与客户端导出凭据 | `0600` |
 | `/etc/shoes/cert-*.pem` | 自动生成证书 | `0644` |
