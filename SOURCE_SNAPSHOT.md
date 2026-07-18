@@ -7,7 +7,7 @@
 ````toml
 [package]
 name = "ping-rust"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 description = "Menu-driven installer and manager for the shoes proxy server"
 license = "MIT"
@@ -3725,7 +3725,7 @@ sudo ping-rust
 ```bash
 bash <(curl --proto '=https' --tlsv1.2 -fsSL \
   https://raw.githubusercontent.com/Jyanbai/ping-rust/main/scripts/install.sh) \
-  --version v0.1.2
+  --version v0.1.3
 
 bash <(curl --proto '=https' --tlsv1.2 -fsSL \
   https://raw.githubusercontent.com/Jyanbai/ping-rust/main/scripts/install.sh) \
@@ -3760,7 +3760,18 @@ bash <(curl --proto '=https' --tlsv1.2 -fsSL \
 
 ## 其他安装方式
 
-从 [crates.io](https://crates.io/crates/ping-rust) 安装已发布的 `0.1.2`：
+使用 cargo 安装前，最小 VPS 需要 C linker 和常用构建工具：
+
+```bash
+# Ubuntu / Debian
+sudo apt-get update
+sudo apt-get install -y build-essential pkg-config git ca-certificates
+
+# Rocky Linux / AlmaLinux
+sudo dnf install -y gcc gcc-c++ make pkgconf-pkg-config git ca-certificates
+```
+
+从 [crates.io](https://crates.io/crates/ping-rust) 安装已发布的 `0.1.3`：
 
 ```bash
 cargo install ping-rust --locked
@@ -3862,8 +3873,8 @@ sudo ping-rust self-update
 `update` 只更新 shoes 内核；`self-update` 更新 ping-rust 本身。默认安装最新 Release，也可以指定版本；显式指定旧版本表示受控降级：
 
 ```bash
-sudo ping-rust self-update --version v0.1.2
-sudo ping-rust self-update --version v0.1.2 --force
+sudo ping-rust self-update --version v0.1.3
+sudo ping-rust self-update --version v0.1.3 --force
 ```
 
 自更新支持 Linux x86_64/aarch64，下载对应 musl 静态包，校验 GitHub API digest 与 `SHA256SUMS`，确认新二进制版本后才替换当前程序。程序位于 `/usr/local/bin` 时通常需要 `sudo`；用户目录内可写的 cargo 安装则不需要。
@@ -3943,14 +3954,16 @@ cargo doc --no-deps
 - 自更新单元测试覆盖版本、架构、checksum 重复/缺失和严格单文件归档；Release job 还会真实执行一次强制自更新并复核版本。
 - 使用 shoes 0.2.8 对 ping-rust 实际生成的 Reality、Hysteria2、TUIC 三份配置执行联合 `--dry-run`，解析成功并加载证书。
 - 通过 cargo-zigbuild + Zig 生成 x86_64/aarch64 Linux GNU release ELF，最高 GLIBC 需求为 2.34，覆盖 Rocky/Alma 9 及更新的目标发行版基线。
-- CI 定义覆盖 Ubuntu 22.04/24.04，并在 Debian 12、Rocky Linux 9、AlmaLinux 9 容器中执行锁定依赖测试和 release 构建；工作流实际结果需在推送 GitHub 后确认。
+- CI 覆盖 Ubuntu 22.04/24.04，并在 Debian 12、Rocky Linux 9、AlmaLinux 9 容器中执行锁定依赖测试和 release 构建；Ubuntu 24.04 acceptance 还会实际管理 root 路径、systemd 与三个监听端口。
 - 使用 RustSec `cargo audit` 扫描锁定依赖，当前未报告安全公告。
 - 在一台干净代理环境的 Debian 12 x86_64 VPS 上完成原生安装与运行验收：Release 路径约 2 秒完成 shoes v0.2.7 musl 安装，三协议同时通过 dry-run 并由 systemd 启动，外部 Reality 客户端的代理出口与 VPS 公网 IP 一致。
 - 实机完成 9 份客户端导出解析、BBR、端口检查、日志、备份恢复、inactive 状态保持和 Release 更新；详细证据见完成度审计。
+- 在 Ubuntu 24.04.3 x86_64 VPS 上从干净基线完成 crates.io、Git 固定提交与一键 Release 三种安装入口；Reality 从 shoes 安装到 systemd active/listening 用时约 2 秒，三协议、9 份客户端导出、备份恢复、更新、数字菜单、逐配置删除和卸载均通过。
+- Ubuntu VPS 真实重启后 shoes 自动恢复为 enabled/active，Reality TCP 443、Hysteria2 UDP 8443、TUIC UDP 9443 均恢复监听；官方 sing-box 客户端在重启前后两次完成公网 Reality 握手，代理出口均为该 VPS。
 
 逐项需求、修复记录、ELF 哈希和外部验收边界见 [COMPLETION_AUDIT.md](COMPLETION_AUDIT.md)。
 
-发布前应在全新 Ubuntu 24.04 x86_64 VPS 执行以下实机验收：
+全新 Ubuntu 24.04 x86_64 VPS 已完成以下实机验收：
 
 1. `cargo install --path . --locked`。
 2. Release 与 cargo 两种 shoes 安装方式各测试一次。
@@ -3958,7 +3971,7 @@ cargo doc --no-deps
 4. 重启 VPS，确认 `shoes.service` 自动启动。
 5. 验证更新、日志、BBR、备份恢复、删除和卸载。
 
-当前 Debian 12 VPS 证据可以证明 Linux/systemd 与公网 Reality 路径可用，但不能替代成功标准指定的 Ubuntu 24.04 实机；完成上述 Ubuntu 清单前，不宣称“Ubuntu 24.04 实机全部通过”。
+上述清单已全部通过。测试结束后执行 `uninstall --purge`，并移除测试目录、导出文件、备份和回滚目录；测试期间安装的 Ubuntu 官方构建依赖与 Rust 工具链保留，便于后续源码测试。
 
 ## 截图建议
 

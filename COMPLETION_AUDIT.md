@@ -2,32 +2,32 @@
 
 审计日期：2026-07-18
 
-本文件把原始目标逐项映射到实现、自动化证据和外部验收边界。`已实现` 表示代码路径和自动化证据完整；实机证据明确区分已验收的 Debian 12 与尚待验收的 Ubuntu 24.04。
+本文件把原始目标逐项映射到实现、自动化证据和外部验收边界。`已实现` 表示代码路径和自动化证据完整；Debian 12 与成功标准指定的 Ubuntu 24.04 均已完成独立实机验收。
 
 ## 需求映射
 
 | 原始需求 | 状态 | 实现位置 | 当前证据 |
 |---|---|---|---|
-| Rust 2021、Rust 代码占绝对主导 | 已实现 | `Cargo.toml`、`src/` | 3,286 行 Rust / 177 行安装 shell，Rust 占 94.89%；代理、配置、服务、运维与自更新核心均为 Rust |
+| Rust 2021、Rust 代码占绝对主导 | 已实现 | `Cargo.toml`、`src/` | 3,334 行 Rust / 177 行安装 shell，Rust 占 94.96%；代理、配置、服务、运维与自更新核心均为 Rust |
 | clap v4 子命令与 233boy 风格数字菜单 | 已实现 | `src/cli.rs`、`src/menu.rs` | 主菜单及全部子菜单明确显示 `1..N` 并校验数字输入；九个主入口完整接通 |
-| shoes GitHub Release 预编译安装 | 已实现，Debian 实测 | `src/installer.rs` | v0.2.7 GNU 因 GLIBC_2.38 不兼容时自动回退 digest 校验过的 static musl；约 2 秒完成且提交前健康检查通过 |
+| shoes GitHub Release 预编译安装 | 已实现，Debian/Ubuntu 实测 | `src/installer.rs` | v0.2.7 GNU 不兼容时自动回退 digest 校验过的 static musl；Ubuntu 24.04 约 2 秒完成 Reality 服务部署且提交前健康检查通过 |
 | `cargo install shoes` 源码安装 | 已实现，Debian 实测 | `src/installer.rs` | 在无 cargo PATH、404 MiB RAM 下从当前 binary 同目录解析 cargo，低内存模式 51m35s 安装 v0.2.2；三协议 dry-run 与公网 Reality 均通过 |
 | Reality X25519 密钥和完整 shoes YAML | 已实现 | `src/config.rs` | X25519 派生单测；本地 shoes 0.2.8 `--dry-run` 解析成功 |
 | Hysteria2 与 TUIC 快速配置 | 已实现 | `src/config.rs` | 随机凭据、自签名/外部证书支持；本地 shoes 0.2.8 同时加载两套 PEM 并解析成功 |
 | 多配置添加、查看、删除 | 已实现 | `src/config.rs`、`src/cli.rs`、`src/menu.rs` | sidecar 状态、端口冲突和条目一致性检查；多 server 与精确回滚测试 |
 | 候选验证与安全提交 | 已实现 | `src/config.rs`、`src/utils.rs` | 进程间 advisory lock；同目录候选先执行 shoes dry-run；失败候选不触碰正式配置测试 |
-| systemd unit 与启停/重启/状态/日志 | 已实现，Debian 实测 | `src/service.rs`、`systemd/ping-rust.service` | daemon-reload、enable/start/stop/restart、状态与 journal 均通过；VPS 重启 11 秒后自动 active，三协议端口全部监听 |
-| 更新与卸载 | 已实现，Debian 实测 | `src/installer.rs`、`src/service.rs` | Release/cargo 更新、active/inactive 状态保持、逐配置删除、最后一条自动停服、默认卸载保留配置及重装恢复均通过 |
+| systemd unit 与启停/重启/状态/日志 | 已实现，Debian/Ubuntu 实测 | `src/service.rs`、`systemd/ping-rust.service` | 首次、active、failed 三态启用策略和 start-limit 恢复均通过；Ubuntu 真实 reboot 后自动 active，三协议端口全部监听 |
+| 更新与卸载 | 已实现，Debian/Ubuntu 实测 | `src/installer.rs`、`src/service.rs` | Release/cargo 更新、连续重启、逐配置删除、最后一条自动停服、默认保留与 `--purge` 清理均通过 |
 | BBR、端口检查、备份恢复 | 已实现，Debian 实测 | `src/operations.rs` | BBR 当前算法为 bbr；TCP/UDP 端口判断正确；0600 备份 round-trip、marker 清理、哈希一致及 active/inactive 恢复均通过 |
-| Clash Meta、sing-box、Nekobox 客户端导出 | 已实现，Debian 实测 | `src/client.rs` | 三协议共 9 份导出均成功解析；逐值检查 Reality 服务端私钥泄漏为 0 |
-| Ubuntu 22.04/24.04、Debian 12、Rocky/Alma 9 x86_64 | 远程构建/测试通过；Ubuntu 运行态待实机 | `.github/workflows/ci.yml`、交叉构建证据 | CI run `29597417851` 的 Ubuntu 22.04/24.04、Debian 12、Rocky 9、AlmaLinux 9 共 5/5 jobs 成功；Debian 12 x86_64 另有原生 systemd/公网验收；Linux GNU ELF 最高 GLIBC 2.34 |
+| Clash Meta、sing-box、Nekobox 客户端导出 | 已实现，Debian/Ubuntu 实测 | `src/client.rs` | 两台 VPS 均生成三协议共 9 份导出；Ubuntu 导出的 Reality JSON 由官方 sing-box 1.13.14 完成公网握手 |
+| Ubuntu 22.04/24.04、Debian 12、Rocky/Alma 9 x86_64 | 构建/测试通过；Ubuntu/Debian 运行态实测 | `.github/workflows/ci.yml`、`.github/workflows/ubuntu-acceptance.yml` | CI 覆盖五个目标系统；Ubuntu acceptance run `29630050797` 全绿，另有 Ubuntu 24.04.3 与 Debian 12 独立 systemd/公网验收；GNU ELF 最高 GLIBC 2.34 |
 | ARM64 次优先支持 | 构建与模拟运行已证实 | `src/installer.rs`、Release workflow | aarch64 GNU ELF 最高 GLIBC 2.34；v0.1.2 aarch64 musl 静态 binary 通过 qemu-user-static `--version` 并公开发布 |
 | ping-rust 预编译一键安装 | 已发布并端到端验证 | `.github/workflows/release.yml`、`scripts/install.sh` | v0.1.2 的 x86_64/aarch64 musl、SHA256SUMS 已公开；tag workflow 3/3 jobs 成功，并从公开 URL 完成指定版本安装与 version 验证 |
 | ping-rust 原生自更新 | 已发布并端到端验证 | `src/self_update.rs`、`src/cli.rs`、`src/menu.rs` | 独立 `self-update` 保留 shoes `update` 语义；v0.1.2 发布 job 在非 root 自定义目录真实完成公开资产下载、双重 SHA-256、运行中原子替换和安装后版本复核 |
 | README、MIT、cargo install 发布 | 已发布并验证 | `README.md`、`LICENSE`、`scripts/install.sh` | README 第一屏提供无需 Rust 的一键入口，并保留 crates.io/Git/源码安装；release build、doc、隔离 `cargo package` 门禁通过 |
 | GitHub 源码开源 | 已发布 | `Cargo.toml`、GitHub `main` | `Jyanbai/ping-rust` 已为 Public/非空并建立 `main`；首个提交与跨平台 CI 修复均已推送 |
 | 公开 `cargo install ping-rust` | 已发布并验证 | crates.io `ping-rust 0.1.2` | 正式 `cargo publish --locked` 成功；官方 API、`cargo search` 与独立 `cargo install ping-rust --version 0.1.2 --locked` 均验证公开安装路径可用 |
-| 干净 Ubuntu 24.04 三分钟部署并公网连通 | Debian 路径通过，Ubuntu 待实机 | `README.md` 验收清单 | Debian 12 上已安装 ping-rust 后，Release + 三协议生成远低于 3 分钟；Windows 外部 Reality 客户端经代理观察到 VPS 公网出口；提供的 VPS 不是 Ubuntu |
+| 干净 Ubuntu 24.04 三分钟部署并公网连通 | 已完成 | `README.md` 验收清单、Ubuntu acceptance workflow | Ubuntu 24.04.3 干净基线安装后，Reality 部署约 2 秒；官方 Windows sing-box 在 reboot 前后均握手成功且观察到 VPS 公网出口 |
 
 ## Milestone 6 修复结果
 
@@ -55,6 +55,18 @@
 - 逐配置删除覆盖 active 有剩余、inactive 保持、最后一条自动停服；默认卸载确认保留配置哈希，随后 Release 重装恢复 enabled/active。
 - 安装 chrony 后 NTP 误差约 0.1 ms；真实 reboot 后 boot ID 改变，shoes/chrony 自动启动，三端口监听且公网 Reality 再次成功。
 
+## Milestone 9 Ubuntu 24.04 VPS 证据
+
+- 环境：Ubuntu 24.04.3 LTS x86_64、systemd 255、约 960 MiB RAM；初始无 Rust、ping-rust、shoes、配置或 unit。
+- 最小 rustup 环境首次暴露缺少 `cc` 的真实前置；安装 Ubuntu 官方 `build-essential pkg-config git ca-certificates` 后，公开 crates.io 0.1.2 与固定 Git 提交均约 2 分钟完成，README 已补充该依赖。
+- 一键脚本从公开 v0.1.2 Release 下载、校验并安装成功；当前修复版本安装 shoes v0.2.7 后，Reality 从安装开始到 systemd active/listening 用时约 2 秒。
+- Reality TCP 443、Hysteria2 UDP 8443、TUIC UDP 9443 同时运行；新增配置后 MainPID 改变且对应监听出现，证明活动服务实际重载了 YAML。
+- 三协议的 Clash Meta、sing-box、Nekobox 共 9 份导出全部生成；备份恢复、更新、连续快速 restart、信息与日志路径均通过。
+- 官方 Windows sing-box 1.13.14 读取 Reality 导出，配置检查与公网请求成功，代理出口为该 VPS；真实 reboot 前后各验证一次。
+- reboot 后 boot ID 改变，`shoes.service` 仍 enabled/active，三个监听全部自动恢复；数字菜单 `9` 退出路径由真实伪终端验证。
+- 删除 TUIC/Hysteria2 时服务保持 active 且对应端口消失；删除最后一条 Reality 后服务自动停止；`uninstall --purge` 删除 binary、unit 与配置。
+- 测试结束后清除远端导出、备份、回滚及三个临时安装 root；本机临时客户端配置和主机认证辅助文件也已删除，不保留测试凭据。
+
 ## Linux 交叉构建证据
 
 构建链：cargo-zigbuild 0.23.0 + Zig 0.15.2，target 后缀显式指定 glibc 2.34。
@@ -70,15 +82,17 @@
 
 - `cargo fmt -- --check`
 - `cargo check --all-targets`
-- `cargo test --all-targets`：33/33 通过
+- `cargo test --all-targets`：34/34 通过
 - `cargo clippy --all-targets -- -D warnings`
 - `cargo build --locked --release`
 - `cargo doc --locked --no-deps`
 - `cargo install --path . --locked` 后执行 `ping-rust --help`
-- `cargo package --locked` / `cargo publish --dry-run --locked`：0.1.2 修复提交后在 clean worktree 打包 25 个文件，197.4 KiB / 53.3 KiB compressed，隔离解包重编译与上传前校验均通过
+- `cargo package --locked` / `cargo publish --dry-run --locked`：0.1.3 clean worktree 打包 26 个文件，208.6 KiB / 55.7 KiB compressed，隔离解包重编译与上传前校验均通过
 - `cargo-audit 0.22.2`：扫描当前 Cargo.lock 的 224 个依赖，RustSec 1166 条 advisory 中无命中
-- `SOURCE_SNAPSHOT.md`：12/12 section、131,023 bytes，Cargo/主要 Rust/README 全部与真实文件逐字一致
-- actionlint v1.7.12：`ci.yml` 与新增 `release.yml` 零诊断；ShellCheck v0.11.0 对一键安装器零诊断
+- `SOURCE_SNAPSHOT.md`：12/12 section、133,760 bytes，Cargo/主要 Rust/README 全部与真实文件逐字一致
+- actionlint v1.7.12：`ci.yml`、`release.yml`、`ubuntu-acceptance.yml` 零诊断；ShellCheck v0.11.0 对一键安装器零诊断
+- GitHub Actions CI run `29630050826`：systemd 修复提交的跨发行版矩阵全部成功
+- GitHub Ubuntu 24.04 acceptance run `29630050797`：公开 crates 安装、当前源码、Reality 三分钟预算、三协议端口、9 份导出、备份恢复、更新、连续重启与卸载清理全部成功
 - GitHub Actions CI run `29627957682`：v0.1.2 tag 的 Ubuntu 22.04/24.04、Debian 12、Rocky Linux 9、AlmaLinux 9 共 5/5 jobs 成功
 - GitHub Release run `29626549437`：x86_64 musl、aarch64 musl、Publish GitHub Release 共 3/3 jobs 成功；发布 job 从公开资产执行安装器并得到 `ping-rust 0.1.0`
 - v0.1.0 公开资产：x86_64 2,457,171 bytes / SHA-256 `99d6d06e30f0f2cc3698318ff6f6e924da71ef4c283cbbfd11dddb936ee49120`；aarch64 2,298,967 bytes / SHA-256 `3a28ff756fa23c58de4cd6a798dc8ae91e6c4bd9ff21dc93eeb9025f68a771a3`；两者均与 SHA256SUMS 交叉核验且归档仅含 `ping-rust`
@@ -86,8 +100,6 @@
 - GitHub Release run `29627957641`：v0.1.2 的 x86_64 musl、aarch64 musl、Publish GitHub Release 共 3/3 jobs 成功；公开一键安装和 `self-update --version v0.1.2 --force` 均通过。
 - v0.1.2 公开资产独立下载复核：x86_64 2,491,684 bytes / SHA-256 `d6ae81cc349791b7d189fbcb13abb3fc41898faf08beb69217e71e6561c9ee78`；aarch64 2,331,294 bytes / SHA-256 `c0ed8f1611691c6da45c7268af5095d80fd882b08884d56e195c4c373e1b6a1a`；两者与 SHA256SUMS、GitHub API digest 一致，且各归档仅含一个 `ping-rust`。
 
-## 剩余的外部发布与验收
+## 发布状态
 
-仍需要一台允许 root/systemd/公网入站的全新 Ubuntu 24.04 x86_64 VPS 重复 README 清单。Debian 12 已给出 Linux/systemd/公网路径的强证据，但不能替代明确指定的 Ubuntu 24.04 成功标准。
-
-公开源码已推送到 `Jyanbai/ping-rust` 的 `main`，当前远程 CI 5/5 jobs 成功；v0.1.2 是 latest Release，README 一键安装与 Rust 原生自更新均由 Ubuntu runner 端到端验证。`ping-rust 0.1.2` 已发布到 crates.io，并由独立公共安装、版本及帮助命令完成验证。
+公开源码已推送到 `Jyanbai/ping-rust` 的 `main`。Ubuntu 24.04 成功标准已由独立 VPS 与 GitHub runner 双重完成；当前收尾项仅为把本次 systemd 三态/start-limit 修复以 0.1.3 发布到 GitHub Releases 与 crates.io，并在发布后再次验证公共安装入口。
