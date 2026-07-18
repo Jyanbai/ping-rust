@@ -21,6 +21,20 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Check one-click installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n scripts/install.sh
+          bash scripts/install.sh --help >/dev/null
+          if bash scripts/install.sh --version invalid >/dev/null 2>&1; then
+            echo "error: installer accepted an invalid version" >&2
+            exit 1
+          fi
+          if bash scripts/install.sh --install-dir relative >/dev/null 2>&1; then
+            echo "error: installer accepted a relative install directory" >&2
+            exit 1
+          fi
       - run: cargo fmt --all -- --check
       - run: cargo test --locked
       - run: cargo clippy --locked --all-targets -- -D warnings

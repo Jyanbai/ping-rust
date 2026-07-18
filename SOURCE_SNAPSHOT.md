@@ -3082,7 +3082,31 @@ mod tests {
 
 `ping-rust` 是一个纯 Rust 编写的 [cfal/shoes](https://github.com/cfal/shoes) 安装与管理工具。它提供类似 233boy 脚本的数字菜单，在 Linux VPS 上完成 shoes 安装、VLESS-Reality/Hysteria2/TUIC 配置、systemd 管理和日常运维。
 
-核心逻辑全部位于 Rust 源码中；`scripts/install.sh` 只负责首次调用 `cargo install`。
+核心逻辑全部位于 Rust 源码中；`scripts/install.sh` 只负责下载、校验并安装官方预编译二进制。
+
+## 一键安装（推荐）
+
+无需预装 Rust。在 Ubuntu 22.04/24.04、Debian 12、Rocky Linux 9、AlmaLinux 9 等 systemd Linux 上执行：
+
+```bash
+bash <(curl --proto '=https' --tlsv1.2 -fsSL \
+  https://raw.githubusercontent.com/Jyanbai/ping-rust/main/scripts/install.sh)
+sudo ping-rust
+```
+
+安装指定版本或目录：
+
+```bash
+bash <(curl --proto '=https' --tlsv1.2 -fsSL \
+  https://raw.githubusercontent.com/Jyanbai/ping-rust/main/scripts/install.sh) \
+  --version v0.1.0
+
+bash <(curl --proto '=https' --tlsv1.2 -fsSL \
+  https://raw.githubusercontent.com/Jyanbai/ping-rust/main/scripts/install.sh) \
+  --install-dir /usr/local/bin --quiet
+```
+
+安装器自动识别 x86_64/aarch64，从 GitHub Releases 下载对应 musl 静态包，强制验证 `SHA256SUMS` 和二进制版本后原子安装到 `/usr/local/bin/ping-rust`。写入系统目录时会调用 `sudo`；令牌、密码和代理配置都不会被上传。
 
 ## 功能
 
@@ -3105,9 +3129,9 @@ mod tests {
 | Debian 12 | x86_64 / aarch64 | 是 | 是 |
 | Rocky Linux 9 / AlmaLinux 9 | x86_64 / aarch64 | 是 | 是 |
 
-要求系统使用 systemd。Release 安装不要求服务器预装 Rust；安装 `ping-rust` 本身以及 cargo 模式需要稳定版 Rust 工具链。
+要求系统使用 systemd。一键安装 ping-rust 与 shoes Release 安装都不要求服务器预装 Rust；只有 cargo 安装方式需要稳定版 Rust 工具链。
 
-## 安装
+## 其他安装方式
 
 crate 发布到 crates.io 后：
 
@@ -3129,13 +3153,6 @@ sudo ping-rust
 git clone https://github.com/Jyanbai/ping-rust.git
 cd ping-rust
 cargo install --path . --locked
-sudo ping-rust
-```
-
-也可以运行极简入口：
-
-```bash
-./scripts/install.sh --path . --locked
 sudo ping-rust
 ```
 

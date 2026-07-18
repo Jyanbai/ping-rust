@@ -8,9 +8,9 @@
 
 | 原始需求 | 状态 | 实现位置 | 当前证据 |
 |---|---|---|---|
-| Rust 2021、Rust 代码占绝对主导 | 已实现 | `Cargo.toml`、`src/` | 2,746 行 Rust / 10 行 shell，Rust 占 99.64% |
+| Rust 2021、Rust 代码占绝对主导 | 已实现 | `Cargo.toml`、`src/` | 2,762 行 Rust / 166 行安装 shell，Rust 占 94.33%；代理、配置、服务与运维核心仍全部为 Rust |
 | clap v4 子命令与 233boy 风格数字菜单 | 已实现 | `src/cli.rs`、`src/menu.rs` | 主菜单及全部子菜单明确显示 `1..N` 并校验数字输入；九个主入口完整接通 |
-| GitHub Release 预编译安装 | 已实现，Debian 实测 | `src/installer.rs` | v0.2.7 GNU 因 GLIBC_2.38 不兼容时自动回退 digest 校验过的 static musl；约 2 秒完成且提交前健康检查通过 |
+| shoes GitHub Release 预编译安装 | 已实现，Debian 实测 | `src/installer.rs` | v0.2.7 GNU 因 GLIBC_2.38 不兼容时自动回退 digest 校验过的 static musl；约 2 秒完成且提交前健康检查通过 |
 | `cargo install shoes` 源码安装 | 已实现，Debian 实测 | `src/installer.rs` | 在无 cargo PATH、404 MiB RAM 下从当前 binary 同目录解析 cargo，低内存模式 51m35s 安装 v0.2.2；三协议 dry-run 与公网 Reality 均通过 |
 | Reality X25519 密钥和完整 shoes YAML | 已实现 | `src/config.rs` | X25519 派生单测；本地 shoes 0.2.8 `--dry-run` 解析成功 |
 | Hysteria2 与 TUIC 快速配置 | 已实现 | `src/config.rs` | 随机凭据、自签名/外部证书支持；本地 shoes 0.2.8 同时加载两套 PEM 并解析成功 |
@@ -22,7 +22,8 @@
 | Clash Meta、sing-box、Nekobox 客户端导出 | 已实现，Debian 实测 | `src/client.rs` | 三协议共 9 份导出均成功解析；逐值检查 Reality 服务端私钥泄漏为 0 |
 | Ubuntu 22.04/24.04、Debian 12、Rocky/Alma 9 x86_64 | 远程构建/测试通过；Ubuntu 运行态待实机 | `.github/workflows/ci.yml`、交叉构建证据 | CI run `29597417851` 的 Ubuntu 22.04/24.04、Debian 12、Rocky 9、AlmaLinux 9 共 5/5 jobs 成功；Debian 12 x86_64 另有原生 systemd/公网验收；Linux GNU ELF 最高 GLIBC 2.34 |
 | ARM64 次优先支持 | 构建已证实，待运行 | `src/installer.rs`、交叉构建证据 | aarch64 Linux GNU ELF，最高 GLIBC 2.34；Release target 选择含 GNU/musl |
-| README、MIT、cargo install 发布准备 | 已实现 | `README.md`、`LICENSE`、`scripts/install.sh` | release build、doc、隔离 `cargo package` 门禁；公开 GitHub `main` 已通过 `cargo install --git ... --locked` 完整安装并运行 0.1.0 |
+| ping-rust 预编译一键安装 | 已实现，待远端 Release 验证 | `.github/workflows/release.yml`、`scripts/install.sh` | tag/workflow_dispatch 构建两个 musl 目标、验证静态 ELF、生成 SHA256SUMS；脚本支持 latest/版本/架构/校验/原子安装，actionlint 与 ShellCheck 通过 |
+| README、MIT、cargo install 发布准备 | 已实现 | `README.md`、`LICENSE`、`scripts/install.sh` | README 第一屏提供无需 Rust 的一键入口，并保留 crates.io/Git/源码安装；release build、doc、隔离 `cargo package` 门禁通过 |
 | GitHub 源码开源 | 已发布 | `Cargo.toml`、GitHub `main` | `Jyanbai/ping-rust` 已为 Public/非空并建立 `main`；首个提交与跨平台 CI 修复均已推送 |
 | 公开 `cargo install ping-rust` | 等待 crates.io 认证 | 发布包 | crates.io API 当前显示 `ping-rust` 名称未占用，publish dry-run 已通过；尚未真实发布 crate，不能宣称该安装命令已上线 |
 | 干净 Ubuntu 24.04 三分钟部署并公网连通 | Debian 路径通过，Ubuntu 待实机 | `README.md` 验收清单 | Debian 12 上已安装 ping-rust 后，Release + 三协议生成远低于 3 分钟；Windows 外部 Reality 客户端经代理观察到 VPS 公网出口；提供的 VPS 不是 Ubuntu |
@@ -73,14 +74,14 @@
 - `cargo build --locked --release`
 - `cargo doc --locked --no-deps`
 - `cargo install --path . --locked` 后执行 `ping-rust --help`
-- `cargo package --locked` / `cargo publish --dry-run --locked`：干净工作区下打包 23 个文件，隔离解包重编译与上传前校验均通过（包内 VCS 提交信息会随提交变化，避免在同一提交中记录自引用哈希）
+- `cargo package --locked --allow-dirty` / `cargo publish --dry-run --locked --allow-dirty`：提交前候选打包 24 个文件，隔离解包重编译与上传前校验均通过；提交后还需以 clean-worktree 严格模式重跑
 - `cargo audit`：扫描 Cargo.lock 的 240 个依赖，RustSec 1166 条 advisory 中无命中
-- `SOURCE_SNAPSHOT.md`：11/11 section、109,984 bytes，逐节与真实源文件一致
-- actionlint v1.7.12：`.github/workflows/ci.yml` 语义检查零诊断；工作流已推送并由 GitHub runner 实际执行
-- GitHub Actions CI run `29597417851`：Ubuntu 22.04/24.04、Debian 12、Rocky Linux 9、AlmaLinux 9 共 5/5 jobs 成功
+- `SOURCE_SNAPSHOT.md`：11/11 section、110,868 bytes，README section 与真实文件逐字一致
+- actionlint v1.7.12：`ci.yml` 与新增 `release.yml` 零诊断；ShellCheck v0.11.0 对一键安装器零诊断
+- GitHub Actions CI run `29598209447`：当前 main 的 Ubuntu 22.04/24.04、Debian 12、Rocky Linux 9、AlmaLinux 9 共 5/5 jobs 成功；新增发布工作流待推送后执行
 
 ## 剩余的外部发布与验收
 
 仍需要一台允许 root/systemd/公网入站的全新 Ubuntu 24.04 x86_64 VPS 重复 README 清单。Debian 12 已给出 Linux/systemd/公网路径的强证据，但不能替代明确指定的 Ubuntu 24.04 成功标准。
 
-公开源码已推送到 `Jyanbai/ping-rust` 的 `main`，首轮矩阵发现的问题已按根因修复，第二轮远程 CI 5/5 jobs 全部成功。`cargo publish --dry-run` 已通过，真正发布 crates.io 仍需用户提供发布授权与登录凭据；在发布前，`cargo install ping-rust --locked` 不能作为已上线命令宣称。
+公开源码已推送到 `Jyanbai/ping-rust` 的 `main`，当前远程 CI 5/5 jobs 成功。ping-rust 双架构 musl 工作流与一键安装器已完成本地门禁，仍需推送、手动构建并创建首个 tag Release 才能把 README 一键命令判定为上线。`cargo publish --dry-run` 已通过，真正发布 crates.io 仍需用户提供发布授权与登录凭据。
