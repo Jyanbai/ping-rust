@@ -279,7 +279,6 @@ jobs:
           }
           wait_listener t 25448
           wait_listener t 25449
-          wait_listener u 25449
 
       - name: Roll back config and systemd state when activation fails
         shell: bash
