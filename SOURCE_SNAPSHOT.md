@@ -8,7 +8,7 @@
 ````toml
 [package]
 name = "ping-rust"
-version = "0.1.8"
+version = "0.1.9"
 edition = "2021"
 description = "Menu-driven installer and manager for the shoes proxy server"
 license = "MIT"
@@ -577,7 +577,7 @@ fn bootstrap_required(config: &Path, state: &Path) -> bool {
 pub(crate) fn print_add_result(result: &fast_add::AddResult) {
     let profile = &result.generation.profile;
     println!("{}", "部署成功，shoes 服务已启动。".green().bold());
-    println!("配置：{} ({})", profile.name, profile.id);
+    println!("配置：{}", profile.display_name());
     println!("协议：{}", profile.protocol_name());
     println!("端口：{}", profile.port);
     println!("\n------------- URL 链接 -------------\n");
@@ -980,7 +980,9 @@ mod tests {
 ## `src/menu.rs`
 
 ````rust
-use anyhow::Result;
+use std::io::{self, Write};
+
+use anyhow::{Context, Result};
 use colored::Colorize;
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, Password};
 
@@ -1048,20 +1050,32 @@ fn parse_keyed_choice(value: &str, items: &[(usize, &str)]) -> Option<usize> {
         .then_some(key)
 }
 
+fn read_menu_choice(max: usize) -> Result<String> {
+    print!("请选择 [0-{max}]: ");
+    io::stdout().flush().context("输出菜单提示失败")?;
+    let mut value = String::new();
+    if io::stdin()
+        .read_line(&mut value)
+        .context("读取菜单输入失败")?
+        == 0
+    {
+        anyhow::bail!("输入已结束");
+    }
+    Ok(value)
+}
+
 fn select_numbered<T: AsRef<str>>(prompt: &str, items: &[T]) -> Result<Option<usize>> {
     if items.is_empty() {
         anyhow::bail!("菜单没有可选项");
     }
-    println!("{prompt}");
+    println!("\n{prompt}:\n");
     for (index, item) in items.iter().enumerate() {
-        println!("  {}. {}", index + 1, item.as_ref());
+        println!("{}) {}", index + 1, item.as_ref());
     }
-    println!("  0. 返回");
+    println!("0) 返回\n");
     let count = items.len();
     loop {
-        let value = Input::<String>::with_theme(&ColorfulTheme::default())
-            .with_prompt("请输入序号（0 返回）")
-            .interact_text()?;
+        let value = read_menu_choice(count)?;
         if let Some(selected) = parse_numbered_choice(&value, count) {
             return Ok(selected);
         }
@@ -1070,14 +1084,16 @@ fn select_numbered<T: AsRef<str>>(prompt: &str, items: &[T]) -> Result<Option<us
 }
 
 fn select_keyed(prompt: &str, items: &[(usize, &str)]) -> Result<usize> {
-    println!("{prompt}");
-    for (key, label) in items {
-        println!("  {key}. {label}");
+    if !prompt.is_empty() {
+        println!("\n{prompt}:\n");
     }
+    for (key, label) in items {
+        println!("{key}) {label}");
+    }
+    println!();
+    let max = items.iter().map(|(key, _)| *key).max().unwrap_or(0);
     loop {
-        let value = Input::<String>::with_theme(&ColorfulTheme::default())
-            .with_prompt("请输入序号")
-            .interact_text()?;
+        let value = read_menu_choice(max)?;
         if let Some(key) = parse_keyed_choice(&value, items) {
             return Ok(key);
         }
@@ -1092,18 +1108,39 @@ fn select_keyed(prompt: &str, items: &[(usize, &str)]) -> Result<usize> {
     }
 }
 
+fn select_profile(profiles: &[config::ManagedProfile]) -> Result<Option<usize>> {
+    if profiles.len() == 1 {
+        return Ok(Some(0));
+    }
+    let labels = profiles
+        .iter()
+        .map(config::ManagedProfile::display_name)
+        .collect::<Vec<_>>();
+    select_numbered("请选择配置", &labels)
+}
+
 pub async fn run() -> Result<()> {
     cli::bootstrap_default_reality().await?;
     loop {
-        println!();
-        println!("{}", "ping-rust · shoes 管理工具".bright_cyan().bold());
-        println!("{}", "────────────────────────────".bright_black());
-        let selected = select_keyed("请选择操作", MAIN_MENU_ITEMS)?;
+        println!(
+            "\n------------- ping-rust v{} -------------",
+            env!("CARGO_PKG_VERSION")
+        );
+        let shoes_status = if service::is_active().unwrap_or(false) {
+            "running"
+        } else if std::path::Path::new(crate::utils::SHOES_BIN).is_file() {
+            "stopped"
+        } else {
+            "not installed"
+        };
+        println!("shoes: {shoes_status}");
+        println!("项目: https://github.com/Jyanbai/ping-rust\n");
+        let selected = select_keyed("", MAIN_MENU_ITEMS)?;
         let result = match selected {
             0 => break,
             1 => fast_add_config_menu().await,
             2 => change_config_menu().await,
-            3 => cli::show_info(None).await,
+            3 => view_config_menu(),
             4 => delete_config_menu().await,
             5 => service_menu(),
             6 => update_menu().await,
@@ -1134,20 +1171,7 @@ async fn change_config_menu() -> Result<()> {
         println!("没有可更改的配置。");
         return Ok(());
     }
-    let labels = state
-        .profiles
-        .iter()
-        .map(|profile| {
-            format!(
-                "{} · {} · :{} · {}",
-                profile.name,
-                profile.protocol_name(),
-                profile.port,
-                profile.id
-            )
-        })
-        .collect::<Vec<_>>();
-    let Some(selected) = select_numbered("选择要更改的配置", &labels)? else {
+    let Some(selected) = select_profile(&state.profiles)? else {
         return Ok(());
     };
     let profile = state.profiles[selected].clone();
@@ -1305,16 +1329,41 @@ async fn change_config_menu() -> Result<()> {
 
     let result = deployment::update_and_activate(profile.id, change).await?;
     println!(
-        "{} {} · {} · :{}",
+        "{} {}",
         "配置更改成功：".green(),
-        result.profile.name,
-        result.profile.protocol_name(),
-        result.profile.port
+        result.profile.display_name()
     );
     if let Some(server) = result.profile.server_address.as_deref() {
         match client::share_uri(&result.profile, server) {
             Ok(uri) => println!("\n{uri}\n"),
             Err(error) => eprintln!("分享链接生成失败：{error:#}"),
+        }
+    }
+    Ok(())
+}
+
+fn view_config_menu() -> Result<()> {
+    let state = config::load_state()?;
+    if state.profiles.is_empty() {
+        println!("没有配置。");
+        return Ok(());
+    }
+    let Some(selected) = select_profile(&state.profiles)? else {
+        return Ok(());
+    };
+    let profile = &state.profiles[selected];
+    println!("\n------------- 配置信息 -------------\n");
+    println!("名称: {}", profile.display_name());
+    println!("协议: {}", profile.protocol_name());
+    println!("端口: {}", profile.port);
+    if profile.server_name() != "-" {
+        println!("SNI: {}", profile.server_name());
+    }
+    if let Some(server) = profile.server_address.as_deref() {
+        println!("地址: {server}");
+        match client::share_uri(profile, server) {
+            Ok(uri) => println!("\n{uri}\n"),
+            Err(error) => println!("\n分享链接生成失败: {error}\n"),
         }
     }
     Ok(())
@@ -1326,25 +1375,12 @@ async fn delete_config_menu() -> Result<()> {
         println!("没有可删除的配置。");
         return Ok(());
     }
-    let labels = state
-        .profiles
-        .iter()
-        .map(|profile| {
-            format!(
-                "{} · {} · :{} · {}",
-                profile.name,
-                profile.protocol_name(),
-                profile.port,
-                profile.id
-            )
-        })
-        .collect::<Vec<_>>();
-    let Some(selected) = select_numbered("选择要删除的配置", &labels)? else {
+    let Some(selected) = select_profile(&state.profiles)? else {
         return Ok(());
     };
     let profile = &state.profiles[selected];
     if !Confirm::with_theme(&ColorfulTheme::default())
-        .with_prompt(format!("确认删除 {}？", profile.name))
+        .with_prompt(format!("确认删除 {}？", profile.display_name()))
         .default(false)
         .interact()?
     {
@@ -1361,7 +1397,7 @@ async fn delete_config_menu() -> Result<()> {
             service::execute(ServiceAction::Restart)?;
         }
     }
-    println!("{} {}", "已删除：".green(), deleted.name);
+    println!("{} {}", "已删除：".green(), deleted.display_name());
     Ok(())
 }
 
@@ -1436,12 +1472,7 @@ fn export_menu() -> Result<()> {
         println!("没有可导出的配置。");
         return Ok(());
     }
-    let labels = state
-        .profiles
-        .iter()
-        .map(|profile| format!("{} · {}", profile.name, profile.protocol_name()))
-        .collect::<Vec<_>>();
-    let Some(selected) = select_numbered("选择配置", &labels)? else {
+    let Some(selected) = select_profile(&state.profiles)? else {
         return Ok(());
     };
     let formats = ["Clash Meta", "sing-box", "Nekobox 分享链接"];
@@ -1799,6 +1830,28 @@ mod tests {
         assert_eq!(parse_keyed_choice("0", MAIN_MENU_ITEMS), Some(0));
         assert_eq!(parse_keyed_choice("0", PROTOCOL_MENU_ITEMS), Some(0));
         assert_eq!(parse_keyed_choice("", MAIN_MENU_ITEMS), None);
+    }
+
+    #[test]
+    fn profile_lists_use_short_protocol_and_port_labels() {
+        let profile = config::ManagedProfile {
+            id: uuid::Uuid::new_v4(),
+            name: "reality-abcd1234".to_owned(),
+            port: 53453,
+            server_address: None,
+            credentials: Credentials::Reality {
+                user_id: uuid::Uuid::new_v4(),
+                private_key: "private".to_owned(),
+                public_key: "public".to_owned(),
+                short_id: "0123456789abcdef".to_owned(),
+                server_name: config::DEFAULT_SNI.to_owned(),
+            },
+            certificate_path: None,
+            certificate_key_path: None,
+            self_signed_certificate: false,
+        };
+        assert_eq!(profile.display_name(), "VLESS-REALITY-53453");
+        assert!(!profile.display_name().contains(&profile.id.to_string()));
     }
 }
 ````
@@ -2718,6 +2771,17 @@ pub struct ManagedProfile {
 }
 
 impl ManagedProfile {
+    pub fn display_name(&self) -> String {
+        let protocol = match self.protocol() {
+            Protocol::Reality => "VLESS-REALITY",
+            Protocol::Hysteria2 => "HYSTERIA2",
+            Protocol::Tuic => "TUIC",
+            Protocol::Shadowsocks => "SHADOWSOCKS",
+            Protocol::AnyTls => "ANYTLS",
+        };
+        format!("{protocol}-{}", self.port)
+    }
+
     pub fn protocol(&self) -> Protocol {
         match &self.credentials {
             Credentials::Reality { .. } => Protocol::Reality,
@@ -7074,7 +7138,7 @@ mod tests {
 
 核心逻辑全部位于 Rust 源码中；`scripts/install.sh` 负责下载、校验并安装官方预编译二进制，随后调用 Rust 的安全首次部署入口。
 
-> v0.1.8 已包含 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks 和 AnyTLS 五协议；运行一键安装脚本即可零输入部署默认 VLESS-REALITY，菜单 `2` 可直接安全更改现有配置。
+> v0.1.9 已包含 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks 和 AnyTLS 五协议；运行一键安装脚本即可零输入部署默认 VLESS-REALITY，数字菜单与配置列表保持 233boy 风格的简洁输出。
 
 ## 一键安装（推荐）
 
@@ -7186,30 +7250,34 @@ vless://...security=reality...pbk=...&sid=...
 ```text
 $ sudo prs
 
-ping-rust · shoes 管理工具
-────────────────────────────
-请选择操作
-  1. 添加配置
-  2. 更改配置
-  3. 查看配置
-  4. 删除配置
-  5. 运行管理
-  6. 更新
-  7. 卸载
-  8. 帮助
-  9. 其他
-  10. 关于
-  0. 退出
-请输入序号: 1
+------------- ping-rust v0.1.9 -------------
+shoes: running
+项目: https://github.com/Jyanbai/ping-rust
 
-选择协议
-  1. TUIC
-  2. Hysteria2
-  3. Shadowsocks
-  4. VLESS-REALITY（推荐）
-  5. AnyTLS
-  0. 返回
-请输入序号: 4
+1) 添加配置
+2) 更改配置
+3) 查看配置
+4) 删除配置
+5) 运行管理
+6) 更新
+7) 卸载
+8) 帮助
+9) 其他
+10) 关于
+0) 退出
+
+请选择 [0-10]: 1
+
+选择协议:
+
+1) TUIC
+2) Hysteria2
+3) Shadowsocks
+4) VLESS-REALITY（推荐）
+5) AnyTLS
+0) 返回
+
+请选择 [0-5]: 4
 输入端口（直接回车自动选择随机端口）:
 
 部署成功，shoes 服务已启动。
@@ -7218,6 +7286,8 @@ vless://...security=reality...pbk=...&sid=...
 ```
 
 菜单 `2. 更改配置` 会先选择现有配置，再按协议提供端口、名称、公网地址、凭据、Reality SNI、Shadowsocks cipher 或 AnyTLS 用户密码等修改项。新配置必须通过真实 `shoes --dry-run` 才会原子提交；服务重启失败时自动恢复修改前的配置与 systemd 状态，成功后直接输出新的分享链接。
+
+查看、更改和删除配置时只显示简洁的 `协议-端口` 名称，例如 `VLESS-REALITY-53453`；只有一个配置时自动选中，多个配置时才显示数字列表。内部 UUID 仍用于安全定位，但不会干扰日常菜单。
 
 首次安装流程是：`install.sh → 自动安装 ping-rust/shoes → 自动随机端口部署 VLESS-REALITY → 复制 URL`，中间零输入。后续日常流程是：`prs → 1 → 4（VLESS）或 3（SS）→ 输入端口/直接回车随机 → 复制 URL 到 v2rayN`。所有协议选择固定使用连续编号 `1/2/3/4/5`；主菜单输入 `0` 退出，任意子菜单输入 `0` 返回主菜单。UUID、Reality 密钥、short ID 或 SS 2022 密码全部安全随机生成。链接只会在配置通过 `shoes --dry-run`、原子写入、systemd 启动且确认为 active 后输出；失败会恢复原配置和服务状态。
 

@@ -263,14 +263,14 @@ jobs:
             }
           }
           spawn $env(PRS_COMMAND)
-          wait_for {请输入序号} main-menu
+          wait_for {请选择 \[0-10\]} main-menu
           send "1\r"
-          wait_for {请输入序号} protocol-menu
+          wait_for {请选择 \[0-5\]} protocol-menu
           send "$env(PROTOCOL_NUMBER)\r"
           wait_for {输入端口} port-prompt
           send "$env(MENU_PORT)\r"
           wait_for "$env(SHARE_SCHEME)://" share-uri
-          wait_for {请输入序号} main-menu-return
+          wait_for {请选择 \[0-10\]} main-menu-return
           send "0\r"
           wait_for {已退出} exit-message
           expect { eof {} timeout { puts stderr "timeout waiting for exit"; exit 23 } }
@@ -313,24 +313,55 @@ jobs:
             }
           }
           spawn $env(PRS_COMMAND)
-          wait_for {请输入序号} main-menu
+          wait_for {请选择 \[0-10\]} main-menu
           send "2\r"
-          wait_for {选择要更改的配置} profile-menu
-          wait_for {请输入序号} profile-prompt
+          wait_for {请选择配置} profile-menu
+          wait_for {请选择 \[0-2\]} profile-prompt
           send "$env(PROFILE_NUMBER)\r"
           wait_for {选择更改项目} change-menu
-          wait_for {请输入序号} change-prompt
+          wait_for {请选择 \[0-5\]} change-prompt
           send "1\r"
           wait_for {输入新端口} port-prompt
           send "25450\r"
           wait_for {配置更改成功} change-success
-          wait_for {请输入序号} main-menu-return
+          wait_for {请选择 \[0-10\]} main-menu-return
           send "0\r"
           wait_for {已退出} exit-message
           expect { eof {} timeout { puts stderr "timeout waiting for change exit"; exit 33 } }
           EXPECT
           wait_listener t 25450
           ! sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)25448$'
+
+          sudo env PRS_COMMAND="$PRS" PROFILE_NUMBER="$profile_number" expect <<'EXPECT'
+          log_user 0
+          set timeout 180
+          proc wait_for {pattern stage} {
+            expect {
+              -re $pattern { return }
+              eof { puts stderr "unexpected EOF at $stage"; exit 34 }
+              timeout { puts stderr "timeout at $stage"; exit 35 }
+            }
+          }
+          spawn $env(PRS_COMMAND)
+          wait_for {请选择 \[0-10\]} main-menu
+          send "3\r"
+          wait_for {请选择配置} view-profile-menu
+          wait_for {VLESS-REALITY-25450} view-short-label
+          wait_for {请选择 \[0-2\]} view-profile-prompt
+          send "$env(PROFILE_NUMBER)\r"
+          wait_for {配置信息} view-info
+          wait_for {vless://} view-uri
+          wait_for {请选择 \[0-10\]} main-menu-after-view
+          send "4\r"
+          wait_for {请选择配置} delete-profile-menu
+          wait_for {VLESS-REALITY-25450} delete-short-label
+          wait_for {请选择 \[0-2\]} delete-profile-prompt
+          send "0\r"
+          wait_for {请选择 \[0-10\]} main-menu-after-delete-return
+          send "0\r"
+          wait_for {已退出} exit-message
+          expect { eof {} timeout { puts stderr "timeout waiting for view/delete exit"; exit 36 } }
+          EXPECT
 
       - name: Roll back config and systemd state when activation fails
         shell: bash

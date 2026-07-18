@@ -324,6 +324,17 @@ pub struct ManagedProfile {
 }
 
 impl ManagedProfile {
+    pub fn display_name(&self) -> String {
+        let protocol = match self.protocol() {
+            Protocol::Reality => "VLESS-REALITY",
+            Protocol::Hysteria2 => "HYSTERIA2",
+            Protocol::Tuic => "TUIC",
+            Protocol::Shadowsocks => "SHADOWSOCKS",
+            Protocol::AnyTls => "ANYTLS",
+        };
+        format!("{protocol}-{}", self.port)
+    }
+
     pub fn protocol(&self) -> Protocol {
         match &self.credentials {
             Credentials::Reality { .. } => Protocol::Reality,

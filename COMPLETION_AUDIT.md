@@ -8,8 +8,8 @@
 
 | 原始需求 | 状态 | 实现位置 | 当前证据 |
 |---|---|---|---|
-| Rust 2021、Rust 代码占绝对主导 | 已实现 | `Cargo.toml`、`src/` | 6,513 行 Rust / 241 行安装 shell，Rust 占 96.43%；代理、配置、服务、运维、自更新与快速部署事务核心均为 Rust |
-| clap v4 子命令与数字菜单 | 已实现 | `src/cli.rs`、`src/menu.rs` | `prs` 主菜单固定 1..10，协议编号固定为连续的 1/2/3/4/5；主菜单 0 退出、所有子菜单 0 返回；VLESS/SS 日常路径只需协议和可选端口 |
+| Rust 2021、Rust 代码占绝对主导 | 已实现 | `Cargo.toml`、`src/` | 6,571 行 Rust / 241 行安装 shell，Rust 占 96.46%；代理、配置、服务、运维、自更新与快速部署事务核心均为 Rust |
+| clap v4 子命令与数字菜单 | 已实现 | `src/cli.rs`、`src/menu.rs` | `prs` 主菜单固定 1..10，协议编号固定为连续的 1/2/3/4/5；采用 233boy 风格 `1)` 列表与 `请选择 [0-N]` 提示，主菜单 0 退出、所有子菜单 0 返回 |
 | 快速添加与直接分享 | 已实现，Ubuntu 24.04 实测 | `src/fast_add.rs`、`src/deployment.rs`、`src/client.rs` | `add/a`、协议短别名、随机端口/凭据、公网地址探测、`--yes/--plain`；真实 PTY 的 Reality/SS 添加、URI 与监听均通过 |
 | 分享信息重显与隐私边界 | 已实现 | `src/cli.rs`、`src/client.rs` | `info/i`、`url`、`qr` 按名称/UUID 读取保存地址；Reality URL 含 flow/pbk/sid 且不含私钥；二维码只调用本机 qrencode |
 | 激活失败事务回滚 | 已实现，Ubuntu 24.04 实测 | `src/deployment.rs`、`src/config.rs`、`src/service.rs` | 一次性 ExecStartPre 故障注入证明失败后 config/state/unit 哈希、enabled/active 和端口均精确恢复，且不输出分享 URI |
@@ -106,6 +106,15 @@
 - crates.io 0.1.8 已正式发布；全新隔离 Cargo root 从公共 registry 下载编译，`ping-rust --version` 返回 0.1.8，`add`/`self-update` 帮助存在。
 - 本地门禁：62/62 tests、fmt、check、clippy `-D warnings`、release build、doc、严格 package/publish dry-run、RustSec、actionlint v1.7.12、ShellCheck 与 diff check 全部通过；v0.1.8 发布闭环完成。
 
+## Milestone 15：233boy 风格简洁菜单
+
+- 以本地只读参考 `sing-box-main/sing-box-main/src/core.sh` 的 `is_main_menu`、`ask get_config_file`、`show_list`、`get info`、`del` 和 `change` 为交互基准；Rust 配置事务、shoes schema 与安全边界保持独立实现。
+- 主菜单改为短横线标题、`shoes: running/stopped` 状态、固定 `1)` 到 `10)` 列表和 `请选择 [0-10]`；协议与子菜单统一相同格式，不再显示 Dialoguer 的长数字提示。
+- 查看、更改、删除与导出统一显示 `VLESS-REALITY-53453`、`SHADOWSOCKS-端口` 等 `协议-端口` 名称，不展示 UUID；内部仍使用 UUID 精确定位，安全性不变。
+- 只有一个配置时直接选中，多个配置时才显示数字列表；查看配置只展示协议、端口、SNI、地址和可复制 URI。添加、修改和删除成功提示也不再输出内部 UUID。
+- 保留用户指定的 `0`：主菜单退出，所有子菜单返回。Ubuntu 24.04 PTY 验收已扩展到查看配置、短名称显示、删除菜单输入 0 返回且不误删。
+- 当前版本号为 0.1.9；本地 63/63 tests、check、clippy `-D warnings`、actionlint 与 diff check 已通过，等待推送后的 Ubuntu 24.04 真实终端验收。
+
 ## Milestone 6 修复结果
 
 - 修复第二个受管配置必然被“仅一个 server”校验拒绝的问题。
@@ -160,14 +169,14 @@
 
 - `cargo fmt -- --check`
 - `cargo check --all-targets`
-- `cargo test --all-targets`：62/62 通过
+- `cargo test --all-targets`：63/63 通过
 - `cargo clippy --all-targets -- -D warnings`
 - `cargo build --locked --release`
 - `cargo doc --locked --no-deps`
 - `cargo install --path . --locked` 后执行 `ping-rust --help`
 - `cargo package --locked` / `cargo publish --dry-run --locked`：发布前 clean worktree 打包 31 个文件，包含五协议示例、固定 shoes workflow 与 sb acceptance；隔离解包重编译与上传前校验均通过
 - `cargo-audit 0.22.2`：扫描当前 Cargo.lock 的 224 个依赖，RustSec 1166 条 advisory 中无命中
-- `SOURCE_SNAPSHOT.md`：14/14 section、261,172 bytes，Cargo/主要 Rust（含 deployment/fast_add）/README 全部与真实文件逐字一致
+- `SOURCE_SNAPSHOT.md`：14/14 section、263,497 bytes，Cargo/主要 Rust（含 deployment/fast_add）/README 全部与真实文件逐字一致
 - actionlint v1.7.12：`ci.yml`、`release.yml`、`shoes-schema.yml`、`ubuntu-acceptance.yml` 零诊断；ShellCheck v0.11.0 对一键安装器零诊断
 - v0.1.8 产品提交 `960edde`：main CI `29645174662`、Ubuntu 24.04 acceptance `29645174670`、固定 shoes schema `29645174650` 全部成功；tag CI `29645387085` 与 schema `29645387104` 再次成功
 - v0.1.8 Release run `29645387081`：双架构 MUSL、SHA256SUMS、公开一键安装默认 Reality 全部成功；crates.io 公开隔离安装返回 `ping-rust 0.1.8`

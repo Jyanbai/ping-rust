@@ -4,7 +4,7 @@
 
 核心逻辑全部位于 Rust 源码中；`scripts/install.sh` 负责下载、校验并安装官方预编译二进制，随后调用 Rust 的安全首次部署入口。
 
-> v0.1.8 已包含 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks 和 AnyTLS 五协议；运行一键安装脚本即可零输入部署默认 VLESS-REALITY，菜单 `2` 可直接安全更改现有配置。
+> v0.1.9 已包含 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks 和 AnyTLS 五协议；运行一键安装脚本即可零输入部署默认 VLESS-REALITY，数字菜单与配置列表保持 233boy 风格的简洁输出。
 
 ## 一键安装（推荐）
 
@@ -116,30 +116,34 @@ vless://...security=reality...pbk=...&sid=...
 ```text
 $ sudo prs
 
-ping-rust · shoes 管理工具
-────────────────────────────
-请选择操作
-  1. 添加配置
-  2. 更改配置
-  3. 查看配置
-  4. 删除配置
-  5. 运行管理
-  6. 更新
-  7. 卸载
-  8. 帮助
-  9. 其他
-  10. 关于
-  0. 退出
-请输入序号: 1
+------------- ping-rust v0.1.9 -------------
+shoes: running
+项目: https://github.com/Jyanbai/ping-rust
 
-选择协议
-  1. TUIC
-  2. Hysteria2
-  3. Shadowsocks
-  4. VLESS-REALITY（推荐）
-  5. AnyTLS
-  0. 返回
-请输入序号: 4
+1) 添加配置
+2) 更改配置
+3) 查看配置
+4) 删除配置
+5) 运行管理
+6) 更新
+7) 卸载
+8) 帮助
+9) 其他
+10) 关于
+0) 退出
+
+请选择 [0-10]: 1
+
+选择协议:
+
+1) TUIC
+2) Hysteria2
+3) Shadowsocks
+4) VLESS-REALITY（推荐）
+5) AnyTLS
+0) 返回
+
+请选择 [0-5]: 4
 输入端口（直接回车自动选择随机端口）:
 
 部署成功，shoes 服务已启动。
@@ -148,6 +152,8 @@ vless://...security=reality...pbk=...&sid=...
 ```
 
 菜单 `2. 更改配置` 会先选择现有配置，再按协议提供端口、名称、公网地址、凭据、Reality SNI、Shadowsocks cipher 或 AnyTLS 用户密码等修改项。新配置必须通过真实 `shoes --dry-run` 才会原子提交；服务重启失败时自动恢复修改前的配置与 systemd 状态，成功后直接输出新的分享链接。
+
+查看、更改和删除配置时只显示简洁的 `协议-端口` 名称，例如 `VLESS-REALITY-53453`；只有一个配置时自动选中，多个配置时才显示数字列表。内部 UUID 仍用于安全定位，但不会干扰日常菜单。
 
 首次安装流程是：`install.sh → 自动安装 ping-rust/shoes → 自动随机端口部署 VLESS-REALITY → 复制 URL`，中间零输入。后续日常流程是：`prs → 1 → 4（VLESS）或 3（SS）→ 输入端口/直接回车随机 → 复制 URL 到 v2rayN`。所有协议选择固定使用连续编号 `1/2/3/4/5`；主菜单输入 `0` 退出，任意子菜单输入 `0` 返回主菜单。UUID、Reality 密钥、short ID 或 SS 2022 密码全部安全随机生成。链接只会在配置通过 `shoes --dry-run`、原子写入、systemd 启动且确认为 active 后输出；失败会恢复原配置和服务状态。
 
