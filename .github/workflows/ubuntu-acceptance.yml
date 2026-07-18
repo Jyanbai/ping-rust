@@ -292,7 +292,7 @@ jobs:
 
           sudo tee /run/ping-rust-fail-once.sh >/dev/null <<'FAIL_ONCE'
           #!/usr/bin/env bash
-          marker=/run/ping-rust-activation-fault
+          marker=/dev/shm/ping-rust-activation-fault
           if [ ! -e "$marker" ]; then
             touch "$marker"
             exit 42
@@ -317,10 +317,10 @@ jobs:
             --plain >"$failure_log" 2>&1
           add_status="$?"
           set -e
-          sudo test -e /run/ping-rust-activation-fault \
+          sudo test -e /dev/shm/ping-rust-activation-fault \
             || { echo 'activation fault did not execute' >&2; exit 1; }
           sudo rm -f /etc/systemd/system/shoes.service.d/activation-fault.conf \
-            /run/ping-rust-fail-once.sh /run/ping-rust-activation-fault
+            /run/ping-rust-fail-once.sh /dev/shm/ping-rust-activation-fault
           sudo rmdir /etc/systemd/system/shoes.service.d
           sudo systemctl daemon-reload
           test "$add_status" -ne 0 \
@@ -413,7 +413,7 @@ jobs:
           fi
           sudo systemctl disable --now shoes.service 2>/dev/null || true
           sudo rm -f /etc/systemd/system/shoes.service /usr/local/bin/shoes
-          sudo rm -f /run/ping-rust-fail-once.sh /run/ping-rust-activation-fault
+          sudo rm -f /run/ping-rust-fail-once.sh /dev/shm/ping-rust-activation-fault
           sudo rm -rf /etc/systemd/system/shoes.service.d
           rm -f "${SB:-}"
           sudo rm -rf /etc/shoes
