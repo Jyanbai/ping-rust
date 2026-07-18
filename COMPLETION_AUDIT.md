@@ -8,11 +8,11 @@
 
 | 原始需求 | 状态 | 实现位置 | 当前证据 |
 |---|---|---|---|
-| Rust 2021、Rust 代码占绝对主导 | 已实现 | `Cargo.toml`、`src/` | 5,290 行 Rust / 206 行安装 shell，Rust 占 96.25%；代理、配置、服务、运维、自更新与快速部署事务核心均为 Rust |
+| Rust 2021、Rust 代码占绝对主导 | 已实现 | `Cargo.toml`、`src/` | 5,309 行 Rust / 206 行安装 shell，Rust 占 96.26%；代理、配置、服务、运维、自更新与快速部署事务核心均为 Rust |
 | clap v4 子命令与 233boy 风格数字菜单 | 已实现 | `src/cli.rs`、`src/menu.rs` | `sb` 主菜单固定 1..10，协议兼容编号固定为 1/3/8/18/20；VLESS/SS 日常路径只需协议和可选端口 |
 | 快速添加与直接分享 | 已实现，待 v0.1.5 远端验收 | `src/fast_add.rs`、`src/deployment.rs`、`src/client.rs` | `add/a`、协议短别名、随机端口/凭据、公网地址探测、`--yes/--plain`；仅在 dry-run、原子提交和 systemd active 后输出 vless/ss 等 URI |
 | 分享信息重显与隐私边界 | 已实现 | `src/cli.rs`、`src/client.rs` | `info/i`、`url`、`qr` 按名称/UUID 读取保存地址；Reality URL 含 flow/pbk/sid 且不含私钥；二维码只调用本机 qrencode |
-| 激活失败事务回滚 | 已实现，待 v0.1.5 远端验收 | `src/deployment.rs`、`src/config.rs`、`src/service.rs` | 配置锁跨越 systemd 激活；失败恢复 config/state/unit 原始字节、enabled/active 状态并删除本次证书；单测和 Ubuntu 故障注入均已配置 |
+| 激活失败事务回滚 | 已实现，待 v0.1.5 远端验收 | `src/deployment.rs`、`src/config.rs`、`src/service.rs` | 配置锁跨越 systemd 激活；两次 active 稳定性探测拒绝立即崩溃/auto-restart；失败恢复 config/state/unit 原始字节、enabled/active 状态并删除本次证书 |
 | shoes GitHub Release 预编译安装 | 已实现，Debian/Ubuntu 实测 | `src/installer.rs` | v0.2.7 GNU 不兼容时自动回退 digest 校验过的 static musl；Ubuntu 24.04 约 2 秒完成 Reality 服务部署且提交前健康检查通过 |
 | `cargo install shoes` 源码安装 | 已实现，Debian 实测 | `src/installer.rs` | 在无 cargo PATH、404 MiB RAM 下从当前 binary 同目录解析 cargo，低内存模式 51m35s 安装 v0.2.2；三协议 dry-run 与公网 Reality 均通过 |
 | Reality X25519 密钥和完整 shoes YAML | 已实现 | `src/config.rs` | X25519 派生单测；本地 shoes 0.2.8 `--dry-run` 解析成功 |
@@ -57,7 +57,7 @@
 - 快捷 Reality URI 包含 v2rayN 所需 `encryption=none`、`flow=xtls-rprx-vision`、`security=reality`、`sni`、`fp`、`pbk`、`sid`、`type=tcp`；Shadowsocks 使用 SIP002 URL-safe Base64 auth。
 - ManagedProfile 新增可选 `server_address` 且 serde 默认兼容旧 sidecar；`info/url/qr` 可按名称或 UUID 重显，二维码不使用外部网页。
 - 统一 deployment 事务让原有受管 `generate` 和新 `add` 都在服务确认 active 后才成功；激活失败会精确恢复配置、状态、unit 与服务 enabled/active 状态。
-- 当前本地门禁：52/52 tests、fmt、check、clippy `-D warnings`、doc、actionlint v1.7.12、ShellCheck 全通过；v0.1.5 Ubuntu PTY/systemd、Release 和公开安装证据将在 tag 发布后补入。
+- 当前本地门禁：53/53 tests、fmt、check、clippy `-D warnings`、doc、actionlint v1.7.12、ShellCheck 全通过；v0.1.5 Ubuntu PTY/systemd、Release 和公开安装证据将在 tag 发布后补入。
 
 ## Milestone 6 修复结果
 
@@ -113,14 +113,14 @@
 
 - `cargo fmt -- --check`
 - `cargo check --all-targets`
-- `cargo test --all-targets`：52/52 通过
+- `cargo test --all-targets`：53/53 通过
 - `cargo clippy --all-targets -- -D warnings`
 - `cargo build --locked --release`
 - `cargo doc --locked --no-deps`
 - `cargo install --path . --locked` 后执行 `ping-rust --help`
 - `cargo package --locked` / `cargo publish --dry-run --locked`：当前 clean worktree 打包 29 个文件，包含五协议示例与固定 shoes workflow；隔离解包重编译与上传前校验均通过
 - `cargo-audit 0.22.2`：扫描当前 Cargo.lock 的 224 个依赖，RustSec 1166 条 advisory 中无命中
-- `SOURCE_SNAPSHOT.md`：14/14 section、211,317 bytes，Cargo/主要 Rust（含 deployment/fast_add）/README 全部与真实文件逐字一致
+- `SOURCE_SNAPSHOT.md`：14/14 section、212,046 bytes，Cargo/主要 Rust（含 deployment/fast_add）/README 全部与真实文件逐字一致
 - actionlint v1.7.12：`ci.yml`、`release.yml`、`shoes-schema.yml`、`ubuntu-acceptance.yml` 零诊断；ShellCheck v0.11.0 对一键安装器零诊断
 - GitHub shoes schema run `29635356030`：固定 shoes 0.2.8 commit 的五单协议、五协议联合、六 Shadowsocks cipher、Reality+AnyTLS 共 13 次显式 dry-run 全部成功，且日志敏感信息扫描为零命中
 - GitHub Actions CI run `29635356053`：五个目标发行版全部成功

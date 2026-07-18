@@ -1,4 +1,4 @@
-use std::{fs, path::Path, process::Command};
+use std::{fs, path::Path, process::Command, thread, time::Duration};
 
 use anyhow::{bail, Context, Result};
 use clap::ValueEnum;
@@ -83,8 +83,21 @@ pub fn install_unit(enable_now: bool) -> Result<()> {
 
 pub fn activate_and_verify() -> Result<()> {
     install_unit(true)?;
-    if !systemctl_is_active()? {
+    verify_active_stable(systemctl_is_active, || {
+        thread::sleep(Duration::from_millis(750))
+    })
+}
+
+fn verify_active_stable(
+    mut probe: impl FnMut() -> Result<bool>,
+    mut pause: impl FnMut(),
+) -> Result<()> {
+    if !probe()? {
         bail!("systemd 命令已返回成功，但 shoes.service 未处于 active 状态");
+    }
+    pause();
+    if !probe()? {
+        bail!("shoes.service 启动后未保持 active，可能已立即退出或进入自动重启");
     }
     Ok(())
 }
@@ -273,5 +286,14 @@ mod tests {
             activation_commands(false, true),
             vec![RESET_FAILED_COMMAND, ENABLE_NOW_COMMAND]
         );
+    }
+
+    #[test]
+    fn stable_activation_requires_two_successful_probes() {
+        let mut samples = [true, true].into_iter();
+        verify_active_stable(|| Ok(samples.next().unwrap()), || {}).unwrap();
+
+        let mut samples = [true, false].into_iter();
+        assert!(verify_active_stable(|| Ok(samples.next().unwrap()), || {}).is_err());
     }
 }
