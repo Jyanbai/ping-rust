@@ -58,18 +58,18 @@ jobs:
 
           "$bin" generate reality --output "$out/reality.yaml" \
             --port 1443 --server-name www.cloudflare.com \
-            --dest www.cloudflare.com:443
+            --dest www.cloudflare.com:443 >/dev/null
           "$bin" generate hysteria2 --output "$out/hysteria2.yaml" \
-            --port 2443 --server-name hy2.example.com --quic-endpoints 1
+            --port 2443 --server-name hy2.example.com --quic-endpoints 1 >/dev/null
           "$bin" generate tuic --output "$out/tuic.yaml" \
-            --port 3443 --server-name tuic.example.com --zero-rtt
+            --port 3443 --server-name tuic.example.com --zero-rtt >/dev/null
           "$bin" generate shadowsocks --output "$out/shadowsocks.yaml" \
-            --port 4388
+            --port 4388 >/dev/null
           "$bin" generate anytls --output "$out/anytls.yaml" \
             --port 5443 --server-name anytls.example.com \
             --user alice:anytls-test-password \
             --padding stop=8 --padding 0=30-30 --padding 1=50-100 \
-            --fallback 127.0.0.1:80
+            --fallback 127.0.0.1:80 >/dev/null
 
           for config in reality hysteria2 tuic shadowsocks anytls; do
             shoes --dry-run "$out/$config.yaml"
@@ -108,7 +108,7 @@ jobs:
             "$bin" generate shadowsocks --output "$config" \
               --port "$((6000 + index))" \
               --cipher "${ciphers[$index]}" \
-              --password "${passwords[$index]}"
+              --password "${passwords[$index]}" >/dev/null
             shoes --dry-run "$config"
           done
 
@@ -116,5 +116,5 @@ jobs:
             --port 7443 --anytls-mode reality \
             --server-name www.cloudflare.com \
             --dest www.cloudflare.com:443 \
-            --user advanced:anytls-reality-password
+            --user advanced:anytls-reality-password >/dev/null
           shoes --dry-run "$out/anytls-reality.yaml"
