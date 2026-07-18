@@ -124,8 +124,9 @@
 - 文件名只由受控协议枚举和规范 `u16` 端口推导，逻辑备注不进入路径；改端口会删除旧 basename 并创建新 basename，陌生文件、symlink、目录、特殊文件和 `0443` 等非规范写法均拒绝覆盖。
 - 旧版只有 config/state 的安装在首次进入菜单时执行幂等迁移；聚合配置与 state 数量、顺序、端口或协议不一致时明确拒绝。旧备份在 staging 中补齐 profile 文件后再执行一致性和 shoes 校验。
 - 添加、修改、删除都在同一进程间锁和部署事务中提交 config/state/profiles；删除只有在 systemd 成功切换后才清理证书，失败则同时恢复三类配置文件和 service snapshot。
-- 本地单测覆盖单 mapping 形状、确定性聚合、迁移幂等、改端口重命名、陌生文件保护、状态写失败目录回滚及延迟凭据清理；当前 66/66 tests、fmt/check、Clippy、release、rustdoc、RustSec、actionlint 与 crate dry-run 全部通过。
-- Ubuntu 24.04 workflow 已加入五协议真实文件、模拟旧版目录迁移、真实 PTY 改名/查看/删除、profile 目录故障回滚哈希、备份归档和恢复断言；等待产品提交推送后的远程运行证据。
+- 本地单测覆盖单 mapping 形状、确定性聚合、迁移幂等、改端口重命名、陌生文件保护、状态写失败目录回滚及延迟凭据清理；当前 66/66 tests、fmt/check、Clippy、release、rustdoc、RustSec、actionlint 与严格 clean-worktree crate dry-run 全部通过。
+- 最终产品 HEAD `975799a` 的 CI `29647842963`、Ubuntu 24.04 acceptance `29647842938`、固定 shoes schema `29647842940` 全部成功。Ubuntu 真实覆盖五协议文件、旧版目录迁移、PTY 改名/查看/实际删除、目录故障回滚哈希、备份恢复和 systemd 运维；schema 完成全部协议 dry-run 矩阵。
+- 严格验收还修复两项边界：root `0600` 备份必须以 root 读取；默认随机端口实现从原 445 下限收紧为文档承诺的 `20000..=65535` 高位范围。两项均保留安全约束，没有放宽测试掩盖。
 
 ## Milestone 6 修复结果
 
@@ -186,13 +187,14 @@
 - `cargo build --locked --release`
 - `cargo doc --locked --no-deps`
 - `cargo install --path . --locked` 后执行 `ping-rust --help`
-- `cargo package --locked` / `cargo publish --dry-run --locked`：提交前 `--allow-dirty` 候选打包 32 个文件、379.8 KiB（压缩 90.2 KiB），隔离解包重编译与上传前校验通过；提交后仍需 strict clean-worktree 复验
+- `cargo package --locked` / `cargo publish --dry-run --locked`：提交后 strict clean-worktree 候选打包 32 个文件、379.8 KiB（压缩 90.2 KiB），隔离解包重编译与上传前校验通过
 - `cargo-audit 0.22.2`：扫描当前 Cargo.lock 的 224 个依赖，RustSec 1166 条 advisory 中无命中
 - `SOURCE_SNAPSHOT.md`：14/14 section、282,322 bytes，Cargo/主要 Rust（含 deployment/fast_add）/README 全部与真实文件逐字一致
 - actionlint v1.7.12：`ci.yml`、`release.yml`、`shoes-schema.yml`、`ubuntu-acceptance.yml` 零诊断；ShellCheck v0.11.0 对一键安装器零诊断
 - v0.1.8 产品提交 `960edde`：main CI `29645174662`、Ubuntu 24.04 acceptance `29645174670`、固定 shoes schema `29645174650` 全部成功；tag CI `29645387085` 与 schema `29645387104` 再次成功
 - v0.1.8 Release run `29645387081`：双架构 MUSL、SHA256SUMS、公开一键安装默认 Reality 全部成功；crates.io 公开隔离安装返回 `ping-rust 0.1.8`
 - v0.1.9 简洁菜单：CI `29646275985` 与 Ubuntu 24.04 acceptance `29646275983` 成功；真实 PTY 覆盖查看短名称/URI、删除菜单 0 返回且不误删
+- v0.1.9 真实 profile 候选：最终产品 HEAD `975799a` 的 CI `29647842963`、Ubuntu 24.04 acceptance `29647842938`、shoes schema `29647842940` 全部成功；Ubuntu 覆盖真实文件、旧目录迁移、PTY 实际删除、事务回滚和备份恢复
 - GitHub shoes schema run `29635356030`：固定 shoes 0.2.8 commit 的五单协议、五协议联合、六 Shadowsocks cipher、Reality+AnyTLS 共 13 次显式 dry-run 全部成功，且日志敏感信息扫描为零命中
 - GitHub Actions CI run `29635356053`：五个目标发行版全部成功
 - GitHub main CI run `29635760760`：五个目标发行版全部成功；Ubuntu 24.04 acceptance run `29635760772`：五协议 systemd、导出、运维和清理全成功
