@@ -75,7 +75,7 @@
 - `cargo build --locked --release`
 - `cargo doc --locked --no-deps`
 - `cargo install --path . --locked` 后执行 `ping-rust --help`
-- `cargo publish --dry-run --locked --allow-dirty`：0.1.2 修复提交前打包 25 个文件，197.4 KiB / 53.3 KiB compressed，隔离解包重编译与上传前校验均通过；提交后将再以 clean worktree 严格复验
+- `cargo package --locked` / `cargo publish --dry-run --locked`：0.1.2 修复提交后在 clean worktree 打包 25 个文件，197.4 KiB / 53.3 KiB compressed，隔离解包重编译与上传前校验均通过
 - `cargo-audit 0.22.2`：扫描当前 Cargo.lock 的 224 个依赖，RustSec 1166 条 advisory 中无命中
 - `SOURCE_SNAPSHOT.md`：12/12 section、131,023 bytes，Cargo/主要 Rust/README 全部与真实文件逐字一致
 - actionlint v1.7.12：`ci.yml` 与新增 `release.yml` 零诊断；ShellCheck v0.11.0 对一键安装器零诊断
