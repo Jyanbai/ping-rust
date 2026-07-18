@@ -307,11 +307,12 @@ jobs:
           FAULT_DROPIN
           sudo systemctl daemon-reload
 
+          rollback_port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
           failure_log="$RUNNER_TEMP/activation-failure.txt"
           set +e
-          sudo "$PING_RUST" add ss \
+          sudo "$PING_RUST" add reality \
             --name must-rollback \
-            --port 25450 \
+            --port "$rollback_port" \
             --server-address 203.0.113.10 \
             --plain >"$failure_log" 2>&1
           add_status="$?"
@@ -325,7 +326,7 @@ jobs:
           test "$add_status" -ne 0 \
             || { echo 'activation failure injection unexpectedly succeeded' >&2; exit 1; }
           grep -q '回滚' "$failure_log" || { echo 'missing rollback marker' >&2; exit 1; }
-          ! grep -q 'ss://' "$failure_log" || { echo 'failure leaked share URI' >&2; exit 1; }
+          ! grep -q 'vless://' "$failure_log" || { echo 'failure leaked share URI' >&2; exit 1; }
           test "$(sudo sha256sum /etc/shoes/config.yaml | awk '{print $1}')" = "$config_before" \
             || { echo 'config hash mismatch' >&2; exit 1; }
           test "$(sudo sha256sum /etc/shoes/ping-rust-state.json | awk '{print $1}')" = "$state_before" \
@@ -336,7 +337,7 @@ jobs:
             || { echo 'service not active after rollback' >&2; exit 1; }
           sudo systemctl is-enabled --quiet shoes.service \
             || { echo 'service not enabled after rollback' >&2; exit 1; }
-          ! sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)25450$' \
+          ! sudo ss -H -lnt | awk '{print $4}' | grep -Eq "(^|:)${rollback_port}$" \
             || { echo 'rolled-back port still listening' >&2; exit 1; }
           rm -f "$failure_log"
 
