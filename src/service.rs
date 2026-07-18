@@ -58,8 +58,9 @@ WantedBy=multi-user.target
 pub fn install_unit(enable_now: bool) -> Result<()> {
     utils::require_linux_root()?;
     ensure_systemctl()?;
-    let was_active =
-        enable_now && Path::new(utils::SERVICE_FILE).exists() && systemctl_is_active()?;
+    let unit_exists = enable_now && Path::new(utils::SERVICE_FILE).exists();
+    let was_active = unit_exists && systemctl_is_active()?;
+    let was_failed = unit_exists && systemctl_is_failed()?;
     utils::atomic_write(
         Path::new(utils::SERVICE_FILE),
         unit_contents().as_bytes(),
@@ -67,15 +68,19 @@ pub fn install_unit(enable_now: bool) -> Result<()> {
     )?;
     systemctl(&["daemon-reload"])?;
     if enable_now {
-        for command in activation_commands(was_active) {
+        for command in activation_commands(was_active, was_failed) {
             systemctl(command)?;
         }
     }
     Ok(())
 }
 
-fn activation_commands(was_active: bool) -> Vec<&'static [&'static str]> {
-    let mut commands = vec![RESET_FAILED_COMMAND, ENABLE_NOW_COMMAND];
+fn activation_commands(was_active: bool, was_failed: bool) -> Vec<&'static [&'static str]> {
+    let mut commands = Vec::with_capacity(3);
+    if was_active || was_failed {
+        commands.push(RESET_FAILED_COMMAND);
+    }
+    commands.push(ENABLE_NOW_COMMAND);
     if was_active {
         commands.push(RESTART_COMMAND);
     }
@@ -97,7 +102,9 @@ pub fn execute(action: ServiceAction) -> Result<()> {
 }
 
 fn systemctl_after_reset(command: &[&str]) -> Result<()> {
-    systemctl(RESET_FAILED_COMMAND)?;
+    if systemctl_is_active()? || systemctl_is_failed()? {
+        systemctl(RESET_FAILED_COMMAND)?;
+    }
     systemctl(command)
 }
 
@@ -141,6 +148,14 @@ fn systemctl_is_active() -> Result<bool> {
         .success())
 }
 
+fn systemctl_is_failed() -> Result<bool> {
+    Ok(Command::new("systemctl")
+        .args(["is-failed", "--quiet", SERVICE_NAME])
+        .status()
+        .context("无法查询 systemd 服务失败状态")?
+        .success())
+}
+
 fn systemctl(args: &[&str]) -> Result<()> {
     let status = Command::new("systemctl")
         .args(args)
@@ -173,14 +188,15 @@ mod tests {
     }
 
     #[test]
-    fn active_service_is_restarted_after_enabling_updated_unit() {
+    fn activation_commands_cover_new_active_and_failed_units() {
+        assert_eq!(activation_commands(false, false), vec![ENABLE_NOW_COMMAND]);
         assert_eq!(
-            activation_commands(false),
-            vec![RESET_FAILED_COMMAND, ENABLE_NOW_COMMAND]
+            activation_commands(true, false),
+            vec![RESET_FAILED_COMMAND, ENABLE_NOW_COMMAND, RESTART_COMMAND]
         );
         assert_eq!(
-            activation_commands(true),
-            vec![RESET_FAILED_COMMAND, ENABLE_NOW_COMMAND, RESTART_COMMAND]
+            activation_commands(false, true),
+            vec![RESET_FAILED_COMMAND, ENABLE_NOW_COMMAND]
         );
     }
 }
