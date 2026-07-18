@@ -4,6 +4,7 @@ mod config;
 mod installer;
 mod menu;
 mod operations;
+mod self_update;
 mod service;
 mod utils;
 

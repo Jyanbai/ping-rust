@@ -19,7 +19,7 @@ sudo ping-rust
 ```bash
 bash <(curl --proto '=https' --tlsv1.2 -fsSL \
   https://raw.githubusercontent.com/Jyanbai/ping-rust/main/scripts/install.sh) \
-  --version v0.1.0
+  --version v0.1.1
 
 bash <(curl --proto '=https' --tlsv1.2 -fsSL \
   https://raw.githubusercontent.com/Jyanbai/ping-rust/main/scripts/install.sh) \
@@ -40,6 +40,7 @@ bash <(curl --proto '=https' --tlsv1.2 -fsSL \
 - 服务启停、重启、状态、journalctl 日志、更新与卸载
 - BBR、TCP/UDP 端口检查、敏感配置备份与安全恢复
 - 导出 Clash Meta、sing-box 和 Nekobox 分享链接
+- Rust 原生更新 ping-rust 自身：GitHub Release + `SHA256SUMS` 双重校验、版本探针、原子替换与失败回滚
 
 ## 支持环境
 
@@ -149,7 +150,17 @@ sudo ping-rust logs -n 200
 ping-rust check-port 443 --kind both
 sudo ping-rust enable-bbr
 sudo ping-rust update --method release
+sudo ping-rust self-update
 ```
+
+`update` 只更新 shoes 内核；`self-update` 更新 ping-rust 本身。默认安装最新 Release，也可以指定版本；显式指定旧版本表示受控降级：
+
+```bash
+sudo ping-rust self-update --version v0.1.1
+sudo ping-rust self-update --version v0.1.1 --force
+```
+
+自更新支持 Linux x86_64/aarch64，下载对应 musl 静态包，校验 GitHub API digest 与 `SHA256SUMS`，确认新二进制版本后才替换当前程序。程序位于 `/usr/local/bin` 时通常需要 `sudo`；用户目录内可写的 cargo 安装则不需要。
 
 多个配置使用不同端口。查看 ID 后删除：
 
@@ -206,6 +217,7 @@ sudo /usr/local/bin/shoes --dry-run /etc/shoes/config.yaml
 - Hysteria2/TUIC 失败：确认 UDP 端口已放行，并检查证书域名。
 - `systemctl` 不存在：当前系统不是 systemd 环境，服务管理功能无法使用。
 - GitHub API 限流：稍后重试，或使用 `install --method cargo`。
+- 自更新提示权限不足：若当前程序位于 `/usr/local/bin`，改用 `sudo ping-rust self-update`；不要手工覆盖正在更新的文件。
 - cargo 安装版本较旧：GitHub Release 与 crates.io 的发布时间可能不同，优先选择 Release。
 - cargo 编译很慢：低内存 VPS 上源码模式可能需要数十分钟；这是回退通道，默认部署应优先使用 Release。
 
@@ -222,6 +234,7 @@ cargo doc --no-deps
 本仓库开发阶段已完成：
 
 - Rust 单元测试覆盖密钥/YAML、归档解包、原子写入、systemd unit、端口检查、客户端三格式和恢复路径安全。
+- 自更新单元测试覆盖版本、架构、checksum 重复/缺失和严格单文件归档；Release job 还会真实执行一次强制自更新并复核版本。
 - 使用 shoes 0.2.8 对 ping-rust 实际生成的 Reality、Hysteria2、TUIC 三份配置执行联合 `--dry-run`，解析成功并加载证书。
 - 通过 cargo-zigbuild + Zig 生成 x86_64/aarch64 Linux GNU release ELF，最高 GLIBC 需求为 2.34，覆盖 Rocky/Alma 9 及更新的目标发行版基线。
 - CI 定义覆盖 Ubuntu 22.04/24.04，并在 Debian 12、Rocky Linux 9、AlmaLinux 9 容器中执行锁定依赖测试和 release 构建；工作流实际结果需在推送 GitHub 后确认。
@@ -267,6 +280,7 @@ ping-rust/
 │   ├── service.rs
 │   ├── client.rs
 │   ├── operations.rs
+│   ├── self_update.rs
 │   └── utils.rs
 ├── examples/
 │   ├── reality.yaml

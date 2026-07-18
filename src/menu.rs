@@ -123,6 +123,7 @@ async fn operations_menu() -> Result<()> {
         "备份配置",
         "恢复配置",
         "导出客户端配置",
+        "更新 ping-rust",
         "返回",
     ];
     let selected = select_numbered("运维工具", &choices)?;
@@ -171,6 +172,7 @@ async fn operations_menu() -> Result<()> {
             Ok(())
         }
         5 => export_menu(),
+        6 => cli::run_self_update(None, false).await,
         _ => Ok(()),
     }
 }

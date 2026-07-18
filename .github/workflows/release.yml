@@ -145,3 +145,8 @@ jobs:
             --quiet
           "${install_dir}/ping-rust" --version \
             | grep -Fx "ping-rust ${GITHUB_REF_NAME#v}"
+          "${install_dir}/ping-rust" self-update \
+            --version "${GITHUB_REF_NAME}" \
+            --force
+          "${install_dir}/ping-rust" --version \
+            | grep -Fx "ping-rust ${GITHUB_REF_NAME#v}"

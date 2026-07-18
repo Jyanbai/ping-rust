@@ -9,7 +9,7 @@ use crate::{
     client::{self, ClientFormat},
     config::{self, GenerationRequest, Protocol},
     installer::{self, InstallMethod},
-    menu, operations,
+    menu, operations, self_update,
     service::{self, ServiceAction},
 };
 
@@ -102,6 +102,15 @@ pub enum Command {
     Update {
         #[arg(long, value_enum, default_value_t = InstallMethod::Release)]
         method: InstallMethod,
+    },
+    /// 更新 ping-rust 自身（不会修改 shoes）
+    SelfUpdate {
+        /// 安装指定版本，例如 v0.1.1；默认使用最新 Release
+        #[arg(long, value_name = "VERSION")]
+        version: Option<String>,
+        /// 即使版本相同也重新安装
+        #[arg(long)]
+        force: bool,
     },
     /// 卸载 shoes（默认保留配置）
     Uninstall {
@@ -231,6 +240,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             println!("{} {}", "shoes 更新完成：".green(), report.version);
             Ok(())
         }
+        Command::SelfUpdate { version, force } => run_self_update(version.as_deref(), force).await,
         Command::Uninstall { purge } => {
             let unit_removed = service::uninstall_unit()?;
             let binary_removed = installer::uninstall_binary()?;
@@ -247,6 +257,28 @@ pub async fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
     }
+}
+
+pub async fn run_self_update(version: Option<&str>, force: bool) -> Result<()> {
+    match self_update::update(version, force).await? {
+        self_update::UpdateReport::Current { current, available } => {
+            if current == available {
+                println!("ping-rust 已是当前版本：{current}");
+            } else {
+                println!("当前版本 {current} 不低于最新 Release {available}，无需更新。");
+            }
+        }
+        self_update::UpdateReport::Updated {
+            from,
+            to,
+            destination,
+        } => {
+            println!("{} {from} → {to}", "ping-rust 自更新完成：".green());
+            println!("路径：{}", destination.display());
+            println!("请重新运行 ping-rust 使用新版本。");
+        }
+    }
+    Ok(())
 }
 
 pub async fn show_info() -> Result<()> {
@@ -357,4 +389,34 @@ fn print_certificate_notice(result: &config::GenerationResult) {
         "若使用自动生成的自签名证书，生产环境应将证书导入客户端信任库；不要长期关闭证书校验。"
             .yellow()
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_self_update_options() {
+        let cli =
+            Cli::try_parse_from(["ping-rust", "self-update", "--version", "v0.1.1", "--force"])
+                .unwrap();
+        match cli.command.unwrap() {
+            Command::SelfUpdate { version, force } => {
+                assert_eq!(version.as_deref(), Some("v0.1.1"));
+                assert!(force);
+            }
+            command => panic!("unexpected command: {command:?}"),
+        }
+    }
+
+    #[test]
+    fn keeps_shoes_update_as_distinct_command() {
+        let cli = Cli::try_parse_from(["ping-rust", "update"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Update {
+                method: InstallMethod::Release
+            })
+        ));
+    }
 }
