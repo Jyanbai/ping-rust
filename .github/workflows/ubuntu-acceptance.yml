@@ -310,15 +310,21 @@ jobs:
             echo 'activation failure injection unexpectedly succeeded' >&2
             exit 1
           fi
-          grep -q '回滚' "$failure_log"
-          ! grep -q 'ss://' "$failure_log"
-          sudo test ! -e /usr/local/bin/shoes.real
-          test "$(sudo sha256sum /etc/shoes/config.yaml | awk '{print $1}')" = "$config_before"
-          test "$(sudo sha256sum /etc/shoes/ping-rust-state.json | awk '{print $1}')" = "$state_before"
-          test "$(sudo sha256sum /etc/systemd/system/shoes.service | awk '{print $1}')" = "$unit_before"
-          sudo systemctl is-active --quiet shoes.service
-          sudo systemctl is-enabled --quiet shoes.service
-          ! sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)25450$'
+          grep -q '回滚' "$failure_log" || { echo 'missing rollback marker' >&2; exit 1; }
+          ! grep -q 'ss://' "$failure_log" || { echo 'failure leaked share URI' >&2; exit 1; }
+          sudo test ! -e /usr/local/bin/shoes.real || { echo 'kernel backup remains' >&2; exit 1; }
+          test "$(sudo sha256sum /etc/shoes/config.yaml | awk '{print $1}')" = "$config_before" \
+            || { echo 'config hash mismatch' >&2; exit 1; }
+          test "$(sudo sha256sum /etc/shoes/ping-rust-state.json | awk '{print $1}')" = "$state_before" \
+            || { echo 'state hash mismatch' >&2; exit 1; }
+          test "$(sudo sha256sum /etc/systemd/system/shoes.service | awk '{print $1}')" = "$unit_before" \
+            || { echo 'unit hash mismatch' >&2; exit 1; }
+          sudo systemctl is-active --quiet shoes.service \
+            || { echo 'service not active after rollback' >&2; exit 1; }
+          sudo systemctl is-enabled --quiet shoes.service \
+            || { echo 'service not enabled after rollback' >&2; exit 1; }
+          ! sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)25450$' \
+            || { echo 'rolled-back port still listening' >&2; exit 1; }
           rm -f "$failure_log"
 
       - name: Verify client exports and operations
