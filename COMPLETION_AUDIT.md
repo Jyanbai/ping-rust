@@ -10,7 +10,7 @@
 |---|---|---|---|
 | Rust 2021、Rust 代码占绝对主导 | 已实现 | `Cargo.toml`、`src/` | 7,037 行 Rust / 241 行安装 shell，Rust 占 96.69%；代理、配置、服务、运维、自更新与快速部署事务核心均为 Rust |
 | clap v4 子命令与数字菜单 | 已实现 | `src/cli.rs`、`src/menu.rs` | `prs` 主菜单固定 1..10，协议编号固定为连续的 1/2/3/4/5；采用 233boy 风格 `1)` 列表与 `请选择 [0-N]` 提示，主菜单 0 退出、所有子菜单 0 返回 |
-| 快速添加与直接分享 | 已实现，Ubuntu 24.04 实测 | `src/fast_add.rs`、`src/deployment.rs`、`src/client.rs` | `add/a`、协议短别名、随机端口/凭据、公网地址探测、`--yes/--plain`；真实 PTY 的 Reality/SS 添加、URI 与监听均通过 |
+| 快速添加与直接分享 | 已实现，Ubuntu 24.04 实测 | `src/fast_add.rs`、`src/deployment.rs`、`src/client.rs` | `add/a`、协议短别名、20000..=65535 高位随机端口/凭据、公网地址探测、`--yes/--plain`；真实 PTY 的 Reality/SS 添加、URI 与监听均通过 |
 | 分享信息重显与隐私边界 | 已实现 | `src/cli.rs`、`src/client.rs` | `info/i`、`url`、`qr` 按名称/UUID 读取保存地址；Reality URL 含 flow/pbk/sid 且不含私钥；二维码只调用本机 qrencode |
 | 激活失败事务回滚 | 已实现，Ubuntu 24.04 实测 | `src/deployment.rs`、`src/config.rs`、`src/service.rs` | 添加、修改和删除共用部署事务；失败恢复 config/state/profiles/unit、enabled/active 和端口，且不输出分享 URI |
 | shoes GitHub Release 预编译安装 | 已实现，Debian/Ubuntu 实测 | `src/installer.rs` | v0.2.7 GNU 不兼容时自动回退 digest 校验过的 static musl；Ubuntu 24.04 约 2 秒完成 Reality 服务部署且提交前健康检查通过 |
@@ -186,9 +186,9 @@
 - `cargo build --locked --release`
 - `cargo doc --locked --no-deps`
 - `cargo install --path . --locked` 后执行 `ping-rust --help`
-- `cargo package --locked` / `cargo publish --dry-run --locked`：提交前 `--allow-dirty` 候选打包 32 个文件、378.6 KiB（压缩 90.0 KiB），隔离解包重编译与上传前校验通过；提交后仍需 strict clean-worktree 复验
+- `cargo package --locked` / `cargo publish --dry-run --locked`：提交前 `--allow-dirty` 候选打包 32 个文件、379.8 KiB（压缩 90.2 KiB），隔离解包重编译与上传前校验通过；提交后仍需 strict clean-worktree 复验
 - `cargo-audit 0.22.2`：扫描当前 Cargo.lock 的 224 个依赖，RustSec 1166 条 advisory 中无命中
-- `SOURCE_SNAPSHOT.md`：14/14 section、282,263 bytes，Cargo/主要 Rust（含 deployment/fast_add）/README 全部与真实文件逐字一致
+- `SOURCE_SNAPSHOT.md`：14/14 section、282,322 bytes，Cargo/主要 Rust（含 deployment/fast_add）/README 全部与真实文件逐字一致
 - actionlint v1.7.12：`ci.yml`、`release.yml`、`shoes-schema.yml`、`ubuntu-acceptance.yml` 零诊断；ShellCheck v0.11.0 对一键安装器零诊断
 - v0.1.8 产品提交 `960edde`：main CI `29645174662`、Ubuntu 24.04 acceptance `29645174670`、固定 shoes schema `29645174650` 全部成功；tag CI `29645387085` 与 schema `29645387104` 再次成功
 - v0.1.8 Release run `29645387081`：双架构 MUSL、SHA256SUMS、公开一键安装默认 Reality 全部成功；crates.io 公开隔离安装返回 `ping-rust 0.1.8`

@@ -10,7 +10,7 @@ use crate::{
     deployment, operations, utils,
 };
 
-const RANDOM_PORT_MIN: u16 = 445;
+const RANDOM_PORT_MIN: u16 = 20_000;
 const RANDOM_PORT_ATTEMPTS: usize = 233;
 const ADDRESS_ENDPOINTS: &[&str] = &[
     "https://api.ipify.org",
