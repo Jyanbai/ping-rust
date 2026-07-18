@@ -21,9 +21,9 @@
 | BBR、端口检查、备份恢复 | 已实现，Debian 实测 | `src/operations.rs` | BBR 当前算法为 bbr；TCP/UDP 端口判断正确；0600 备份 round-trip、marker 清理、哈希一致及 active/inactive 恢复均通过 |
 | Clash Meta、sing-box、Nekobox 客户端导出 | 已实现，Debian 实测 | `src/client.rs` | 三协议共 9 份导出均成功解析；逐值检查 Reality 服务端私钥泄漏为 0 |
 | Ubuntu 22.04/24.04、Debian 12、Rocky/Alma 9 x86_64 | 远程构建/测试通过；Ubuntu 运行态待实机 | `.github/workflows/ci.yml`、交叉构建证据 | CI run `29597417851` 的 Ubuntu 22.04/24.04、Debian 12、Rocky 9、AlmaLinux 9 共 5/5 jobs 成功；Debian 12 x86_64 另有原生 systemd/公网验收；Linux GNU ELF 最高 GLIBC 2.34 |
-| ARM64 次优先支持 | 构建与模拟运行已证实 | `src/installer.rs`、Release workflow | aarch64 GNU ELF 最高 GLIBC 2.34；v0.1.0 aarch64 musl 静态 binary 通过 qemu-user-static `--version` 并公开发布 |
-| ping-rust 预编译一键安装 | 已发布并端到端验证 | `.github/workflows/release.yml`、`scripts/install.sh` | v0.1.0 的 x86_64/aarch64 musl、SHA256SUMS 已公开；tag workflow 3/3 jobs 成功，并从公开 URL 完成指定版本安装与 version 验证 |
-| ping-rust 原生自更新 | 已实现，等待 v0.1.2 发布验收 | `src/self_update.rs`、`src/cli.rs`、`src/menu.rs` | 独立 `self-update` 保留 shoes `update` 语义；v0.1.1 发布烟测发现自定义安装目录被 sudo 创建后不可由普通用户替换，0.1.2 已改为仅在目录不可写时提权 |
+| ARM64 次优先支持 | 构建与模拟运行已证实 | `src/installer.rs`、Release workflow | aarch64 GNU ELF 最高 GLIBC 2.34；v0.1.2 aarch64 musl 静态 binary 通过 qemu-user-static `--version` 并公开发布 |
+| ping-rust 预编译一键安装 | 已发布并端到端验证 | `.github/workflows/release.yml`、`scripts/install.sh` | v0.1.2 的 x86_64/aarch64 musl、SHA256SUMS 已公开；tag workflow 3/3 jobs 成功，并从公开 URL 完成指定版本安装与 version 验证 |
+| ping-rust 原生自更新 | 已发布并端到端验证 | `src/self_update.rs`、`src/cli.rs`、`src/menu.rs` | 独立 `self-update` 保留 shoes `update` 语义；v0.1.2 发布 job 在非 root 自定义目录真实完成公开资产下载、双重 SHA-256、运行中原子替换和安装后版本复核 |
 | README、MIT、cargo install 发布准备 | 已实现 | `README.md`、`LICENSE`、`scripts/install.sh` | README 第一屏提供无需 Rust 的一键入口，并保留 crates.io/Git/源码安装；release build、doc、隔离 `cargo package` 门禁通过 |
 | GitHub 源码开源 | 已发布 | `Cargo.toml`、GitHub `main` | `Jyanbai/ping-rust` 已为 Public/非空并建立 `main`；首个提交与跨平台 CI 修复均已推送 |
 | 公开 `cargo install ping-rust` | 等待 crates.io 认证 | 发布包 | crates.io API 当前显示 `ping-rust` 名称未占用，publish dry-run 已通过；尚未真实发布 crate，不能宣称该安装命令已上线 |
@@ -79,13 +79,15 @@
 - `cargo-audit 0.22.2`：扫描当前 Cargo.lock 的 224 个依赖，RustSec 1166 条 advisory 中无命中
 - `SOURCE_SNAPSHOT.md`：12/12 section、131,023 bytes，Cargo/主要 Rust/README 全部与真实文件逐字一致
 - actionlint v1.7.12：`ci.yml` 与新增 `release.yml` 零诊断；ShellCheck v0.11.0 对一键安装器零诊断
-- GitHub Actions CI run `29626486447`：发布提交的 Ubuntu 22.04/24.04、Debian 12、Rocky Linux 9、AlmaLinux 9 共 5/5 jobs 成功
+- GitHub Actions CI run `29627957682`：v0.1.2 tag 的 Ubuntu 22.04/24.04、Debian 12、Rocky Linux 9、AlmaLinux 9 共 5/5 jobs 成功
 - GitHub Release run `29626549437`：x86_64 musl、aarch64 musl、Publish GitHub Release 共 3/3 jobs 成功；发布 job 从公开资产执行安装器并得到 `ping-rust 0.1.0`
 - v0.1.0 公开资产：x86_64 2,457,171 bytes / SHA-256 `99d6d06e30f0f2cc3698318ff6f6e924da71ef4c283cbbfd11dddb936ee49120`；aarch64 2,298,967 bytes / SHA-256 `3a28ff756fa23c58de4cd6a798dc8ae91e6c4bd9ff21dc93eeb9025f68a771a3`；两者均与 SHA256SUMS 交叉核验且归档仅含 `ping-rust`
 - v0.1.1 Release run `29627638839`：两个 musl build、checksum 与公开 Release 创建成功；最终强制自更新因 install.sh 对可写自定义目录仍无条件 sudo 而失败。权限拒绝发生在原子替换前，旧 binary 未损坏；修复进入 0.1.2，不改写已公开 tag。
+- GitHub Release run `29627957641`：v0.1.2 的 x86_64 musl、aarch64 musl、Publish GitHub Release 共 3/3 jobs 成功；公开一键安装和 `self-update --version v0.1.2 --force` 均通过。
+- v0.1.2 公开资产独立下载复核：x86_64 2,491,684 bytes / SHA-256 `d6ae81cc349791b7d189fbcb13abb3fc41898faf08beb69217e71e6561c9ee78`；aarch64 2,331,294 bytes / SHA-256 `c0ed8f1611691c6da45c7268af5095d80fd882b08884d56e195c4c373e1b6a1a`；两者与 SHA256SUMS、GitHub API digest 一致，且各归档仅含一个 `ping-rust`。
 
 ## 剩余的外部发布与验收
 
 仍需要一台允许 root/systemd/公网入站的全新 Ubuntu 24.04 x86_64 VPS 重复 README 清单。Debian 12 已给出 Linux/systemd/公网路径的强证据，但不能替代明确指定的 Ubuntu 24.04 成功标准。
 
-公开源码已推送到 `Jyanbai/ping-rust` 的 `main`，当前远程 CI 5/5 jobs 成功；v0.1.0 Release 与 README 一键安装命令已经上线并由 Ubuntu runner 端到端验证。`cargo publish --dry-run` 已通过，真正发布 crates.io 仍需用户提供发布授权与登录凭据。
+公开源码已推送到 `Jyanbai/ping-rust` 的 `main`，当前远程 CI 5/5 jobs 成功；v0.1.2 是 latest Release，README 一键安装与 Rust 原生自更新均由 Ubuntu runner 端到端验证。`cargo publish --dry-run` 已通过，真正发布 crates.io 仍需用户提供发布授权与登录凭据。
