@@ -107,7 +107,7 @@
 - `cargo install --path . --locked` 后执行 `ping-rust --help`
 - `cargo package --locked` / `cargo publish --dry-run --locked`：当前 clean worktree 打包 29 个文件，包含五协议示例与固定 shoes workflow；隔离解包重编译与上传前校验均通过
 - `cargo-audit 0.22.2`：扫描当前 Cargo.lock 的 224 个依赖，RustSec 1166 条 advisory 中无命中
-- `SOURCE_SNAPSHOT.md`：12/12 section、175,408 bytes，Cargo/主要 Rust/README 全部与真实文件逐字一致
+- `SOURCE_SNAPSHOT.md`：12/12 section、175,658 bytes，Cargo/主要 Rust/README 全部与真实文件逐字一致
 - actionlint v1.7.12：`ci.yml`、`release.yml`、`shoes-schema.yml`、`ubuntu-acceptance.yml` 零诊断；ShellCheck v0.11.0 对一键安装器零诊断
 - GitHub shoes schema run `29635356030`：固定 shoes 0.2.8 commit 的五单协议、五协议联合、六 Shadowsocks cipher、Reality+AnyTLS 共 13 次显式 dry-run 全部成功，且日志敏感信息扫描为零命中
 - GitHub Actions CI run `29635356053`：五个目标发行版全部成功
@@ -128,3 +128,5 @@
 ## 发布状态
 
 公开源码已推送到 `Jyanbai/ping-rust` 的 `main`。Ubuntu 24.04 成功标准已由独立 VPS 与 GitHub runner 双重完成；v0.1.3 已同时发布到 GitHub Releases 与 crates.io，双架构静态资产、一键安装、自更新和公共 cargo 安装均已验证。
+
+本次五协议对齐只按用户要求推送源码到 `main`，未创建新 tag、GitHub Release 或 crates.io 版本。公开 v0.1.3 是本次变更前的稳定版；五协议在下一版本发布前应使用 Git main 安装验证。

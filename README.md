@@ -4,6 +4,8 @@
 
 核心逻辑全部位于 Rust 源码中；`scripts/install.sh` 只负责下载、校验并安装官方预编译二进制。
 
+> 当前五协议实现已经合并到 `main`，但尚未创建高于 v0.1.3 的新 Release。发布新版本前，如需测试 Shadowsocks/AnyTLS，请使用下文的 `cargo install --git ...`；顶部一键脚本仍安装现有稳定版 v0.1.3。
+
 ## 一键安装（推荐）
 
 无需预装 Rust。在 Ubuntu 22.04/24.04、Debian 12、Rocky Linux 9、AlmaLinux 9 等 systemd Linux 上执行：
