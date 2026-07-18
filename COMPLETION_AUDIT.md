@@ -27,12 +27,12 @@
 | BBR、端口检查、备份恢复 | 已实现，Debian/Ubuntu 实测 | `src/operations.rs` | 两台 VPS 均由 ping-rust 写入并验证 bbr/fq；TCP/UDP 端口判断、0600 备份 round-trip 和服务状态恢复均通过 |
 | Clash Meta、sing-box、Nekobox 客户端导出 | 已实现，前三协议 Debian/Ubuntu 实测 | `src/client.rs` | 五协议 YAML/JSON/URI 解析测试；Reality 私钥不泄漏；普通 AnyTLS 支持三格式，AnyTLS+Reality 仅输出 sing-box，Mihomo/标准 URI 不支持时明确报错 |
 | Ubuntu 22.04/24.04、Debian 12、Rocky/Alma 9 x86_64 | 构建/测试通过；Ubuntu/Debian 运行态实测 | `.github/workflows/ci.yml`、`.github/workflows/ubuntu-acceptance.yml` | CI 覆盖五个目标系统；Ubuntu acceptance run `29635760772` 实际加载五协议并复核监听，另有 Ubuntu 24.04.3 与 Debian 12 独立 systemd/公网验收；GNU ELF 最高 GLIBC 2.34 |
-| ARM64 次优先支持 | 构建与模拟运行已证实 | `src/installer.rs`、Release workflow | aarch64 GNU ELF 最高 GLIBC 2.34；v0.1.6 aarch64 musl 静态 binary 通过 qemu-user-static `--version` 并公开发布 |
-| ping-rust 预编译一键安装 | 已发布并端到端验证 | `.github/workflows/release.yml`、`scripts/install.sh` | v0.1.6 的 x86_64/aarch64 musl、SHA256SUMS 已公开；Release workflow 全部成功，并从公开 URL 完成指定版本安装、`prs` 链接、冲突保护、旧 `sb` 迁移、自更新与 version 验证 |
+| ARM64 次优先支持 | 构建与模拟运行已证实 | `src/installer.rs`、Release workflow | aarch64 GNU ELF 最高 GLIBC 2.34；v0.1.7 aarch64 musl 静态 binary 通过 qemu-user-static `--version` 并公开发布 |
+| ping-rust 预编译一键安装 | 已发布并端到端验证 | `.github/workflows/release.yml`、`scripts/install.sh` | v0.1.7 的 x86_64/aarch64 musl、SHA256SUMS 已公开；Release workflow 从公开 URL 零输入部署默认 Reality，验证随机监听、systemd、URI 与重复运行保护，同时覆盖 `prs`、冲突保护、旧 `sb` 迁移和自更新 |
 | ping-rust 原生自更新 | 已发布并端到端验证 | `src/self_update.rs`、`src/cli.rs`、`src/menu.rs` | 独立 `self-update` 保留 shoes `update` 语义；v0.1.6 发布 job 在非 root 自定义目录真实完成公开资产下载、双重 SHA-256、运行中原子替换和安装后版本复核 |
 | README、MIT、cargo install 发布 | 已发布并验证 | `README.md`、`LICENSE`、`scripts/install.sh` | README 第一屏提供无需 Rust 的一键入口，并保留 crates.io/Git/源码安装；release build、doc、隔离 `cargo package` 门禁通过 |
 | GitHub 源码开源 | 已发布 | `Cargo.toml`、GitHub `main` | `Jyanbai/ping-rust` 已为 Public/非空并建立 `main`；首个提交与跨平台 CI 修复均已推送 |
-| 公开 `cargo install ping-rust` | 已发布并验证 | crates.io `ping-rust 0.1.6` | 正式 `cargo publish --locked` 成功；公开 registry 搜索与独立 `cargo install ping-rust --version 0.1.6 --locked` 均验证版本、`add --help` 和 `--plain` 入口 |
+| 公开 `cargo install ping-rust` | 已发布并验证 | crates.io `ping-rust 0.1.7` | 正式 `cargo publish --locked` 成功；公开 registry 搜索与独立 `cargo install ping-rust --version 0.1.7 --locked` 均返回 0.1.7 |
 | 干净 Ubuntu 24.04 三分钟部署并公网连通 | 已完成 | `README.md` 验收清单、Ubuntu acceptance workflow | Ubuntu 24.04.3 干净基线安装后，Reality 部署约 2 秒；官方 Windows sing-box 在 reboot 前后均握手成功且观察到 VPS 公网出口 |
 
 ## Milestone 10：latest shoes 五协议 schema 对齐
@@ -84,6 +84,11 @@
 - Release workflow 从公开 tag 资产运行默认 install.sh 全链路，静默捕获敏感 URI，验证监听、重复 bootstrap 幂等，再卸载清理；普通安装/冲突/迁移测试使用 `--no-bootstrap` 保持职责独立。
 - 本地门禁：55/55 tests、fmt、check、clippy `-D warnings`、actionlint v1.7.12、ShellCheck 全通过。
 - 首轮 Ubuntu run `29642950205` 已实际完成 shoes 安装、systemd unit 启用和 Reality 激活，随后因验收脚本用行首锚点从带终端样式的展示输出提取 URI 而失败；改为只确认展示含 URI，再通过 `url` 命令取得规范值，不更改产品部署逻辑。
+- 精确产品提交 `5774869` 的 CI run `29642950179` 与固定 shoes schema run `29642950174` 成功；验收提取修复提交 `a473cfb` 的 CI run `29643148634` 与 Ubuntu 24.04 acceptance run `29643148659` 全部成功。
+- v0.1.7 Release run `29643229765` 的双架构 MUSL build 和发布 job 全部成功；“Verify published one-click installer”直接运行公开安装器，验证零询问、随机端口、规范 URI、systemd active、真实监听与二次 bootstrap 安全跳过。
+- v0.1.7 tag shoes schema run `29643229756` 从固定 shoes 0.2.8 源码构建，并对五协议、全部 Shadowsocks cipher、Reality+AnyTLS 执行实际 `shoes --dry-run`，全部成功。
+- v0.1.7 公开资产独立下载复核：x86_64 2,598,642 bytes / SHA-256 `ac31ed3e9db951ffb900f970fb7f027bfeb11bcb0cff7c625520d0d719c50767`；aarch64 2,431,641 bytes / SHA-256 `d15373ce83ea3dfb58b574f745d76714aeeefbf1e91db6612e1fb49fe260d455`；两者与公开 `SHA256SUMS` 和 GitHub API digest 一致。
+- crates.io 0.1.7 已正式发布；`cargo search ping-rust` 返回 0.1.7，全新隔离 Cargo root 从 registry 下载编译后 `ping-rust --version` 返回 `ping-rust 0.1.7`。
 
 ## Milestone 6 修复结果
 
@@ -174,7 +179,12 @@
 - v0.1.6 main 门禁：CI run `29641525438`、shoes schema run `29641525465`、Ubuntu acceptance run `29641525455` 全部成功；真实 PTY 使用连续协议编号并输入 0 退出。
 - v0.1.6 Release run `29641681305` 全部成功；双架构 MUSL、SHA256SUMS、一键安装、`prs`、冲突保护、旧 `sb` 迁移与自更新均通过。
 - crates.io 0.1.6 正式发布且公开检索可见；独立 registry 安装、版本和快速添加帮助验证成功。
+- v0.1.7 发布前 main 门禁：CI run `29643148634` 和 Ubuntu 24.04 acceptance run `29643148659` 成功；安装器 bootstrap 零输入完成 Reality、systemd、监听和完整后续五协议验收。
+- v0.1.7 tag CI run `29643229768` 五个目标发行版全部成功；Release run `29643229765` 的 x86_64/aarch64 MUSL 与公开一键安装完整探针全部成功。
+- v0.1.7 tag shoes schema run `29643229756` 成功；固定 shoes 0.2.8 的全部协议生成与 dry-run 矩阵再次通过。
+- v0.1.7 公开资产：x86_64 2,598,642 bytes / SHA-256 `ac31ed3e9db951ffb900f970fb7f027bfeb11bcb0cff7c625520d0d719c50767`；aarch64 2,431,641 bytes / SHA-256 `d15373ce83ea3dfb58b574f745d76714aeeefbf1e91db6612e1fb49fe260d455`；两者与 SHA256SUMS、GitHub API digest 一致。
+- crates.io 0.1.7 正式发布；公开 registry 搜索与全新隔离安装均确认 `ping-rust 0.1.7`。
 
 ## 发布状态
 
-公开稳定版 v0.1.6 已发布。v0.1.7 的安装脚本零输入默认 Reality 已完成本地实现与静态门禁，等待远端五发行版 CI、Ubuntu 24.04 bootstrap/systemd 验收及正式发布。
+公开稳定版 v0.1.7 已发布。默认一键安装会在无现有配置时零输入完成 VLESS-Reality-Vision 随机端口部署、systemd 激活并直接输出 `vless://`；升级或重复运行检测到配置后安全跳过。
