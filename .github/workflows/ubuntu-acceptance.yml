@@ -290,20 +290,22 @@ jobs:
           sudo systemctl is-active --quiet shoes.service
           sudo systemctl is-enabled --quiet shoes.service
 
-          sudo mv /usr/local/bin/shoes /usr/local/bin/shoes.real
-          sudo tee /usr/local/bin/shoes >/dev/null <<'FAKE_SHOES'
+          sudo tee /run/ping-rust-fail-once.sh >/dev/null <<'FAIL_ONCE'
           #!/usr/bin/env bash
-          if [ "${1:-}" = "--dry-run" ]; then
-            exit 0
-          fi
           marker=/run/ping-rust-activation-fault
           if [ ! -e "$marker" ]; then
             touch "$marker"
             exit 42
           fi
-          exec /usr/local/bin/shoes.real "$@"
-          FAKE_SHOES
-          sudo chmod 0755 /usr/local/bin/shoes
+          exit 0
+          FAIL_ONCE
+          sudo chmod 0755 /run/ping-rust-fail-once.sh
+          sudo mkdir -p /etc/systemd/system/shoes.service.d
+          sudo tee /etc/systemd/system/shoes.service.d/activation-fault.conf >/dev/null <<'FAULT_DROPIN'
+          [Service]
+          ExecStartPre=/run/ping-rust-fail-once.sh
+          FAULT_DROPIN
+          sudo systemctl daemon-reload
 
           failure_log="$RUNNER_TEMP/activation-failure.txt"
           set +e
@@ -316,13 +318,14 @@ jobs:
           set -e
           sudo test -e /run/ping-rust-activation-fault \
             || { echo 'activation fault did not execute' >&2; exit 1; }
-          sudo mv /usr/local/bin/shoes.real /usr/local/bin/shoes
-          sudo rm -f /run/ping-rust-activation-fault
+          sudo rm -f /etc/systemd/system/shoes.service.d/activation-fault.conf \
+            /run/ping-rust-fail-once.sh /run/ping-rust-activation-fault
+          sudo rmdir /etc/systemd/system/shoes.service.d
+          sudo systemctl daemon-reload
           test "$add_status" -ne 0 \
             || { echo 'activation failure injection unexpectedly succeeded' >&2; exit 1; }
           grep -q '回滚' "$failure_log" || { echo 'missing rollback marker' >&2; exit 1; }
           ! grep -q 'ss://' "$failure_log" || { echo 'failure leaked share URI' >&2; exit 1; }
-          sudo test ! -e /usr/local/bin/shoes.real || { echo 'kernel backup remains' >&2; exit 1; }
           test "$(sudo sha256sum /etc/shoes/config.yaml | awk '{print $1}')" = "$config_before" \
             || { echo 'config hash mismatch' >&2; exit 1; }
           test "$(sudo sha256sum /etc/shoes/ping-rust-state.json | awk '{print $1}')" = "$state_before" \
@@ -409,7 +412,8 @@ jobs:
           fi
           sudo systemctl disable --now shoes.service 2>/dev/null || true
           sudo rm -f /etc/systemd/system/shoes.service /usr/local/bin/shoes
-          sudo rm -f /usr/local/bin/shoes.real /run/ping-rust-activation-fault
+          sudo rm -f /run/ping-rust-fail-once.sh /run/ping-rust-activation-fault
+          sudo rm -rf /etc/systemd/system/shoes.service.d
           rm -f "${SB:-}"
           sudo rm -rf /etc/shoes
           sudo systemctl daemon-reload
