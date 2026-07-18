@@ -110,7 +110,11 @@ jobs:
           done
           sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)24443$'
 
-          reality_profile="$(printf '%s' "$reality_uri" | sed -E 's#^vless://([^@]+)@.*#\1#')"
+          reality_profile="$(
+            printf '%s' "$info_output" \
+              | grep -Eo '[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}' \
+              | head -n 1
+          )"
           test -n "$reality_profile"
           printf 'REALITY_PROFILE=%s\n' "$reality_profile" >> "$GITHUB_ENV"
 
