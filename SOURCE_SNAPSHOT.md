@@ -7,7 +7,7 @@
 ````toml
 [package]
 name = "ping-rust"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 description = "Menu-driven installer and manager for the shoes proxy server"
 license = "MIT"
@@ -4790,7 +4790,7 @@ mod tests {
 
 核心逻辑全部位于 Rust 源码中；`scripts/install.sh` 只负责下载、校验并安装官方预编译二进制。
 
-> 当前五协议实现已经合并到 `main`，但尚未创建高于 v0.1.3 的新 Release。发布新版本前，如需测试 Shadowsocks/AnyTLS，请使用下文的 `cargo install --git ...`；顶部一键脚本仍安装现有稳定版 v0.1.3。
+> v0.1.4 已包含 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks 和 AnyTLS 五协议支持。
 
 ## 一键安装（推荐）
 
@@ -4807,7 +4807,7 @@ sudo ping-rust
 ```bash
 bash <(curl --proto '=https' --tlsv1.2 -fsSL \
   https://raw.githubusercontent.com/Jyanbai/ping-rust/main/scripts/install.sh) \
-  --version v0.1.3
+  --version v0.1.4
 
 bash <(curl --proto '=https' --tlsv1.2 -fsSL \
   https://raw.githubusercontent.com/Jyanbai/ping-rust/main/scripts/install.sh) \
@@ -4853,7 +4853,7 @@ sudo apt-get install -y build-essential pkg-config git ca-certificates
 sudo dnf install -y gcc gcc-c++ make pkgconf-pkg-config git ca-certificates
 ```
 
-从 [crates.io](https://crates.io/crates/ping-rust) 安装已发布的 `0.1.3`：
+从 [crates.io](https://crates.io/crates/ping-rust) 安装已发布的 `0.1.4`：
 
 ```bash
 cargo install ping-rust --locked
@@ -4998,8 +4998,8 @@ sudo ping-rust self-update
 `update` 只更新 shoes 内核；`self-update` 更新 ping-rust 本身。默认安装最新 Release，也可以指定版本；显式指定旧版本表示受控降级：
 
 ```bash
-sudo ping-rust self-update --version v0.1.3
-sudo ping-rust self-update --version v0.1.3 --force
+sudo ping-rust self-update --version v0.1.4
+sudo ping-rust self-update --version v0.1.4 --force
 ```
 
 自更新支持 Linux x86_64/aarch64，下载对应 musl 静态包，校验 GitHub API digest 与 `SHA256SUMS`，确认新二进制版本后才替换当前程序。程序位于 `/usr/local/bin` 时通常需要 `sudo`；用户目录内可写的 cargo 安装则不需要。
