@@ -2152,6 +2152,8 @@ use clap::ValueEnum;
 use crate::utils;
 
 pub const SERVICE_NAME: &str = "shoes.service";
+const ENABLE_NOW_COMMAND: &[&str] = &["enable", "--now", SERVICE_NAME];
+const RESTART_COMMAND: &[&str] = &["restart", SERVICE_NAME];
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum ServiceAction {
@@ -2200,6 +2202,8 @@ WantedBy=multi-user.target
 pub fn install_unit(enable_now: bool) -> Result<()> {
     utils::require_linux_root()?;
     ensure_systemctl()?;
+    let was_active =
+        enable_now && Path::new(utils::SERVICE_FILE).exists() && systemctl_is_active()?;
     utils::atomic_write(
         Path::new(utils::SERVICE_FILE),
         unit_contents().as_bytes(),
@@ -2207,9 +2211,19 @@ pub fn install_unit(enable_now: bool) -> Result<()> {
     )?;
     systemctl(&["daemon-reload"])?;
     if enable_now {
-        systemctl(&["enable", "--now", SERVICE_NAME])?;
+        for command in activation_commands(was_active) {
+            systemctl(command)?;
+        }
     }
     Ok(())
+}
+
+fn activation_commands(was_active: bool) -> Vec<&'static [&'static str]> {
+    let mut commands = vec![ENABLE_NOW_COMMAND];
+    if was_active {
+        commands.push(RESTART_COMMAND);
+    }
+    commands
 }
 
 pub fn execute(action: ServiceAction) -> Result<()> {
@@ -2255,6 +2269,10 @@ pub fn uninstall_unit() -> Result<bool> {
 pub fn is_active() -> Result<bool> {
     utils::require_linux()?;
     ensure_systemctl()?;
+    systemctl_is_active()
+}
+
+fn systemctl_is_active() -> Result<bool> {
     Ok(Command::new("systemctl")
         .args(["is-active", "--quiet", SERVICE_NAME])
         .status()
@@ -2291,6 +2309,15 @@ mod tests {
         assert!(unit.contains("Restart=on-failure"));
         assert!(unit.contains("NoNewPrivileges=true"));
         assert!(unit.contains("WantedBy=multi-user.target"));
+    }
+
+    #[test]
+    fn active_service_is_restarted_after_enabling_updated_unit() {
+        assert_eq!(activation_commands(false), vec![ENABLE_NOW_COMMAND]);
+        assert_eq!(
+            activation_commands(true),
+            vec![ENABLE_NOW_COMMAND, RESTART_COMMAND]
+        );
     }
 }
 ````

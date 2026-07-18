@@ -1,0 +1,246 @@
+name: Ubuntu 24.04 acceptance
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/ubuntu-acceptance.yml
+      - Cargo.toml
+      - Cargo.lock
+      - src/**
+
+permissions:
+  contents: read
+
+env:
+  PUBLIC_VERSION: 0.1.2
+
+jobs:
+  root-systemd:
+    name: Public install and root/systemd runtime
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Verify clean Ubuntu 24.04 x86_64 baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          . /etc/os-release
+          test "$ID" = ubuntu
+          test "$VERSION_ID" = 24.04
+          test "$(uname -m)" = x86_64
+          systemctl --version
+          test ! -e /usr/local/bin/shoes
+          test ! -e /etc/shoes
+          test ! -e /etc/systemd/system/shoes.service
+
+      - name: Verify public crates.io installation
+        shell: bash
+        run: |
+          set -euo pipefail
+          public_root="$RUNNER_TEMP/ping-rust-public"
+          cargo install ping-rust \
+            --version "$PUBLIC_VERSION" \
+            --locked \
+            --root "$public_root"
+          test "$("$public_root/bin/ping-rust" --version)" = \
+            "ping-rust $PUBLIC_VERSION"
+
+      - name: Install current source under test
+        shell: bash
+        run: |
+          set -euo pipefail
+          current_root="$RUNNER_TEMP/ping-rust-current"
+          cargo install --path . --locked --root "$current_root"
+          ping_rust="$current_root/bin/ping-rust"
+          "$ping_rust" --version
+          printf 'PING_RUST=%s\n' "$ping_rust" >> "$GITHUB_ENV"
+
+      - name: Deploy Reality within three minutes
+        id: reality
+        shell: bash
+        run: |
+          set -euo pipefail
+          started_at="$(date +%s)"
+
+          sudo "$PING_RUST" install --method release
+          reality_output="$RUNNER_TEMP/reality-generation.txt"
+          sudo "$PING_RUST" generate reality \
+            --name acceptance-reality \
+            --port 24443 \
+            --server-name www.cloudflare.com \
+            --dest www.cloudflare.com:443 \
+            | sudo tee "$reality_output" >/dev/null
+
+          elapsed="$(( $(date +%s) - started_at ))"
+          test "$elapsed" -le 180
+          printf 'elapsed=%s\n' "$elapsed" >> "$GITHUB_OUTPUT"
+
+          sudo systemctl is-active --quiet shoes.service
+          sudo systemctl is-enabled --quiet shoes.service
+          for _ in {1..20}; do
+            if sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)24443$'; then
+              break
+            fi
+            sleep 0.5
+          done
+          sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)24443$'
+
+          reality_profile="$(
+            grep -Eo '[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}' \
+              "$reality_output" | head -n 1
+          )"
+          test -n "$reality_profile"
+          printf 'REALITY_PROFILE=%s\n' "$reality_profile" >> "$GITHUB_ENV"
+          sudo rm -f "$reality_output"
+
+      - name: Add Hysteria2 and confirm service reload
+        shell: bash
+        run: |
+          set -euo pipefail
+          previous_pid="$(sudo systemctl show --property MainPID --value shoes.service)"
+          test "$previous_pid" -gt 0
+
+          hysteria_output="$RUNNER_TEMP/hysteria2-generation.txt"
+          sudo "$PING_RUST" generate hysteria2 \
+            --name acceptance-hysteria2 \
+            --port 24444 \
+            --server-name localhost \
+            | sudo tee "$hysteria_output" >/dev/null
+
+          current_pid="$(sudo systemctl show --property MainPID --value shoes.service)"
+          test "$current_pid" -gt 0
+          test "$current_pid" != "$previous_pid"
+          sudo systemctl is-active --quiet shoes.service
+          for _ in {1..20}; do
+            if sudo ss -H -lun | awk '{print $4}' | grep -Eq '(^|:)24444$'; then
+              break
+            fi
+            sleep 0.5
+          done
+          sudo ss -H -lun | awk '{print $4}' | grep -Eq '(^|:)24444$'
+
+          hysteria_profile="$(
+            grep -Eo '[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}' \
+              "$hysteria_output" | head -n 1
+          )"
+          test -n "$hysteria_profile"
+          printf 'HYSTERIA_PROFILE=%s\n' "$hysteria_profile" >> "$GITHUB_ENV"
+          sudo rm -f "$hysteria_output"
+
+      - name: Add TUIC and confirm service reload
+        shell: bash
+        run: |
+          set -euo pipefail
+          previous_pid="$(sudo systemctl show --property MainPID --value shoes.service)"
+          test "$previous_pid" -gt 0
+
+          tuic_output="$RUNNER_TEMP/tuic-generation.txt"
+          sudo "$PING_RUST" generate tuic \
+            --name acceptance-tuic \
+            --port 24445 \
+            --server-name localhost \
+            | sudo tee "$tuic_output" >/dev/null
+
+          current_pid="$(sudo systemctl show --property MainPID --value shoes.service)"
+          test "$current_pid" -gt 0
+          test "$current_pid" != "$previous_pid"
+          sudo systemctl is-active --quiet shoes.service
+          for _ in {1..20}; do
+            if sudo ss -H -lun | awk '{print $4}' | grep -Eq '(^|:)24445$'; then
+              break
+            fi
+            sleep 0.5
+          done
+          sudo ss -H -lun | awk '{print $4}' | grep -Eq '(^|:)24445$'
+
+          tuic_profile="$(
+            grep -Eo '[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}' \
+              "$tuic_output" | head -n 1
+          )"
+          test -n "$tuic_profile"
+          printf 'TUIC_PROFILE=%s\n' "$tuic_profile" >> "$GITHUB_ENV"
+          sudo rm -f "$tuic_output"
+
+      - name: Verify client exports and operations
+        shell: bash
+        run: |
+          set -euo pipefail
+          for entry in \
+            "reality:$REALITY_PROFILE" \
+            "hysteria2:$HYSTERIA_PROFILE" \
+            "tuic:$TUIC_PROFILE"; do
+            name="${entry%%:*}"
+            profile="${entry#*:}"
+            sudo "$PING_RUST" export clash-meta \
+              --profile "$profile" \
+              --server 127.0.0.1 \
+              --output "$RUNNER_TEMP/$name-clash.yaml"
+            sudo "$PING_RUST" export sing-box \
+              --profile "$profile" \
+              --server 127.0.0.1 \
+              --output "$RUNNER_TEMP/$name-sing-box.json"
+            sudo "$PING_RUST" export nekobox \
+              --profile "$profile" \
+              --server 127.0.0.1 \
+              --output "$RUNNER_TEMP/$name-nekobox.txt"
+            sudo test -s "$RUNNER_TEMP/$name-clash.yaml"
+            sudo test -s "$RUNNER_TEMP/$name-sing-box.json"
+            sudo test -s "$RUNNER_TEMP/$name-nekobox.txt"
+            sudo python3 -m json.tool \
+              "$RUNNER_TEMP/$name-sing-box.json" >/dev/null
+          done
+
+          backup="$RUNNER_TEMP/shoes-backup.tar.gz"
+          sudo "$PING_RUST" backup "$backup"
+          sudo test -s "$backup"
+          sudo "$PING_RUST" restore "$backup"
+          sudo "$PING_RUST" update --method release
+          sudo "$PING_RUST" service restart
+          sudo "$PING_RUST" service status
+          sudo "$PING_RUST" logs --lines 20
+          sudo "$PING_RUST" info
+
+          sudo systemctl is-active --quiet shoes.service
+          sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)24443$'
+          sudo ss -H -lun | awk '{print $4}' | grep -Eq '(^|:)24444$'
+          sudo ss -H -lun | awk '{print $4}' | grep -Eq '(^|:)24445$'
+
+      - name: Record acceptance summary
+        shell: bash
+        run: |
+          {
+            echo '### Ubuntu 24.04 acceptance'
+            echo
+            echo "- Public crates.io version: $PUBLIC_VERSION"
+            echo "- Reality deployment: ${{ steps.reality.outputs.elapsed }} seconds"
+            echo '- systemd: enabled, active, restart verified'
+            echo '- Protocol listeners: Reality, Hysteria2, TUIC'
+            echo '- Client exports: Clash Meta, sing-box, Nekobox'
+            echo '- Operations: logs, backup, restore, update, restart, info'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Uninstall and verify cleanup
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          if [ -n "${PING_RUST:-}" ] && [ -x "$PING_RUST" ]; then
+            sudo "$PING_RUST" uninstall --purge
+          fi
+          sudo systemctl disable --now shoes.service 2>/dev/null || true
+          sudo rm -f /etc/systemd/system/shoes.service /usr/local/bin/shoes
+          sudo rm -rf /etc/shoes
+          sudo systemctl daemon-reload
+          set -e
+          test ! -e /usr/local/bin/shoes
+          test ! -e /etc/shoes
+          test ! -e /etc/systemd/system/shoes.service
