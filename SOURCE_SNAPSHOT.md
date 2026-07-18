@@ -55,7 +55,6 @@ codegen-units = 1
 strip = true
 ````
 
-
 ## `src/main.rs`
 
 ````rust
@@ -79,7 +78,6 @@ async fn main() -> Result<()> {
     cli::run(cli::Cli::parse()).await
 }
 ````
-
 
 ## `src/cli.rs`
 
@@ -410,17 +408,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             if !yes {
                 anyhow::bail!("删除配置需要显式添加 --yes；也可使用交互菜单确认");
             }
-            let unit_exists = std::path::Path::new(crate::utils::SERVICE_FILE).exists();
-            let was_active = unit_exists && service::is_active()?;
-            let deleted = config::delete_profile(profile).await?;
-            let state = config::load_state()?;
-            if was_active {
-                if state.profiles.is_empty() {
-                    service::execute(ServiceAction::Stop)?;
-                } else {
-                    service::execute(ServiceAction::Restart)?;
-                }
-            }
+            let deleted = deployment::delete_and_activate(profile).await?;
             println!("已删除配置 {} ({})", deleted.name, deleted.id);
             Ok(())
         }
@@ -577,7 +565,7 @@ fn bootstrap_required(config: &Path, state: &Path) -> bool {
 pub(crate) fn print_add_result(result: &fast_add::AddResult) {
     let profile = &result.generation.profile;
     println!("{}", "部署成功，shoes 服务已启动。".green().bold());
-    println!("配置：{}", profile.display_name());
+    println!("配置：{}", profile.config_file_name());
     println!("协议：{}", profile.protocol_name());
     println!("端口：{}", profile.port);
     println!("\n------------- URL 链接 -------------\n");
@@ -976,7 +964,6 @@ mod tests {
 }
 ````
 
-
 ## `src/menu.rs`
 
 ````rust
@@ -1114,13 +1101,14 @@ fn select_profile(profiles: &[config::ManagedProfile]) -> Result<Option<usize>> 
     }
     let labels = profiles
         .iter()
-        .map(config::ManagedProfile::display_name)
+        .map(config::ManagedProfile::config_file_name)
         .collect::<Vec<_>>();
     select_numbered("请选择配置", &labels)
 }
 
 pub async fn run() -> Result<()> {
     cli::bootstrap_default_reality().await?;
+    config::ensure_profile_files().await?;
     loop {
         println!(
             "\n------------- ping-rust v{} -------------",
@@ -1331,7 +1319,7 @@ async fn change_config_menu() -> Result<()> {
     println!(
         "{} {}",
         "配置更改成功：".green(),
-        result.profile.display_name()
+        result.profile.config_file_name()
     );
     if let Some(server) = result.profile.server_address.as_deref() {
         match client::share_uri(&result.profile, server) {
@@ -1353,7 +1341,7 @@ fn view_config_menu() -> Result<()> {
     };
     let profile = &state.profiles[selected];
     println!("\n------------- 配置信息 -------------\n");
-    println!("名称: {}", profile.display_name());
+    println!("文件: {}", profile.config_file_name());
     println!("协议: {}", profile.protocol_name());
     println!("端口: {}", profile.port);
     if profile.server_name() != "-" {
@@ -1380,24 +1368,14 @@ async fn delete_config_menu() -> Result<()> {
     };
     let profile = &state.profiles[selected];
     if !Confirm::with_theme(&ColorfulTheme::default())
-        .with_prompt(format!("确认删除 {}？", profile.display_name()))
+        .with_prompt(format!("确认删除 {}？", profile.config_file_name()))
         .default(false)
         .interact()?
     {
         return Ok(());
     }
-    let unit_exists = std::path::Path::new(crate::utils::SERVICE_FILE).exists();
-    let was_active = unit_exists && service::is_active()?;
-    let deleted = config::delete_profile(profile.id).await?;
-    let remaining = config::load_state()?;
-    if was_active {
-        if remaining.profiles.is_empty() {
-            service::execute(ServiceAction::Stop)?;
-        } else {
-            service::execute(ServiceAction::Restart)?;
-        }
-    }
-    println!("{} {}", "已删除：".green(), deleted.display_name());
+    let deleted = deployment::delete_and_activate(profile.id).await?;
+    println!("{} {}", "已删除：".green(), deleted.config_file_name());
     Ok(())
 }
 
@@ -1833,7 +1811,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_lists_use_short_protocol_and_port_labels() {
+    fn profile_lists_use_real_protocol_and_port_file_names() {
         let profile = config::ManagedProfile {
             id: uuid::Uuid::new_v4(),
             name: "reality-abcd1234".to_owned(),
@@ -1851,11 +1829,11 @@ mod tests {
             self_signed_certificate: false,
         };
         assert_eq!(profile.display_name(), "VLESS-REALITY-53453");
+        assert_eq!(profile.config_file_name(), "VLESS-REALITY-53453.yaml");
         assert!(!profile.display_name().contains(&profile.id.to_string()));
     }
 }
 ````
-
 
 ## `src/installer.rs`
 
@@ -2441,7 +2419,6 @@ mod tests {
 }
 ````
 
-
 ## `src/config.rs`
 
 ````rust
@@ -2646,11 +2623,24 @@ pub struct GenerationResult {
     _lock: Option<utils::ExclusiveLock>,
 }
 
+pub(crate) struct DeletionResult {
+    pub profile: ManagedProfile,
+    pub remaining_profiles: usize,
+    rollback: Option<ManagedRollback>,
+    _lock: Option<utils::ExclusiveLock>,
+}
+
 struct ManagedRollback {
     config: Option<Vec<u8>>,
     state: Option<Vec<u8>>,
+    profiles: ProfileDirectorySnapshot,
     generated_certificate: Option<PathBuf>,
     generated_certificate_key: Option<PathBuf>,
+}
+
+struct ProfileDirectorySnapshot {
+    existed: bool,
+    files: BTreeMap<String, Vec<u8>>,
 }
 
 impl GenerationResult {
@@ -2659,14 +2649,55 @@ impl GenerationResult {
             .rollback
             .take()
             .context("该生成结果不包含可回滚的系统配置事务")?;
-        rollback.restore_to(Path::new(utils::CONFIG_FILE), Path::new(utils::STATE_FILE))
+        rollback.restore_to(
+            Path::new(utils::CONFIG_FILE),
+            Path::new(utils::STATE_FILE),
+            Path::new(utils::PROFILES_DIR),
+        )
+    }
+}
+
+impl DeletionResult {
+    pub fn rollback_managed(&mut self) -> Result<()> {
+        let rollback = self
+            .rollback
+            .take()
+            .context("该删除结果不包含可回滚的系统配置事务")?;
+        rollback.restore_to(
+            Path::new(utils::CONFIG_FILE),
+            Path::new(utils::STATE_FILE),
+            Path::new(utils::PROFILES_DIR),
+        )
+    }
+
+    pub fn finish(self) -> ManagedProfile {
+        self.finish_with(remove_managed_credential)
+    }
+
+    fn finish_with(
+        mut self,
+        mut remove_credential: impl FnMut(Option<&Path>) -> Result<()>,
+    ) -> ManagedProfile {
+        self.rollback.take();
+        if self.profile.self_signed_certificate {
+            for path in [
+                self.profile.certificate_path.as_deref(),
+                self.profile.certificate_key_path.as_deref(),
+            ] {
+                if let Err(error) = remove_credential(path) {
+                    eprintln!("警告：配置已删除，但清理凭据失败：{error:#}");
+                }
+            }
+        }
+        self.profile
     }
 }
 
 impl ManagedRollback {
-    fn restore_to(self, config_path: &Path, state_path: &Path) -> Result<()> {
+    fn restore_to(self, config_path: &Path, state_path: &Path, profiles_path: &Path) -> Result<()> {
         let state_result = restore_snapshot(state_path, self.state.as_deref(), 0o600);
         let config_result = restore_snapshot(config_path, self.config.as_deref(), 0o600);
+        let profiles_result = self.profiles.restore(profiles_path);
         for path in [
             self.generated_certificate.as_deref(),
             self.generated_certificate_key.as_deref(),
@@ -2679,14 +2710,88 @@ impl ManagedRollback {
                     .with_context(|| format!("删除回滚凭据 {} 失败", path.display()))?;
             }
         }
-        match (state_result, config_result) {
-            (Ok(()), Ok(())) => Ok(()),
-            (Err(state), Ok(())) => Err(state.context("恢复管理状态失败")),
-            (Ok(()), Err(config)) => Err(config.context("恢复 shoes 配置失败")),
-            (Err(state), Err(config)) => {
-                bail!("恢复管理状态和 shoes 配置均失败：状态={state:#}；配置={config:#}")
+        let mut failures = Vec::new();
+        if let Err(error) = state_result {
+            failures.push(format!("状态={error:#}"));
+        }
+        if let Err(error) = config_result {
+            failures.push(format!("聚合配置={error:#}"));
+        }
+        if let Err(error) = profiles_result {
+            failures.push(format!("节点目录={error:#}"));
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            bail!("恢复受管配置失败：{}", failures.join("；"))
+        }
+    }
+}
+
+impl ProfileDirectorySnapshot {
+    fn capture(path: &Path) -> Result<Self> {
+        let metadata = match fs::symlink_metadata(path) {
+            Ok(metadata) => Some(metadata),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(error).with_context(|| format!("读取节点目录 {} 失败", path.display()))
+            }
+        };
+        let Some(metadata) = metadata else {
+            return Ok(Self {
+                existed: false,
+                files: BTreeMap::new(),
+            });
+        };
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            bail!("节点目录不是普通目录：{}", path.display());
+        }
+        let mut files = BTreeMap::new();
+        for entry in
+            fs::read_dir(path).with_context(|| format!("读取节点目录 {} 失败", path.display()))?
+        {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                bail!(
+                    "节点目录包含链接、目录或特殊文件：{}",
+                    entry.path().display()
+                );
+            }
+            let name = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| anyhow::anyhow!("节点文件名不是 UTF-8：{}", entry.path().display()))?;
+            files.insert(
+                name,
+                fs::read(entry.path())
+                    .with_context(|| format!("读取节点文件 {} 失败", entry.path().display()))?,
+            );
+        }
+        Ok(Self {
+            existed: true,
+            files,
+        })
+    }
+
+    fn restore(self, path: &Path) -> Result<()> {
+        if path.exists() {
+            let metadata = fs::symlink_metadata(path)?;
+            if metadata.is_dir() && !metadata.file_type().is_symlink() {
+                fs::remove_dir_all(path)
+                    .with_context(|| format!("清理节点目录 {} 失败", path.display()))?;
+            } else {
+                fs::remove_file(path)
+                    .with_context(|| format!("清理节点路径 {} 失败", path.display()))?;
             }
         }
+        if !self.existed {
+            return Ok(());
+        }
+        utils::ensure_directory(path, 0o700)?;
+        for (name, contents) in self.files {
+            utils::atomic_write(&path.join(name), &contents, 0o600)?;
+        }
+        Ok(())
     }
 }
 
@@ -2780,6 +2885,10 @@ impl ManagedProfile {
             Protocol::AnyTls => "ANYTLS",
         };
         format!("{protocol}-{}", self.port)
+    }
+
+    pub fn config_file_name(&self) -> String {
+        format!("{}.yaml", self.display_name())
     }
 
     pub fn protocol(&self) -> Protocol {
@@ -3058,6 +3167,7 @@ async fn generate_inner_with_lock(
         Some(ManagedRollback {
             config: read_optional(Path::new(utils::CONFIG_FILE))?,
             state: read_optional(Path::new(utils::STATE_FILE))?,
+            profiles: ProfileDirectorySnapshot::capture(Path::new(utils::PROFILES_DIR))?,
             generated_certificate: self_signed.then(|| certificate_path.clone()).flatten(),
             generated_certificate_key: self_signed.then(|| certificate_key_path.clone()).flatten(),
         })
@@ -3065,7 +3175,12 @@ async fn generate_inner_with_lock(
         None
     };
     if managed {
-        commit_managed(&request.output, Path::new(utils::STATE_FILE), &yaml, &state)?;
+        commit_managed(
+            &request.output,
+            Path::new(utils::STATE_FILE),
+            &servers,
+            &state,
+        )?;
     } else {
         utils::atomic_write(&request.output, yaml.as_bytes(), 0o600)?;
     }
@@ -3131,6 +3246,7 @@ pub(crate) async fn update_profile_locked(
     let rollback = ManagedRollback {
         config: read_optional(config_path)?,
         state: read_optional(state_path)?,
+        profiles: ProfileDirectorySnapshot::capture(Path::new(utils::PROFILES_DIR))?,
         generated_certificate: None,
         generated_certificate_key: None,
     };
@@ -3139,7 +3255,7 @@ pub(crate) async fn update_profile_locked(
     let yaml = serde_yaml::to_string(&servers).context("序列化更新后 shoes YAML 失败")?;
     validate_yaml(&yaml)?;
     validate_candidate_with_shoes(&yaml, Path::new(utils::CONFIG_DIR)).await?;
-    commit_managed(config_path, state_path, &yaml, &state)?;
+    commit_managed(config_path, state_path, &servers, &state)?;
 
     Ok(GenerationResult {
         profile_id: profile.id,
@@ -3435,6 +3551,60 @@ fn load_servers(path: &Path) -> Result<Vec<ServerConfig>> {
     serde_yaml::from_str(&yaml).context("现有 shoes 配置不是 ping-rust 可管理的格式")
 }
 
+pub async fn ensure_profile_files() -> Result<bool> {
+    utils::require_linux_root()?;
+    let lock = utils::exclusive_lock(Path::new(utils::LOCK_FILE))?;
+    let config_path = Path::new(utils::CONFIG_FILE);
+    let state_path = Path::new(utils::STATE_FILE);
+    if !config_path.exists() && !state_path.exists() {
+        return Ok(false);
+    }
+    let state = load_state_for_update()?;
+    let servers = load_servers(config_path)?;
+    ensure_servers_match_state(&servers, &state.profiles)
+        .context("旧版聚合配置与管理状态不一致，无法安全迁移节点文件")?;
+    let documents = profile_documents(&servers, &state.profiles)?;
+    if profile_documents_are_current(Path::new(utils::PROFILES_DIR), &documents)? {
+        return Ok(false);
+    }
+    let yaml = serde_yaml::to_string(&servers).context("序列化迁移聚合配置失败")?;
+    if !servers.is_empty() {
+        validate_candidate_with_shoes(&yaml, Path::new(utils::CONFIG_DIR)).await?;
+    }
+    commit_managed(config_path, state_path, &servers, &state)?;
+    drop(lock);
+    Ok(true)
+}
+
+pub(crate) fn prepare_managed_snapshot(directory: &Path) -> Result<bool> {
+    let config_path = directory.join("config.yaml");
+    let state_path = directory.join("ping-rust-state.json");
+    if !state_path.exists() {
+        return Ok(false);
+    }
+    let state = load_state_from(&state_path)?;
+    let servers = load_servers(&config_path)?;
+    ensure_servers_match_state(&servers, &state.profiles).context("备份内容不一致")?;
+    let documents = profile_documents(&servers, &state.profiles)?;
+    let profiles_path = directory.join("profiles");
+    if profile_documents_are_current(&profiles_path, &documents)? {
+        return Ok(false);
+    }
+    write_profile_documents(&profiles_path, &documents)?;
+    Ok(true)
+}
+
+fn profile_documents_are_current(
+    path: &Path,
+    documents: &BTreeMap<String, Vec<u8>>,
+) -> Result<bool> {
+    let snapshot = ProfileDirectorySnapshot::capture(path)?;
+    if !snapshot.existed {
+        return Ok(documents.is_empty());
+    }
+    Ok(snapshot.files == *documents)
+}
+
 fn ensure_servers_match_state(servers: &[ServerConfig], profiles: &[ManagedProfile]) -> Result<()> {
     if servers.len() != profiles.len() {
         bail!(
@@ -3523,9 +3693,11 @@ fn save_state_to(path: &Path, state: &ManagedState) -> Result<()> {
     utils::atomic_write(path, &json, 0o600)
 }
 
-pub async fn delete_profile(id: Uuid) -> Result<ManagedProfile> {
+pub(crate) async fn delete_profile_locked(
+    id: Uuid,
+    lock: utils::ExclusiveLock,
+) -> Result<DeletionResult> {
     utils::require_linux_root()?;
-    let _lock = utils::exclusive_lock(Path::new(utils::LOCK_FILE))?;
     let mut state = load_state()?;
     let index = state
         .profiles
@@ -3536,6 +3708,13 @@ pub async fn delete_profile(id: Uuid) -> Result<ManagedProfile> {
     let mut servers = load_servers(config_path)?;
     ensure_servers_match_state(&servers, &state.profiles)
         .context("配置文件与管理状态不一致，已拒绝删除")?;
+    let rollback = ManagedRollback {
+        config: read_optional(config_path)?,
+        state: read_optional(Path::new(utils::STATE_FILE))?,
+        profiles: ProfileDirectorySnapshot::capture(Path::new(utils::PROFILES_DIR))?,
+        generated_certificate: None,
+        generated_certificate_key: None,
+    };
     servers.remove(index);
     let profile = state.profiles.remove(index);
     let yaml = serde_yaml::to_string(&servers).context("序列化更新后配置失败")?;
@@ -3543,34 +3722,37 @@ pub async fn delete_profile(id: Uuid) -> Result<ManagedProfile> {
         validate_yaml(&yaml)?;
         validate_candidate_with_shoes(&yaml, Path::new(utils::CONFIG_DIR)).await?;
     }
-    commit_managed(config_path, Path::new(utils::STATE_FILE), &yaml, &state)?;
+    commit_managed(config_path, Path::new(utils::STATE_FILE), &servers, &state)?;
 
-    if profile.self_signed_certificate {
-        for path in [
-            profile.certificate_path.as_deref(),
-            profile.certificate_key_path.as_deref(),
-        ] {
-            if let Err(error) = remove_managed_credential(path) {
-                eprintln!("警告：配置已删除，但清理凭据失败：{error:#}");
-            }
-        }
-    }
-    Ok(profile)
+    Ok(DeletionResult {
+        profile,
+        remaining_profiles: state.profiles.len(),
+        rollback: Some(rollback),
+        _lock: Some(lock),
+    })
 }
 
 fn commit_managed(
     config_path: &Path,
     state_path: &Path,
-    yaml: &str,
+    servers: &[ServerConfig],
     state: &ManagedState,
 ) -> Result<()> {
-    commit_managed_with_state_writer(config_path, state_path, yaml, state, save_state_to)
+    commit_managed_with_state_writer(
+        config_path,
+        state_path,
+        Path::new(utils::PROFILES_DIR),
+        servers,
+        state,
+        save_state_to,
+    )
 }
 
 fn commit_managed_with_state_writer<F>(
     config_path: &Path,
     state_path: &Path,
-    yaml: &str,
+    profiles_path: &Path,
+    servers: &[ServerConfig],
     state: &ManagedState,
     write_state: F,
 ) -> Result<()>
@@ -3579,18 +3761,124 @@ where
 {
     let old_config = read_optional(config_path)?;
     let old_state = read_optional(state_path)?;
-    utils::atomic_write(config_path, yaml.as_bytes(), 0o600)?;
-    if let Err(error) = write_state(state_path, state) {
+    let old_profiles = ProfileDirectorySnapshot::capture(profiles_path)?;
+    let documents = profile_documents(servers, &state.profiles)?;
+    let aggregate_yaml = aggregate_profile_documents(&documents, &state.profiles)?;
+    let commit = (|| {
+        write_profile_documents(profiles_path, &documents)?;
+        utils::atomic_write(config_path, aggregate_yaml.as_bytes(), 0o600)?;
+        write_state(state_path, state)
+    })();
+    if let Err(error) = commit {
         let state_rollback = restore_snapshot(state_path, old_state.as_deref(), 0o600);
         let config_rollback = restore_snapshot(config_path, old_config.as_deref(), 0o600);
-        if let Err(rollback_error) = state_rollback.and(config_rollback) {
-            return Err(error.context(format!(
-                "写入管理状态失败，且回滚也失败：{rollback_error:#}"
-            )));
+        let profiles_rollback = old_profiles.restore(profiles_path);
+        let mut rollback_failures = Vec::new();
+        if let Err(error) = state_rollback {
+            rollback_failures.push(format!("状态={error:#}"));
         }
-        return Err(error.context("写入管理状态失败，配置和状态已回滚"));
+        if let Err(error) = config_rollback {
+            rollback_failures.push(format!("聚合配置={error:#}"));
+        }
+        if let Err(error) = profiles_rollback {
+            rollback_failures.push(format!("节点目录={error:#}"));
+        }
+        if rollback_failures.is_empty() {
+            return Err(error.context("受管配置提交失败，聚合配置、状态和节点文件已回滚"));
+        }
+        return Err(error.context(format!(
+            "受管配置提交失败且回滚不完整：{}",
+            rollback_failures.join("；")
+        )));
     }
     Ok(())
+}
+
+fn profile_documents(
+    servers: &[ServerConfig],
+    profiles: &[ManagedProfile],
+) -> Result<BTreeMap<String, Vec<u8>>> {
+    ensure_servers_match_state(servers, profiles)?;
+    let mut documents = BTreeMap::new();
+    for (server, profile) in servers.iter().zip(profiles) {
+        let name = profile.config_file_name();
+        let yaml =
+            serde_yaml::to_string(server).with_context(|| format!("序列化节点文件 {name} 失败"))?;
+        if documents.insert(name.clone(), yaml.into_bytes()).is_some() {
+            bail!("节点文件名冲突：{name}");
+        }
+    }
+    Ok(documents)
+}
+
+fn aggregate_profile_documents(
+    documents: &BTreeMap<String, Vec<u8>>,
+    profiles: &[ManagedProfile],
+) -> Result<String> {
+    let mut servers = Vec::with_capacity(profiles.len());
+    for profile in profiles {
+        let name = profile.config_file_name();
+        let contents = documents
+            .get(&name)
+            .with_context(|| format!("缺少节点文件 {name}"))?;
+        let server: ServerConfig = serde_yaml::from_slice(contents)
+            .with_context(|| format!("解析节点文件 {name} 失败"))?;
+        servers.push(server);
+    }
+    ensure_servers_match_state(&servers, profiles)?;
+    serde_yaml::to_string(&servers).context("聚合节点配置失败")
+}
+
+fn write_profile_documents(path: &Path, documents: &BTreeMap<String, Vec<u8>>) -> Result<()> {
+    utils::ensure_directory(path, 0o700)?;
+    let mut existing = Vec::new();
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            bail!(
+                "节点目录包含链接、目录或特殊文件：{}",
+                entry.path().display()
+            );
+        }
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("节点文件名不是 UTF-8：{}", entry.path().display()))?;
+        if !is_managed_profile_file_name(&name) {
+            bail!("节点目录包含非 ping-rust 文件 {name}，已拒绝覆盖");
+        }
+        existing.push(name);
+    }
+    for (name, contents) in documents {
+        utils::atomic_write(&path.join(name), contents, 0o600)?;
+    }
+    for name in existing {
+        if !documents.contains_key(&name) {
+            fs::remove_file(path.join(&name))
+                .with_context(|| format!("删除旧节点文件 {name} 失败"))?;
+        }
+    }
+    Ok(())
+}
+
+fn is_managed_profile_file_name(name: &str) -> bool {
+    let Some(stem) = name.strip_suffix(".yaml") else {
+        return false;
+    };
+    let prefixes = [
+        "VLESS-REALITY-",
+        "HYSTERIA2-",
+        "TUIC-",
+        "SHADOWSOCKS-",
+        "ANYTLS-",
+    ];
+    prefixes.iter().any(|prefix| {
+        stem.strip_prefix(prefix).is_some_and(|value| {
+            value
+                .parse::<u16>()
+                .is_ok_and(|port| port > 0 && port.to_string() == value)
+        })
+    })
 }
 
 fn read_optional(path: &Path) -> Result<Option<Vec<u8>>> {
@@ -4170,7 +4458,18 @@ async fn validate_candidate_with_binary(yaml: &str, directory: &Path, binary: &P
 pub(crate) fn validate_managed_snapshot(config_path: &Path, state_path: &Path) -> Result<()> {
     let servers = load_servers(config_path)?;
     let state = load_state_from(state_path)?;
-    ensure_servers_match_state(&servers, &state.profiles).context("备份内容不一致")
+    ensure_servers_match_state(&servers, &state.profiles).context("备份内容不一致")?;
+    let profiles_path = config_path
+        .parent()
+        .context("备份配置没有父目录")?
+        .join("profiles");
+    if profiles_path.exists() {
+        let documents = profile_documents(&servers, &state.profiles)?;
+        if !profile_documents_are_current(&profiles_path, &documents)? {
+            bail!("备份中的节点文件与聚合配置不一致");
+        }
+    }
+    Ok(())
 }
 
 pub async fn validate_with_shoes(config_path: &Path) -> Result<()> {
@@ -4213,6 +4512,23 @@ mod tests {
             certificate_key: None,
             options: GenerationOptions::default(),
         }
+    }
+
+    fn reality_server_and_profile(port: u16) -> (ServerConfig, ManagedProfile) {
+        let mut request = request(Protocol::Reality, PathBuf::from("unused.yaml"));
+        request.port = port;
+        let (server, credentials, _, _) = generate_reality(&request);
+        let profile = ManagedProfile {
+            id: Uuid::new_v4(),
+            name: format!("reality-{port}"),
+            port,
+            server_address: None,
+            credentials,
+            certificate_path: None,
+            certificate_key_path: None,
+            self_signed_certificate: false,
+        };
+        (server, profile)
     }
 
     #[test]
@@ -4415,6 +4731,100 @@ mod tests {
     }
 
     #[test]
+    fn legacy_snapshot_materializes_one_real_mapping_file_idempotently() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.yaml");
+        let state = dir.path().join("ping-rust-state.json");
+        let (server, profile) = reality_server_and_profile(53453);
+        fs::write(&config, serde_yaml::to_string(&vec![server]).unwrap()).unwrap();
+        fs::write(
+            &state,
+            serde_json::to_vec(&ManagedState {
+                schema_version: 1,
+                profiles: vec![profile],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert!(prepare_managed_snapshot(dir.path()).unwrap());
+        let profile_path = dir.path().join("profiles").join("VLESS-REALITY-53453.yaml");
+        let profile_yaml = fs::read_to_string(&profile_path).unwrap();
+        let parsed: ServerConfig = serde_yaml::from_str(&profile_yaml).unwrap();
+        assert_eq!(parsed.address, "0.0.0.0:53453");
+        assert!(!profile_yaml.trim_start().starts_with('-'));
+        assert!(!prepare_managed_snapshot(dir.path()).unwrap());
+        validate_managed_snapshot(&config, &state).unwrap();
+    }
+
+    #[test]
+    fn profile_writer_renames_port_and_rejects_foreign_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let profiles = dir.path().join("profiles");
+        let (first_server, first_profile) = reality_server_and_profile(53453);
+        let first = profile_documents(
+            std::slice::from_ref(&first_server),
+            std::slice::from_ref(&first_profile),
+        )
+        .unwrap();
+        let aggregate =
+            aggregate_profile_documents(&first, std::slice::from_ref(&first_profile)).unwrap();
+        let aggregate_servers: Vec<ServerConfig> = serde_yaml::from_str(&aggregate).unwrap();
+        assert_eq!(aggregate_servers.len(), 1);
+        assert_eq!(aggregate_servers[0].address, "0.0.0.0:53453");
+        write_profile_documents(&profiles, &first).unwrap();
+        assert!(profiles.join("VLESS-REALITY-53453.yaml").is_file());
+
+        let (second_server, second_profile) = reality_server_and_profile(53454);
+        let second = profile_documents(&[second_server], &[second_profile]).unwrap();
+        write_profile_documents(&profiles, &second).unwrap();
+        assert!(!profiles.join("VLESS-REALITY-53453.yaml").exists());
+        assert!(profiles.join("VLESS-REALITY-53454.yaml").is_file());
+
+        fs::write(profiles.join("notes.txt"), b"do not overwrite").unwrap();
+        let error = write_profile_documents(&profiles, &second).unwrap_err();
+        assert!(error.to_string().contains("非 ping-rust 文件"));
+        assert_eq!(
+            fs::read(profiles.join("notes.txt")).unwrap(),
+            b"do not overwrite"
+        );
+        assert!(is_managed_profile_file_name("VLESS-REALITY-65535.yaml"));
+        assert!(!is_managed_profile_file_name("VLESS-REALITY-053453.yaml"));
+        assert!(!is_managed_profile_file_name("VLESS-REALITY-0.yaml"));
+    }
+
+    #[test]
+    fn deletion_result_delays_credential_cleanup_until_finish() {
+        let dir = tempfile::tempdir().unwrap();
+        let certificate = dir.path().join("cert.pem");
+        let certificate_key = dir.path().join("key.pem");
+        fs::write(&certificate, b"certificate").unwrap();
+        fs::write(&certificate_key, b"private-key").unwrap();
+        let (_, mut profile) = reality_server_and_profile(53453);
+        profile.self_signed_certificate = true;
+        profile.certificate_path = Some(certificate.clone());
+        profile.certificate_key_path = Some(certificate_key.clone());
+        let result = DeletionResult {
+            profile,
+            remaining_profiles: 0,
+            rollback: None,
+            _lock: None,
+        };
+
+        assert!(certificate.is_file());
+        assert!(certificate_key.is_file());
+        let deleted = result.finish_with(|path| {
+            if let Some(path) = path {
+                fs::remove_file(path).unwrap();
+            }
+            Ok(())
+        });
+        assert!(deleted.self_signed_certificate);
+        assert!(!certificate.exists());
+        assert!(!certificate_key.exists());
+    }
+
+    #[test]
     fn validates_reality_destination_host_and_port() {
         validate_host_port("www.cloudflare.com:443").unwrap();
         validate_host_port("[2001:db8::1]:443").unwrap();
@@ -4428,12 +4838,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("config.yaml");
         let state = dir.path().join("state.json");
+        let profiles = dir.path().join("profiles");
         fs::write(&config, b"old-config").unwrap();
+        fs::create_dir(&profiles).unwrap();
+        fs::write(profiles.join("VLESS-REALITY-443.yaml"), b"old-profile").unwrap();
 
         let error = commit_managed_with_state_writer(
             &config,
             &state,
-            "new-config",
+            &profiles,
+            &[],
             &ManagedState::default(),
             |_, _| Err(anyhow::anyhow!("injected state write failure")),
         )
@@ -4441,6 +4855,10 @@ mod tests {
         assert!(error.to_string().contains("已回滚"));
         assert_eq!(fs::read(&config).unwrap(), b"old-config");
         assert!(!state.exists());
+        assert_eq!(
+            fs::read(profiles.join("VLESS-REALITY-443.yaml")).unwrap(),
+            b"old-profile"
+        );
     }
 
     #[test]
@@ -4448,24 +4866,39 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("config.yaml");
         let state = dir.path().join("state.json");
+        let profiles = dir.path().join("profiles");
         let certificate = dir.path().join("new.pem");
         let certificate_key = dir.path().join("new-key.pem");
         fs::write(&config, b"new-config").unwrap();
         fs::write(&state, b"new-state").unwrap();
+        fs::create_dir(&profiles).unwrap();
+        fs::write(profiles.join("VLESS-REALITY-443.yaml"), b"new-profile").unwrap();
         fs::write(&certificate, b"certificate").unwrap();
         fs::write(&certificate_key, b"private-key").unwrap();
 
         ManagedRollback {
             config: Some(b"old-config\n".to_vec()),
             state: None,
+            profiles: ProfileDirectorySnapshot {
+                existed: true,
+                files: BTreeMap::from([(
+                    "VLESS-REALITY-8443.yaml".to_owned(),
+                    b"old-profile\n".to_vec(),
+                )]),
+            },
             generated_certificate: Some(certificate.clone()),
             generated_certificate_key: Some(certificate_key.clone()),
         }
-        .restore_to(&config, &state)
+        .restore_to(&config, &state, &profiles)
         .unwrap();
 
         assert_eq!(fs::read(config).unwrap(), b"old-config\n");
         assert!(!state.exists());
+        assert!(!profiles.join("VLESS-REALITY-443.yaml").exists());
+        assert_eq!(
+            fs::read(profiles.join("VLESS-REALITY-8443.yaml")).unwrap(),
+            b"old-profile\n"
+        );
         assert!(!certificate.exists());
         assert!(!certificate_key.exists());
     }
@@ -4677,7 +5110,6 @@ mod tests {
 }
 ````
 
-
 ## `src/deployment.rs`
 
 ````rust
@@ -4742,8 +5174,41 @@ pub async fn update_and_activate(id: Uuid, change: ProfileChange) -> Result<Gene
     }
     Ok(result)
 }
-````
 
+pub async fn delete_and_activate(id: Uuid) -> Result<config::ManagedProfile> {
+    utils::require_linux_root()?;
+    let lock = utils::exclusive_lock(Path::new(utils::LOCK_FILE))?;
+    let service_snapshot = service::capture_snapshot()?;
+    let was_active = Path::new(utils::SERVICE_FILE).exists() && service::is_active()?;
+    let mut result = config::delete_profile_locked(id, lock).await?;
+    let activation = if !was_active {
+        Ok(())
+    } else if result.remaining_profiles == 0 {
+        service::execute(service::ServiceAction::Stop)
+    } else {
+        service::activate_and_verify()
+    };
+    if let Err(activation) = activation {
+        let config_rollback = result.rollback_managed();
+        let service_rollback = service::restore_snapshot(service_snapshot);
+        return match (config_rollback, service_rollback) {
+            (Ok(()), Ok(())) => {
+                Err(activation.context("shoes 切换失败，配置删除和服务状态已回滚"))
+            }
+            (Err(config), Ok(())) => bail!(
+                "shoes 切换失败，服务状态已恢复，但配置删除回滚失败：切换={activation:#}；配置={config:#}"
+            ),
+            (Ok(()), Err(service)) => bail!(
+                "shoes 切换失败，配置删除已回滚，但服务状态恢复失败：切换={activation:#}；服务={service:#}"
+            ),
+            (Err(config), Err(service)) => bail!(
+                "shoes 切换失败，配置删除与服务状态回滚均失败：切换={activation:#}；配置={config:#}；服务={service:#}"
+            ),
+        };
+    }
+    Ok(result.finish())
+}
+````
 
 ## `src/fast_add.rs`
 
@@ -5016,7 +5481,6 @@ mod tests {
     }
 }
 ````
-
 
 ## `src/service.rs`
 
@@ -5331,7 +5795,6 @@ mod tests {
 }
 ````
 
-
 ## `src/utils.rs`
 
 ````rust
@@ -5349,6 +5812,7 @@ use fs2::FileExt;
 pub const SHOES_BIN: &str = "/usr/local/bin/shoes";
 pub const CONFIG_DIR: &str = "/etc/shoes";
 pub const CONFIG_FILE: &str = "/etc/shoes/config.yaml";
+pub const PROFILES_DIR: &str = "/etc/shoes/profiles";
 pub const STATE_FILE: &str = "/etc/shoes/ping-rust-state.json";
 pub const LOCK_FILE: &str = "/run/lock/ping-rust.lock";
 pub const SERVICE_FILE: &str = "/etc/systemd/system/shoes.service";
@@ -5612,7 +6076,6 @@ mod tests {
 }
 ````
 
-
 ## `src/operations.rs`
 
 ````rust
@@ -5731,6 +6194,7 @@ pub async fn restore(archive_path: &Path) -> Result<Option<PathBuf>> {
     let _: Vec<serde_yaml::Value> =
         serde_yaml::from_str(&yaml).context("备份中的 config.yaml 不是有效 YAML 数组")?;
     if restored.join("ping-rust-state.json").exists() {
+        config::prepare_managed_snapshot(&restored)?;
         config::validate_managed_snapshot(
             &restored.join("config.yaml"),
             &restored.join("ping-rust-state.json"),
@@ -5899,6 +6363,18 @@ mod tests {
             builder
                 .append_data(&mut header, "shoes/config.yaml", Cursor::new(contents))
                 .unwrap();
+            let profile = b"address: 0.0.0.0:443\n";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(profile.len() as u64);
+            header.set_mode(0o600);
+            header.set_cksum();
+            builder
+                .append_data(
+                    &mut header,
+                    "shoes/profiles/VLESS-REALITY-443.yaml",
+                    Cursor::new(profile),
+                )
+                .unwrap();
             builder.finish().unwrap();
         }
         let output = dir.path().join("output");
@@ -5907,6 +6383,10 @@ mod tests {
         assert_eq!(
             fs::read(output.join("shoes/config.yaml")).unwrap(),
             b"- address: 0.0.0.0:443\n"
+        );
+        assert_eq!(
+            fs::read(output.join("shoes/profiles").join("VLESS-REALITY-443.yaml")).unwrap(),
+            b"address: 0.0.0.0:443\n"
         );
     }
 
@@ -5936,7 +6416,6 @@ mod tests {
     }
 }
 ````
-
 
 ## `src/client.rs`
 
@@ -6616,7 +7095,6 @@ mod tests {
 }
 ````
 
-
 ## `src/self_update.rs`
 
 ````rust
@@ -7128,7 +7606,6 @@ mod tests {
 }
 ````
 
-
 ## `README.md`
 
 ````markdown
@@ -7287,7 +7764,7 @@ vless://...security=reality...pbk=...&sid=...
 
 菜单 `2. 更改配置` 会先选择现有配置，再按协议提供端口、名称、公网地址、凭据、Reality SNI、Shadowsocks cipher 或 AnyTLS 用户密码等修改项。新配置必须通过真实 `shoes --dry-run` 才会原子提交；服务重启失败时自动恢复修改前的配置与 systemd 状态，成功后直接输出新的分享链接。
 
-查看、更改和删除配置时只显示简洁的 `协议-端口` 名称，例如 `VLESS-REALITY-53453`；只有一个配置时自动选中，多个配置时才显示数字列表。内部 UUID 仍用于安全定位，但不会干扰日常菜单。
+每个节点都会保存为 `/etc/shoes/profiles/` 下的真实独立 YAML 文件；查看、更改和删除时直接显示该文件名，例如 `VLESS-REALITY-53453.yaml`。只有一个配置时自动选中，多个配置时才显示数字列表。shoes 继续加载由 Rust 确定性聚合的 `/etc/shoes/config.yaml`，内部 UUID 仅用于安全定位。
 
 首次安装流程是：`install.sh → 自动安装 ping-rust/shoes → 自动随机端口部署 VLESS-REALITY → 复制 URL`，中间零输入。后续日常流程是：`prs → 1 → 4（VLESS）或 3（SS）→ 输入端口/直接回车随机 → 复制 URL 到 v2rayN`。所有协议选择固定使用连续编号 `1/2/3/4/5`；主菜单输入 `0` 退出，任意子菜单输入 `0` 返回主菜单。UUID、Reality 密钥、short ID 或 SS 2022 密码全部安全随机生成。链接只会在配置通过 `shoes --dry-run`、原子写入、systemd 启动且确认为 active 后输出；失败会恢复原配置和服务状态。
 
@@ -7439,7 +7916,8 @@ sudo ping-rust restore ./shoes-backup.tar.gz
 |---|---|---:|
 | `/usr/local/bin/shoes` | shoes 内核 | `0755` |
 | `/usr/local/bin/prs` | 指向 ping-rust 的安全短命令符号链接 | symlink |
-| `/etc/shoes/config.yaml` | shoes 配置 | `0600` |
+| `/etc/shoes/profiles/<协议>-<端口>.yaml` | 每个节点的真实独立配置文件 | `0600` |
+| `/etc/shoes/config.yaml` | Rust 从全部节点确定性聚合、供 shoes 实际加载的配置 | `0600` |
 | `/etc/shoes/ping-rust-state.json` | 多配置元数据与客户端导出凭据 | `0600` |
 | `/etc/shoes/cert-*.pem` | 自动生成证书 | `0644` |
 | `/etc/shoes/key-*.pem` | 自动生成证书私钥 | `0600` |

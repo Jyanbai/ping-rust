@@ -132,13 +132,14 @@ fn select_profile(profiles: &[config::ManagedProfile]) -> Result<Option<usize>> 
     }
     let labels = profiles
         .iter()
-        .map(config::ManagedProfile::display_name)
+        .map(config::ManagedProfile::config_file_name)
         .collect::<Vec<_>>();
     select_numbered("请选择配置", &labels)
 }
 
 pub async fn run() -> Result<()> {
     cli::bootstrap_default_reality().await?;
+    config::ensure_profile_files().await?;
     loop {
         println!(
             "\n------------- ping-rust v{} -------------",
@@ -349,7 +350,7 @@ async fn change_config_menu() -> Result<()> {
     println!(
         "{} {}",
         "配置更改成功：".green(),
-        result.profile.display_name()
+        result.profile.config_file_name()
     );
     if let Some(server) = result.profile.server_address.as_deref() {
         match client::share_uri(&result.profile, server) {
@@ -371,7 +372,7 @@ fn view_config_menu() -> Result<()> {
     };
     let profile = &state.profiles[selected];
     println!("\n------------- 配置信息 -------------\n");
-    println!("名称: {}", profile.display_name());
+    println!("文件: {}", profile.config_file_name());
     println!("协议: {}", profile.protocol_name());
     println!("端口: {}", profile.port);
     if profile.server_name() != "-" {
@@ -398,24 +399,14 @@ async fn delete_config_menu() -> Result<()> {
     };
     let profile = &state.profiles[selected];
     if !Confirm::with_theme(&ColorfulTheme::default())
-        .with_prompt(format!("确认删除 {}？", profile.display_name()))
+        .with_prompt(format!("确认删除 {}？", profile.config_file_name()))
         .default(false)
         .interact()?
     {
         return Ok(());
     }
-    let unit_exists = std::path::Path::new(crate::utils::SERVICE_FILE).exists();
-    let was_active = unit_exists && service::is_active()?;
-    let deleted = config::delete_profile(profile.id).await?;
-    let remaining = config::load_state()?;
-    if was_active {
-        if remaining.profiles.is_empty() {
-            service::execute(ServiceAction::Stop)?;
-        } else {
-            service::execute(ServiceAction::Restart)?;
-        }
-    }
-    println!("{} {}", "已删除：".green(), deleted.display_name());
+    let deleted = deployment::delete_and_activate(profile.id).await?;
+    println!("{} {}", "已删除：".green(), deleted.config_file_name());
     Ok(())
 }
 
@@ -851,7 +842,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_lists_use_short_protocol_and_port_labels() {
+    fn profile_lists_use_real_protocol_and_port_file_names() {
         let profile = config::ManagedProfile {
             id: uuid::Uuid::new_v4(),
             name: "reality-abcd1234".to_owned(),
@@ -869,6 +860,7 @@ mod tests {
             self_signed_certificate: false,
         };
         assert_eq!(profile.display_name(), "VLESS-REALITY-53453");
+        assert_eq!(profile.config_file_name(), "VLESS-REALITY-53453.yaml");
         assert!(!profile.display_name().contains(&profile.id.to_string()));
     }
 }

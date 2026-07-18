@@ -59,3 +59,37 @@ pub async fn update_and_activate(id: Uuid, change: ProfileChange) -> Result<Gene
     }
     Ok(result)
 }
+
+pub async fn delete_and_activate(id: Uuid) -> Result<config::ManagedProfile> {
+    utils::require_linux_root()?;
+    let lock = utils::exclusive_lock(Path::new(utils::LOCK_FILE))?;
+    let service_snapshot = service::capture_snapshot()?;
+    let was_active = Path::new(utils::SERVICE_FILE).exists() && service::is_active()?;
+    let mut result = config::delete_profile_locked(id, lock).await?;
+    let activation = if !was_active {
+        Ok(())
+    } else if result.remaining_profiles == 0 {
+        service::execute(service::ServiceAction::Stop)
+    } else {
+        service::activate_and_verify()
+    };
+    if let Err(activation) = activation {
+        let config_rollback = result.rollback_managed();
+        let service_rollback = service::restore_snapshot(service_snapshot);
+        return match (config_rollback, service_rollback) {
+            (Ok(()), Ok(())) => {
+                Err(activation.context("shoes 切换失败，配置删除和服务状态已回滚"))
+            }
+            (Err(config), Ok(())) => bail!(
+                "shoes 切换失败，服务状态已恢复，但配置删除回滚失败：切换={activation:#}；配置={config:#}"
+            ),
+            (Ok(()), Err(service)) => bail!(
+                "shoes 切换失败，配置删除已回滚，但服务状态恢复失败：切换={activation:#}；服务={service:#}"
+            ),
+            (Err(config), Err(service)) => bail!(
+                "shoes 切换失败，配置删除与服务状态回滚均失败：切换={activation:#}；配置={config:#}；服务={service:#}"
+            ),
+        };
+    }
+    Ok(result.finish())
+}

@@ -324,17 +324,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             if !yes {
                 anyhow::bail!("删除配置需要显式添加 --yes；也可使用交互菜单确认");
             }
-            let unit_exists = std::path::Path::new(crate::utils::SERVICE_FILE).exists();
-            let was_active = unit_exists && service::is_active()?;
-            let deleted = config::delete_profile(profile).await?;
-            let state = config::load_state()?;
-            if was_active {
-                if state.profiles.is_empty() {
-                    service::execute(ServiceAction::Stop)?;
-                } else {
-                    service::execute(ServiceAction::Restart)?;
-                }
-            }
+            let deleted = deployment::delete_and_activate(profile).await?;
             println!("已删除配置 {} ({})", deleted.name, deleted.id);
             Ok(())
         }
@@ -491,7 +481,7 @@ fn bootstrap_required(config: &Path, state: &Path) -> bool {
 pub(crate) fn print_add_result(result: &fast_add::AddResult) {
     let profile = &result.generation.profile;
     println!("{}", "部署成功，shoes 服务已启动。".green().bold());
-    println!("配置：{}", profile.display_name());
+    println!("配置：{}", profile.config_file_name());
     println!("协议：{}", profile.protocol_name());
     println!("端口：{}", profile.port);
     println!("\n------------- URL 链接 -------------\n");

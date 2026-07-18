@@ -243,10 +243,44 @@ jobs:
           printf 'ANYTLS_PROFILE=%s\n' "$anytls_profile" >> "$GITHUB_ENV"
           sudo rm -f "$anytls_output"
 
+          for profile_file in \
+            "VLESS-REALITY-${REALITY_PORT}.yaml" \
+            HYSTERIA2-24444.yaml \
+            TUIC-24445.yaml \
+            SHADOWSOCKS-24446.yaml \
+            ANYTLS-24447.yaml; do
+            sudo test -s "/etc/shoes/profiles/$profile_file"
+          done
+
       - name: Verify prs numeric PTY flow for Reality and Shadowsocks
         shell: bash
         run: |
           set -euo pipefail
+          config_before_migration="$(sudo sha256sum /etc/shoes/config.yaml | awk '{print $1}')"
+          state_before_migration="$(sudo sha256sum /etc/shoes/ping-rust-state.json | awk '{print $1}')"
+          sudo mv /etc/shoes/profiles "$RUNNER_TEMP/legacy-profiles"
+          sudo env PRS_COMMAND="$PRS" expect <<'EXPECT'
+          log_user 0
+          set timeout 180
+          spawn $env(PRS_COMMAND)
+          expect -re {请选择 \[0-10\]}
+          send "0\r"
+          expect eof
+          EXPECT
+          test "$(sudo sha256sum /etc/shoes/config.yaml | awk '{print $1}')" = \
+            "$config_before_migration"
+          test "$(sudo sha256sum /etc/shoes/ping-rust-state.json | awk '{print $1}')" = \
+            "$state_before_migration"
+          for profile_file in \
+            "VLESS-REALITY-${REALITY_PORT}.yaml" \
+            HYSTERIA2-24444.yaml \
+            TUIC-24445.yaml \
+            SHADOWSOCKS-24446.yaml \
+            ANYTLS-24447.yaml; do
+            sudo test -s "/etc/shoes/profiles/$profile_file"
+          done
+          sudo rm -r "$RUNNER_TEMP/legacy-profiles"
+
           run_menu_add() {
             local protocol_number="$1"
             local port="$2"
@@ -331,8 +365,21 @@ jobs:
           EXPECT
           wait_listener t 25450
           ! sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)25448$'
+          sudo test ! -e /etc/shoes/profiles/VLESS-REALITY-25448.yaml
+          sudo test -s /etc/shoes/profiles/VLESS-REALITY-25450.yaml
+          sudo test -s /etc/shoes/profiles/SHADOWSOCKS-25449.yaml
+          sudo grep -q '^address: 0.0.0.0:25450$' \
+            /etc/shoes/profiles/VLESS-REALITY-25450.yaml
 
-          sudo env PRS_COMMAND="$PRS" PROFILE_NUMBER="$profile_number" expect <<'EXPECT'
+          ss_profile_number="$(sudo python3 - <<'PY'
+          import json
+          with open('/etc/shoes/ping-rust-state.json', encoding='utf-8') as stream:
+              profiles = json.load(stream)['profiles']
+          print(next(index for index, profile in enumerate(profiles, 1) if profile['port'] == 25449))
+          PY
+          )"
+          sudo env PRS_COMMAND="$PRS" PROFILE_NUMBER="$profile_number" \
+            SS_PROFILE_NUMBER="$ss_profile_number" expect <<'EXPECT'
           log_user 0
           set timeout 180
           proc wait_for {pattern stage} {
@@ -346,7 +393,7 @@ jobs:
           wait_for {请选择 \[0-10\]} main-menu
           send "3\r"
           wait_for {请选择配置} view-profile-menu
-          wait_for {VLESS-REALITY-25450} view-short-label
+          wait_for {VLESS-REALITY-25450\.yaml} view-profile-file
           wait_for {请选择} view-profile-prompt
           send "$env(PROFILE_NUMBER)\r"
           wait_for {配置信息} view-info
@@ -354,14 +401,24 @@ jobs:
           wait_for {请选择 \[0-10\]} main-menu-after-view
           send "4\r"
           wait_for {请选择配置} delete-profile-menu
-          wait_for {VLESS-REALITY-25450} delete-short-label
+          wait_for {VLESS-REALITY-25450\.yaml} delete-profile-file
           wait_for {请选择} delete-profile-prompt
           send "0\r"
           wait_for {请选择 \[0-10\]} main-menu-after-delete-return
+          send "4\r"
+          wait_for {请选择配置} delete-profile-menu-again
+          wait_for {请选择} delete-profile-prompt-again
+          send "$env(SS_PROFILE_NUMBER)\r"
+          wait_for {确认删除 SHADOWSOCKS-25449\.yaml} delete-confirm
+          send "y\r"
+          wait_for {已删除.*SHADOWSOCKS-25449\.yaml} delete-success
+          wait_for {请选择 \[0-10\]} main-menu-after-delete
           send "0\r"
           wait_for {已退出} exit-message
           expect { eof {} timeout { puts stderr "timeout waiting for view/delete exit"; exit 36 } }
           EXPECT
+          sudo test ! -e /etc/shoes/profiles/SHADOWSOCKS-25449.yaml
+          ! sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)25449$'
 
       - name: Roll back config and systemd state when activation fails
         shell: bash
@@ -369,6 +426,8 @@ jobs:
           set -euo pipefail
           config_before="$(sudo sha256sum /etc/shoes/config.yaml | awk '{print $1}')"
           state_before="$(sudo sha256sum /etc/shoes/ping-rust-state.json | awk '{print $1}')"
+          profiles_before="$(sudo find /etc/shoes/profiles -maxdepth 1 -type f \
+            -print0 | sort -z | sudo xargs -0 -r sha256sum | sha256sum | awk '{print $1}')"
           unit_before="$(sudo sha256sum /etc/systemd/system/shoes.service | awk '{print $1}')"
           sudo systemctl is-active --quiet shoes.service
           sudo systemctl is-enabled --quiet shoes.service
@@ -414,6 +473,9 @@ jobs:
             || { echo 'config hash mismatch' >&2; exit 1; }
           test "$(sudo sha256sum /etc/shoes/ping-rust-state.json | awk '{print $1}')" = "$state_before" \
             || { echo 'state hash mismatch' >&2; exit 1; }
+          test "$(sudo find /etc/shoes/profiles -maxdepth 1 -type f \
+            -print0 | sort -z | sudo xargs -0 -r sha256sum | sha256sum | awk '{print $1}')" = "$profiles_before" \
+            || { echo 'profile directory hash mismatch' >&2; exit 1; }
           test "$(sudo sha256sum /etc/systemd/system/shoes.service | awk '{print $1}')" = "$unit_before" \
             || { echo 'unit hash mismatch' >&2; exit 1; }
           sudo systemctl is-active --quiet shoes.service \
@@ -458,7 +520,10 @@ jobs:
           backup="$RUNNER_TEMP/shoes-backup.tar.gz"
           sudo "$PING_RUST" backup "$backup"
           sudo test -s "$backup"
+          tar -tzf "$backup" | grep -q 'shoes/profiles/VLESS-REALITY-'
+          tar -tzf "$backup" | grep -q 'shoes/profiles/HYSTERIA2-'
           sudo "$PING_RUST" restore "$backup"
+          sudo test -s "/etc/shoes/profiles/VLESS-REALITY-${REALITY_PORT}.yaml"
           sudo "$PING_RUST" update --method release
           sudo "$PING_RUST" service restart
           sudo "$PING_RUST" service status

@@ -8,11 +8,11 @@
 
 | 原始需求 | 状态 | 实现位置 | 当前证据 |
 |---|---|---|---|
-| Rust 2021、Rust 代码占绝对主导 | 已实现 | `Cargo.toml`、`src/` | 6,571 行 Rust / 241 行安装 shell，Rust 占 96.46%；代理、配置、服务、运维、自更新与快速部署事务核心均为 Rust |
+| Rust 2021、Rust 代码占绝对主导 | 已实现 | `Cargo.toml`、`src/` | 7,037 行 Rust / 241 行安装 shell，Rust 占 96.69%；代理、配置、服务、运维、自更新与快速部署事务核心均为 Rust |
 | clap v4 子命令与数字菜单 | 已实现 | `src/cli.rs`、`src/menu.rs` | `prs` 主菜单固定 1..10，协议编号固定为连续的 1/2/3/4/5；采用 233boy 风格 `1)` 列表与 `请选择 [0-N]` 提示，主菜单 0 退出、所有子菜单 0 返回 |
 | 快速添加与直接分享 | 已实现，Ubuntu 24.04 实测 | `src/fast_add.rs`、`src/deployment.rs`、`src/client.rs` | `add/a`、协议短别名、随机端口/凭据、公网地址探测、`--yes/--plain`；真实 PTY 的 Reality/SS 添加、URI 与监听均通过 |
 | 分享信息重显与隐私边界 | 已实现 | `src/cli.rs`、`src/client.rs` | `info/i`、`url`、`qr` 按名称/UUID 读取保存地址；Reality URL 含 flow/pbk/sid 且不含私钥；二维码只调用本机 qrencode |
-| 激活失败事务回滚 | 已实现，Ubuntu 24.04 实测 | `src/deployment.rs`、`src/config.rs`、`src/service.rs` | 一次性 ExecStartPre 故障注入证明失败后 config/state/unit 哈希、enabled/active 和端口均精确恢复，且不输出分享 URI |
+| 激活失败事务回滚 | 已实现，Ubuntu 24.04 实测 | `src/deployment.rs`、`src/config.rs`、`src/service.rs` | 添加、修改和删除共用部署事务；失败恢复 config/state/profiles/unit、enabled/active 和端口，且不输出分享 URI |
 | shoes GitHub Release 预编译安装 | 已实现，Debian/Ubuntu 实测 | `src/installer.rs` | v0.2.7 GNU 不兼容时自动回退 digest 校验过的 static musl；Ubuntu 24.04 约 2 秒完成 Reality 服务部署且提交前健康检查通过 |
 | cargo 源码安装 shoes | 已实现，Debian 实测 | `src/installer.rs` | 从与 schema CI 相同的 cfal/shoes 固定提交 `386b115...` 执行 `cargo install --git --rev --locked`；保留低内存单任务/关闭 LTO 保护，避免 crates.io 新版本 schema 漂移 |
 | Reality X25519 密钥和完整 shoes YAML | 已实现 | `src/config.rs` | X25519 派生单测；本地 shoes 0.2.8 `--dry-run` 解析成功 |
@@ -20,12 +20,12 @@
 | Shadowsocks 六种 cipher | 已实现 | `src/config.rs`、`src/client.rs` | legacy/2022 六种 shoes cipher 全部真实 dry-run；2022 标准 Base64 与 16/32 字节前置校验；客户端 ChaCha 标准名称单独映射 |
 | AnyTLS（TLS 与 Reality 外层） | 已实现 | `src/config.rs`、`src/cli.rs`、`src/menu.rs` | 多用户、UDP、padding、fallback、自签名/外部证书和 Reality 高级模式均已接通；TLS 与 Reality 两种配置通过固定 shoes dry-run |
 | 固定 latest shoes schema 验证 | 已实现 | `.github/workflows/shoes-schema.yml` | 固定 `386b11532424b8665ee3e46340c6236fb3c47595` / 0.2.8 从源码构建；五单协议、五协议联合、六 cipher 与 Reality+AnyTLS 共 13 次显式 dry-run 成功 |
-| 多配置添加、查看、删除 | 已实现 | `src/config.rs`、`src/cli.rs`、`src/menu.rs` | sidecar 状态、端口冲突和条目一致性检查；多 server 与精确回滚测试 |
+| 多配置添加、查看、删除 | 已实现 | `src/config.rs`、`src/cli.rs`、`src/menu.rs` | `/etc/shoes/profiles/<协议>-<端口>.yaml` 为真实单节点 mapping；菜单显示并操作真实 basename，Rust 按 state 顺序聚合为 shoes 顶层数组 |
 | 菜单 `2. 更改配置` | 已实现，Ubuntu 24.04 实测 | `src/menu.rs`、`src/config.rs`、`src/deployment.rs` | 原占位提示已替换为协议感知修改流程；端口、名称、地址、凭据、Reality SNI、SS cipher、AnyTLS 用户密码均同步 YAML/sidecar，经真实 shoes dry-run、原子提交和 systemd 稳定激活后才成功，失败精确回滚 |
-| 候选验证与安全提交 | 已实现 | `src/config.rs`、`src/utils.rs` | 进程间 advisory lock；同目录候选先执行 shoes dry-run；失败候选不触碰正式配置测试 |
+| 候选验证与安全提交 | 已实现 | `src/config.rs`、`src/utils.rs` | 进程间 advisory lock；候选先执行 shoes dry-run；config/state/profile 目录任一步失败均恢复精确旧快照，拒绝 symlink、特殊文件和非规范文件名 |
 | systemd unit 与启停/重启/状态/日志 | 已实现，Debian/Ubuntu 实测 | `src/service.rs`、`systemd/ping-rust.service` | 首次、active、failed 三态启用策略和 start-limit 恢复均通过；Ubuntu 真实 reboot 后自动 active，三协议端口全部监听 |
 | 更新与卸载 | 已实现，Debian/Ubuntu 实测 | `src/installer.rs`、`src/service.rs`、`src/utils.rs` | update/uninstall 共用全局锁；更新前保存旧 shoes，验证新内核能加载现有配置并在 restart 后稳定 active，否则恢复旧二进制和服务；卸载仍只删除确实属于本工具的文件与别名 |
-| BBR、端口检查、备份恢复 | 已实现，Debian/Ubuntu 实测 | `src/operations.rs` | 两台 VPS 均由 ping-rust 写入并验证 bbr/fq；TCP/UDP 端口判断、0600 备份 round-trip 和服务状态恢复均通过 |
+| BBR、端口检查、备份恢复 | 已实现，Debian/Ubuntu 实测 | `src/operations.rs` | 两台 VPS 均由 ping-rust 写入并验证 bbr/fq；备份递归包含真实 profiles，旧备份恢复时在 staging 幂等物化后校验，失败恢复原目录 |
 | Clash Meta、sing-box、Nekobox 客户端导出 | 已实现，前三协议 Debian/Ubuntu 实测 | `src/client.rs` | 五协议 YAML/JSON/URI 解析测试；Reality 私钥不泄漏；普通 AnyTLS 支持三格式，AnyTLS+Reality 仅输出 sing-box，Mihomo/标准 URI 不支持时明确报错 |
 | Ubuntu 22.04/24.04、Debian 12、Rocky/Alma 9 x86_64 | 构建/测试通过；Ubuntu/Debian 运行态实测 | `.github/workflows/ci.yml`、`.github/workflows/ubuntu-acceptance.yml` | CI 覆盖五个目标系统；Ubuntu acceptance run `29635760772` 实际加载五协议并复核监听，另有 Ubuntu 24.04.3 与 Debian 12 独立 systemd/公网验收；GNU ELF 最高 GLIBC 2.34 |
 | ARM64 次优先支持 | 构建与模拟运行已证实 | `src/installer.rs`、Release workflow | aarch64 GNU ELF 最高 GLIBC 2.34；v0.1.8 aarch64 musl 静态 binary 通过 qemu-user-static `--version` 并公开发布 |
@@ -117,6 +117,16 @@
 - 配置数量无关的测试修正提交 `2fdd1b7` 后，CI run `29646275985` 与 Ubuntu 24.04 acceptance run `29646275983` 全绿；后者真实完成短配置名、查看 URI、删除菜单输入 0 返回、修改配置、五协议、故障回滚、导出与卸载清理。
 - 当前版本号为 0.1.9；本地 63/63 tests、check、clippy `-D warnings`、release build、doc、严格 package/publish dry-run、actionlint、ShellCheck 与 diff check 全部通过。源码已推送 main，尚未创建不可覆盖的 crates.io/GitHub Release 0.1.9。
 
+## Milestone 16：真实的一节点一配置文件
+
+- 菜单中的 `VLESS-REALITY-53453.yaml`、`SHADOWSOCKS-端口.yaml` 等名称现在对应 `/etc/shoes/profiles/` 下的真实独立 YAML 文件，不再只是由协议和端口临时拼出的显示标签。
+- 每个 profile 文件只保存一个 shoes `ServerConfig` mapping；Rust 事务层按 sidecar state 顺序重新解析全部 mapping，确定性生成 shoes 实际加载的 `/etc/shoes/config.yaml` 顶层数组。
+- 文件名只由受控协议枚举和规范 `u16` 端口推导，逻辑备注不进入路径；改端口会删除旧 basename 并创建新 basename，陌生文件、symlink、目录、特殊文件和 `0443` 等非规范写法均拒绝覆盖。
+- 旧版只有 config/state 的安装在首次进入菜单时执行幂等迁移；聚合配置与 state 数量、顺序、端口或协议不一致时明确拒绝。旧备份在 staging 中补齐 profile 文件后再执行一致性和 shoes 校验。
+- 添加、修改、删除都在同一进程间锁和部署事务中提交 config/state/profiles；删除只有在 systemd 成功切换后才清理证书，失败则同时恢复三类配置文件和 service snapshot。
+- 本地单测覆盖单 mapping 形状、确定性聚合、迁移幂等、改端口重命名、陌生文件保护、状态写失败目录回滚及延迟凭据清理；当前 66/66 tests、fmt/check、Clippy、release、rustdoc、RustSec、actionlint 与 crate dry-run 全部通过。
+- Ubuntu 24.04 workflow 已加入五协议真实文件、模拟旧版目录迁移、真实 PTY 改名/查看/删除、profile 目录故障回滚哈希、备份归档和恢复断言；等待产品提交推送后的远程运行证据。
+
 ## Milestone 6 修复结果
 
 - 修复第二个受管配置必然被“仅一个 server”校验拒绝的问题。
@@ -171,14 +181,14 @@
 
 - `cargo fmt -- --check`
 - `cargo check --all-targets`
-- `cargo test --all-targets`：63/63 通过
+- `cargo test --all-targets`：66/66 通过
 - `cargo clippy --all-targets -- -D warnings`
 - `cargo build --locked --release`
 - `cargo doc --locked --no-deps`
 - `cargo install --path . --locked` 后执行 `ping-rust --help`
-- `cargo package --locked` / `cargo publish --dry-run --locked`：发布前 clean worktree 打包 31 个文件，包含五协议示例、固定 shoes workflow 与 sb acceptance；隔离解包重编译与上传前校验均通过
+- `cargo package --locked` / `cargo publish --dry-run --locked`：提交前 `--allow-dirty` 候选打包 32 个文件、378.6 KiB（压缩 90.0 KiB），隔离解包重编译与上传前校验通过；提交后仍需 strict clean-worktree 复验
 - `cargo-audit 0.22.2`：扫描当前 Cargo.lock 的 224 个依赖，RustSec 1166 条 advisory 中无命中
-- `SOURCE_SNAPSHOT.md`：14/14 section、263,497 bytes，Cargo/主要 Rust（含 deployment/fast_add）/README 全部与真实文件逐字一致
+- `SOURCE_SNAPSHOT.md`：14/14 section、282,263 bytes，Cargo/主要 Rust（含 deployment/fast_add）/README 全部与真实文件逐字一致
 - actionlint v1.7.12：`ci.yml`、`release.yml`、`shoes-schema.yml`、`ubuntu-acceptance.yml` 零诊断；ShellCheck v0.11.0 对一键安装器零诊断
 - v0.1.8 产品提交 `960edde`：main CI `29645174662`、Ubuntu 24.04 acceptance `29645174670`、固定 shoes schema `29645174650` 全部成功；tag CI `29645387085` 与 schema `29645387104` 再次成功
 - v0.1.8 Release run `29645387081`：双架构 MUSL、SHA256SUMS、公开一键安装默认 Reality 全部成功；crates.io 公开隔离安装返回 `ping-rust 0.1.8`
@@ -217,4 +227,4 @@
 
 ## 发布状态
 
-公开稳定版 v0.1.7 已发布。默认一键安装会在无现有配置时零输入完成 VLESS-Reality-Vision 随机端口部署、systemd 激活并直接输出 `vless://`；升级或重复运行检测到配置后安全跳过。
+公开稳定版 v0.1.8 已发布。main 的 v0.1.9 候选新增真实一节点一配置文件及简洁菜单，尚未创建 crates.io/GitHub Release；本 Goal 只授权形成并推送经验证候选，不擅自发布不可覆盖版本。

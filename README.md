@@ -153,7 +153,7 @@ vless://...security=reality...pbk=...&sid=...
 
 菜单 `2. 更改配置` 会先选择现有配置，再按协议提供端口、名称、公网地址、凭据、Reality SNI、Shadowsocks cipher 或 AnyTLS 用户密码等修改项。新配置必须通过真实 `shoes --dry-run` 才会原子提交；服务重启失败时自动恢复修改前的配置与 systemd 状态，成功后直接输出新的分享链接。
 
-查看、更改和删除配置时只显示简洁的 `协议-端口` 名称，例如 `VLESS-REALITY-53453`；只有一个配置时自动选中，多个配置时才显示数字列表。内部 UUID 仍用于安全定位，但不会干扰日常菜单。
+每个节点都会保存为 `/etc/shoes/profiles/` 下的真实独立 YAML 文件；查看、更改和删除时直接显示该文件名，例如 `VLESS-REALITY-53453.yaml`。只有一个配置时自动选中，多个配置时才显示数字列表。shoes 继续加载由 Rust 确定性聚合的 `/etc/shoes/config.yaml`，内部 UUID 仅用于安全定位。
 
 首次安装流程是：`install.sh → 自动安装 ping-rust/shoes → 自动随机端口部署 VLESS-REALITY → 复制 URL`，中间零输入。后续日常流程是：`prs → 1 → 4（VLESS）或 3（SS）→ 输入端口/直接回车随机 → 复制 URL 到 v2rayN`。所有协议选择固定使用连续编号 `1/2/3/4/5`；主菜单输入 `0` 退出，任意子菜单输入 `0` 返回主菜单。UUID、Reality 密钥、short ID 或 SS 2022 密码全部安全随机生成。链接只会在配置通过 `shoes --dry-run`、原子写入、systemd 启动且确认为 active 后输出；失败会恢复原配置和服务状态。
 
@@ -305,7 +305,8 @@ sudo ping-rust restore ./shoes-backup.tar.gz
 |---|---|---:|
 | `/usr/local/bin/shoes` | shoes 内核 | `0755` |
 | `/usr/local/bin/prs` | 指向 ping-rust 的安全短命令符号链接 | symlink |
-| `/etc/shoes/config.yaml` | shoes 配置 | `0600` |
+| `/etc/shoes/profiles/<协议>-<端口>.yaml` | 每个节点的真实独立配置文件 | `0600` |
+| `/etc/shoes/config.yaml` | Rust 从全部节点确定性聚合、供 shoes 实际加载的配置 | `0600` |
 | `/etc/shoes/ping-rust-state.json` | 多配置元数据与客户端导出凭据 | `0600` |
 | `/etc/shoes/cert-*.pem` | 自动生成证书 | `0644` |
 | `/etc/shoes/key-*.pem` | 自动生成证书私钥 | `0600` |

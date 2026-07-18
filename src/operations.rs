@@ -113,6 +113,7 @@ pub async fn restore(archive_path: &Path) -> Result<Option<PathBuf>> {
     let _: Vec<serde_yaml::Value> =
         serde_yaml::from_str(&yaml).context("备份中的 config.yaml 不是有效 YAML 数组")?;
     if restored.join("ping-rust-state.json").exists() {
+        config::prepare_managed_snapshot(&restored)?;
         config::validate_managed_snapshot(
             &restored.join("config.yaml"),
             &restored.join("ping-rust-state.json"),
@@ -281,6 +282,18 @@ mod tests {
             builder
                 .append_data(&mut header, "shoes/config.yaml", Cursor::new(contents))
                 .unwrap();
+            let profile = b"address: 0.0.0.0:443\n";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(profile.len() as u64);
+            header.set_mode(0o600);
+            header.set_cksum();
+            builder
+                .append_data(
+                    &mut header,
+                    "shoes/profiles/VLESS-REALITY-443.yaml",
+                    Cursor::new(profile),
+                )
+                .unwrap();
             builder.finish().unwrap();
         }
         let output = dir.path().join("output");
@@ -289,6 +302,10 @@ mod tests {
         assert_eq!(
             fs::read(output.join("shoes/config.yaml")).unwrap(),
             b"- address: 0.0.0.0:443\n"
+        );
+        assert_eq!(
+            fs::read(output.join("shoes/profiles").join("VLESS-REALITY-443.yaml")).unwrap(),
+            b"address: 0.0.0.0:443\n"
         );
     }
 
