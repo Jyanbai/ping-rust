@@ -2152,7 +2152,9 @@ use clap::ValueEnum;
 use crate::utils;
 
 pub const SERVICE_NAME: &str = "shoes.service";
+const RESET_FAILED_COMMAND: &[&str] = &["reset-failed", SERVICE_NAME];
 const ENABLE_NOW_COMMAND: &[&str] = &["enable", "--now", SERVICE_NAME];
+const START_COMMAND: &[&str] = &["start", SERVICE_NAME];
 const RESTART_COMMAND: &[&str] = &["restart", SERVICE_NAME];
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -2219,7 +2221,7 @@ pub fn install_unit(enable_now: bool) -> Result<()> {
 }
 
 fn activation_commands(was_active: bool) -> Vec<&'static [&'static str]> {
-    let mut commands = vec![ENABLE_NOW_COMMAND];
+    let mut commands = vec![RESET_FAILED_COMMAND, ENABLE_NOW_COMMAND];
     if was_active {
         commands.push(RESTART_COMMAND);
     }
@@ -2231,13 +2233,18 @@ pub fn execute(action: ServiceAction) -> Result<()> {
     ensure_systemctl()?;
     match action {
         ServiceAction::Install => install_unit(false),
-        ServiceAction::Start => systemctl(&["start", SERVICE_NAME]),
+        ServiceAction::Start => systemctl_after_reset(START_COMMAND),
         ServiceAction::Stop => systemctl(&["stop", SERVICE_NAME]),
-        ServiceAction::Restart => systemctl(&["restart", SERVICE_NAME]),
+        ServiceAction::Restart => systemctl_after_reset(RESTART_COMMAND),
         ServiceAction::Status => systemctl(&["status", "--no-pager", SERVICE_NAME]),
-        ServiceAction::Enable => systemctl(&["enable", "--now", SERVICE_NAME]),
+        ServiceAction::Enable => systemctl_after_reset(ENABLE_NOW_COMMAND),
         ServiceAction::Disable => systemctl(&["disable", "--now", SERVICE_NAME]),
     }
+}
+
+fn systemctl_after_reset(command: &[&str]) -> Result<()> {
+    systemctl(RESET_FAILED_COMMAND)?;
+    systemctl(command)
 }
 
 pub fn logs(lines: usize) -> Result<()> {
@@ -2313,10 +2320,13 @@ mod tests {
 
     #[test]
     fn active_service_is_restarted_after_enabling_updated_unit() {
-        assert_eq!(activation_commands(false), vec![ENABLE_NOW_COMMAND]);
+        assert_eq!(
+            activation_commands(false),
+            vec![RESET_FAILED_COMMAND, ENABLE_NOW_COMMAND]
+        );
         assert_eq!(
             activation_commands(true),
-            vec![ENABLE_NOW_COMMAND, RESTART_COMMAND]
+            vec![RESET_FAILED_COMMAND, ENABLE_NOW_COMMAND, RESTART_COMMAND]
         );
     }
 }
