@@ -1,13 +1,16 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use colored::Colorize;
 use uuid::Uuid;
 
 use crate::{
     client::{self, ClientFormat},
-    config::{self, GenerationRequest, Protocol},
+    config::{
+        self, AnyTlsMode, AnyTlsUser, GenerationOptions, GenerationRequest, Protocol,
+        ShadowsocksCipher,
+    },
     installer::{self, InstallMethod},
     menu, operations, self_update,
     service::{self, ServiceAction},
@@ -31,29 +34,7 @@ pub enum Command {
         method: InstallMethod,
     },
     /// 生成服务端配置
-    Generate {
-        /// 配置显示名称
-        #[arg(long)]
-        name: Option<String>,
-        #[arg(value_enum)]
-        protocol: Protocol,
-        #[arg(long, default_value_t = 443)]
-        port: u16,
-        #[arg(long)]
-        output: Option<PathBuf>,
-        /// Reality SNI 或 QUIC 证书域名
-        #[arg(long, default_value = config::DEFAULT_SNI)]
-        server_name: String,
-        /// Reality fallback，格式为 host:port
-        #[arg(long)]
-        dest: Option<String>,
-        /// Hysteria2/TUIC PEM 证书；不指定时生成自签名证书
-        #[arg(long, requires = "key")]
-        cert: Option<PathBuf>,
-        /// Hysteria2/TUIC PEM 私钥
-        #[arg(long, requires = "cert")]
-        key: Option<PathBuf>,
-    },
+    Generate(Box<GenerateArgs>),
     /// 管理 shoes systemd 服务
     Service {
         #[arg(value_enum)]
@@ -119,6 +100,64 @@ pub enum Command {
     },
 }
 
+#[derive(Debug, Args)]
+pub struct GenerateArgs {
+    /// 配置显示名称
+    #[arg(long)]
+    name: Option<String>,
+    #[arg(value_enum)]
+    protocol: Protocol,
+    #[arg(long, default_value_t = 443)]
+    port: u16,
+    #[arg(long)]
+    output: Option<PathBuf>,
+    /// Reality SNI 或 QUIC/TLS 证书域名
+    #[arg(long, default_value = config::DEFAULT_SNI)]
+    server_name: String,
+    /// Reality fallback，格式为 host:port
+    #[arg(long)]
+    dest: Option<String>,
+    /// Reality short ID；不指定时安全随机生成
+    #[arg(long)]
+    short_id: Option<String>,
+    /// Reality 允许的最大时间差（毫秒）
+    #[arg(long, default_value_t = 60_000)]
+    reality_max_time_diff: u64,
+    /// 禁用协议 UDP 支持
+    #[arg(long)]
+    disable_udp: bool,
+    /// Hysteria2/TUIC 的 QUIC endpoint 数；0 表示跟随 shoes 线程数
+    #[arg(long, default_value_t = 0)]
+    quic_endpoints: usize,
+    /// 为 TUIC v5 启用 0-RTT
+    #[arg(long)]
+    zero_rtt: bool,
+    /// Shadowsocks 加密方式（默认推荐 2022 AES-256-GCM）
+    #[arg(long, value_enum, default_value_t = ShadowsocksCipher::default())]
+    cipher: ShadowsocksCipher,
+    /// Shadowsocks 密码；2022 cipher 必须为正确长度的标准 Base64
+    #[arg(long)]
+    password: Option<String>,
+    /// AnyTLS 外层安全模式
+    #[arg(long, value_enum, default_value_t = AnyTlsMode::default())]
+    anytls_mode: AnyTlsMode,
+    /// AnyTLS 用户，可重复；格式为 [名称:]密码
+    #[arg(long = "user")]
+    anytls_users: Vec<AnyTlsUser>,
+    /// AnyTLS padding 条目，可重复，例如 --padding stop=8 --padding 0=30-30
+    #[arg(long = "padding")]
+    anytls_padding: Vec<String>,
+    /// AnyTLS 认证失败 fallback，格式为 host:port
+    #[arg(long)]
+    fallback: Option<String>,
+    /// Hysteria2/TUIC/AnyTLS TLS PEM 证书；不指定时生成自签名证书
+    #[arg(long, requires = "key")]
+    cert: Option<PathBuf>,
+    /// Hysteria2/TUIC/AnyTLS TLS PEM 私钥
+    #[arg(long, requires = "cert")]
+    key: Option<PathBuf>,
+}
+
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum PortKind {
     Tcp,
@@ -138,16 +177,31 @@ pub async fn run(cli: Cli) -> Result<()> {
             println!("systemd unit 已写入；生成配置后再启动服务。");
             Ok(())
         }
-        Command::Generate {
-            name,
-            protocol,
-            port,
-            output,
-            server_name,
-            dest,
-            cert,
-            key,
-        } => {
+        Command::Generate(args) => {
+            let GenerateArgs {
+                name,
+                protocol,
+                port,
+                output,
+                server_name,
+                dest,
+                short_id,
+                reality_max_time_diff,
+                disable_udp,
+                quic_endpoints,
+                zero_rtt,
+                cipher,
+                password,
+                anytls_mode,
+                mut anytls_users,
+                anytls_padding,
+                fallback,
+                cert,
+                key,
+            } = *args;
+            if matches!(protocol, Protocol::AnyTls) && anytls_users.is_empty() {
+                anytls_users.push(config::generated_anytls_user("default"));
+            }
             let output = output.unwrap_or_else(|| PathBuf::from(crate::utils::CONFIG_FILE));
             let result = config::generate(GenerationRequest {
                 name,
@@ -158,6 +212,19 @@ pub async fn run(cli: Cli) -> Result<()> {
                 reality_dest: dest,
                 certificate: cert,
                 certificate_key: key,
+                options: GenerationOptions {
+                    reality_short_id: short_id,
+                    reality_max_time_diff,
+                    udp_enabled: !disable_udp,
+                    quic_endpoints,
+                    tuic_zero_rtt: zero_rtt,
+                    shadowsocks_cipher: cipher,
+                    shadowsocks_password: password,
+                    anytls_mode,
+                    anytls_users,
+                    anytls_padding_scheme: (!anytls_padding.is_empty()).then_some(anytls_padding),
+                    anytls_fallback: fallback,
+                },
             })
             .await?;
             print_credentials(&result);
@@ -357,22 +424,78 @@ pub fn print_credentials(result: &config::GenerationResult) {
         config::Credentials::Hysteria2 {
             password,
             server_name,
+            alpn_protocols,
         } => {
             println!("协议：Hysteria2");
             println!("服务器名称：{server_name}");
             println!("密码：{password}");
+            println!("ALPN：{}", alpn_protocols.join(", "));
             print_certificate_notice(result);
         }
         config::Credentials::Tuic {
             user_id,
             password,
             server_name,
+            alpn_protocols,
+            zero_rtt_handshake,
         } => {
             println!("协议：TUIC v5");
             println!("服务器名称：{server_name}");
             println!("UUID：{user_id}");
             println!("密码：{password}");
+            println!("ALPN：{}", alpn_protocols.join(", "));
+            println!(
+                "0-RTT：{}",
+                if *zero_rtt_handshake {
+                    "启用"
+                } else {
+                    "关闭"
+                }
+            );
             print_certificate_notice(result);
+        }
+        config::Credentials::Shadowsocks {
+            cipher,
+            password,
+            udp_enabled,
+        } => {
+            println!("协议：Shadowsocks");
+            println!("加密：{}", cipher.as_str());
+            println!("密码：{password}");
+            println!("UDP：{}", if *udp_enabled { "启用" } else { "关闭" });
+        }
+        config::Credentials::AnyTls {
+            users,
+            server_name,
+            alpn_protocols,
+            udp_enabled,
+            security,
+        } => {
+            println!("协议：AnyTLS");
+            println!("服务器名称：{server_name}");
+            println!("ALPN：{}", alpn_protocols.join(", "));
+            println!("UDP：{}", if *udp_enabled { "启用" } else { "关闭" });
+            for user in users {
+                let label = if user.name.is_empty() {
+                    "default"
+                } else {
+                    &user.name
+                };
+                println!("用户 {label}：{}", user.password);
+            }
+            match security {
+                config::AnyTlsSecurity::Tls => print_certificate_notice(result),
+                config::AnyTlsSecurity::Reality {
+                    private_key,
+                    public_key,
+                    short_id,
+                } => {
+                    println!("Short ID：{short_id}");
+                    println!("Reality 私钥：{private_key}");
+                    println!("Reality 公钥：{public_key}");
+                    println!("{}", "安全提示：Reality 私钥不得导出或分享。".yellow());
+                }
+            }
         }
     }
 }
@@ -418,5 +541,40 @@ mod tests {
                 method: InstallMethod::Release
             })
         ));
+    }
+
+    #[test]
+    fn parses_new_protocol_options_without_changing_generate_shape() {
+        let ss = Cli::try_parse_from([
+            "ping-rust",
+            "generate",
+            "shadowsocks",
+            "--cipher",
+            "2022-blake3-aes-128-gcm",
+        ])
+        .unwrap();
+        let Some(Command::Generate(args)) = ss.command else {
+            panic!("expected generate command");
+        };
+        assert_eq!(args.protocol, Protocol::Shadowsocks);
+        assert_eq!(args.cipher, ShadowsocksCipher::Aes128Gcm2022);
+
+        let anytls = Cli::try_parse_from([
+            "ping-rust",
+            "generate",
+            "anytls",
+            "--anytls-mode",
+            "reality",
+            "--user",
+            "alice:secret",
+            "--padding",
+            "stop=8",
+        ])
+        .unwrap();
+        let Some(Command::Generate(args)) = anytls.command else {
+            panic!("expected generate command");
+        };
+        assert_eq!(args.protocol, Protocol::AnyTls);
+        assert_eq!(args.anytls_mode, AnyTlsMode::Reality);
     }
 }

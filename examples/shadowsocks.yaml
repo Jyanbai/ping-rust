@@ -1,0 +1,8 @@
+- address: 0.0.0.0:8388
+  protocol:
+    type: shadowsocks
+    cipher: 2022-blake3-aes-256-gcm
+    password: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+    udp_enabled: true
+  rules:
+    - allow-all-direct

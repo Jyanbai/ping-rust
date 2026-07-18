@@ -3,10 +3,14 @@ use std::{
     fs,
     io::Write,
     path::{Path, PathBuf},
+    str::FromStr,
 };
 
 use anyhow::{bail, Context, Result};
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use base64::{
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+    Engine,
+};
 use clap::ValueEnum;
 use rand::RngCore;
 use rcgen::{generate_simple_self_signed, CertifiedKey};
@@ -19,11 +23,138 @@ use crate::utils;
 
 pub const DEFAULT_SNI: &str = "www.cloudflare.com";
 
-#[derive(Clone, Copy, Debug, ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum Protocol {
     Reality,
     Hysteria2,
     Tuic,
+    Shadowsocks,
+    #[value(name = "anytls")]
+    AnyTls,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum ShadowsocksCipher {
+    #[value(name = "aes-128-gcm")]
+    #[serde(rename = "aes-128-gcm")]
+    Aes128Gcm,
+    #[value(name = "aes-256-gcm")]
+    #[serde(rename = "aes-256-gcm")]
+    Aes256Gcm,
+    #[value(name = "chacha20-ietf-poly1305")]
+    #[serde(rename = "chacha20-ietf-poly1305")]
+    Chacha20IetfPoly1305,
+    #[value(name = "2022-blake3-aes-128-gcm")]
+    #[serde(rename = "2022-blake3-aes-128-gcm")]
+    Aes128Gcm2022,
+    #[default]
+    #[value(name = "2022-blake3-aes-256-gcm")]
+    #[serde(rename = "2022-blake3-aes-256-gcm")]
+    Aes256Gcm2022,
+    #[value(name = "2022-blake3-chacha20-ietf-poly1305")]
+    #[serde(rename = "2022-blake3-chacha20-ietf-poly1305")]
+    Chacha20IetfPoly13052022,
+}
+
+impl ShadowsocksCipher {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Aes128Gcm => "aes-128-gcm",
+            Self::Aes256Gcm => "aes-256-gcm",
+            Self::Chacha20IetfPoly1305 => "chacha20-ietf-poly1305",
+            Self::Aes128Gcm2022 => "2022-blake3-aes-128-gcm",
+            Self::Aes256Gcm2022 => "2022-blake3-aes-256-gcm",
+            Self::Chacha20IetfPoly13052022 => "2022-blake3-chacha20-ietf-poly1305",
+        }
+    }
+
+    fn key_len(self) -> Option<usize> {
+        match self {
+            Self::Aes128Gcm2022 => Some(16),
+            Self::Aes256Gcm2022 | Self::Chacha20IetfPoly13052022 => Some(32),
+            _ => None,
+        }
+    }
+
+    pub fn client_name(self) -> &'static str {
+        match self {
+            Self::Chacha20IetfPoly13052022 => "2022-blake3-chacha20-poly1305",
+            _ => self.as_str(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum AnyTlsMode {
+    #[default]
+    Tls,
+    Reality,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AnyTlsUser {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    pub password: String,
+}
+
+impl FromStr for AnyTlsUser {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        let (name, password) = value
+            .split_once(':')
+            .map_or(("", value), |(name, password)| (name, password));
+        if password.is_empty() {
+            return Err("AnyTLS 用户格式应为 [名称:]密码，密码不能为空".to_owned());
+        }
+        Ok(Self {
+            name: name.to_owned(),
+            password: password.to_owned(),
+        })
+    }
+}
+
+pub fn generated_anytls_user(name: impl Into<String>) -> AnyTlsUser {
+    AnyTlsUser {
+        name: name.into(),
+        password: random_secret(24),
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct GenerationOptions {
+    pub reality_short_id: Option<String>,
+    pub reality_max_time_diff: u64,
+    pub udp_enabled: bool,
+    pub quic_endpoints: usize,
+    pub tuic_zero_rtt: bool,
+    pub shadowsocks_cipher: ShadowsocksCipher,
+    pub shadowsocks_password: Option<String>,
+    pub anytls_mode: AnyTlsMode,
+    pub anytls_users: Vec<AnyTlsUser>,
+    pub anytls_padding_scheme: Option<Vec<String>>,
+    pub anytls_fallback: Option<String>,
+}
+
+impl Default for GenerationOptions {
+    fn default() -> Self {
+        Self {
+            reality_short_id: None,
+            reality_max_time_diff: 60_000,
+            udp_enabled: true,
+            quic_endpoints: 0,
+            tuic_zero_rtt: false,
+            shadowsocks_cipher: ShadowsocksCipher::default(),
+            shadowsocks_password: None,
+            anytls_mode: AnyTlsMode::default(),
+            anytls_users: Vec::new(),
+            anytls_padding_scheme: None,
+            anytls_fallback: None,
+        }
+    }
 }
 
 pub struct GenerationRequest {
@@ -35,6 +166,7 @@ pub struct GenerationRequest {
     pub reality_dest: Option<String>,
     pub certificate: Option<PathBuf>,
     pub certificate_key: Option<PathBuf>,
+    pub options: GenerationOptions,
 }
 
 pub struct GenerationResult {
@@ -57,12 +189,44 @@ pub enum Credentials {
     Hysteria2 {
         password: String,
         server_name: String,
+        #[serde(default = "default_h3_alpn")]
+        alpn_protocols: Vec<String>,
     },
     Tuic {
         user_id: Uuid,
         password: String,
         server_name: String,
+        #[serde(default = "default_h3_alpn")]
+        alpn_protocols: Vec<String>,
+        #[serde(default)]
+        zero_rtt_handshake: bool,
     },
+    Shadowsocks {
+        cipher: ShadowsocksCipher,
+        password: String,
+        udp_enabled: bool,
+    },
+    AnyTls {
+        users: Vec<AnyTlsUser>,
+        server_name: String,
+        alpn_protocols: Vec<String>,
+        udp_enabled: bool,
+        security: AnyTlsSecurity,
+    },
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub enum AnyTlsSecurity {
+    Tls,
+    Reality {
+        private_key: String,
+        public_key: String,
+        short_id: String,
+    },
+}
+
+fn default_h3_alpn() -> Vec<String> {
+    vec!["h3".to_owned()]
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -97,6 +261,8 @@ impl ManagedProfile {
             Credentials::Reality { .. } => "VLESS-Reality-Vision",
             Credentials::Hysteria2 { .. } => "Hysteria2",
             Credentials::Tuic { .. } => "TUIC v5",
+            Credentials::Shadowsocks { .. } => "Shadowsocks",
+            Credentials::AnyTls { .. } => "AnyTLS",
         }
     }
 
@@ -104,7 +270,9 @@ impl ManagedProfile {
         match &self.credentials {
             Credentials::Reality { server_name, .. }
             | Credentials::Hysteria2 { server_name, .. }
-            | Credentials::Tuic { server_name, .. } => server_name,
+            | Credentials::Tuic { server_name, .. }
+            | Credentials::AnyTls { server_name, .. } => server_name,
+            Credentials::Shadowsocks { .. } => "-",
         }
     }
 }
@@ -127,12 +295,17 @@ struct QuicSettings {
     key: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     alpn_protocols: Vec<String>,
+    #[serde(default)]
+    num_endpoints: usize,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 enum ServerProtocol {
     Tls {
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        tls_targets: BTreeMap<String, TlsTarget>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         reality_targets: BTreeMap<String, RealityTarget>,
     },
     Hysteria2 {
@@ -144,6 +317,20 @@ enum ServerProtocol {
         password: String,
         zero_rtt_handshake: bool,
     },
+    Shadowsocks {
+        cipher: String,
+        password: String,
+        udp_enabled: bool,
+    },
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct TlsTarget {
+    cert: String,
+    key: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    alpn_protocols: Vec<String>,
+    protocol: InnerProtocol,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -159,10 +346,29 @@ struct RealityTarget {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 enum InnerProtocol {
-    Vless { user_id: Uuid, udp_enabled: bool },
+    Vless {
+        user_id: Uuid,
+        udp_enabled: bool,
+    },
+    #[serde(rename = "anytls")]
+    AnyTls {
+        users: Vec<AnyTlsUser>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        padding_scheme: Option<Vec<String>>,
+        udp_enabled: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        fallback: Option<String>,
+    },
 }
 
 pub async fn generate(request: GenerationRequest) -> Result<GenerationResult> {
+    generate_inner(request, true).await
+}
+
+async fn generate_inner(
+    request: GenerationRequest,
+    validate_with_shoes: bool,
+) -> Result<GenerationResult> {
     validate_request(&request)?;
     let parent = request.output.parent().context("配置输出路径没有父目录")?;
     let parent = if parent.as_os_str().is_empty() {
@@ -190,8 +396,10 @@ pub async fn generate(request: GenerationRequest) -> Result<GenerationResult> {
         bail!("端口 {} 已由现有配置使用", request.port);
     }
     let profile_id = Uuid::new_v4();
-    let self_signed = request.certificate.is_none()
-        && matches!(request.protocol, Protocol::Hysteria2 | Protocol::Tuic);
+    let needs_certificate = matches!(request.protocol, Protocol::Hysteria2 | Protocol::Tuic)
+        || (matches!(request.protocol, Protocol::AnyTls)
+            && request.options.anytls_mode == AnyTlsMode::Tls);
+    let self_signed = request.certificate.is_none() && needs_certificate;
 
     let (server, credentials, certificate_path, certificate_key_path) = match request.protocol {
         Protocol::Reality => generate_reality(&request),
@@ -208,12 +416,14 @@ pub async fn generate(request: GenerationRequest) -> Result<GenerationResult> {
                         &key_string,
                         ServerProtocol::Hysteria2 {
                             password: password.clone(),
-                            udp_enabled: true,
+                            udp_enabled: request.options.udp_enabled,
                         },
+                        request.options.quic_endpoints,
                     ),
                     Credentials::Hysteria2 {
                         password,
                         server_name: request.server_name.clone(),
+                        alpn_protocols: default_h3_alpn(),
                     },
                     Some(cert),
                     Some(key),
@@ -228,19 +438,24 @@ pub async fn generate(request: GenerationRequest) -> Result<GenerationResult> {
                         ServerProtocol::Tuic {
                             uuid: user_id,
                             password: password.clone(),
-                            zero_rtt_handshake: false,
+                            zero_rtt_handshake: request.options.tuic_zero_rtt,
                         },
+                        request.options.quic_endpoints,
                     ),
                     Credentials::Tuic {
                         user_id,
                         password,
                         server_name: request.server_name.clone(),
+                        alpn_protocols: default_h3_alpn(),
+                        zero_rtt_handshake: request.options.tuic_zero_rtt,
                     },
                     Some(cert),
                     Some(key),
                 )
             }
         }
+        Protocol::Shadowsocks => generate_shadowsocks(&request),
+        Protocol::AnyTls => generate_anytls(&request, parent, profile_id)?,
     };
 
     let profile = ManagedProfile {
@@ -274,8 +489,10 @@ pub async fn generate(request: GenerationRequest) -> Result<GenerationResult> {
 
     let yaml = serde_yaml::to_string(&servers).context("序列化 shoes YAML 失败")?;
     validate_yaml(&yaml)?;
-    if managed {
+    if validate_with_shoes {
         validate_candidate_with_shoes(&yaml, parent).await?;
+    }
+    if managed {
         commit_managed(&request.output, Path::new(utils::STATE_FILE), &yaml, &state)?;
     } else {
         utils::atomic_write(&request.output, yaml.as_bytes(), 0o600)?;
@@ -296,6 +513,8 @@ fn default_profile_name(protocol: Protocol, id: Uuid) -> String {
         Protocol::Reality => "reality",
         Protocol::Hysteria2 => "hysteria2",
         Protocol::Tuic => "tuic",
+        Protocol::Shadowsocks => "shadowsocks",
+        Protocol::AnyTls => "anytls",
     };
     format!("{protocol}-{}", &id.simple().to_string()[..8])
 }
@@ -480,7 +699,11 @@ fn generate_reality(
     request: &GenerationRequest,
 ) -> (ServerConfig, Credentials, Option<PathBuf>, Option<PathBuf>) {
     let keypair = generate_reality_keypair();
-    let short_id = random_hex(8);
+    let short_id = request
+        .options
+        .reality_short_id
+        .clone()
+        .unwrap_or_else(|| random_hex(8));
     let user_id = Uuid::new_v4();
     let destination = request
         .reality_dest
@@ -490,11 +713,11 @@ fn generate_reality(
         private_key: keypair.private_key.clone(),
         short_ids: vec![short_id.clone()],
         dest: destination,
-        max_time_diff: 60_000,
+        max_time_diff: request.options.reality_max_time_diff,
         vision: true,
         protocol: InnerProtocol::Vless {
             user_id,
-            udp_enabled: true,
+            udp_enabled: request.options.udp_enabled,
         },
     };
     let mut targets = BTreeMap::new();
@@ -506,6 +729,7 @@ fn generate_reality(
             transport: None,
             quic_settings: None,
             protocol: ServerProtocol::Tls {
+                tls_targets: BTreeMap::new(),
                 reality_targets: targets,
             },
             rules: Vec::new(),
@@ -522,7 +746,128 @@ fn generate_reality(
     )
 }
 
-fn quic_server(port: u16, cert: &str, key: &str, protocol: ServerProtocol) -> ServerConfig {
+fn generate_shadowsocks(
+    request: &GenerationRequest,
+) -> (ServerConfig, Credentials, Option<PathBuf>, Option<PathBuf>) {
+    let cipher = request.options.shadowsocks_cipher;
+    let password = request
+        .options
+        .shadowsocks_password
+        .clone()
+        .unwrap_or_else(|| generate_shadowsocks_password(cipher));
+    (
+        ServerConfig {
+            address: format!("0.0.0.0:{}", request.port),
+            transport: None,
+            quic_settings: None,
+            protocol: ServerProtocol::Shadowsocks {
+                cipher: cipher.as_str().to_owned(),
+                password: password.clone(),
+                udp_enabled: request.options.udp_enabled,
+            },
+            rules: vec!["allow-all-direct".to_owned()],
+        },
+        Credentials::Shadowsocks {
+            cipher,
+            password,
+            udp_enabled: request.options.udp_enabled,
+        },
+        None,
+        None,
+    )
+}
+
+fn generate_anytls(
+    request: &GenerationRequest,
+    parent: &Path,
+    profile_id: Uuid,
+) -> Result<(ServerConfig, Credentials, Option<PathBuf>, Option<PathBuf>)> {
+    let inner = InnerProtocol::AnyTls {
+        users: request.options.anytls_users.clone(),
+        padding_scheme: request.options.anytls_padding_scheme.clone(),
+        udp_enabled: request.options.udp_enabled,
+        fallback: request.options.anytls_fallback.clone(),
+    };
+    let mut tls_targets = BTreeMap::new();
+    let mut reality_targets = BTreeMap::new();
+
+    let (security, cert, key) = match request.options.anytls_mode {
+        AnyTlsMode::Tls => {
+            let (cert, key) = resolve_certificate(request, parent, profile_id)?;
+            tls_targets.insert(
+                request.server_name.clone(),
+                TlsTarget {
+                    cert: cert.to_string_lossy().into_owned(),
+                    key: key.to_string_lossy().into_owned(),
+                    alpn_protocols: vec!["h2".to_owned(), "http/1.1".to_owned()],
+                    protocol: inner,
+                },
+            );
+            (AnyTlsSecurity::Tls, Some(cert), Some(key))
+        }
+        AnyTlsMode::Reality => {
+            let keypair = generate_reality_keypair();
+            let short_id = request
+                .options
+                .reality_short_id
+                .clone()
+                .unwrap_or_else(|| random_hex(8));
+            reality_targets.insert(
+                request.server_name.clone(),
+                RealityTarget {
+                    private_key: keypair.private_key.clone(),
+                    short_ids: vec![short_id.clone()],
+                    dest: request
+                        .reality_dest
+                        .clone()
+                        .unwrap_or_else(|| format!("{}:443", request.server_name)),
+                    max_time_diff: request.options.reality_max_time_diff,
+                    vision: false,
+                    protocol: inner,
+                },
+            );
+            (
+                AnyTlsSecurity::Reality {
+                    private_key: keypair.private_key,
+                    public_key: keypair.public_key,
+                    short_id,
+                },
+                None,
+                None,
+            )
+        }
+    };
+
+    Ok((
+        ServerConfig {
+            address: format!("0.0.0.0:{}", request.port),
+            transport: None,
+            quic_settings: None,
+            protocol: ServerProtocol::Tls {
+                tls_targets,
+                reality_targets,
+            },
+            rules: Vec::new(),
+        },
+        Credentials::AnyTls {
+            users: request.options.anytls_users.clone(),
+            server_name: request.server_name.clone(),
+            alpn_protocols: vec!["h2".to_owned(), "http/1.1".to_owned()],
+            udp_enabled: request.options.udp_enabled,
+            security,
+        },
+        cert,
+        key,
+    ))
+}
+
+fn quic_server(
+    port: u16,
+    cert: &str,
+    key: &str,
+    protocol: ServerProtocol,
+    num_endpoints: usize,
+) -> ServerConfig {
     ServerConfig {
         address: format!("0.0.0.0:{port}"),
         transport: Some("quic".to_owned()),
@@ -530,9 +875,21 @@ fn quic_server(port: u16, cert: &str, key: &str, protocol: ServerProtocol) -> Se
             cert: cert.to_owned(),
             key: key.to_owned(),
             alpn_protocols: vec!["h3".to_owned()],
+            num_endpoints,
         }),
         protocol,
         rules: vec!["allow-all-direct".to_owned()],
+    }
+}
+
+fn generate_shadowsocks_password(cipher: ShadowsocksCipher) -> String {
+    let bytes = cipher.key_len().unwrap_or(24);
+    let mut value = vec![0u8; bytes];
+    rand::rng().fill_bytes(&mut value);
+    if cipher.key_len().is_some() {
+        STANDARD.encode(value)
+    } else {
+        URL_SAFE_NO_PAD.encode(value)
     }
 }
 
@@ -607,24 +964,187 @@ fn validate_request(request: &GenerationRequest) -> Result<()> {
             bail!("配置名称必须为 1..=64 个非控制字符");
         }
     }
-    if request.server_name.trim().is_empty()
-        || request.server_name.len() > 253
-        || request.server_name.contains(char::is_whitespace)
-        || request.server_name.contains('/')
-        || request.server_name.contains([':', '\\'])
-    {
-        bail!("SNI/服务器名称无效");
+    if !matches!(request.protocol, Protocol::Shadowsocks) {
+        validate_server_name(&request.server_name)?;
     }
     if let Some(destination) = &request.reality_dest {
         validate_host_port(destination)?;
     }
-    if matches!(request.protocol, Protocol::Reality)
-        && (request.certificate.is_some() || request.certificate_key.is_some())
-    {
-        bail!("Reality 不使用 --cert/--key；请改用 --server-name 和 --dest");
+    if let Some(short_id) = &request.options.reality_short_id {
+        validate_reality_short_id(short_id)?;
     }
-    if !matches!(request.protocol, Protocol::Reality) && request.reality_dest.is_some() {
-        bail!("--dest 仅适用于 Reality");
+    if request.options.reality_max_time_diff == 0 {
+        bail!("Reality max_time_diff 必须大于 0 毫秒");
+    }
+    if request.options.quic_endpoints > 256 {
+        bail!("QUIC endpoint 数量不能超过 256");
+    }
+    if request.options.quic_endpoints > 0
+        && !matches!(request.protocol, Protocol::Hysteria2 | Protocol::Tuic)
+    {
+        bail!("--quic-endpoints 仅适用于 Hysteria2/TUIC");
+    }
+    if request.options.tuic_zero_rtt && !matches!(request.protocol, Protocol::Tuic) {
+        bail!("--zero-rtt 仅适用于 TUIC v5");
+    }
+    if request.options.anytls_mode != AnyTlsMode::Tls
+        && !matches!(request.protocol, Protocol::AnyTls)
+    {
+        bail!("--anytls-mode 仅适用于 AnyTLS");
+    }
+
+    let reality_outer = matches!(request.protocol, Protocol::Reality)
+        || (matches!(request.protocol, Protocol::AnyTls)
+            && request.options.anytls_mode == AnyTlsMode::Reality);
+    let certificate_protocol = matches!(request.protocol, Protocol::Hysteria2 | Protocol::Tuic)
+        || (matches!(request.protocol, Protocol::AnyTls)
+            && request.options.anytls_mode == AnyTlsMode::Tls);
+
+    match (&request.certificate, &request.certificate_key) {
+        (Some(_), None) | (None, Some(_)) => bail!("--cert 和 --key 必须同时提供"),
+        (Some(_), Some(_)) if !certificate_protocol => {
+            bail!("当前协议不使用 --cert/--key")
+        }
+        _ => {}
+    }
+    if request.reality_dest.is_some() && !reality_outer {
+        bail!("--dest 仅适用于 Reality 或 Reality+AnyTLS");
+    }
+    if request.options.reality_short_id.is_some() && !reality_outer {
+        bail!("--short-id 仅适用于 Reality 或 Reality+AnyTLS");
+    }
+
+    if matches!(request.protocol, Protocol::Shadowsocks) {
+        if let Some(password) = &request.options.shadowsocks_password {
+            validate_shadowsocks_password(request.options.shadowsocks_cipher, password)?;
+        }
+    } else if request.options.shadowsocks_password.is_some() {
+        bail!("--password 仅适用于 Shadowsocks");
+    }
+
+    if matches!(request.protocol, Protocol::AnyTls) {
+        validate_anytls_users(&request.options.anytls_users)?;
+        if let Some(scheme) = &request.options.anytls_padding_scheme {
+            validate_padding_scheme(scheme)?;
+        }
+        if let Some(fallback) = &request.options.anytls_fallback {
+            validate_host_port(fallback)?;
+        }
+    } else if !request.options.anytls_users.is_empty()
+        || request.options.anytls_padding_scheme.is_some()
+        || request.options.anytls_fallback.is_some()
+    {
+        bail!("--user/--padding/--fallback 仅适用于 AnyTLS");
+    }
+    Ok(())
+}
+
+fn validate_server_name(value: &str) -> Result<()> {
+    if value.trim().is_empty()
+        || value.len() > 253
+        || value.contains(char::is_whitespace)
+        || value.contains('/')
+        || value.contains([':', '\\'])
+        || value.split('.').any(|label| {
+            label.is_empty()
+                || label.len() > 63
+                || label.starts_with('-')
+                || label.ends_with('-')
+                || !label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        })
+    {
+        bail!("SNI/服务器名称无效");
+    }
+    Ok(())
+}
+
+fn validate_reality_short_id(value: &str) -> Result<()> {
+    if value.len() > 16
+        || !value.len().is_multiple_of(2)
+        || !value.chars().all(|c| c.is_ascii_hexdigit())
+    {
+        bail!("Reality short ID 必须是 0..=16 个偶数长度十六进制字符");
+    }
+    Ok(())
+}
+
+fn validate_shadowsocks_password(cipher: ShadowsocksCipher, password: &str) -> Result<()> {
+    if password.is_empty() || password.contains(char::is_control) {
+        bail!("Shadowsocks 密码不能为空或包含控制字符");
+    }
+    if let Some(expected) = cipher.key_len() {
+        let decoded = STANDARD
+            .decode(password)
+            .context("Shadowsocks 2022 密码必须使用标准 Base64 编码")?;
+        if decoded.len() != expected {
+            bail!(
+                "{} 密码解码后必须为 {} 字节，当前为 {} 字节",
+                cipher.as_str(),
+                expected,
+                decoded.len()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_anytls_users(users: &[AnyTlsUser]) -> Result<()> {
+    if users.is_empty() {
+        bail!("AnyTLS 至少需要一个用户");
+    }
+    for user in users {
+        if user.name.len() > 64 || user.name.chars().any(char::is_control) {
+            bail!("AnyTLS 用户名不能超过 64 字符或包含控制字符");
+        }
+        if user.password.is_empty() || user.password.chars().any(char::is_control) {
+            bail!("AnyTLS 用户密码不能为空或包含控制字符");
+        }
+    }
+    Ok(())
+}
+
+fn validate_padding_scheme(scheme: &[String]) -> Result<()> {
+    if scheme.is_empty() {
+        bail!("AnyTLS padding_scheme 不能为空");
+    }
+    let mut stop_count = 0;
+    for entry in scheme {
+        let (key, value) = entry
+            .split_once('=')
+            .context("AnyTLS padding 条目必须采用 key=value 格式")?;
+        if key == "stop" {
+            stop_count += 1;
+            let stop = value
+                .parse::<u32>()
+                .context("AnyTLS padding 的 stop 必须是正整数")?;
+            if stop == 0 {
+                bail!("AnyTLS padding 的 stop 必须大于 0");
+            }
+            continue;
+        }
+        key.parse::<u32>()
+            .context("AnyTLS padding 的包序号必须是非负整数")?;
+        if value.is_empty() {
+            bail!("AnyTLS padding 范围不能为空");
+        }
+        for range in value.split(',') {
+            let (min, max) = match range.split_once('-') {
+                Some((min, max)) => (
+                    min.parse::<u32>().context("AnyTLS padding 下限无效")?,
+                    max.parse::<u32>().context("AnyTLS padding 上限无效")?,
+                ),
+                None => {
+                    let size = range.parse::<u32>().context("AnyTLS padding 长度无效")?;
+                    (size, size)
+                }
+            };
+            if min > max || max > 65_535 {
+                bail!("AnyTLS padding 范围必须满足 0 <= min <= max <= 65535");
+            }
+        }
+    }
+    if stop_count != 1 {
+        bail!("AnyTLS padding_scheme 必须且只能包含一个 stop=N 条目");
     }
     Ok(())
 }
@@ -745,6 +1265,7 @@ mod tests {
             reality_dest: None,
             certificate: None,
             certificate_key: None,
+            options: GenerationOptions::default(),
         }
     }
 
@@ -763,9 +1284,12 @@ mod tests {
     #[tokio::test]
     async fn reality_yaml_matches_shoes_shape() {
         let dir = tempfile::tempdir().unwrap();
-        let result = generate(request(Protocol::Reality, dir.path().join("reality.yaml")))
-            .await
-            .unwrap();
+        let result = generate_inner(
+            request(Protocol::Reality, dir.path().join("reality.yaml")),
+            false,
+        )
+        .await
+        .unwrap();
         let yaml = std::fs::read_to_string(result.config_path).unwrap();
         assert!(yaml.contains("type: tls"));
         assert!(yaml.contains("reality_targets:"));
@@ -776,9 +1300,12 @@ mod tests {
     #[tokio::test]
     async fn hysteria2_generates_certificate_and_yaml() {
         let dir = tempfile::tempdir().unwrap();
-        let result = generate(request(Protocol::Hysteria2, dir.path().join("hy2.yaml")))
-            .await
-            .unwrap();
+        let result = generate_inner(
+            request(Protocol::Hysteria2, dir.path().join("hy2.yaml")),
+            false,
+        )
+        .await
+        .unwrap();
         let yaml = std::fs::read_to_string(result.config_path).unwrap();
         assert!(yaml.contains("type: hysteria2"));
         assert!(yaml.contains("transport: quic"));
@@ -789,13 +1316,85 @@ mod tests {
     #[tokio::test]
     async fn tuic_yaml_has_required_credentials() {
         let dir = tempfile::tempdir().unwrap();
-        let result = generate(request(Protocol::Tuic, dir.path().join("tuic.yaml")))
+        let result = generate_inner(request(Protocol::Tuic, dir.path().join("tuic.yaml")), false)
             .await
             .unwrap();
         let yaml = std::fs::read_to_string(result.config_path).unwrap();
         assert!(yaml.contains("type: tuic"));
         assert!(yaml.contains("uuid:"));
         assert!(yaml.contains("zero_rtt_handshake: false"));
+    }
+
+    #[tokio::test]
+    async fn shadowsocks_2022_generates_exact_key_length() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut request = request(Protocol::Shadowsocks, dir.path().join("shadowsocks.yaml"));
+        request.options.shadowsocks_cipher = ShadowsocksCipher::Aes256Gcm2022;
+        let result = generate_inner(request, false).await.unwrap();
+        let yaml = fs::read_to_string(result.config_path).unwrap();
+        assert!(yaml.contains("type: shadowsocks"));
+        assert!(yaml.contains("cipher: 2022-blake3-aes-256-gcm"));
+        let Credentials::Shadowsocks { password, .. } = result.credentials else {
+            panic!("expected Shadowsocks credentials");
+        };
+        assert_eq!(STANDARD.decode(password).unwrap().len(), 32);
+    }
+
+    #[tokio::test]
+    async fn anytls_tls_and_reality_match_shoes_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut tls_request = request(Protocol::AnyTls, dir.path().join("anytls-tls.yaml"));
+        tls_request.options.anytls_users = vec![generated_anytls_user("alice")];
+        tls_request.options.anytls_padding_scheme = Some(vec![
+            "stop=8".to_owned(),
+            "0=30-30".to_owned(),
+            "1=50-100".to_owned(),
+        ]);
+        let tls = generate_inner(tls_request, false).await.unwrap();
+        let tls_yaml = fs::read_to_string(tls.config_path).unwrap();
+        assert!(tls_yaml.contains("tls_targets:"));
+        assert!(tls_yaml.contains("type: anytls"));
+        assert!(tls_yaml.contains("padding_scheme:"));
+        assert!(tls.certificate_path.unwrap().is_file());
+
+        let mut reality_request = request(Protocol::AnyTls, dir.path().join("anytls-reality.yaml"));
+        reality_request.options.anytls_mode = AnyTlsMode::Reality;
+        reality_request.options.anytls_users = vec![generated_anytls_user("bob")];
+        let reality = generate_inner(reality_request, false).await.unwrap();
+        let reality_yaml = fs::read_to_string(reality.config_path).unwrap();
+        assert!(reality_yaml.contains("reality_targets:"));
+        assert!(reality_yaml.contains("type: anytls"));
+        assert!(reality_yaml.contains("vision: false"));
+        assert!(reality.certificate_path.is_none());
+    }
+
+    #[test]
+    fn rejects_invalid_shadowsocks_2022_password_and_anytls_inputs() {
+        let mut ss = request(Protocol::Shadowsocks, PathBuf::from("unused.yaml"));
+        ss.options.shadowsocks_cipher = ShadowsocksCipher::Aes128Gcm2022;
+        ss.options.shadowsocks_password = Some(STANDARD.encode([0u8; 15]));
+        assert!(validate_request(&ss)
+            .unwrap_err()
+            .to_string()
+            .contains("16 字节"));
+
+        let mut anytls = request(Protocol::AnyTls, PathBuf::from("unused.yaml"));
+        assert!(validate_request(&anytls)
+            .unwrap_err()
+            .to_string()
+            .contains("至少需要一个用户"));
+        anytls.options.anytls_users = vec![generated_anytls_user("alice")];
+        anytls.options.anytls_padding_scheme = Some(vec!["0=100-10".to_owned()]);
+        assert!(validate_request(&anytls).is_err());
+    }
+
+    #[test]
+    fn validates_reality_short_ids() {
+        validate_reality_short_id("").unwrap();
+        validate_reality_short_id("0123456789abcdef").unwrap();
+        assert!(validate_reality_short_id("xyz").is_err());
+        assert!(validate_reality_short_id("123").is_err());
+        assert!(validate_reality_short_id("0123456789abcdef00").is_err());
     }
 
     #[test]

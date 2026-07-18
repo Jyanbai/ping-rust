@@ -1,6 +1,6 @@
 # ping-rust
 
-`ping-rust` 是一个纯 Rust 编写的 [cfal/shoes](https://github.com/cfal/shoes) 安装与管理工具。它提供类似 233boy 脚本的数字菜单，在 Linux VPS 上完成 shoes 安装、VLESS-Reality/Hysteria2/TUIC 配置、systemd 管理和日常运维。
+`ping-rust` 是一个纯 Rust 编写的 [cfal/shoes](https://github.com/cfal/shoes) 安装与管理工具。它提供类似 233boy 脚本的数字菜单，在 Linux VPS 上完成 shoes 安装、VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks、AnyTLS 配置、systemd 管理和日常运维。
 
 核心逻辑全部位于 Rust 源码中；`scripts/install.sh` 只负责下载、校验并安装官方预编译二进制。
 
@@ -32,7 +32,7 @@ bash <(curl --proto '=https' --tlsv1.2 -fsSL \
 
 - 从 GitHub Release 下载 shoes，自动匹配 x86_64/aarch64 与 GNU/musl，强制校验官方 SHA-256 digest；GNU 资产不兼容时安全回退 static musl
 - 使用 `cargo install shoes` 从 crates.io 编译安装；低于 1 GiB 内存时自动单任务并关闭 LTO，避免换页风暴
-- 生成 VLESS-Reality-Vision、Hysteria2、TUIC v5 服务端配置
+- 生成 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks、AnyTLS 服务端配置
 - 在 Rust 内生成 X25519 Reality 密钥、UUID、short ID、随机密码和自签名证书
 - 在同目录候选文件上调用 `shoes --dry-run`，通过后才原子提交并启用 systemd 服务
 - 多配置添加、列表、删除、端口冲突保护
@@ -150,6 +150,49 @@ sudo ping-rust generate hysteria2 \
 
 `--cert` 与 `--key` 必须同时提供。
 
+## Shadowsocks 与 AnyTLS
+
+Shadowsocks 默认使用 shoes 推荐列表中的 2022 AES-256-GCM，并生成标准 Base64 编码的 32 字节密钥：
+
+```bash
+sudo ping-rust generate shadowsocks --name ss-main --port 8388
+
+# 指定其它 shoes 支持的 cipher；2022 密码会严格检查解码后长度
+sudo ping-rust generate shadowsocks \
+  --name ss-aes128 \
+  --port 8389 \
+  --cipher 2022-blake3-aes-128-gcm
+```
+
+AnyTLS 默认使用普通 TLS 外层；`--user` 可重复，格式为 `[名称:]密码`。未提供用户时自动创建一个随机密码用户：
+
+```bash
+sudo ping-rust generate anytls \
+  --name anytls-main \
+  --port 9443 \
+  --server-name proxy.example.com \
+  --user alice:'replace-with-a-long-random-password' \
+  --user bob:'another-long-random-password' \
+  --padding stop=8 \
+  --padding 0=30-30 \
+  --padding 1=50-100 \
+  --fallback 127.0.0.1:80
+```
+
+不指定 `--cert/--key` 时会生成自签名证书。高级 Reality+AnyTLS 组合使用：
+
+```bash
+sudo ping-rust generate anytls \
+  --name anytls-reality \
+  --port 10443 \
+  --anytls-mode reality \
+  --server-name www.cloudflare.com \
+  --dest www.cloudflare.com:443 \
+  --user default:'replace-with-a-long-random-password'
+```
+
+`padding_scheme` 必须包含且只包含一个 `stop=N`；非法范围会在写配置前被拒绝。Reality short ID 可用 `--short-id` 指定，否则安全随机生成。
+
 ## 常用命令
 
 ```bash
@@ -188,7 +231,7 @@ sudo ping-rust export sing-box --profile <配置-UUID> --server proxy.example.co
 sudo ping-rust export nekobox --profile <配置-UUID> --server 203.0.113.10
 ```
 
-只有一个配置时可以省略 `--profile`。导出内容包含客户端连接所需凭据，但 Reality 导出永远不包含服务器私钥。
+只有一个配置时可以省略 `--profile`。五种协议均支持 sing-box；普通 TLS AnyTLS 和 Shadowsocks 也支持 Clash Meta 与 Nekobox 标准 URI。Mihomo 明确不支持 AnyTLS+Reality，标准 AnyTLS URI也无法表达 Reality 公钥，因此这两个导出会返回中文错误，不会生成伪配置。所有 Reality 导出都只包含公钥，永远不包含服务器私钥。
 
 ## 备份与恢复
 
@@ -226,6 +269,8 @@ sudo /usr/local/bin/shoes --dry-run /etc/shoes/config.yaml
 - `Address already in use`：运行 `ping-rust check-port <端口>`，换用未占用端口。
 - Reality 连接失败：检查 VPS 防火墙、安全组、UUID、公钥、short ID、SNI 和 fallback 是否一致，并用 `timedatectl status` 确认客户端与服务端时钟已同步。
 - Hysteria2/TUIC 失败：确认 UDP 端口已放行，并检查证书域名。
+- Shadowsocks 2022 导入失败：确认客户端 cipher 使用标准名称，且 Base64 密钥解码长度与 AES-128（16 字节）或 AES-256/ChaCha20（32 字节）一致。
+- AnyTLS 失败：确认选择的 TLS/Reality 模式、SNI、密码与证书校验设置一致；AnyTLS+Reality 请使用 sing-box 导出。
 - `systemctl` 不存在：当前系统不是 systemd 环境，服务管理功能无法使用。
 - GitHub API 限流：稍后重试，或使用 `install --method cargo`。
 - 自更新提示权限不足：若当前程序位于 `/usr/local/bin`，改用 `sudo ping-rust self-update`；不要手工覆盖正在更新的文件。
@@ -246,7 +291,7 @@ cargo doc --no-deps
 
 - Rust 单元测试覆盖密钥/YAML、归档解包、原子写入、systemd unit、端口检查、客户端三格式和恢复路径安全。
 - 自更新单元测试覆盖版本、架构、checksum 重复/缺失和严格单文件归档；Release job 还会真实执行一次强制自更新并复核版本。
-- 使用 shoes 0.2.8 对 ping-rust 实际生成的 Reality、Hysteria2、TUIC 三份配置执行联合 `--dry-run`，解析成功并加载证书。
+- `shoes-schema.yml` 固定 cfal/shoes commit `386b11532424b8665ee3e46340c6236fb3c47595`（0.2.8），对五协议单独配置、五协议联合配置、全部六种 Shadowsocks cipher 和 Reality+AnyTLS 执行真实 `shoes --dry-run`。
 - 通过 cargo-zigbuild + Zig 生成 x86_64/aarch64 Linux GNU release ELF，最高 GLIBC 需求为 2.34，覆盖 Rocky/Alma 9 及更新的目标发行版基线。
 - CI 覆盖 Ubuntu 22.04/24.04，并在 Debian 12、Rocky Linux 9、AlmaLinux 9 容器中执行锁定依赖测试和 release 构建；Ubuntu 24.04 acceptance 还会实际管理 root 路径、systemd 与三个监听端口。
 - 使用 RustSec `cargo audit` 扫描锁定依赖，当前未报告安全公告。
@@ -298,7 +343,9 @@ ping-rust/
 ├── examples/
 │   ├── reality.yaml
 │   ├── hysteria2.yaml
-│   └── tuic.yaml
+│   ├── tuic.yaml
+│   ├── shadowsocks.yaml
+│   └── anytls.yaml
 ├── systemd/
 │   └── ping-rust.service
 └── scripts/

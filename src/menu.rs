@@ -5,7 +5,10 @@ use dialoguer::{theme::ColorfulTheme, Confirm, Input};
 use crate::{
     cli,
     client::{self, ClientFormat},
-    config::{self, GenerationRequest, Protocol},
+    config::{
+        self, AnyTlsMode, AnyTlsUser, GenerationOptions, GenerationRequest, Protocol,
+        ShadowsocksCipher,
+    },
     installer::{self, InstallMethod},
     operations,
     service::{self, ServiceAction},
@@ -214,6 +217,8 @@ async fn add_config_menu() -> Result<()> {
         "VLESS-Reality-Vision（推荐）",
         "Hysteria2",
         "TUIC v5",
+        "Shadowsocks 2022",
+        "AnyTLS",
         "返回",
     ];
     let selected = select_numbered("选择协议", &choices)?;
@@ -221,6 +226,8 @@ async fn add_config_menu() -> Result<()> {
         0 => Protocol::Reality,
         1 => Protocol::Hysteria2,
         2 => Protocol::Tuic,
+        3 => Protocol::Shadowsocks,
+        4 => Protocol::AnyTls,
         _ => return Ok(()),
     };
     let name = Input::<String>::with_theme(&ColorfulTheme::default())
@@ -229,6 +236,8 @@ async fn add_config_menu() -> Result<()> {
             Protocol::Reality => "reality".to_owned(),
             Protocol::Hysteria2 => "hysteria2".to_owned(),
             Protocol::Tuic => "tuic".to_owned(),
+            Protocol::Shadowsocks => "shadowsocks".to_owned(),
+            Protocol::AnyTls => "anytls".to_owned(),
         })
         .interact_text()?;
     let port = Input::<u16>::with_theme(&ColorfulTheme::default())
@@ -242,15 +251,105 @@ async fn add_config_menu() -> Result<()> {
             }
         })
         .interact_text()?;
-    let server_name = Input::<String>::with_theme(&ColorfulTheme::default())
-        .with_prompt(if matches!(protocol, Protocol::Reality) {
-            "Reality SNI"
-        } else {
-            "证书域名/服务器名称"
-        })
-        .default(config::DEFAULT_SNI.to_owned())
-        .interact_text()?;
-    let reality_dest = if matches!(protocol, Protocol::Reality) {
+    let mut options = GenerationOptions::default();
+    if matches!(protocol, Protocol::Shadowsocks) {
+        let ciphers = [
+            "2022-blake3-aes-256-gcm（推荐）",
+            "2022-blake3-aes-128-gcm",
+            "2022-blake3-chacha20-ietf-poly1305",
+            "aes-256-gcm",
+            "aes-128-gcm",
+            "chacha20-ietf-poly1305",
+        ];
+        options.shadowsocks_cipher = match select_numbered("选择加密方式", &ciphers)? {
+            0 => ShadowsocksCipher::Aes256Gcm2022,
+            1 => ShadowsocksCipher::Aes128Gcm2022,
+            2 => ShadowsocksCipher::Chacha20IetfPoly13052022,
+            3 => ShadowsocksCipher::Aes256Gcm,
+            4 => ShadowsocksCipher::Aes128Gcm,
+            _ => ShadowsocksCipher::Chacha20IetfPoly1305,
+        };
+    }
+    if matches!(protocol, Protocol::AnyTls) {
+        options.anytls_mode =
+            match select_numbered("AnyTLS 外层安全模式", &["TLS（推荐）", "Reality（高级）"])?
+            {
+                0 => AnyTlsMode::Tls,
+                _ => AnyTlsMode::Reality,
+            };
+        loop {
+            let default_name = if options.anytls_users.is_empty() {
+                "default".to_owned()
+            } else {
+                format!("user{}", options.anytls_users.len() + 1)
+            };
+            let user_name = Input::<String>::with_theme(&ColorfulTheme::default())
+                .with_prompt("AnyTLS 用户名")
+                .default(default_name)
+                .interact_text()?;
+            let password = Input::<String>::with_theme(&ColorfulTheme::default())
+                .with_prompt("AnyTLS 密码（留空则安全随机生成）")
+                .allow_empty(true)
+                .interact_text()?;
+            options.anytls_users.push(if password.is_empty() {
+                config::generated_anytls_user(user_name)
+            } else {
+                AnyTlsUser {
+                    name: user_name,
+                    password,
+                }
+            });
+            if !Confirm::with_theme(&ColorfulTheme::default())
+                .with_prompt("继续添加 AnyTLS 用户？")
+                .default(false)
+                .interact()?
+            {
+                break;
+            }
+        }
+        if Confirm::with_theme(&ColorfulTheme::default())
+            .with_prompt("使用推荐 padding_scheme？")
+            .default(true)
+            .interact()?
+        {
+            options.anytls_padding_scheme = Some(vec![
+                "stop=8".to_owned(),
+                "0=30-30".to_owned(),
+                "1=50-100".to_owned(),
+            ]);
+        }
+        if Confirm::with_theme(&ColorfulTheme::default())
+            .with_prompt("配置认证失败 fallback？")
+            .default(false)
+            .interact()?
+        {
+            options.anytls_fallback = Some(
+                Input::<String>::with_theme(&ColorfulTheme::default())
+                    .with_prompt("AnyTLS fallback（host:port）")
+                    .default("127.0.0.1:80".to_owned())
+                    .interact_text()?,
+            );
+        }
+    }
+    let server_name = if matches!(protocol, Protocol::Shadowsocks) {
+        config::DEFAULT_SNI.to_owned()
+    } else {
+        Input::<String>::with_theme(&ColorfulTheme::default())
+            .with_prompt(
+                if matches!(protocol, Protocol::Reality)
+                    || options.anytls_mode == AnyTlsMode::Reality
+                {
+                    "Reality SNI"
+                } else {
+                    "证书域名/服务器名称"
+                },
+            )
+            .default(config::DEFAULT_SNI.to_owned())
+            .interact_text()?
+    };
+    let reality_dest = if matches!(protocol, Protocol::Reality)
+        || (matches!(protocol, Protocol::AnyTls) && options.anytls_mode == AnyTlsMode::Reality)
+    {
         Some(
             Input::<String>::with_theme(&ColorfulTheme::default())
                 .with_prompt("Reality fallback")
@@ -260,6 +359,24 @@ async fn add_config_menu() -> Result<()> {
     } else {
         None
     };
+    let needs_certificate = matches!(protocol, Protocol::Hysteria2 | Protocol::Tuic)
+        || (matches!(protocol, Protocol::AnyTls) && options.anytls_mode == AnyTlsMode::Tls);
+    let (certificate, certificate_key) = if needs_certificate
+        && Confirm::with_theme(&ColorfulTheme::default())
+            .with_prompt("使用已有 PEM 证书和私钥？（否则自动生成自签名证书）")
+            .default(false)
+            .interact()?
+    {
+        let cert = Input::<String>::with_theme(&ColorfulTheme::default())
+            .with_prompt("PEM 证书路径")
+            .interact_text()?;
+        let key = Input::<String>::with_theme(&ColorfulTheme::default())
+            .with_prompt("PEM 私钥路径")
+            .interact_text()?;
+        (Some(cert.into()), Some(key.into()))
+    } else {
+        (None, None)
+    };
 
     let result = config::generate(GenerationRequest {
         name: Some(name),
@@ -268,8 +385,9 @@ async fn add_config_menu() -> Result<()> {
         output: crate::utils::CONFIG_FILE.into(),
         server_name,
         reality_dest,
-        certificate: None,
-        certificate_key: None,
+        certificate,
+        certificate_key,
+        options,
     })
     .await?;
     cli::print_credentials(&result);

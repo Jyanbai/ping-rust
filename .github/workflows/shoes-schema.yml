@@ -1,0 +1,120 @@
+name: shoes schema compatibility
+
+on:
+  push:
+    paths:
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/shoes-schema.yml"
+  pull_request:
+    paths:
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/shoes-schema.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  SHOES_COMMIT: 386b11532424b8665ee3e46340c6236fb3c47595
+  SHOES_VERSION: 0.2.8
+
+jobs:
+  dry-run:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build fixed shoes revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          shoes_source="$RUNNER_TEMP/shoes-source"
+          shoes_target="$RUNNER_TEMP/shoes-target"
+          git init "$shoes_source"
+          git -C "$shoes_source" remote add origin https://github.com/cfal/shoes.git
+          git -C "$shoes_source" fetch --depth 1 origin "$SHOES_COMMIT"
+          git -C "$shoes_source" checkout --detach FETCH_HEAD
+          test "$(git -C "$shoes_source" rev-parse HEAD)" = "$SHOES_COMMIT"
+          CARGO_TARGET_DIR="$shoes_target" cargo build \
+            --locked --release --manifest-path "$shoes_source/Cargo.toml"
+          sudo install -m 0755 "$shoes_target/release/shoes" /usr/local/bin/shoes
+          shoes_version="$(shoes --version)"
+          printf '%s\n' "$shoes_version"
+          grep -F "$SHOES_VERSION" <<<"$shoes_version"
+      - name: Build ping-rust
+        run: cargo build --locked
+      - name: Generate and validate every protocol
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="$PWD/target/debug/ping-rust"
+          out="$PWD/target/shoes-validation"
+          mkdir -p "$out"
+
+          "$bin" generate reality --output "$out/reality.yaml" \
+            --port 1443 --server-name www.cloudflare.com \
+            --dest www.cloudflare.com:443
+          "$bin" generate hysteria2 --output "$out/hysteria2.yaml" \
+            --port 2443 --server-name hy2.example.com --quic-endpoints 1
+          "$bin" generate tuic --output "$out/tuic.yaml" \
+            --port 3443 --server-name tuic.example.com --zero-rtt
+          "$bin" generate shadowsocks --output "$out/shadowsocks.yaml" \
+            --port 4388
+          "$bin" generate anytls --output "$out/anytls.yaml" \
+            --port 5443 --server-name anytls.example.com \
+            --user alice:anytls-test-password \
+            --padding stop=8 --padding 0=30-30 --padding 1=50-100 \
+            --fallback 127.0.0.1:80
+
+          for config in reality hysteria2 tuic shadowsocks anytls; do
+            shoes --dry-run "$out/$config.yaml"
+          done
+          cat \
+            "$out/reality.yaml" \
+            "$out/hysteria2.yaml" \
+            "$out/tuic.yaml" \
+            "$out/shadowsocks.yaml" \
+            "$out/anytls.yaml" >"$out/all-five.yaml"
+          shoes --dry-run "$out/all-five.yaml"
+      - name: Validate all Shadowsocks ciphers and Reality plus AnyTLS
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="$PWD/target/debug/ping-rust"
+          out="$PWD/target/shoes-validation"
+          ciphers=(
+            aes-128-gcm
+            aes-256-gcm
+            chacha20-ietf-poly1305
+            2022-blake3-aes-128-gcm
+            2022-blake3-aes-256-gcm
+            2022-blake3-chacha20-ietf-poly1305
+          )
+          passwords=(
+            legacy-aes-128-password
+            legacy-aes-256-password
+            legacy-chacha-password
+            AAAAAAAAAAAAAAAAAAAAAA==
+            AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+            AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+          )
+          for index in "${!ciphers[@]}"; do
+            config="$out/ss-$index.yaml"
+            "$bin" generate shadowsocks --output "$config" \
+              --port "$((6000 + index))" \
+              --cipher "${ciphers[$index]}" \
+              --password "${passwords[$index]}"
+            shoes --dry-run "$config"
+          done
+
+          "$bin" generate anytls --output "$out/anytls-reality.yaml" \
+            --port 7443 --anytls-mode reality \
+            --server-name www.cloudflare.com \
+            --dest www.cloudflare.com:443 \
+            --user advanced:anytls-reality-password
+          shoes --dry-run "$out/anytls-reality.yaml"

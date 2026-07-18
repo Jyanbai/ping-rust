@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use clap::ValueEnum;
 use serde_json::{json, Value};
 use url::form_urlencoded::{byte_serialize, Serializer};
@@ -48,7 +49,7 @@ pub fn render(profile: &ManagedProfile, format: ClientFormat, server: &str) -> R
     match format {
         ClientFormat::ClashMeta => clash_meta(profile, server),
         ClientFormat::SingBox => sing_box(profile, server),
-        ClientFormat::Nekobox => Ok(share_uri(profile, server)),
+        ClientFormat::Nekobox => share_uri(profile, server),
     }
 }
 
@@ -77,6 +78,7 @@ fn clash_meta(profile: &ManagedProfile, server: &str) -> Result<String> {
         Credentials::Hysteria2 {
             password,
             server_name,
+            alpn_protocols,
         } => json!({
             "name": profile.name,
             "type": "hysteria2",
@@ -84,12 +86,15 @@ fn clash_meta(profile: &ManagedProfile, server: &str) -> Result<String> {
             "port": profile.port,
             "password": password,
             "sni": server_name,
+            "alpn": alpn_protocols,
             "skip-cert-verify": profile.self_signed_certificate
         }),
         Credentials::Tuic {
             user_id,
             password,
             server_name,
+            alpn_protocols,
+            zero_rtt_handshake,
         } => json!({
             "name": profile.name,
             "type": "tuic",
@@ -98,21 +103,59 @@ fn clash_meta(profile: &ManagedProfile, server: &str) -> Result<String> {
             "uuid": user_id,
             "password": password,
             "sni": server_name,
-            "alpn": ["h3"],
+            "alpn": alpn_protocols,
+            "reduce-rtt": zero_rtt_handshake,
             "congestion-controller": "bbr",
             "udp-relay-mode": "native",
             "skip-cert-verify": profile.self_signed_certificate
         }),
+        Credentials::Shadowsocks {
+            cipher,
+            password,
+            udp_enabled,
+        } => json!({
+            "name": profile.name,
+            "type": "ss",
+            "server": server,
+            "port": profile.port,
+            "cipher": cipher.client_name(),
+            "password": password,
+            "udp": udp_enabled
+        }),
+        Credentials::AnyTls {
+            users,
+            server_name,
+            alpn_protocols,
+            udp_enabled,
+            security,
+        } => {
+            if matches!(security, config::AnyTlsSecurity::Reality { .. }) {
+                bail!("Clash Meta 不支持 AnyTLS+Reality，请改用 sing-box 导出");
+            }
+            json!({
+                "name": profile.name,
+                "type": "anytls",
+                "server": server,
+                "port": profile.port,
+                "password": first_anytls_password(users)?,
+                "client-fingerprint": "chrome",
+                "udp": udp_enabled,
+                "sni": server_name,
+                "alpn": alpn_protocols,
+                "skip-cert-verify": profile.self_signed_certificate
+            })
+        }
     };
     serde_yaml::to_string(&json!({ "proxies": [proxy] })).context("生成 Clash Meta YAML 失败")
 }
 
 fn sing_box(profile: &ManagedProfile, server: &str) -> Result<String> {
-    let tls = |server_name: &str, insecure: bool| {
+    let tls = |server_name: &str, insecure: bool, alpn: &[String]| {
         json!({
             "enabled": true,
             "server_name": server_name,
-            "insecure": insecure
+            "insecure": insecure,
+            "alpn": alpn
         })
     };
     let outbound: Value = match &profile.credentials {
@@ -139,18 +182,21 @@ fn sing_box(profile: &ManagedProfile, server: &str) -> Result<String> {
         Credentials::Hysteria2 {
             password,
             server_name,
+            alpn_protocols,
         } => json!({
             "type": "hysteria2",
             "tag": profile.name,
             "server": server,
             "server_port": profile.port,
             "password": password,
-            "tls": tls(server_name, profile.self_signed_certificate)
+            "tls": tls(server_name, profile.self_signed_certificate, alpn_protocols)
         }),
         Credentials::Tuic {
             user_id,
             password,
             server_name,
+            alpn_protocols,
+            zero_rtt_handshake,
         } => json!({
             "type": "tuic",
             "tag": profile.name,
@@ -159,14 +205,60 @@ fn sing_box(profile: &ManagedProfile, server: &str) -> Result<String> {
             "uuid": user_id,
             "password": password,
             "congestion_control": "bbr",
-            "tls": tls(server_name, profile.self_signed_certificate)
+            "zero_rtt_handshake": zero_rtt_handshake,
+            "tls": tls(server_name, profile.self_signed_certificate, alpn_protocols)
         }),
+        Credentials::Shadowsocks {
+            cipher, password, ..
+        } => json!({
+            "type": "shadowsocks",
+            "tag": profile.name,
+            "server": server,
+            "server_port": profile.port,
+            "method": cipher.client_name(),
+            "password": password
+        }),
+        Credentials::AnyTls {
+            users,
+            server_name,
+            alpn_protocols,
+            security,
+            ..
+        } => {
+            let tls = match security {
+                config::AnyTlsSecurity::Tls => {
+                    tls(server_name, profile.self_signed_certificate, alpn_protocols)
+                }
+                config::AnyTlsSecurity::Reality {
+                    public_key,
+                    short_id,
+                    ..
+                } => json!({
+                    "enabled": true,
+                    "server_name": server_name,
+                    "utls": { "enabled": true, "fingerprint": "chrome" },
+                    "reality": {
+                        "enabled": true,
+                        "public_key": public_key,
+                        "short_id": short_id
+                    }
+                }),
+            };
+            json!({
+                "type": "anytls",
+                "tag": profile.name,
+                "server": server,
+                "server_port": profile.port,
+                "password": first_anytls_password(users)?,
+                "tls": tls
+            })
+        }
     };
     serde_json::to_string_pretty(&json!({ "outbounds": [outbound] }))
         .context("生成 sing-box JSON 失败")
 }
 
-fn share_uri(profile: &ManagedProfile, server: &str) -> String {
+fn share_uri(profile: &ManagedProfile, server: &str) -> Result<String> {
     let host = authority_host(server);
     let fragment = encode(&profile.name);
     match &profile.credentials {
@@ -187,32 +279,34 @@ fn share_uri(profile: &ManagedProfile, server: &str) -> String {
                 .append_pair("pbk", public_key)
                 .append_pair("sid", short_id)
                 .append_pair("type", "tcp");
-            format!(
+            Ok(format!(
                 "vless://{user_id}@{host}:{}?{}#{fragment}",
                 profile.port,
                 query.finish()
-            )
+            ))
         }
         Credentials::Hysteria2 {
             password,
             server_name,
+            ..
         } => {
             let mut query = Serializer::new(String::new());
             query.append_pair("sni", server_name);
             if profile.self_signed_certificate {
                 query.append_pair("insecure", "1");
             }
-            format!(
+            Ok(format!(
                 "hysteria2://{}@{host}:{}?{}#{fragment}",
                 encode(password),
                 profile.port,
                 query.finish()
-            )
+            ))
         }
         Credentials::Tuic {
             user_id,
             password,
             server_name,
+            ..
         } => {
             let mut query = Serializer::new(String::new());
             query
@@ -222,14 +316,48 @@ fn share_uri(profile: &ManagedProfile, server: &str) -> String {
             if profile.self_signed_certificate {
                 query.append_pair("allow_insecure", "1");
             }
-            format!(
+            Ok(format!(
                 "tuic://{user_id}:{}@{host}:{}?{}#{fragment}",
                 encode(password),
                 profile.port,
                 query.finish()
-            )
+            ))
+        }
+        Credentials::Shadowsocks {
+            cipher, password, ..
+        } => {
+            let auth = URL_SAFE_NO_PAD.encode(format!("{}:{password}", cipher.client_name()));
+            Ok(format!("ss://{auth}@{host}:{}#{fragment}", profile.port))
+        }
+        Credentials::AnyTls {
+            users,
+            server_name,
+            security,
+            ..
+        } => {
+            if matches!(security, config::AnyTlsSecurity::Reality { .. }) {
+                bail!("Nekobox/标准 AnyTLS URI 不支持 Reality 参数，请改用 sing-box 导出");
+            }
+            let mut query = Serializer::new(String::new());
+            query.append_pair("sni", server_name);
+            if profile.self_signed_certificate {
+                query.append_pair("insecure", "1");
+            }
+            Ok(format!(
+                "anytls://{}@{host}:{}/?{}#{fragment}",
+                encode(first_anytls_password(users)?),
+                profile.port,
+                query.finish()
+            ))
         }
     }
+}
+
+fn first_anytls_password(users: &[config::AnyTlsUser]) -> Result<&str> {
+    users
+        .first()
+        .map(|user| user.password.as_str())
+        .context("AnyTLS 配置没有可导出的用户")
 }
 
 fn authority_host(server: &str) -> String {
@@ -247,7 +375,7 @@ fn encode(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Credentials;
+    use crate::config::{AnyTlsSecurity, AnyTlsUser, Credentials, ShadowsocksCipher};
 
     fn reality_profile() -> ManagedProfile {
         ManagedProfile {
@@ -296,6 +424,7 @@ mod tests {
             credentials: Credentials::Hysteria2 {
                 password: "secret".to_owned(),
                 server_name: "proxy.example.com".to_owned(),
+                alpn_protocols: vec!["h3".to_owned()],
             },
             certificate_path: None,
             certificate_key_path: None,
@@ -317,6 +446,8 @@ mod tests {
                 user_id: Uuid::nil(),
                 password: "secret".to_owned(),
                 server_name: "proxy.example.com".to_owned(),
+                alpn_protocols: vec!["h3".to_owned()],
+                zero_rtt_handshake: false,
             },
             certificate_path: None,
             certificate_key_path: None,
@@ -326,5 +457,79 @@ mod tests {
         let sing_box = render(&profile, ClientFormat::SingBox, "203.0.113.3").unwrap();
         assert!(clash.contains("congestion-controller: bbr"));
         assert!(sing_box.contains("\"congestion_control\": \"bbr\""));
+    }
+
+    #[test]
+    fn exports_shadowsocks_to_parseable_formats() {
+        let profile = ManagedProfile {
+            id: Uuid::nil(),
+            name: "ss-2022".to_owned(),
+            port: 8388,
+            credentials: Credentials::Shadowsocks {
+                cipher: ShadowsocksCipher::Chacha20IetfPoly13052022,
+                password: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_owned(),
+                udp_enabled: true,
+            },
+            certificate_path: None,
+            certificate_key_path: None,
+            self_signed_certificate: false,
+        };
+        let clash = render(&profile, ClientFormat::ClashMeta, "203.0.113.4").unwrap();
+        let sing_box = render(&profile, ClientFormat::SingBox, "203.0.113.4").unwrap();
+        let uri = render(&profile, ClientFormat::Nekobox, "203.0.113.4").unwrap();
+        let clash_value: serde_yaml::Value = serde_yaml::from_str(&clash).unwrap();
+        let sing_value: Value = serde_json::from_str(&sing_box).unwrap();
+        assert!(clash_value.is_mapping());
+        assert!(sing_value.is_object());
+        assert!(clash.contains("2022-blake3-chacha20-poly1305"));
+        assert!(sing_box.contains("2022-blake3-chacha20-poly1305"));
+        assert!(uri.starts_with("ss://"));
+    }
+
+    fn anytls_profile(security: AnyTlsSecurity) -> ManagedProfile {
+        ManagedProfile {
+            id: Uuid::nil(),
+            name: "anytls-test".to_owned(),
+            port: 443,
+            credentials: Credentials::AnyTls {
+                users: vec![AnyTlsUser {
+                    name: "alice".to_owned(),
+                    password: "anytls-secret".to_owned(),
+                }],
+                server_name: "proxy.example.com".to_owned(),
+                alpn_protocols: vec!["h2".to_owned(), "http/1.1".to_owned()],
+                udp_enabled: true,
+                security,
+            },
+            certificate_path: Some("/etc/shoes/server.pem".into()),
+            certificate_key_path: Some("/etc/shoes/server-private.pem".into()),
+            self_signed_certificate: true,
+        }
+    }
+
+    #[test]
+    fn exports_anytls_tls_and_rejects_unsupported_reality_formats() {
+        let tls = anytls_profile(AnyTlsSecurity::Tls);
+        let clash = render(&tls, ClientFormat::ClashMeta, "203.0.113.5").unwrap();
+        let sing_box = render(&tls, ClientFormat::SingBox, "203.0.113.5").unwrap();
+        let uri = render(&tls, ClientFormat::Nekobox, "203.0.113.5").unwrap();
+        serde_yaml::from_str::<serde_yaml::Value>(&clash).unwrap();
+        serde_json::from_str::<Value>(&sing_box).unwrap();
+        url::Url::parse(&uri).unwrap();
+        assert!(uri.contains("sni=proxy.example.com"));
+        assert!(!clash.contains("server-private"));
+        assert!(!sing_box.contains("server-private"));
+
+        let reality = anytls_profile(AnyTlsSecurity::Reality {
+            private_key: "never-export-this-private-key".to_owned(),
+            public_key: "public-key".to_owned(),
+            short_id: "0123456789abcdef".to_owned(),
+        });
+        assert!(render(&reality, ClientFormat::ClashMeta, "203.0.113.5").is_err());
+        assert!(render(&reality, ClientFormat::Nekobox, "203.0.113.5").is_err());
+        let sing_box = render(&reality, ClientFormat::SingBox, "203.0.113.5").unwrap();
+        serde_json::from_str::<Value>(&sing_box).unwrap();
+        assert!(sing_box.contains("public-key"));
+        assert!(!sing_box.contains("never-export-this-private-key"));
     }
 }
