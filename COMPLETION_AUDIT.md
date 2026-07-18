@@ -8,18 +8,21 @@
 
 | 原始需求 | 状态 | 实现位置 | 当前证据 |
 |---|---|---|---|
-| Rust 2021、Rust 代码占绝对主导 | 已实现 | `Cargo.toml`、`src/` | 3,334 行 Rust / 177 行安装 shell，Rust 占 94.96%；代理、配置、服务、运维与自更新核心均为 Rust |
+| Rust 2021、Rust 代码占绝对主导 | 已实现 | `Cargo.toml`、`src/` | 4,371 行 Rust / 177 行安装 shell，Rust 占 96.11%；代理、配置、服务、运维与自更新核心均为 Rust |
 | clap v4 子命令与 233boy 风格数字菜单 | 已实现 | `src/cli.rs`、`src/menu.rs` | 主菜单及全部子菜单明确显示 `1..N` 并校验数字输入；九个主入口完整接通 |
 | shoes GitHub Release 预编译安装 | 已实现，Debian/Ubuntu 实测 | `src/installer.rs` | v0.2.7 GNU 不兼容时自动回退 digest 校验过的 static musl；Ubuntu 24.04 约 2 秒完成 Reality 服务部署且提交前健康检查通过 |
 | `cargo install shoes` 源码安装 | 已实现，Debian 实测 | `src/installer.rs` | 在无 cargo PATH、404 MiB RAM 下从当前 binary 同目录解析 cargo，低内存模式 51m35s 安装 v0.2.2；三协议 dry-run 与公网 Reality 均通过 |
 | Reality X25519 密钥和完整 shoes YAML | 已实现 | `src/config.rs` | X25519 派生单测；本地 shoes 0.2.8 `--dry-run` 解析成功 |
 | Hysteria2 与 TUIC 快速配置 | 已实现 | `src/config.rs` | 随机凭据、自签名/外部证书支持；本地 shoes 0.2.8 同时加载两套 PEM 并解析成功 |
+| Shadowsocks 六种 cipher | 已实现 | `src/config.rs`、`src/client.rs` | legacy/2022 六种 shoes cipher 全部真实 dry-run；2022 标准 Base64 与 16/32 字节前置校验；客户端 ChaCha 标准名称单独映射 |
+| AnyTLS（TLS 与 Reality 外层） | 已实现 | `src/config.rs`、`src/cli.rs`、`src/menu.rs` | 多用户、UDP、padding、fallback、自签名/外部证书和 Reality 高级模式均已接通；TLS 与 Reality 两种配置通过固定 shoes dry-run |
+| 固定 latest shoes schema 验证 | 已实现 | `.github/workflows/shoes-schema.yml` | 固定 `386b11532424b8665ee3e46340c6236fb3c47595` / 0.2.8 从源码构建；五单协议、五协议联合、六 cipher 与 Reality+AnyTLS 共 13 次显式 dry-run 成功 |
 | 多配置添加、查看、删除 | 已实现 | `src/config.rs`、`src/cli.rs`、`src/menu.rs` | sidecar 状态、端口冲突和条目一致性检查；多 server 与精确回滚测试 |
 | 候选验证与安全提交 | 已实现 | `src/config.rs`、`src/utils.rs` | 进程间 advisory lock；同目录候选先执行 shoes dry-run；失败候选不触碰正式配置测试 |
 | systemd unit 与启停/重启/状态/日志 | 已实现，Debian/Ubuntu 实测 | `src/service.rs`、`systemd/ping-rust.service` | 首次、active、failed 三态启用策略和 start-limit 恢复均通过；Ubuntu 真实 reboot 后自动 active，三协议端口全部监听 |
 | 更新与卸载 | 已实现，Debian/Ubuntu 实测 | `src/installer.rs`、`src/service.rs` | Release/cargo 更新、连续重启、逐配置删除、最后一条自动停服、默认保留与 `--purge` 清理均通过 |
 | BBR、端口检查、备份恢复 | 已实现，Debian/Ubuntu 实测 | `src/operations.rs` | 两台 VPS 均由 ping-rust 写入并验证 bbr/fq；TCP/UDP 端口判断、0600 备份 round-trip 和服务状态恢复均通过 |
-| Clash Meta、sing-box、Nekobox 客户端导出 | 已实现，Debian/Ubuntu 实测 | `src/client.rs` | 两台 VPS 均生成三协议共 9 份导出；Ubuntu 导出的 Reality JSON 由官方 sing-box 1.13.14 完成公网握手 |
+| Clash Meta、sing-box、Nekobox 客户端导出 | 已实现，前三协议 Debian/Ubuntu 实测 | `src/client.rs` | 五协议 YAML/JSON/URI 解析测试；Reality 私钥不泄漏；普通 AnyTLS 支持三格式，AnyTLS+Reality 仅输出 sing-box，Mihomo/标准 URI 不支持时明确报错 |
 | Ubuntu 22.04/24.04、Debian 12、Rocky/Alma 9 x86_64 | 构建/测试通过；Ubuntu/Debian 运行态实测 | `.github/workflows/ci.yml`、`.github/workflows/ubuntu-acceptance.yml` | CI 覆盖五个目标系统；Ubuntu acceptance run `29630050797` 全绿，另有 Ubuntu 24.04.3 与 Debian 12 独立 systemd/公网验收；GNU ELF 最高 GLIBC 2.34 |
 | ARM64 次优先支持 | 构建与模拟运行已证实 | `src/installer.rs`、Release workflow | aarch64 GNU ELF 最高 GLIBC 2.34；v0.1.3 aarch64 musl 静态 binary 通过 qemu-user-static `--version` 并公开发布 |
 | ping-rust 预编译一键安装 | 已发布并端到端验证 | `.github/workflows/release.yml`、`scripts/install.sh` | v0.1.3 的 x86_64/aarch64 musl、SHA256SUMS 已公开；tag workflow 3/3 jobs 成功，并从公开 URL 完成指定版本安装与 version 验证 |
@@ -28,6 +31,19 @@
 | GitHub 源码开源 | 已发布 | `Cargo.toml`、GitHub `main` | `Jyanbai/ping-rust` 已为 Public/非空并建立 `main`；首个提交与跨平台 CI 修复均已推送 |
 | 公开 `cargo install ping-rust` | 已发布并验证 | crates.io `ping-rust 0.1.3` | 正式 `cargo publish --locked` 成功；官方 API 与独立 `cargo install ping-rust --version 0.1.3 --locked` 均验证公共版本、帮助和运行入口 |
 | 干净 Ubuntu 24.04 三分钟部署并公网连通 | 已完成 | `README.md` 验收清单、Ubuntu acceptance workflow | Ubuntu 24.04.3 干净基线安装后，Reality 部署约 2 秒；官方 Windows sing-box 在 reboot 前后均握手成功且观察到 VPS 公网出口 |
+
+## Milestone 10：latest shoes 五协议 schema 对齐
+
+- 唯一 schema 事实来源固定为 cfal/shoes master commit `386b11532424b8665ee3e46340c6236fb3c47595`，其 `Cargo.toml` 版本为 0.2.8。
+- Reality 继续使用 TLS 外层 `reality_targets`、X25519 base64url 密钥、0..=16 偶数长度十六进制 short ID、VLESS 内层和 `vision: true`；新增 short ID 与 `max_time_diff` 高级参数校验。
+- Hysteria2/TUIC 保持 QUIC transport，显式写入 `h3` ALPN 和 `num_endpoints`；TUIC 的 `zero_rtt_handshake` 同步保存并映射到 sing-box/Mihomo 客户端字段。
+- Shadowsocks 支持 shoes 当前六种 cipher。2022 cipher 按标准 Base64 生成并校验 AES-128 16 字节、AES-256/ChaCha20 32 字节，避免 shoes 内部长度断言；服务端保留 shoes 的 `ietf` 名称，客户端导出映射标准名称。
+- AnyTLS 默认生成 `tls_targets` + TLS target + `protocol.type: anytls`，支持一个或多个用户、UDP、严格 padding、fallback 与证书；高级模式生成 `reality_targets` + AnyTLS，且不错误开启 Vision。
+- 正式生成路径（包括自定义 `--output`）在原子写入前调用实际 `/usr/local/bin/shoes --dry-run`；单元测试通过私有注入点只跳过外部进程，公开生产入口始终启用真实校验。
+- 客户端导出对服务端字段逐项对应；Clash Meta 明确不支持 AnyTLS+Reality，标准 AnyTLS URI也无法携带 Reality 公钥，因此这两种组合返回中文错误，只有 sing-box 生成 Reality+AnyTLS。
+- GitHub run `29635018245` 从固定 SHA 构建 shoes，在 Ubuntu 24.04 对五个单协议配置、五协议联合配置、六种 Shadowsocks cipher 和 Reality+AnyTLS 执行 13 次显式 `shoes --dry-run`，全部输出 `config parsed successfully`。
+- 首次验证 run 因 CLI 标准输出包含一次性 Reality 私钥而被主动删除；工作流随后把生成 stdout 静默，仅保留 shoes 校验结果。重跑日志已扫描，无 `Reality 私钥`、PEM 私钥头或 `private_key:`。
+- 同一修正提交的常规 CI run `29635018243` 在 Ubuntu 22.04/24.04、Debian 12、Rocky Linux 9、AlmaLinux 9 全部成功。
 
 ## Milestone 6 修复结果
 
@@ -83,15 +99,17 @@
 
 - `cargo fmt -- --check`
 - `cargo check --all-targets`
-- `cargo test --all-targets`：34/34 通过
+- `cargo test --all-targets`：41/41 通过
 - `cargo clippy --all-targets -- -D warnings`
 - `cargo build --locked --release`
 - `cargo doc --locked --no-deps`
 - `cargo install --path . --locked` 后执行 `ping-rust --help`
-- `cargo package --locked` / `cargo publish --dry-run --locked`：0.1.3 clean worktree 打包 26 个文件，208.6 KiB / 55.7 KiB compressed，隔离解包重编译与上传前校验均通过
+- `cargo package --locked` / `cargo publish --dry-run --locked`：当前 clean worktree 打包 29 个文件，包含五协议示例与固定 shoes workflow；隔离解包重编译与上传前校验均通过
 - `cargo-audit 0.22.2`：扫描当前 Cargo.lock 的 224 个依赖，RustSec 1166 条 advisory 中无命中
-- `SOURCE_SNAPSHOT.md`：12/12 section、133,760 bytes，Cargo/主要 Rust/README 全部与真实文件逐字一致
-- actionlint v1.7.12：`ci.yml`、`release.yml`、`ubuntu-acceptance.yml` 零诊断；ShellCheck v0.11.0 对一键安装器零诊断
+- `SOURCE_SNAPSHOT.md`：12/12 section、175,403 bytes，Cargo/主要 Rust/README 全部与真实文件逐字一致
+- actionlint v1.7.12：`ci.yml`、`release.yml`、`shoes-schema.yml`、`ubuntu-acceptance.yml` 零诊断；ShellCheck v0.11.0 对一键安装器零诊断
+- GitHub shoes schema run `29635018245`：固定 shoes 0.2.8 commit 的五单协议、五协议联合、六 Shadowsocks cipher、Reality+AnyTLS 共 13 次显式 dry-run 全部成功，且日志敏感信息扫描为零命中
+- GitHub Actions CI run `29635018243`：五个目标发行版全部成功
 - GitHub Actions CI run `29630050826`：systemd 修复提交的跨发行版矩阵全部成功
 - GitHub Ubuntu 24.04 acceptance run `29630050797`：公开 crates 安装、当前源码、Reality 三分钟预算、三协议端口、9 份导出、备份恢复、更新、连续重启与卸载清理全部成功
 - GitHub Actions CI run `29627957682`：v0.1.2 tag 的 Ubuntu 22.04/24.04、Debian 12、Rocky Linux 9、AlmaLinux 9 共 5/5 jobs 成功
