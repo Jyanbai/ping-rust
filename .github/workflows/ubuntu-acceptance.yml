@@ -81,49 +81,66 @@ jobs:
           started_at="$(date +%s)"
 
           bootstrap_output="$RUNNER_TEMP/reality-bootstrap.txt"
-          sudo "$PING_RUST" bootstrap | sudo tee "$bootstrap_output" >/dev/null
-          ! sudo grep -Eq '选择协议|输入端口' "$bootstrap_output"
-          sudo grep -q '首次安装：自动部署 VLESS-REALITY' "$bootstrap_output"
-          sudo grep -q 'vless://' "$bootstrap_output"
+          sudo "$PING_RUST" bootstrap | sudo tee "$bootstrap_output" >/dev/null \
+            || { echo 'bootstrap command failed' >&2; exit 1; }
+          ! sudo grep -Eq '选择协议|输入端口' "$bootstrap_output" \
+            || { echo 'bootstrap prompted unexpectedly' >&2; exit 1; }
+          sudo grep -q '首次安装：自动部署 VLESS-REALITY' "$bootstrap_output" \
+            || { echo 'bootstrap marker missing' >&2; exit 1; }
+          sudo grep -q 'vless://' "$bootstrap_output" \
+            || { echo 'bootstrap URI missing' >&2; exit 1; }
 
           reality_uri="$(sudo "$PING_RUST" url)"
           sudo rm -f "$bootstrap_output"
-          printf '%s' "$reality_uri" | grep -q '^vless://'
+          printf '%s' "$reality_uri" | grep -q '^vless://' \
+            || { echo 'saved URI missing' >&2; exit 1; }
           for parameter in security=reality flow=xtls-rprx-vision pbk= sid=; do
-            printf '%s' "$reality_uri" | grep -q "$parameter"
+            printf '%s' "$reality_uri" | grep -q "$parameter" \
+              || { echo 'saved URI parameter missing' >&2; exit 1; }
           done
-          test "$(sudo "$PING_RUST" qr 2>/dev/null)" = "$reality_uri"
+          test "$(sudo "$PING_RUST" qr 2>/dev/null)" = "$reality_uri" \
+            || { echo 'QR fallback URI mismatch' >&2; exit 1; }
           info_output="$(sudo "$PING_RUST" info)"
-          printf '%s' "$info_output" | grep -q '客户端地址：'
+          printf '%s' "$info_output" | grep -q '客户端地址：' \
+            || { echo 'client address missing from info' >&2; exit 1; }
           reality_port="$(
             printf '%s' "$info_output" \
               | sed -nE 's/.*0\.0\.0\.0:([0-9]+).*/\1/p' \
               | head -n 1
           )"
-          test -n "$reality_port"
-          test "$reality_port" -ge 20000
+          test -n "$reality_port" \
+            || { echo 'Reality port missing from info' >&2; exit 1; }
+          test "$reality_port" -ge 20000 \
+            || { echo 'Reality port outside random range' >&2; exit 1; }
           printf 'REALITY_PORT=%s\n' "$reality_port" >> "$GITHUB_ENV"
 
           elapsed="$(( $(date +%s) - started_at ))"
-          test "$elapsed" -le 180
+          test "$elapsed" -le 180 \
+            || { echo 'Reality bootstrap exceeded three minutes' >&2; exit 1; }
           printf 'elapsed=%s\n' "$elapsed" >> "$GITHUB_OUTPUT"
 
-          sudo systemctl is-active --quiet shoes.service
-          sudo systemctl is-enabled --quiet shoes.service
+          sudo systemctl is-active --quiet shoes.service \
+            || { echo 'shoes service is not active' >&2; exit 1; }
+          sudo systemctl is-enabled --quiet shoes.service \
+            || { echo 'shoes service is not enabled' >&2; exit 1; }
           for _ in {1..20}; do
             if sudo ss -H -lnt | awk '{print $4}' | grep -Eq "(^|:)${reality_port}$"; then
               break
             fi
             sleep 0.5
           done
-          sudo ss -H -lnt | awk '{print $4}' | grep -Eq "(^|:)${reality_port}$"
+          sudo ss -H -lnt | awk '{print $4}' | grep -Eq "(^|:)${reality_port}$" \
+            || { echo 'Reality listener missing' >&2; exit 1; }
+          sudo test -s "/etc/shoes/profiles/VLESS-REALITY-${reality_port}.yaml" \
+            || { echo 'Reality profile file missing' >&2; exit 1; }
 
           reality_profile="$(
             printf '%s' "$info_output" \
               | grep -Eo '[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}' \
               | head -n 1
           )"
-          test -n "$reality_profile"
+          test -n "$reality_profile" \
+            || { echo 'Reality profile UUID missing' >&2; exit 1; }
           printf 'REALITY_PROFILE=%s\n' "$reality_profile" >> "$GITHUB_ENV"
 
       - name: Add Hysteria2 and confirm service reload
