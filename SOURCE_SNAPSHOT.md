@@ -7,7 +7,7 @@
 ````toml
 [package]
 name = "ping-rust"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "Menu-driven installer and manager for the shoes proxy server"
 license = "MIT"
@@ -186,7 +186,7 @@ pub enum Command {
     },
     /// 更新 ping-rust 自身（不会修改 shoes）
     SelfUpdate {
-        /// 安装指定版本，例如 v0.1.1；默认使用最新 Release
+        /// 安装指定版本，例如 v0.1.2；默认使用最新 Release
         #[arg(long, value_name = "VERSION")]
         version: Option<String>,
         /// 即使版本相同也重新安装
@@ -479,11 +479,11 @@ mod tests {
     #[test]
     fn parses_self_update_options() {
         let cli =
-            Cli::try_parse_from(["ping-rust", "self-update", "--version", "v0.1.1", "--force"])
+            Cli::try_parse_from(["ping-rust", "self-update", "--version", "v0.1.2", "--force"])
                 .unwrap();
         match cli.command.unwrap() {
             Command::SelfUpdate { version, force } => {
-                assert_eq!(version.as_deref(), Some("v0.1.1"));
+                assert_eq!(version.as_deref(), Some("v0.1.2"));
                 assert!(force);
             }
             command => panic!("unexpected command: {command:?}"),
@@ -3300,7 +3300,7 @@ async fn fetch_release(client: &Client, tag: Option<&String>) -> Result<GithubRe
 fn normalize_tag(value: &str) -> Result<(String, Version)> {
     let value = value.trim();
     let version = Version::parse(value.strip_prefix('v').unwrap_or(value))
-        .with_context(|| format!("版本格式无效：{value}；示例：v0.1.1"))?;
+        .with_context(|| format!("版本格式无效：{value}；示例：v0.1.2"))?;
     Ok((format!("v{version}"), version))
 }
 
@@ -3672,7 +3672,7 @@ sudo ping-rust
 ```bash
 bash <(curl --proto '=https' --tlsv1.2 -fsSL \
   https://raw.githubusercontent.com/Jyanbai/ping-rust/main/scripts/install.sh) \
-  --version v0.1.1
+  --version v0.1.2
 
 bash <(curl --proto '=https' --tlsv1.2 -fsSL \
   https://raw.githubusercontent.com/Jyanbai/ping-rust/main/scripts/install.sh) \
@@ -3809,8 +3809,8 @@ sudo ping-rust self-update
 `update` 只更新 shoes 内核；`self-update` 更新 ping-rust 本身。默认安装最新 Release，也可以指定版本；显式指定旧版本表示受控降级：
 
 ```bash
-sudo ping-rust self-update --version v0.1.1
-sudo ping-rust self-update --version v0.1.1 --force
+sudo ping-rust self-update --version v0.1.2
+sudo ping-rust self-update --version v0.1.2 --force
 ```
 
 自更新支持 Linux x86_64/aarch64，下载对应 musl 静态包，校验 GitHub API digest 与 `SHA256SUMS`，确认新二进制版本后才替换当前程序。程序位于 `/usr/local/bin` 时通常需要 `sudo`；用户目录内可写的 cargo 安装则不需要。

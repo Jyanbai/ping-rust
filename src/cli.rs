@@ -105,7 +105,7 @@ pub enum Command {
     },
     /// 更新 ping-rust 自身（不会修改 shoes）
     SelfUpdate {
-        /// 安装指定版本，例如 v0.1.1；默认使用最新 Release
+        /// 安装指定版本，例如 v0.1.2；默认使用最新 Release
         #[arg(long, value_name = "VERSION")]
         version: Option<String>,
         /// 即使版本相同也重新安装
@@ -398,11 +398,11 @@ mod tests {
     #[test]
     fn parses_self_update_options() {
         let cli =
-            Cli::try_parse_from(["ping-rust", "self-update", "--version", "v0.1.1", "--force"])
+            Cli::try_parse_from(["ping-rust", "self-update", "--version", "v0.1.2", "--force"])
                 .unwrap();
         match cli.command.unwrap() {
             Command::SelfUpdate { version, force } => {
-                assert_eq!(version.as_deref(), Some("v0.1.1"));
+                assert_eq!(version.as_deref(), Some("v0.1.2"));
                 assert!(force);
             }
             command => panic!("unexpected command: {command:?}"),

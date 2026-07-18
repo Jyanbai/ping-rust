@@ -9,6 +9,7 @@ INSTALL_DIR="${PING_RUST_INSTALL_DIR:-/usr/local/bin}"
 QUIET=0
 TEMP_DIR=""
 STAGED_PATH=""
+USE_SUDO=0
 
 usage() {
   cat <<'EOF'
@@ -18,7 +19,7 @@ usage() {
   install.sh [选项]
 
 选项：
-  --version <版本>       安装指定版本，例如 v0.1.0；默认 latest
+  --version <版本>       安装指定版本，例如 v0.1.2；默认 latest
   --install-dir <目录>   安装目录；默认 /usr/local/bin
   --quiet                只显示错误和最终结果
   -h, --help             显示帮助
@@ -49,13 +50,26 @@ cleanup() {
 }
 
 privileged() {
-  if [ "$(id -u)" -eq 0 ]; then
+  if [ "${USE_SUDO}" -eq 0 ]; then
     "$@"
-  elif command -v sudo >/dev/null 2>&1; then
-    sudo "$@"
   else
-    die "安装到 ${INSTALL_DIR} 需要 root 权限，但系统没有 sudo；请以 root 运行。"
+    sudo "$@"
   fi
+}
+
+prepare_install_dir() {
+  if mkdir -p -- "${INSTALL_DIR}" 2>/dev/null \
+    && [ -w "${INSTALL_DIR}" ] \
+    && [ -x "${INSTALL_DIR}" ]; then
+    USE_SUDO=0
+    return
+  fi
+
+  command -v sudo >/dev/null 2>&1 \
+    || die "安装到 ${INSTALL_DIR} 需要 root 权限，但系统没有 sudo；请以 root 运行。"
+  sudo mkdir -p -- "${INSTALL_DIR}" \
+    || die "无法创建安装目录 ${INSTALL_DIR}。"
+  USE_SUDO=1
 }
 
 require_command() {
@@ -125,7 +139,6 @@ esac
 
 require_command curl
 require_command grep
-require_command id
 require_command install
 require_command mktemp
 require_command sha256sum
@@ -178,7 +191,7 @@ chmod 0755 "${TEMP_DIR}/unpacked/${PROGRAM}"
 "${TEMP_DIR}/unpacked/${PROGRAM}" --version >/dev/null \
   || die "下载的二进制无法在当前系统运行。"
 
-privileged mkdir -p -- "${INSTALL_DIR}"
+prepare_install_dir
 STAGED_PATH="$(privileged mktemp "${INSTALL_DIR}/.${PROGRAM}.install.XXXXXX")"
 privileged install -m 0755 "${TEMP_DIR}/unpacked/${PROGRAM}" "${STAGED_PATH}"
 privileged mv -f -- "${STAGED_PATH}" "${INSTALL_DIR}/${PROGRAM}"

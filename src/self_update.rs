@@ -158,7 +158,7 @@ async fn fetch_release(client: &Client, tag: Option<&String>) -> Result<GithubRe
 fn normalize_tag(value: &str) -> Result<(String, Version)> {
     let value = value.trim();
     let version = Version::parse(value.strip_prefix('v').unwrap_or(value))
-        .with_context(|| format!("版本格式无效：{value}；示例：v0.1.1"))?;
+        .with_context(|| format!("版本格式无效：{value}；示例：v0.1.2"))?;
     Ok((format!("v{version}"), version))
 }
 
