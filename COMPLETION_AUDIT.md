@@ -83,6 +83,7 @@
 - Ubuntu acceptance 直接运行安装器调用的 bootstrap 命令，断言输出中没有“选择协议/输入端口”、端口为随机高位端口、URI 完整、systemd active 且实际监听。
 - Release workflow 从公开 tag 资产运行默认 install.sh 全链路，静默捕获敏感 URI，验证监听、重复 bootstrap 幂等，再卸载清理；普通安装/冲突/迁移测试使用 `--no-bootstrap` 保持职责独立。
 - 本地门禁：55/55 tests、fmt、check、clippy `-D warnings`、actionlint v1.7.12、ShellCheck 全通过。
+- 首轮 Ubuntu run `29642950205` 已实际完成 shoes 安装、systemd unit 启用和 Reality 激活，随后因验收脚本用行首锚点从带终端样式的展示输出提取 URI 而失败；改为只确认展示含 URI，再通过 `url` 命令取得规范值，不更改产品部署逻辑。
 
 ## Milestone 6 修复结果
 

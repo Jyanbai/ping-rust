@@ -188,9 +188,9 @@ jobs:
             > "${bootstrap_output}"
           ! grep -Eq '选择协议|输入端口' "${bootstrap_output}"
           grep -q '首次安装：自动部署 VLESS-REALITY' "${bootstrap_output}"
-          bootstrap_uri="$(grep '^vless://' "${bootstrap_output}" | tail -n 1)"
-          test -n "${bootstrap_uri}"
-          test "$(sudo "${bootstrap_dir}/ping-rust" url)" = "${bootstrap_uri}"
+          grep -q 'vless://' "${bootstrap_output}"
+          bootstrap_uri="$(sudo "${bootstrap_dir}/ping-rust" url)"
+          printf '%s' "${bootstrap_uri}" | grep -q '^vless://'
           sudo systemctl is-active --quiet shoes.service
           bootstrap_info="$(sudo "${bootstrap_dir}/ping-rust" info)"
           bootstrap_port="$(

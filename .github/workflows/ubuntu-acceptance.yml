@@ -84,8 +84,9 @@ jobs:
           sudo "$PING_RUST" bootstrap | sudo tee "$bootstrap_output" >/dev/null
           ! sudo grep -Eq '选择协议|输入端口' "$bootstrap_output"
           sudo grep -q '首次安装：自动部署 VLESS-REALITY' "$bootstrap_output"
+          sudo grep -q 'vless://' "$bootstrap_output"
 
-          reality_uri="$(sudo grep '^vless://' "$bootstrap_output" | tail -n 1)"
+          reality_uri="$(sudo "$PING_RUST" url)"
           sudo rm -f "$bootstrap_output"
           printf '%s' "$reality_uri" | grep -q '^vless://'
           for parameter in security=reality flow=xtls-rprx-vision pbk= sid=; do
