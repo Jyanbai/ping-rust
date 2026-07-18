@@ -170,6 +170,55 @@ jobs:
           printf 'TUIC_PROFILE=%s\n' "$tuic_profile" >> "$GITHUB_ENV"
           sudo rm -f "$tuic_output"
 
+      - name: Add Shadowsocks and AnyTLS and confirm five-protocol runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          shadowsocks_output="$RUNNER_TEMP/shadowsocks-generation.txt"
+          sudo "$PING_RUST" generate shadowsocks \
+            --name acceptance-shadowsocks \
+            --port 24446 \
+            | sudo tee "$shadowsocks_output" >/dev/null
+          for _ in {1..20}; do
+            if sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)24446$'; then
+              break
+            fi
+            sleep 0.5
+          done
+          sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)24446$'
+          shadowsocks_profile="$(
+            grep -Eo '[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}' \
+              "$shadowsocks_output" | head -n 1
+          )"
+          test -n "$shadowsocks_profile"
+          printf 'SHADOWSOCKS_PROFILE=%s\n' "$shadowsocks_profile" >> "$GITHUB_ENV"
+          sudo rm -f "$shadowsocks_output"
+
+          anytls_output="$RUNNER_TEMP/anytls-generation.txt"
+          sudo "$PING_RUST" generate anytls \
+            --name acceptance-anytls \
+            --port 24447 \
+            --server-name localhost \
+            --user acceptance:anytls-acceptance-password \
+            --padding stop=8 \
+            --padding 0=30-30 \
+            | sudo tee "$anytls_output" >/dev/null
+          sudo systemctl is-active --quiet shoes.service
+          for _ in {1..20}; do
+            if sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)24447$'; then
+              break
+            fi
+            sleep 0.5
+          done
+          sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)24447$'
+          anytls_profile="$(
+            grep -Eo '[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}' \
+              "$anytls_output" | head -n 1
+          )"
+          test -n "$anytls_profile"
+          printf 'ANYTLS_PROFILE=%s\n' "$anytls_profile" >> "$GITHUB_ENV"
+          sudo rm -f "$anytls_output"
+
       - name: Verify client exports and operations
         shell: bash
         run: |
@@ -177,7 +226,9 @@ jobs:
           for entry in \
             "reality:$REALITY_PROFILE" \
             "hysteria2:$HYSTERIA_PROFILE" \
-            "tuic:$TUIC_PROFILE"; do
+            "tuic:$TUIC_PROFILE" \
+            "shadowsocks:$SHADOWSOCKS_PROFILE" \
+            "anytls:$ANYTLS_PROFILE"; do
             name="${entry%%:*}"
             profile="${entry#*:}"
             sudo "$PING_RUST" export clash-meta \
@@ -213,6 +264,8 @@ jobs:
           sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)24443$'
           sudo ss -H -lun | awk '{print $4}' | grep -Eq '(^|:)24444$'
           sudo ss -H -lun | awk '{print $4}' | grep -Eq '(^|:)24445$'
+          sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)24446$'
+          sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)24447$'
 
       - name: Record acceptance summary
         shell: bash
@@ -223,8 +276,8 @@ jobs:
             echo "- Public crates.io version: $PUBLIC_VERSION"
             echo "- Reality deployment: ${{ steps.reality.outputs.elapsed }} seconds"
             echo '- systemd: enabled, active, restart verified'
-            echo '- Protocol listeners: Reality, Hysteria2, TUIC'
-            echo '- Client exports: Clash Meta, sing-box, Nekobox'
+            echo '- Protocol listeners: Reality, Hysteria2, TUIC, Shadowsocks, AnyTLS'
+            echo '- Client exports: five protocols to Clash Meta, sing-box, Nekobox'
             echo '- Operations: logs, backup, restore, update, restart, info'
           } >> "$GITHUB_STEP_SUMMARY"
 
