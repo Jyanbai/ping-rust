@@ -21,12 +21,12 @@
 | BBR、端口检查、备份恢复 | 已实现，Debian 实测 | `src/operations.rs` | BBR 当前算法为 bbr；TCP/UDP 端口判断正确；0600 备份 round-trip、marker 清理、哈希一致及 active/inactive 恢复均通过 |
 | Clash Meta、sing-box、Nekobox 客户端导出 | 已实现，Debian/Ubuntu 实测 | `src/client.rs` | 两台 VPS 均生成三协议共 9 份导出；Ubuntu 导出的 Reality JSON 由官方 sing-box 1.13.14 完成公网握手 |
 | Ubuntu 22.04/24.04、Debian 12、Rocky/Alma 9 x86_64 | 构建/测试通过；Ubuntu/Debian 运行态实测 | `.github/workflows/ci.yml`、`.github/workflows/ubuntu-acceptance.yml` | CI 覆盖五个目标系统；Ubuntu acceptance run `29630050797` 全绿，另有 Ubuntu 24.04.3 与 Debian 12 独立 systemd/公网验收；GNU ELF 最高 GLIBC 2.34 |
-| ARM64 次优先支持 | 构建与模拟运行已证实 | `src/installer.rs`、Release workflow | aarch64 GNU ELF 最高 GLIBC 2.34；v0.1.2 aarch64 musl 静态 binary 通过 qemu-user-static `--version` 并公开发布 |
-| ping-rust 预编译一键安装 | 已发布并端到端验证 | `.github/workflows/release.yml`、`scripts/install.sh` | v0.1.2 的 x86_64/aarch64 musl、SHA256SUMS 已公开；tag workflow 3/3 jobs 成功，并从公开 URL 完成指定版本安装与 version 验证 |
-| ping-rust 原生自更新 | 已发布并端到端验证 | `src/self_update.rs`、`src/cli.rs`、`src/menu.rs` | 独立 `self-update` 保留 shoes `update` 语义；v0.1.2 发布 job 在非 root 自定义目录真实完成公开资产下载、双重 SHA-256、运行中原子替换和安装后版本复核 |
+| ARM64 次优先支持 | 构建与模拟运行已证实 | `src/installer.rs`、Release workflow | aarch64 GNU ELF 最高 GLIBC 2.34；v0.1.3 aarch64 musl 静态 binary 通过 qemu-user-static `--version` 并公开发布 |
+| ping-rust 预编译一键安装 | 已发布并端到端验证 | `.github/workflows/release.yml`、`scripts/install.sh` | v0.1.3 的 x86_64/aarch64 musl、SHA256SUMS 已公开；tag workflow 3/3 jobs 成功，并从公开 URL 完成指定版本安装与 version 验证 |
+| ping-rust 原生自更新 | 已发布并端到端验证 | `src/self_update.rs`、`src/cli.rs`、`src/menu.rs` | 独立 `self-update` 保留 shoes `update` 语义；v0.1.3 发布 job 在非 root 自定义目录真实完成公开资产下载、双重 SHA-256、运行中原子替换和安装后版本复核 |
 | README、MIT、cargo install 发布 | 已发布并验证 | `README.md`、`LICENSE`、`scripts/install.sh` | README 第一屏提供无需 Rust 的一键入口，并保留 crates.io/Git/源码安装；release build、doc、隔离 `cargo package` 门禁通过 |
 | GitHub 源码开源 | 已发布 | `Cargo.toml`、GitHub `main` | `Jyanbai/ping-rust` 已为 Public/非空并建立 `main`；首个提交与跨平台 CI 修复均已推送 |
-| 公开 `cargo install ping-rust` | 已发布并验证 | crates.io `ping-rust 0.1.2` | 正式 `cargo publish --locked` 成功；官方 API、`cargo search` 与独立 `cargo install ping-rust --version 0.1.2 --locked` 均验证公开安装路径可用 |
+| 公开 `cargo install ping-rust` | 已发布并验证 | crates.io `ping-rust 0.1.3` | 正式 `cargo publish --locked` 成功；官方 API 与独立 `cargo install ping-rust --version 0.1.3 --locked` 均验证公共版本、帮助和运行入口 |
 | 干净 Ubuntu 24.04 三分钟部署并公网连通 | 已完成 | `README.md` 验收清单、Ubuntu acceptance workflow | Ubuntu 24.04.3 干净基线安装后，Reality 部署约 2 秒；官方 Windows sing-box 在 reboot 前后均握手成功且观察到 VPS 公网出口 |
 
 ## Milestone 6 修复结果
@@ -99,7 +99,10 @@
 - v0.1.1 Release run `29627638839`：两个 musl build、checksum 与公开 Release 创建成功；最终强制自更新因 install.sh 对可写自定义目录仍无条件 sudo 而失败。权限拒绝发生在原子替换前，旧 binary 未损坏；修复进入 0.1.2，不改写已公开 tag。
 - GitHub Release run `29627957641`：v0.1.2 的 x86_64 musl、aarch64 musl、Publish GitHub Release 共 3/3 jobs 成功；公开一键安装和 `self-update --version v0.1.2 --force` 均通过。
 - v0.1.2 公开资产独立下载复核：x86_64 2,491,684 bytes / SHA-256 `d6ae81cc349791b7d189fbcb13abb3fc41898faf08beb69217e71e6561c9ee78`；aarch64 2,331,294 bytes / SHA-256 `c0ed8f1611691c6da45c7268af5095d80fd882b08884d56e195c4c373e1b6a1a`；两者与 SHA256SUMS、GitHub API digest 一致，且各归档仅含一个 `ping-rust`。
+- GitHub Release run `29630671628`：v0.1.3 的 x86_64 musl、aarch64 musl 与 Publish GitHub Release 3/3 jobs 成功；公开一键安装和强制自更新探针均通过。
+- v0.1.3 公开资产独立下载复核：x86_64 2,491,829 bytes / SHA-256 `3a5f37e462e534cbb123dfde4edbe44663363679b7ba7582681180d203ea8d01`；aarch64 2,331,135 bytes / SHA-256 `b25497ac2dbdc55868a6a6abef27bca4835c4324fe2112b1e38b24e6e02210d7`；两者与 SHA256SUMS、GitHub API digest 一致。
+- crates.io 0.1.3 正式发布后，官方 API 最新版本为 0.1.3；全新隔离 root 从 registry 下载并编译，`ping-rust --version` 与 `--help` 均成功。
 
 ## 发布状态
 
-公开源码已推送到 `Jyanbai/ping-rust` 的 `main`。Ubuntu 24.04 成功标准已由独立 VPS 与 GitHub runner 双重完成；当前收尾项仅为把本次 systemd 三态/start-limit 修复以 0.1.3 发布到 GitHub Releases 与 crates.io，并在发布后再次验证公共安装入口。
+公开源码已推送到 `Jyanbai/ping-rust` 的 `main`。Ubuntu 24.04 成功标准已由独立 VPS 与 GitHub runner 双重完成；v0.1.3 已同时发布到 GitHub Releases 与 crates.io，双架构静态资产、一键安装、自更新和公共 cargo 安装均已验证。
