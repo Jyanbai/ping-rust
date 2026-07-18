@@ -21,19 +21,19 @@
 | AnyTLS（TLS 与 Reality 外层） | 已实现 | `src/config.rs`、`src/cli.rs`、`src/menu.rs` | 多用户、UDP、padding、fallback、自签名/外部证书和 Reality 高级模式均已接通；TLS 与 Reality 两种配置通过固定 shoes dry-run |
 | 固定 latest shoes schema 验证 | 已实现 | `.github/workflows/shoes-schema.yml` | 固定 `386b11532424b8665ee3e46340c6236fb3c47595` / 0.2.8 从源码构建；五单协议、五协议联合、六 cipher 与 Reality+AnyTLS 共 13 次显式 dry-run 成功 |
 | 多配置添加、查看、删除 | 已实现 | `src/config.rs`、`src/cli.rs`、`src/menu.rs` | sidecar 状态、端口冲突和条目一致性检查；多 server 与精确回滚测试 |
-| 菜单 `2. 更改配置` | 已实现，Ubuntu 自动验收待运行 | `src/menu.rs`、`src/config.rs`、`src/deployment.rs` | 原占位提示已替换为协议感知修改流程；端口、名称、地址、凭据、Reality SNI、SS cipher、AnyTLS 用户密码均同步 YAML/sidecar，经真实 shoes dry-run、原子提交和 systemd 稳定激活后才成功，失败精确回滚 |
+| 菜单 `2. 更改配置` | 已实现，Ubuntu 24.04 实测 | `src/menu.rs`、`src/config.rs`、`src/deployment.rs` | 原占位提示已替换为协议感知修改流程；端口、名称、地址、凭据、Reality SNI、SS cipher、AnyTLS 用户密码均同步 YAML/sidecar，经真实 shoes dry-run、原子提交和 systemd 稳定激活后才成功，失败精确回滚 |
 | 候选验证与安全提交 | 已实现 | `src/config.rs`、`src/utils.rs` | 进程间 advisory lock；同目录候选先执行 shoes dry-run；失败候选不触碰正式配置测试 |
 | systemd unit 与启停/重启/状态/日志 | 已实现，Debian/Ubuntu 实测 | `src/service.rs`、`systemd/ping-rust.service` | 首次、active、failed 三态启用策略和 start-limit 恢复均通过；Ubuntu 真实 reboot 后自动 active，三协议端口全部监听 |
 | 更新与卸载 | 已实现，Debian/Ubuntu 实测 | `src/installer.rs`、`src/service.rs`、`src/utils.rs` | update/uninstall 共用全局锁；更新前保存旧 shoes，验证新内核能加载现有配置并在 restart 后稳定 active，否则恢复旧二进制和服务；卸载仍只删除确实属于本工具的文件与别名 |
 | BBR、端口检查、备份恢复 | 已实现，Debian/Ubuntu 实测 | `src/operations.rs` | 两台 VPS 均由 ping-rust 写入并验证 bbr/fq；TCP/UDP 端口判断、0600 备份 round-trip 和服务状态恢复均通过 |
 | Clash Meta、sing-box、Nekobox 客户端导出 | 已实现，前三协议 Debian/Ubuntu 实测 | `src/client.rs` | 五协议 YAML/JSON/URI 解析测试；Reality 私钥不泄漏；普通 AnyTLS 支持三格式，AnyTLS+Reality 仅输出 sing-box，Mihomo/标准 URI 不支持时明确报错 |
 | Ubuntu 22.04/24.04、Debian 12、Rocky/Alma 9 x86_64 | 构建/测试通过；Ubuntu/Debian 运行态实测 | `.github/workflows/ci.yml`、`.github/workflows/ubuntu-acceptance.yml` | CI 覆盖五个目标系统；Ubuntu acceptance run `29635760772` 实际加载五协议并复核监听，另有 Ubuntu 24.04.3 与 Debian 12 独立 systemd/公网验收；GNU ELF 最高 GLIBC 2.34 |
-| ARM64 次优先支持 | 构建与模拟运行已证实 | `src/installer.rs`、Release workflow | aarch64 GNU ELF 最高 GLIBC 2.34；v0.1.7 aarch64 musl 静态 binary 通过 qemu-user-static `--version` 并公开发布 |
-| ping-rust 预编译一键安装 | 已发布并端到端验证 | `.github/workflows/release.yml`、`scripts/install.sh` | v0.1.7 的 x86_64/aarch64 musl、SHA256SUMS 已公开；Release workflow 从公开 URL 零输入部署默认 Reality，验证随机监听、systemd、URI 与重复运行保护，同时覆盖 `prs`、冲突保护、旧 `sb` 迁移和自更新 |
+| ARM64 次优先支持 | 构建与模拟运行已证实 | `src/installer.rs`、Release workflow | aarch64 GNU ELF 最高 GLIBC 2.34；v0.1.8 aarch64 musl 静态 binary 通过 qemu-user-static `--version` 并公开发布 |
+| ping-rust 预编译一键安装 | 已发布并端到端验证 | `.github/workflows/release.yml`、`scripts/install.sh` | v0.1.8 的 x86_64/aarch64 musl、SHA256SUMS 已公开；Release workflow 从公开 URL 零输入部署默认 Reality，验证随机监听、systemd、URI 与重复运行保护，同时覆盖 `prs`、冲突保护、旧 `sb` 迁移和自更新 |
 | ping-rust 原生自更新 | 已发布并端到端验证 | `src/self_update.rs`、`src/cli.rs`、`src/menu.rs` | 独立 `self-update` 保留 shoes `update` 语义；v0.1.6 发布 job 在非 root 自定义目录真实完成公开资产下载、双重 SHA-256、运行中原子替换和安装后版本复核 |
 | README、MIT、cargo install 发布 | 已发布并验证 | `README.md`、`LICENSE`、`scripts/install.sh` | README 第一屏提供无需 Rust 的一键入口，并保留 crates.io/Git/源码安装；release build、doc、隔离 `cargo package` 门禁通过 |
 | GitHub 源码开源 | 已发布 | `Cargo.toml`、GitHub `main` | `Jyanbai/ping-rust` 已为 Public/非空并建立 `main`；首个提交与跨平台 CI 修复均已推送 |
-| 公开 `cargo install ping-rust` | 已发布并验证 | crates.io `ping-rust 0.1.7` | 正式 `cargo publish --locked` 成功；公开 registry 搜索与独立 `cargo install ping-rust --version 0.1.7 --locked` 均返回 0.1.7 |
+| 公开 `cargo install ping-rust` | 已发布并验证 | crates.io `ping-rust 0.1.8` | 正式 `cargo publish --locked` 成功；公开 registry API 与独立 `cargo install ping-rust --version 0.1.8 --locked` 均返回 0.1.8 |
 | 干净 Ubuntu 24.04 三分钟部署并公网连通 | 已完成 | `README.md` 验收清单、Ubuntu acceptance workflow | Ubuntu 24.04.3 干净基线安装后，Reality 部署约 2 秒；官方 Windows sing-box 在 reboot 前后均握手成功且观察到 VPS 公网出口 |
 
 ## Milestone 10：latest shoes 五协议 schema 对齐
@@ -100,8 +100,11 @@
 - shoes update 在获取全局锁后保存旧二进制；新内核必须能 dry-run 现有配置且重启后两次探测保持 active，否则恢复旧二进制并重新启动旧服务。update/uninstall/config transaction 不再并发互相覆盖。
 - 新建配置名称强制不区分大小写唯一；旧数据若存在同名项，名称选择明确拒绝并要求 UUID，避免静默选错。
 - `/etc/shoes` 统一收紧为 0700、文件为 0600；备份恢复遇到 symlink/特殊文件拒绝并回滚。四个 GitHub workflow 的第三方 Actions 均固定完整 commit SHA，并加入 Dependabot 更新通道。
-- Ubuntu 24.04 acceptance 新增真实 `prs → 2 → 选择 Reality → 改端口` PTY 路径，成功后验证新端口监听、旧端口消失；等待产品提交推送后的远端 run 作为最终 Linux 证据。
-- 当前本地门禁：62/62 tests、fmt、check、clippy `-D warnings`、release build、doc、actionlint v1.7.12、ShellCheck 与 diff check 全部通过；v0.1.8 发布状态仍为待远端 CI。
+- Ubuntu 24.04 acceptance run `29645174670` 通过真实 `prs → 2 → 选择 Reality → 改端口` PTY 路径，并验证新端口监听、旧端口消失；同一 run 的五协议、激活故障回滚、导出、运维和清理全部成功。
+- 精确产品提交 `960edde` 的 main CI run `29645174662`、固定 shoes schema run `29645174650` 与 Dependabot 配置 run `29645176313` 全部成功；tag CI `29645387085` 和 schema run `29645387104` 再次全绿。
+- GitHub Release run `29645387081` 的 x86_64/aarch64 MUSL 构建、公开 checksum、Release 创建和一键安装器默认 Reality 全部成功。独立下载复核：x86_64 2,632,869 bytes / SHA-256 `11a87df2afa8dc387dba2f5f2a9366d7cd3fa344aad54476e1c3a86263a996c1`；aarch64 2,462,412 bytes / SHA-256 `a165b41cd469339de070053ae4d6aabf8320cd844e892fc9881de068aadea7fe`；两者均只含一个 `ping-rust` 且与 `SHA256SUMS`/GitHub digest 一致。
+- crates.io 0.1.8 已正式发布；全新隔离 Cargo root 从公共 registry 下载编译，`ping-rust --version` 返回 0.1.8，`add`/`self-update` 帮助存在。
+- 本地门禁：62/62 tests、fmt、check、clippy `-D warnings`、release build、doc、严格 package/publish dry-run、RustSec、actionlint v1.7.12、ShellCheck 与 diff check 全部通过；v0.1.8 发布闭环完成。
 
 ## Milestone 6 修复结果
 
@@ -166,6 +169,8 @@
 - `cargo-audit 0.22.2`：扫描当前 Cargo.lock 的 224 个依赖，RustSec 1166 条 advisory 中无命中
 - `SOURCE_SNAPSHOT.md`：14/14 section、261,172 bytes，Cargo/主要 Rust（含 deployment/fast_add）/README 全部与真实文件逐字一致
 - actionlint v1.7.12：`ci.yml`、`release.yml`、`shoes-schema.yml`、`ubuntu-acceptance.yml` 零诊断；ShellCheck v0.11.0 对一键安装器零诊断
+- v0.1.8 产品提交 `960edde`：main CI `29645174662`、Ubuntu 24.04 acceptance `29645174670`、固定 shoes schema `29645174650` 全部成功；tag CI `29645387085` 与 schema `29645387104` 再次成功
+- v0.1.8 Release run `29645387081`：双架构 MUSL、SHA256SUMS、公开一键安装默认 Reality 全部成功；crates.io 公开隔离安装返回 `ping-rust 0.1.8`
 - GitHub shoes schema run `29635356030`：固定 shoes 0.2.8 commit 的五单协议、五协议联合、六 Shadowsocks cipher、Reality+AnyTLS 共 13 次显式 dry-run 全部成功，且日志敏感信息扫描为零命中
 - GitHub Actions CI run `29635356053`：五个目标发行版全部成功
 - GitHub main CI run `29635760760`：五个目标发行版全部成功；Ubuntu 24.04 acceptance run `29635760772`：五协议 systemd、导出、运维和清理全成功
