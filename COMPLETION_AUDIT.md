@@ -10,9 +10,9 @@
 |---|---|---|---|
 | Rust 2021、Rust 代码占绝对主导 | 已实现 | `Cargo.toml`、`src/` | 5,309 行 Rust / 206 行安装 shell，Rust 占 96.26%；代理、配置、服务、运维、自更新与快速部署事务核心均为 Rust |
 | clap v4 子命令与 233boy 风格数字菜单 | 已实现 | `src/cli.rs`、`src/menu.rs` | `sb` 主菜单固定 1..10，协议兼容编号固定为 1/3/8/18/20；VLESS/SS 日常路径只需协议和可选端口 |
-| 快速添加与直接分享 | 已实现，待 v0.1.5 远端验收 | `src/fast_add.rs`、`src/deployment.rs`、`src/client.rs` | `add/a`、协议短别名、随机端口/凭据、公网地址探测、`--yes/--plain`；仅在 dry-run、原子提交和 systemd active 后输出 vless/ss 等 URI |
+| 快速添加与直接分享 | 已实现，Ubuntu 24.04 实测 | `src/fast_add.rs`、`src/deployment.rs`、`src/client.rs` | `add/a`、协议短别名、随机端口/凭据、公网地址探测、`--yes/--plain`；真实 PTY 的 Reality/SS 添加、URI 与监听均通过 |
 | 分享信息重显与隐私边界 | 已实现 | `src/cli.rs`、`src/client.rs` | `info/i`、`url`、`qr` 按名称/UUID 读取保存地址；Reality URL 含 flow/pbk/sid 且不含私钥；二维码只调用本机 qrencode |
-| 激活失败事务回滚 | 已实现，待 v0.1.5 远端验收 | `src/deployment.rs`、`src/config.rs`、`src/service.rs` | 配置锁跨越 systemd 激活；两次 active 稳定性探测拒绝立即崩溃/auto-restart；失败恢复 config/state/unit 原始字节、enabled/active 状态并删除本次证书 |
+| 激活失败事务回滚 | 已实现，Ubuntu 24.04 实测 | `src/deployment.rs`、`src/config.rs`、`src/service.rs` | 一次性 ExecStartPre 故障注入证明失败后 config/state/unit 哈希、enabled/active 和端口均精确恢复，且不输出分享 URI |
 | shoes GitHub Release 预编译安装 | 已实现，Debian/Ubuntu 实测 | `src/installer.rs` | v0.2.7 GNU 不兼容时自动回退 digest 校验过的 static musl；Ubuntu 24.04 约 2 秒完成 Reality 服务部署且提交前健康检查通过 |
 | `cargo install shoes` 源码安装 | 已实现，Debian 实测 | `src/installer.rs` | 在无 cargo PATH、404 MiB RAM 下从当前 binary 同目录解析 cargo，低内存模式 51m35s 安装 v0.2.2；三协议 dry-run 与公网 Reality 均通过 |
 | Reality X25519 密钥和完整 shoes YAML | 已实现 | `src/config.rs` | X25519 派生单测；本地 shoes 0.2.8 `--dry-run` 解析成功 |
@@ -57,7 +57,9 @@
 - 快捷 Reality URI 包含 v2rayN 所需 `encryption=none`、`flow=xtls-rprx-vision`、`security=reality`、`sni`、`fp`、`pbk`、`sid`、`type=tcp`；Shadowsocks 使用 SIP002 URL-safe Base64 auth。
 - ManagedProfile 新增可选 `server_address` 且 serde 默认兼容旧 sidecar；`info/url/qr` 可按名称或 UUID 重显，二维码不使用外部网页。
 - 统一 deployment 事务让原有受管 `generate` 和新 `add` 都在服务确认 active 后才成功；激活失败会精确恢复配置、状态、unit 与服务 enabled/active 状态。
-- 当前本地门禁：53/53 tests、fmt、check、clippy `-D warnings`、doc、actionlint v1.7.12、ShellCheck 全通过；v0.1.5 Ubuntu PTY/systemd、Release 和公开安装证据将在 tag 发布后补入。
+- 本地门禁：53/53 tests、fmt、check、clippy `-D warnings`、release build、doc、严格 package/publish dry-run、actionlint v1.7.12、ShellCheck 全通过。
+- GitHub CI run `29640353028` 五发行版全绿；固定 shoes schema run `29639726196` 的五协议矩阵全绿。
+- Ubuntu 24.04 acceptance run `29640353088` 在 2m33s 内完成公开 crate 基线、当前源码、五协议、真实 `sb` Reality/SS PTY、事务故障回滚、客户端导出、运维与卸载清理。
 
 ## Milestone 6 修复结果
 
@@ -141,7 +143,8 @@
 - GitHub Release run `29637241120`：v0.1.4 的 x86_64 musl、aarch64 musl 与 Publish GitHub Release 3/3 jobs 成功；tag/Cargo 版本一致性、静态依赖检查、QEMU ARM64 版本探针、公开一键安装与强制自更新均通过。
 - v0.1.4 公开资产独立下载复核：x86_64 2,565,491 bytes / SHA-256 `2915b52ae0b50f0e201a76cb5b3c6636b594fe2edca4c8bf14067ac615753d25`；aarch64 2,401,406 bytes / SHA-256 `380954eb53bd1904b0c6d547de2e48380c0c41a785a48ad9b5efa8b8d6a8ceb7`；两者与 SHA256SUMS、GitHub API digest 一致。
 - crates.io 0.1.4 正式发布且未 yanked，crate checksum 为 `bc8e1ecaba7498d67e5494eb819212eecf173138cb5f61a2328d4abd752d866c`；全新隔离 root 从 registry 下载并编译，`ping-rust --version` 返回 `ping-rust 0.1.4`，帮助入口正常。
+- v0.1.5 发布前：CI run `29640353028`、shoes schema run `29639726196`、Ubuntu acceptance run `29640353088` 全部成功；Ubuntu 新增真实 sb 数字 PTY 与 systemd 一次性启动故障回滚证据。
 
 ## 发布状态
 
-公开源码已推送到 `Jyanbai/ping-rust` 的 `main`。Ubuntu 24.04 成功标准已由独立 VPS 与 GitHub runner 双重完成；五协议版本 v0.1.4 已同时发布到 GitHub Releases 与 crates.io。v0.1.5 的 sb 快速路径当前处于本地门禁完成、待 main CI/Ubuntu acceptance 与正式发布状态。
+公开源码已推送到 `Jyanbai/ping-rust` 的 `main`。Ubuntu 24.04 成功标准已由独立 VPS 与 GitHub runner 双重完成；v0.1.5 的 sb 快速路径已完成本地、五发行版 CI、固定 shoes schema 和 Ubuntu 24.04 验收，等待创建 tag、GitHub Release 与 crates.io 正式发布。
