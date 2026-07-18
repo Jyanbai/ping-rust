@@ -265,9 +265,21 @@ jobs:
           run_menu_add 18 25448 vless
           run_menu_add 8 25449 ss
           sudo systemctl is-active --quiet shoes.service
-          sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)25448$'
-          sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)25449$'
-          sudo ss -H -lun | awk '{print $4}' | grep -Eq '(^|:)25449$'
+          wait_listener() {
+            local kind="$1"
+            local port="$2"
+            for _ in {1..20}; do
+              if sudo ss -H "-ln${kind}" | awk '{print $4}' | grep -Eq "(^|:)${port}$"; then
+                return 0
+              fi
+              sleep 0.5
+            done
+            echo "missing ${kind} listener on ${port}" >&2
+            return 1
+          }
+          wait_listener t 25448
+          wait_listener t 25449
+          wait_listener u 25449
 
       - name: Roll back config and systemd state when activation fails
         shell: bash
