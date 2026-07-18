@@ -36,6 +36,12 @@ jobs:
       - name: Build static binary
         run: cross build --locked --release --target "${{ matrix.target }}"
 
+      - name: Install ARM64 runtime emulator
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-user-static
+
       - name: Verify and package binary
         env:
           TARGET: ${{ matrix.target }}
@@ -55,7 +61,11 @@ jobs:
             exit 1
           fi
 
-          version_output="$(cross run --locked --release --target "${TARGET}" -- --version)"
+          if [ "${TARGET}" = "aarch64-unknown-linux-musl" ]; then
+            version_output="$(qemu-aarch64-static "${binary}" --version)"
+          else
+            version_output="$("${binary}" --version)"
+          fi
           printf '%s\n' "${version_output}"
           printf '%s\n' "${version_output}" \
             | grep -Eq '^ping-rust [0-9]+\.[0-9]+\.[0-9]+([.+-][0-9A-Za-z.-]+)?$'
