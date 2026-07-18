@@ -8,7 +8,7 @@
 ````toml
 [package]
 name = "ping-rust"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2021"
 description = "Menu-driven installer and manager for the shoes proxy server"
 license = "MIT"
@@ -467,17 +467,15 @@ pub async fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Command::Update { method } => {
-            let unit_exists = std::path::Path::new(crate::utils::SERVICE_FILE).exists();
-            let was_active = unit_exists && service::is_active()?;
-            let report = installer::install(method, true).await?;
-            if was_active {
-                service::execute(ServiceAction::Restart)?;
-            }
+            let report = update_shoes(method).await?;
             println!("{} {}", "shoes 更新完成：".green(), report.version);
             Ok(())
         }
         Command::SelfUpdate { version, force } => run_self_update(version.as_deref(), force).await,
         Command::Uninstall { purge } => {
+            crate::utils::require_linux_root()?;
+            let _lock =
+                crate::utils::exclusive_lock(std::path::Path::new(crate::utils::LOCK_FILE))?;
             let unit_removed = service::uninstall_unit()?;
             let binary_removed = installer::uninstall_binary()?;
             let aliases_removed = crate::utils::remove_command_aliases()?;
@@ -494,6 +492,37 @@ pub async fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
     }
+}
+
+pub(crate) async fn update_shoes(method: InstallMethod) -> Result<installer::InstallReport> {
+    crate::utils::require_linux_root()?;
+    let lock = crate::utils::exclusive_lock(std::path::Path::new(crate::utils::LOCK_FILE))?;
+    let unit_exists = std::path::Path::new(crate::utils::SERVICE_FILE).exists();
+    let was_active = unit_exists && service::is_active()?;
+    let mut report = installer::install_locked(method, true, lock).await?;
+    if !was_active {
+        return Ok(report);
+    }
+    if let Err(restart) = service::restart_and_verify() {
+        let binary_rollback = report.rollback_binary();
+        let service_rollback = if binary_rollback.is_ok() {
+            service::restart_and_verify()
+        } else {
+            Ok(())
+        };
+        return match (binary_rollback, service_rollback) {
+            (Ok(()), Ok(())) => {
+                Err(restart.context("新版 shoes 启动失败，旧二进制和服务已恢复"))
+            }
+            (Err(binary), _) => anyhow::bail!(
+                "新版 shoes 启动失败且旧二进制恢复失败：启动={restart:#}；二进制={binary:#}"
+            ),
+            (Ok(()), Err(service)) => anyhow::bail!(
+                "新版 shoes 启动失败，旧二进制已恢复但服务恢复失败：启动={restart:#}；服务={service:#}"
+            ),
+        };
+    }
+    Ok(report)
 }
 
 async fn run_add(args: AddArgs) -> Result<()> {
@@ -953,14 +982,14 @@ mod tests {
 ````rust
 use anyhow::Result;
 use colored::Colorize;
-use dialoguer::{theme::ColorfulTheme, Confirm, Input};
+use dialoguer::{theme::ColorfulTheme, Confirm, Input, Password};
 
 use crate::{
     cli,
     client::{self, ClientFormat},
     config::{
-        self, AnyTlsMode, AnyTlsUser, GenerationOptions, GenerationRequest, Protocol,
-        ShadowsocksCipher,
+        self, AnyTlsMode, AnyTlsUser, Credentials, GenerationOptions, GenerationRequest,
+        ProfileChange, Protocol, ShadowsocksCipher,
     },
     deployment, fast_add,
     installer::{self, InstallMethod},
@@ -990,6 +1019,18 @@ const PROTOCOL_MENU_ITEMS: &[(usize, &str)] = &[
     (5, "AnyTLS"),
     (0, "返回"),
 ];
+
+#[derive(Clone, Copy)]
+enum ChangeAction {
+    Port,
+    Name,
+    ServerAddress,
+    RegenerateCredentials,
+    Password,
+    RealityServerName,
+    ShadowsocksCipher,
+    AnyTlsUserPassword,
+}
 
 fn parse_numbered_choice(value: &str, count: usize) -> Option<Option<usize>> {
     match value.trim().parse::<usize>().ok()? {
@@ -1061,10 +1102,7 @@ pub async fn run() -> Result<()> {
         let result = match selected {
             0 => break,
             1 => fast_add_config_menu().await,
-            2 => {
-                println!("更改配置请使用完整 generate 参数，或删除后通过快速添加安全重建。");
-                Ok(())
-            }
+            2 => change_config_menu().await,
             3 => cli::show_info(None).await,
             4 => delete_config_menu().await,
             5 => service_menu(),
@@ -1087,6 +1125,198 @@ pub async fn run() -> Result<()> {
         result?;
     }
     println!("{}", "已退出。".green());
+    Ok(())
+}
+
+async fn change_config_menu() -> Result<()> {
+    let state = config::load_state()?;
+    if state.profiles.is_empty() {
+        println!("没有可更改的配置。");
+        return Ok(());
+    }
+    let labels = state
+        .profiles
+        .iter()
+        .map(|profile| {
+            format!(
+                "{} · {} · :{} · {}",
+                profile.name,
+                profile.protocol_name(),
+                profile.port,
+                profile.id
+            )
+        })
+        .collect::<Vec<_>>();
+    let Some(selected) = select_numbered("选择要更改的配置", &labels)? else {
+        return Ok(());
+    };
+    let profile = state.profiles[selected].clone();
+    let mut actions = vec![
+        (ChangeAction::Port, "更改端口"),
+        (ChangeAction::Name, "更改配置名称"),
+        (ChangeAction::ServerAddress, "更改客户端公网地址"),
+        (ChangeAction::RegenerateCredentials, "重新生成全部协议凭据"),
+    ];
+    match profile.protocol() {
+        Protocol::Reality => actions.push((ChangeAction::RealityServerName, "更改 SNI")),
+        Protocol::Hysteria2 | Protocol::Tuic => {
+            actions.push((ChangeAction::Password, "更改密码"));
+        }
+        Protocol::Shadowsocks => {
+            actions.push((ChangeAction::Password, "更改密码"));
+            actions.push((ChangeAction::ShadowsocksCipher, "更改加密方式"));
+        }
+        Protocol::AnyTls => {
+            actions.push((ChangeAction::AnyTlsUserPassword, "更改用户密码"));
+        }
+    }
+    let action_labels = actions.iter().map(|(_, label)| *label).collect::<Vec<_>>();
+    let Some(action_index) = select_numbered("选择更改项目", &action_labels)? else {
+        return Ok(());
+    };
+    let action = actions[action_index].0;
+    let change = match action {
+        ChangeAction::Port => {
+            let value = Input::<String>::with_theme(&ColorfulTheme::default())
+                .with_prompt("输入新端口（直接回车自动选择随机端口）")
+                .allow_empty(true)
+                .validate_with(|value: &String| {
+                    if value.trim().is_empty() {
+                        return Ok(());
+                    }
+                    match value.trim().parse::<u16>() {
+                        Ok(port) if port > 0 => Ok(()),
+                        _ => Err("端口必须在 1..=65535 范围内，或直接回车"),
+                    }
+                })
+                .interact_text()?;
+            let requested = if value.trim().is_empty() {
+                None
+            } else {
+                Some(value.trim().parse::<u16>()?)
+            };
+            let port = fast_add::select_port_for_update(
+                profile.protocol(),
+                requested,
+                profile.id,
+                profile.port,
+            )?;
+            ProfileChange::Port(port)
+        }
+        ChangeAction::Name => {
+            let name = Input::<String>::with_theme(&ColorfulTheme::default())
+                .with_prompt("新配置名称")
+                .default(profile.name.clone())
+                .interact_text()?;
+            ProfileChange::Name(name)
+        }
+        ChangeAction::ServerAddress => {
+            let value = Input::<String>::with_theme(&ColorfulTheme::default())
+                .with_prompt("VPS 公网域名或 IP（留空自动检测）")
+                .allow_empty(true)
+                .interact_text()?;
+            let address = if value.trim().is_empty() {
+                fast_add::resolve_server_address(None).await?
+            } else {
+                client::normalize_server_address(&value)?
+            };
+            ProfileChange::ServerAddress(Some(address))
+        }
+        ChangeAction::RegenerateCredentials => {
+            if !Confirm::with_theme(&ColorfulTheme::default())
+                .with_prompt("确认重新生成凭据？旧分享链接将立即失效")
+                .default(false)
+                .interact()?
+            {
+                return Ok(());
+            }
+            ProfileChange::RegenerateCredentials
+        }
+        ChangeAction::Password => {
+            let password = Password::with_theme(&ColorfulTheme::default())
+                .with_prompt("新密码（留空安全随机生成）")
+                .allow_empty_password(true)
+                .interact()?;
+            if password.is_empty() {
+                if matches!(profile.protocol(), Protocol::Shadowsocks) {
+                    ProfileChange::RegenerateCredentials
+                } else {
+                    ProfileChange::Password(config::generated_password())
+                }
+            } else {
+                ProfileChange::Password(password)
+            }
+        }
+        ChangeAction::RealityServerName => {
+            let server_name = Input::<String>::with_theme(&ColorfulTheme::default())
+                .with_prompt("新 SNI")
+                .default(profile.server_name().to_owned())
+                .interact_text()?;
+            ProfileChange::RealityServerName(server_name)
+        }
+        ChangeAction::ShadowsocksCipher => {
+            let ciphers = [
+                ShadowsocksCipher::Aes256Gcm2022,
+                ShadowsocksCipher::Aes128Gcm2022,
+                ShadowsocksCipher::Chacha20IetfPoly13052022,
+                ShadowsocksCipher::Aes256Gcm,
+                ShadowsocksCipher::Aes128Gcm,
+                ShadowsocksCipher::Chacha20IetfPoly1305,
+            ];
+            let labels = ciphers
+                .iter()
+                .map(|cipher| cipher.as_str())
+                .collect::<Vec<_>>();
+            let Some(selected) = select_numbered("选择新加密方式", &labels)? else {
+                return Ok(());
+            };
+            ProfileChange::ShadowsocksCipher(ciphers[selected])
+        }
+        ChangeAction::AnyTlsUserPassword => {
+            let Credentials::AnyTls { users, .. } = &profile.credentials else {
+                anyhow::bail!("配置协议与管理状态不一致");
+            };
+            let user_labels = users
+                .iter()
+                .enumerate()
+                .map(|(index, user)| {
+                    if user.name.is_empty() {
+                        format!("用户 {}", index + 1)
+                    } else {
+                        user.name.clone()
+                    }
+                })
+                .collect::<Vec<_>>();
+            let Some(index) = select_numbered("选择 AnyTLS 用户", &user_labels)? else {
+                return Ok(());
+            };
+            let password = Password::with_theme(&ColorfulTheme::default())
+                .with_prompt("新密码（留空安全随机生成）")
+                .allow_empty_password(true)
+                .interact()?;
+            let password = if password.is_empty() {
+                config::generated_password()
+            } else {
+                password
+            };
+            ProfileChange::AnyTlsUserPassword { index, password }
+        }
+    };
+
+    let result = deployment::update_and_activate(profile.id, change).await?;
+    println!(
+        "{} {} · {} · :{}",
+        "配置更改成功：".green(),
+        result.profile.name,
+        result.profile.protocol_name(),
+        result.profile.port
+    );
+    if let Some(server) = result.profile.server_address.as_deref() {
+        match client::share_uri(&result.profile, server) {
+            Ok(uri) => println!("\n{uri}\n"),
+            Err(error) => eprintln!("分享链接生成失败：{error:#}"),
+        }
+    }
     Ok(())
 }
 
@@ -1369,10 +1599,10 @@ async fn advanced_add_config_menu() -> Result<()> {
                 .with_prompt("AnyTLS 用户名")
                 .default(default_name)
                 .interact_text()?;
-            let password = Input::<String>::with_theme(&ColorfulTheme::default())
+            let password = Password::with_theme(&ColorfulTheme::default())
                 .with_prompt("AnyTLS 密码（留空则安全随机生成）")
-                .allow_empty(true)
-                .interact_text()?;
+                .allow_empty_password(true)
+                .interact()?;
             options.anytls_users.push(if password.is_empty() {
                 config::generated_anytls_user(user_name)
             } else {
@@ -1479,7 +1709,7 @@ async fn advanced_add_config_menu() -> Result<()> {
 }
 
 async fn update_menu() -> Result<()> {
-    let choices = ["GitHub Release（推荐）", "cargo install shoes"];
+    let choices = ["GitHub Release（推荐）", "cargo 固定源码编译 shoes"];
     let Some(selected) = select_numbered("选择更新方式", &choices)? else {
         return Ok(());
     };
@@ -1488,12 +1718,7 @@ async fn update_menu() -> Result<()> {
         1 => InstallMethod::Cargo,
         _ => unreachable!("更新菜单编号已验证"),
     };
-    let unit_exists = std::path::Path::new(crate::utils::SERVICE_FILE).exists();
-    let was_active = unit_exists && service::is_active()?;
-    let report = installer::install(method, true).await?;
-    if was_active {
-        service::execute(ServiceAction::Restart)?;
-    }
+    let report = cli::update_shoes(method).await?;
     println!("{} {}", "更新成功：".green(), report.version);
     Ok(())
 }
@@ -1527,6 +1752,8 @@ fn uninstall_menu() -> Result<()> {
         .with_prompt("同时永久删除 /etc/shoes 配置与凭据？")
         .default(false)
         .interact()?;
+    crate::utils::require_linux_root()?;
+    let _lock = crate::utils::exclusive_lock(std::path::Path::new(crate::utils::LOCK_FILE))?;
     let unit_removed = service::uninstall_unit()?;
     let binary_removed = installer::uninstall_binary()?;
     let aliases_removed = crate::utils::remove_command_aliases()?;
@@ -1586,6 +1813,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     process::Stdio,
+    time::Duration,
 };
 
 use anyhow::{bail, Context, Result};
@@ -1599,9 +1827,12 @@ use sha2::{Digest, Sha256};
 use tar::Archive;
 use tokio::process::Command;
 
-use crate::utils;
+use crate::{config, utils};
 
 const LATEST_RELEASE_API: &str = "https://api.github.com/repos/cfal/shoes/releases/latest";
+const SHOES_GIT_REPOSITORY: &str = "https://github.com/cfal/shoes";
+const SHOES_SCHEMA_REVISION: &str = "386b11532424b8665ee3e46340c6236fb3c47595";
+const MAX_ARCHIVE_SIZE: u64 = 128 * 1024 * 1024;
 const MAX_BINARY_SIZE: u64 = 128 * 1024 * 1024;
 const LOW_MEMORY_THRESHOLD_KIB: u64 = 1024 * 1024;
 
@@ -1609,7 +1840,7 @@ const LOW_MEMORY_THRESHOLD_KIB: u64 = 1024 * 1024;
 pub enum InstallMethod {
     /// 下载 GitHub Release 预编译文件
     Release,
-    /// 执行 cargo install shoes
+    /// 用 cargo 编译 schema 验证过的 shoes 固定源码提交
     Cargo,
 }
 
@@ -1618,6 +1849,56 @@ pub struct InstallReport {
     pub version: String,
     pub source: String,
     pub destination: PathBuf,
+    _lock: Option<utils::ExclusiveLock>,
+    rollback: Option<BinaryRollback>,
+}
+
+#[derive(Debug)]
+struct BinaryRollback {
+    destination: PathBuf,
+    previous: Option<PathBuf>,
+    _work: tempfile::TempDir,
+}
+
+impl InstallReport {
+    pub fn rollback_binary(&mut self) -> Result<()> {
+        self.rollback
+            .take()
+            .context("更新结果不包含可回滚的 shoes 二进制事务")?
+            .restore()
+    }
+}
+
+impl BinaryRollback {
+    fn capture(destination: &Path) -> Result<Self> {
+        let work = tempfile::tempdir().context("创建 shoes 更新回滚目录失败")?;
+        let previous = if destination.exists() {
+            if !destination.is_file() {
+                bail!("shoes 目标路径不是普通文件：{}", destination.display());
+            }
+            let snapshot = work.path().join("shoes.previous");
+            fs::copy(destination, &snapshot).context("备份现有 shoes 二进制失败")?;
+            Some(snapshot)
+        } else {
+            None
+        };
+        Ok(Self {
+            destination: destination.to_path_buf(),
+            previous,
+            _work: work,
+        })
+    }
+
+    fn restore(self) -> Result<()> {
+        if let Some(previous) = self.previous {
+            utils::atomic_copy(&previous, &self.destination, 0o755)
+                .context("恢复旧 shoes 二进制失败")
+        } else if self.destination.exists() {
+            fs::remove_file(&self.destination).context("删除失败安装产生的 shoes 二进制失败")
+        } else {
+            Ok(())
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1636,15 +1917,59 @@ struct ReleaseAsset {
 
 pub async fn install(method: InstallMethod, force: bool) -> Result<InstallReport> {
     utils::require_linux_root()?;
-    match method {
+    let lock = utils::exclusive_lock(Path::new(utils::LOCK_FILE))?;
+    install_locked(method, force, lock).await
+}
+
+pub(crate) async fn install_locked(
+    method: InstallMethod,
+    force: bool,
+    lock: utils::ExclusiveLock,
+) -> Result<InstallReport> {
+    utils::require_linux_root()?;
+    let rollback = BinaryRollback::capture(Path::new(utils::SHOES_BIN))?;
+    let installation = match method {
         InstallMethod::Release => install_release(Path::new(utils::SHOES_BIN)).await,
         InstallMethod::Cargo => install_cargo(force).await,
+    };
+    match installation {
+        Ok(mut report) => {
+            if Path::new(utils::CONFIG_FILE).is_file() {
+                if let Err(validation) = config::validate_with_binary(
+                    Path::new(utils::SHOES_BIN),
+                    Path::new(utils::CONFIG_FILE),
+                )
+                .await
+                {
+                    return match rollback.restore() {
+                        Ok(()) => Err(validation.context(
+                            "新版 shoes 无法加载现有配置，旧二进制已恢复",
+                        )),
+                        Err(restore) => bail!(
+                            "新版 shoes 无法加载现有配置且旧二进制恢复失败：验证={validation:#}；回滚={restore:#}"
+                        ),
+                    };
+                }
+            }
+            report._lock = Some(lock);
+            report.rollback = Some(rollback);
+            Ok(report)
+        }
+        Err(installation) => match rollback.restore() {
+            Ok(()) => Err(installation.context("shoes 安装失败，原二进制状态已恢复")),
+            Err(restore) => {
+                bail!("shoes 安装失败且原二进制恢复失败：安装={installation:#}；回滚={restore:#}")
+            }
+        },
     }
 }
 
 async fn install_release(destination: &Path) -> Result<InstallReport> {
     let client = Client::builder()
         .user_agent(concat!("ping-rust/", env!("CARGO_PKG_VERSION")))
+        .https_only(true)
+        .connect_timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(300))
         .build()
         .context("创建 HTTP 客户端失败")?;
 
@@ -1676,6 +2001,8 @@ async fn install_release(destination: &Path) -> Result<InstallReport> {
                     version: release.tag_name,
                     source: format!("GitHub Release ({})", asset.name),
                     destination: destination.to_path_buf(),
+                    _lock: None,
+                    rollback: None,
                 });
             }
             Err(error) => failures.push(format!("{target}: {error:#}")),
@@ -1716,7 +2043,17 @@ async fn install_cargo(force: bool) -> Result<InstallReport> {
         "无法找到 cargo；请安装 Rust toolchain，或确认 cargo 与 ping-rust 位于同一目录/已加入 PATH",
     )?;
     let mut command = Command::new(cargo);
-    command.args(["install", "shoes", "--locked", "--root", "/usr/local"]);
+    command.args([
+        "install",
+        "--git",
+        SHOES_GIT_REPOSITORY,
+        "--rev",
+        SHOES_SCHEMA_REVISION,
+        "shoes",
+        "--locked",
+        "--root",
+        "/usr/local",
+    ]);
     if is_low_memory_linux() {
         eprintln!("检测到系统内存低于 1 GiB：cargo 源码安装将使用单任务并关闭 LTO，避免严重换页。");
         command
@@ -1744,8 +2081,10 @@ async fn install_cargo(force: bool) -> Result<InstallReport> {
         .unwrap_or_else(|_| "unknown".to_owned());
     Ok(InstallReport {
         version,
-        source: "crates.io (cargo install)".to_owned(),
+        source: format!("GitHub source ({})", &SHOES_SCHEMA_REVISION[..12]),
         destination: PathBuf::from(utils::SHOES_BIN),
+        _lock: None,
+        rollback: None,
     })
 }
 
@@ -1767,6 +2106,7 @@ fn mem_total_below_threshold(meminfo: &str) -> bool {
 }
 
 async fn download(client: &Client, asset: &ReleaseAsset, destination: &Path) -> Result<String> {
+    validate_release_asset(asset)?;
     let response = client
         .get(&asset.browser_download_url)
         .send()
@@ -1775,6 +2115,12 @@ async fn download(client: &Client, asset: &ReleaseAsset, destination: &Path) -> 
         .error_for_status()
         .with_context(|| format!("下载 {} 时服务器返回错误", asset.name))?;
 
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_ARCHIVE_SIZE)
+    {
+        bail!("{} 响应尺寸超过安全上限", asset.name);
+    }
     let total = response.content_length().unwrap_or(asset.size);
     let progress = ProgressBar::new(total);
     progress.set_style(
@@ -1789,16 +2135,42 @@ async fn download(client: &Client, asset: &ReleaseAsset, destination: &Path) -> 
         .with_context(|| format!("无法创建临时文件 {}", destination.display()))?;
     let mut hasher = Sha256::new();
     let mut stream = response.bytes_stream();
+    let mut received = 0u64;
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.context("下载流中断")?;
+        received = received
+            .checked_add(chunk.len() as u64)
+            .context("下载尺寸溢出")?;
+        if received > MAX_ARCHIVE_SIZE || received > asset.size {
+            bail!("{} 下载内容超过 Release 声明尺寸，已终止", asset.name);
+        }
         output.write_all(&chunk).context("写入下载文件失败")?;
         hasher.update(&chunk);
         progress.inc(chunk.len() as u64);
     }
     output.sync_all().context("同步下载文件失败")?;
+    if received != asset.size {
+        bail!(
+            "{} 下载尺寸不一致：Release 声明 {} bytes，实际 {} bytes",
+            asset.name,
+            asset.size,
+            received
+        );
+    }
     progress.finish_with_message("下载完成并已校验");
 
     Ok(hex::encode(hasher.finalize()))
+}
+
+fn validate_release_asset(asset: &ReleaseAsset) -> Result<()> {
+    if asset.size == 0 || asset.size > MAX_ARCHIVE_SIZE {
+        bail!("{} 尺寸异常：{} bytes", asset.name, asset.size);
+    }
+    let url = reqwest::Url::parse(&asset.browser_download_url).context("Release 下载 URL 无效")?;
+    if url.scheme() != "https" || url.host_str() != Some("github.com") {
+        bail!("拒绝非 GitHub HTTPS Release 下载地址：{url}");
+    }
+    Ok(())
 }
 
 fn extract_shoes(archive_path: &Path, work_dir: &Path) -> Result<PathBuf> {
@@ -1970,6 +2342,49 @@ mod tests {
         assert!(!mem_total_below_threshold("MemTotal:        2097152 kB\n"));
         assert!(!mem_total_below_threshold("SwapTotal:       2097152 kB\n"));
     }
+
+    #[test]
+    fn validates_release_asset_origin_and_size() {
+        let valid = ReleaseAsset {
+            name: "shoes-x86_64-unknown-linux-musl.tar.gz".to_owned(),
+            browser_download_url: "https://github.com/cfal/shoes/releases/download/v1/shoes.tar.gz"
+                .to_owned(),
+            size: 1024,
+            digest: None,
+        };
+        validate_release_asset(&valid).unwrap();
+
+        let mut invalid = ReleaseAsset {
+            browser_download_url: "http://github.com/cfal/shoes/releases/download/v1/shoes.tar.gz"
+                .to_owned(),
+            ..valid
+        };
+        assert!(validate_release_asset(&invalid).is_err());
+        invalid.browser_download_url =
+            "https://example.com/cfal/shoes/releases/download/v1/shoes.tar.gz".to_owned();
+        assert!(validate_release_asset(&invalid).is_err());
+        invalid.browser_download_url =
+            "https://github.com/cfal/shoes/releases/download/v1/shoes.tar.gz".to_owned();
+        invalid.size = MAX_ARCHIVE_SIZE + 1;
+        assert!(validate_release_asset(&invalid).is_err());
+    }
+
+    #[test]
+    fn binary_rollback_restores_previous_or_removes_new_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let existing = dir.path().join("existing-shoes");
+        fs::write(&existing, b"old").unwrap();
+        let rollback = BinaryRollback::capture(&existing).unwrap();
+        fs::write(&existing, b"new").unwrap();
+        rollback.restore().unwrap();
+        assert_eq!(fs::read(&existing).unwrap(), b"old");
+
+        let fresh = dir.path().join("fresh-shoes");
+        let rollback = BinaryRollback::capture(&fresh).unwrap();
+        fs::write(&fresh, b"new").unwrap();
+        rollback.restore().unwrap();
+        assert!(!fresh.exists());
+    }
 }
 ````
 
@@ -2106,6 +2521,10 @@ pub fn generated_anytls_user(name: impl Into<String>) -> AnyTlsUser {
     }
 }
 
+pub fn generated_password() -> String {
+    random_secret(24)
+}
+
 #[derive(Clone, Debug)]
 pub struct GenerationOptions {
     pub reality_short_id: Option<String>,
@@ -2150,6 +2569,17 @@ pub struct GenerationRequest {
     pub certificate: Option<PathBuf>,
     pub certificate_key: Option<PathBuf>,
     pub options: GenerationOptions,
+}
+
+pub enum ProfileChange {
+    Name(String),
+    Port(u16),
+    ServerAddress(Option<String>),
+    RegenerateCredentials,
+    Password(String),
+    RealityServerName(String),
+    ShadowsocksCipher(ShadowsocksCipher),
+    AnyTlsUserPassword { index: usize, password: String },
 }
 
 pub struct GenerationResult {
@@ -2288,6 +2718,16 @@ pub struct ManagedProfile {
 }
 
 impl ManagedProfile {
+    pub fn protocol(&self) -> Protocol {
+        match &self.credentials {
+            Credentials::Reality { .. } => Protocol::Reality,
+            Credentials::Hysteria2 { .. } => Protocol::Hysteria2,
+            Credentials::Tuic { .. } => Protocol::Tuic,
+            Credentials::Shadowsocks { .. } => Protocol::Shadowsocks,
+            Credentials::AnyTls { .. } => Protocol::AnyTls,
+        }
+    }
+
     pub fn protocol_name(&self) -> &'static str {
         match &self.credentials {
             Credentials::Reality { .. } => "VLESS-Reality-Vision",
@@ -2401,6 +2841,21 @@ async fn generate_inner(
     request: GenerationRequest,
     validate_with_shoes: bool,
 ) -> Result<GenerationResult> {
+    generate_inner_with_lock(request, validate_with_shoes, None).await
+}
+
+pub(crate) async fn generate_locked(
+    request: GenerationRequest,
+    lock: utils::ExclusiveLock,
+) -> Result<GenerationResult> {
+    generate_inner_with_lock(request, true, Some(lock)).await
+}
+
+async fn generate_inner_with_lock(
+    request: GenerationRequest,
+    validate_with_shoes: bool,
+    supplied_lock: Option<utils::ExclusiveLock>,
+) -> Result<GenerationResult> {
     validate_request(&request)?;
     let parent = request.output.parent().context("配置输出路径没有父目录")?;
     let parent = if parent.as_os_str().is_empty() {
@@ -2411,10 +2866,19 @@ async fn generate_inner(
     let managed = request.output == Path::new(utils::CONFIG_FILE);
     if managed {
         utils::require_linux_root()?;
+        utils::ensure_directory(Path::new(utils::CONFIG_DIR), 0o700)?;
     }
-    let lock = managed
-        .then(|| utils::exclusive_lock(Path::new(utils::LOCK_FILE)))
-        .transpose()?;
+    let lock = if managed {
+        Some(match supplied_lock {
+            Some(lock) => lock,
+            None => utils::exclusive_lock(Path::new(utils::LOCK_FILE))?,
+        })
+    } else {
+        if supplied_lock.is_some() {
+            bail!("自定义输出不应持有系统配置锁");
+        }
+        None
+    };
     let mut state = if managed {
         load_state_for_update()?
     } else {
@@ -2428,6 +2892,11 @@ async fn generate_inner(
         bail!("端口 {} 已由现有配置使用", request.port);
     }
     let profile_id = Uuid::new_v4();
+    let profile_name = request
+        .name
+        .clone()
+        .unwrap_or_else(|| default_profile_name(request.protocol, profile_id));
+    validate_profile_name(&profile_name, &state.profiles, None)?;
     let needs_certificate = matches!(request.protocol, Protocol::Hysteria2 | Protocol::Tuic)
         || (matches!(request.protocol, Protocol::AnyTls)
             && request.options.anytls_mode == AnyTlsMode::Tls);
@@ -2492,10 +2961,7 @@ async fn generate_inner(
 
     let profile = ManagedProfile {
         id: profile_id,
-        name: request
-            .name
-            .clone()
-            .unwrap_or_else(|| default_profile_name(request.protocol, profile_id)),
+        name: profile_name,
         port: request.port,
         server_address: request.server_address.clone(),
         credentials: credentials.clone(),
@@ -2514,9 +2980,8 @@ async fn generate_inner(
     } else {
         Vec::new()
     };
-    if servers.len() != state.profiles.len() {
-        bail!("配置文件与管理状态不一致；请先备份并修复，ping-rust 不会覆盖现有配置");
-    }
+    ensure_servers_match_state(&servers, &state.profiles)
+        .context("配置文件与管理状态不一致；请先备份并修复，ping-rust 不会覆盖现有配置")?;
     servers.push(server);
     state.profiles.push(profile.clone());
 
@@ -2554,6 +3019,341 @@ async fn generate_inner(
     })
 }
 
+pub(crate) async fn update_profile_locked(
+    id: Uuid,
+    change: ProfileChange,
+    lock: utils::ExclusiveLock,
+) -> Result<GenerationResult> {
+    utils::require_linux_root()?;
+    utils::ensure_directory(Path::new(utils::CONFIG_DIR), 0o700)?;
+    let config_path = Path::new(utils::CONFIG_FILE);
+    let state_path = Path::new(utils::STATE_FILE);
+    let mut state = load_state_for_update()?;
+    let index = state
+        .profiles
+        .iter()
+        .position(|profile| profile.id == id)
+        .with_context(|| format!("未找到配置 {id}"))?;
+    let mut servers = load_servers(config_path)?;
+    ensure_servers_match_state(&servers, &state.profiles)
+        .context("配置文件与管理状态不一致；请先备份并修复，ping-rust 不会覆盖现有配置")?;
+
+    match &change {
+        ProfileChange::Name(name) => validate_profile_name(name, &state.profiles, Some(id))?,
+        ProfileChange::Port(port) => {
+            if *port == 0 {
+                bail!("端口必须在 1..=65535 范围内");
+            }
+            if state
+                .profiles
+                .iter()
+                .any(|profile| profile.id != id && profile.port == *port)
+            {
+                bail!("端口 {port} 已由现有配置使用");
+            }
+        }
+        ProfileChange::ServerAddress(Some(address)) => {
+            if address.trim().is_empty()
+                || address.len() > 255
+                || address.chars().any(char::is_control)
+            {
+                bail!("客户端地址必须为 1..=255 个非控制字符");
+            }
+        }
+        ProfileChange::RealityServerName(server_name) => validate_server_name(server_name)?,
+        _ => {}
+    }
+
+    let rollback = ManagedRollback {
+        config: read_optional(config_path)?,
+        state: read_optional(state_path)?,
+        generated_certificate: None,
+        generated_certificate_key: None,
+    };
+    apply_profile_change(&mut servers[index], &mut state.profiles[index], change)?;
+    let profile = state.profiles[index].clone();
+    let yaml = serde_yaml::to_string(&servers).context("序列化更新后 shoes YAML 失败")?;
+    validate_yaml(&yaml)?;
+    validate_candidate_with_shoes(&yaml, Path::new(utils::CONFIG_DIR)).await?;
+    commit_managed(config_path, state_path, &yaml, &state)?;
+
+    Ok(GenerationResult {
+        profile_id: profile.id,
+        config_path: config_path.to_path_buf(),
+        certificate_path: profile.certificate_path.clone(),
+        certificate_key_path: profile.certificate_key_path.clone(),
+        credentials: profile.credentials.clone(),
+        profile,
+        rollback: Some(rollback),
+        _lock: Some(lock),
+    })
+}
+
+fn apply_profile_change(
+    server: &mut ServerConfig,
+    profile: &mut ManagedProfile,
+    change: ProfileChange,
+) -> Result<()> {
+    match change {
+        ProfileChange::Name(name) => profile.name = name.trim().to_owned(),
+        ProfileChange::Port(port) => {
+            server.address = format!("0.0.0.0:{port}");
+            profile.port = port;
+        }
+        ProfileChange::ServerAddress(address) => profile.server_address = address,
+        ProfileChange::RegenerateCredentials => regenerate_profile_credentials(server, profile)?,
+        ProfileChange::Password(password) => {
+            if password.is_empty() || password.chars().any(char::is_control) {
+                bail!("密码不能为空或包含控制字符");
+            }
+            match (&mut server.protocol, &mut profile.credentials) {
+                (
+                    ServerProtocol::Hysteria2 {
+                        password: server_password,
+                        ..
+                    },
+                    Credentials::Hysteria2 {
+                        password: state_password,
+                        ..
+                    },
+                )
+                | (
+                    ServerProtocol::Tuic {
+                        password: server_password,
+                        ..
+                    },
+                    Credentials::Tuic {
+                        password: state_password,
+                        ..
+                    },
+                ) => {
+                    *server_password = password.clone();
+                    *state_password = password;
+                }
+                (
+                    ServerProtocol::Shadowsocks {
+                        password: server_password,
+                        ..
+                    },
+                    Credentials::Shadowsocks {
+                        cipher,
+                        password: state_password,
+                        ..
+                    },
+                ) => {
+                    validate_shadowsocks_password(*cipher, &password)?;
+                    *server_password = password.clone();
+                    *state_password = password;
+                }
+                _ => bail!("该协议不支持直接更改单一密码；请选择重新生成凭据"),
+            }
+        }
+        ProfileChange::RealityServerName(new_name) => {
+            let Credentials::Reality { server_name, .. } = &mut profile.credentials else {
+                bail!("只有 VLESS-Reality 配置支持更改 SNI");
+            };
+            let ServerProtocol::Tls {
+                reality_targets, ..
+            } = &mut server.protocol
+            else {
+                bail!("Reality 配置与管理状态不一致");
+            };
+            if reality_targets.len() != 1 {
+                bail!("Reality 配置必须恰好包含一个目标");
+            }
+            let mut target = reality_targets
+                .remove(server_name)
+                .or_else(|| reality_targets.pop_first().map(|(_, target)| target))
+                .context("Reality 配置中缺少现有 SNI 目标")?;
+            if target.dest == format!("{server_name}:443") {
+                target.dest = format!("{new_name}:443");
+            }
+            reality_targets.insert(new_name.clone(), target);
+            *server_name = new_name;
+        }
+        ProfileChange::ShadowsocksCipher(cipher) => {
+            let password = generate_shadowsocks_password(cipher);
+            match (&mut server.protocol, &mut profile.credentials) {
+                (
+                    ServerProtocol::Shadowsocks {
+                        cipher: server_cipher,
+                        password: server_password,
+                        ..
+                    },
+                    Credentials::Shadowsocks {
+                        cipher: state_cipher,
+                        password: state_password,
+                        ..
+                    },
+                ) => {
+                    *server_cipher = cipher.as_str().to_owned();
+                    *server_password = password.clone();
+                    *state_cipher = cipher;
+                    *state_password = password;
+                }
+                _ => bail!("只有 Shadowsocks 配置支持更改加密方式"),
+            }
+        }
+        ProfileChange::AnyTlsUserPassword { index, password } => {
+            if password.is_empty() || password.chars().any(char::is_control) {
+                bail!("AnyTLS 用户密码不能为空或包含控制字符");
+            }
+            let Credentials::AnyTls { users, .. } = &mut profile.credentials else {
+                bail!("只有 AnyTLS 配置支持更改用户密码");
+            };
+            let user = users.get_mut(index).context("AnyTLS 用户序号无效")?;
+            user.password = password;
+            *anytls_users_mut(server)? = users.clone();
+        }
+    }
+    Ok(())
+}
+
+fn regenerate_profile_credentials(
+    server: &mut ServerConfig,
+    profile: &mut ManagedProfile,
+) -> Result<()> {
+    match &mut profile.credentials {
+        Credentials::Reality {
+            user_id,
+            private_key,
+            public_key,
+            short_id,
+            server_name,
+        } => {
+            let ServerProtocol::Tls {
+                reality_targets, ..
+            } = &mut server.protocol
+            else {
+                bail!("Reality 配置与管理状态不一致");
+            };
+            if reality_targets.len() != 1 {
+                bail!("Reality 配置必须恰好包含一个目标");
+            }
+            let target = if reality_targets.contains_key(server_name) {
+                reality_targets.get_mut(server_name)
+            } else {
+                reality_targets.values_mut().next()
+            }
+            .context("Reality 配置中缺少目标")?;
+            let InnerProtocol::Vless {
+                user_id: server_user_id,
+                ..
+            } = &mut target.protocol
+            else {
+                bail!("Reality 内层协议不是 VLESS");
+            };
+            let keypair = generate_reality_keypair();
+            let new_user_id = Uuid::new_v4();
+            let new_short_id = random_hex(8);
+            target.private_key = keypair.private_key.clone();
+            target.short_ids = vec![new_short_id.clone()];
+            *server_user_id = new_user_id;
+            *user_id = new_user_id;
+            *private_key = keypair.private_key;
+            *public_key = keypair.public_key;
+            *short_id = new_short_id;
+        }
+        Credentials::Hysteria2 { password, .. } => {
+            let ServerProtocol::Hysteria2 {
+                password: server_password,
+                ..
+            } = &mut server.protocol
+            else {
+                bail!("Hysteria2 配置与管理状态不一致");
+            };
+            let generated = random_secret(24);
+            *server_password = generated.clone();
+            *password = generated;
+        }
+        Credentials::Tuic {
+            user_id, password, ..
+        } => {
+            let ServerProtocol::Tuic {
+                uuid,
+                password: server_password,
+                ..
+            } = &mut server.protocol
+            else {
+                bail!("TUIC 配置与管理状态不一致");
+            };
+            let generated_id = Uuid::new_v4();
+            let generated_password = random_secret(24);
+            *uuid = generated_id;
+            *server_password = generated_password.clone();
+            *user_id = generated_id;
+            *password = generated_password;
+        }
+        Credentials::Shadowsocks {
+            cipher, password, ..
+        } => {
+            let ServerProtocol::Shadowsocks {
+                cipher: server_cipher,
+                password: server_password,
+                ..
+            } = &mut server.protocol
+            else {
+                bail!("Shadowsocks 配置与管理状态不一致");
+            };
+            let generated = generate_shadowsocks_password(*cipher);
+            *server_cipher = cipher.as_str().to_owned();
+            *server_password = generated.clone();
+            *password = generated;
+        }
+        Credentials::AnyTls { users, .. } => {
+            for user in users.iter_mut() {
+                user.password = random_secret(24);
+            }
+            *anytls_users_mut(server)? = users.clone();
+        }
+    }
+    Ok(())
+}
+
+fn anytls_users_mut(server: &mut ServerConfig) -> Result<&mut Vec<AnyTlsUser>> {
+    let ServerProtocol::Tls {
+        tls_targets,
+        reality_targets,
+    } = &mut server.protocol
+    else {
+        bail!("AnyTLS 配置与管理状态不一致");
+    };
+    let target_count = tls_targets.len() + reality_targets.len();
+    if target_count != 1 {
+        bail!("AnyTLS 配置必须恰好包含一个 TLS 或 Reality 目标");
+    }
+    let protocol = if let Some(target) = tls_targets.values_mut().next() {
+        &mut target.protocol
+    } else {
+        &mut reality_targets
+            .values_mut()
+            .next()
+            .context("AnyTLS 配置中缺少目标")?
+            .protocol
+    };
+    let InnerProtocol::AnyTls { users, .. } = protocol else {
+        bail!("TLS 目标内层协议不是 AnyTLS");
+    };
+    Ok(users)
+}
+
+fn validate_profile_name(
+    name: &str,
+    profiles: &[ManagedProfile],
+    except_id: Option<Uuid>,
+) -> Result<()> {
+    let name = name.trim();
+    if name.is_empty() || name.len() > 64 || name.chars().any(char::is_control) {
+        bail!("配置名称必须为 1..=64 个非控制字符");
+    }
+    if profiles.iter().any(|profile| {
+        Some(profile.id) != except_id && profile.name.trim().eq_ignore_ascii_case(name)
+    }) {
+        bail!("配置名称 {name} 已存在；名称必须唯一");
+    }
+    Ok(())
+}
+
 fn default_profile_name(protocol: Protocol, id: Uuid) -> String {
     let protocol = match protocol {
         Protocol::Reality => "reality",
@@ -2569,6 +3369,59 @@ fn load_servers(path: &Path) -> Result<Vec<ServerConfig>> {
     let yaml =
         fs::read_to_string(path).with_context(|| format!("读取配置 {} 失败", path.display()))?;
     serde_yaml::from_str(&yaml).context("现有 shoes 配置不是 ping-rust 可管理的格式")
+}
+
+fn ensure_servers_match_state(servers: &[ServerConfig], profiles: &[ManagedProfile]) -> Result<()> {
+    if servers.len() != profiles.len() {
+        bail!(
+            "配置条目数 {} 与管理状态条目数 {} 不一致",
+            servers.len(),
+            profiles.len()
+        );
+    }
+    for (index, (server, profile)) in servers.iter().zip(profiles).enumerate() {
+        let expected_address = format!("0.0.0.0:{}", profile.port);
+        if server.address != expected_address {
+            bail!(
+                "第 {} 项监听地址 {} 与管理状态端口 {} 不一致",
+                index + 1,
+                server.address,
+                profile.port
+            );
+        }
+        let protocol_matches = match (&server.protocol, profile.protocol()) {
+            (ServerProtocol::Hysteria2 { .. }, Protocol::Hysteria2)
+            | (ServerProtocol::Tuic { .. }, Protocol::Tuic)
+            | (ServerProtocol::Shadowsocks { .. }, Protocol::Shadowsocks) => true,
+            (
+                ServerProtocol::Tls {
+                    reality_targets, ..
+                },
+                Protocol::Reality,
+            ) => reality_targets
+                .values()
+                .any(|target| matches!(target.protocol, InnerProtocol::Vless { .. })),
+            (
+                ServerProtocol::Tls {
+                    tls_targets,
+                    reality_targets,
+                },
+                Protocol::AnyTls,
+            ) => {
+                tls_targets
+                    .values()
+                    .any(|target| matches!(target.protocol, InnerProtocol::AnyTls { .. }))
+                    || reality_targets
+                        .values()
+                        .any(|target| matches!(target.protocol, InnerProtocol::AnyTls { .. }))
+            }
+            _ => false,
+        };
+        if !protocol_matches {
+            bail!("第 {} 项协议与管理状态 {} 不一致", index + 1, profile.id);
+        }
+    }
+    Ok(())
 }
 
 fn load_state_for_update() -> Result<ManagedState> {
@@ -2617,9 +3470,8 @@ pub async fn delete_profile(id: Uuid) -> Result<ManagedProfile> {
         .with_context(|| format!("未找到配置 {id}"))?;
     let config_path = Path::new(utils::CONFIG_FILE);
     let mut servers = load_servers(config_path)?;
-    if servers.len() != state.profiles.len() {
-        bail!("配置文件与管理状态不一致，已拒绝删除");
-    }
+    ensure_servers_match_state(&servers, &state.profiles)
+        .context("配置文件与管理状态不一致，已拒绝删除")?;
     servers.remove(index);
     let profile = state.profiles.remove(index);
     let yaml = serde_yaml::to_string(&servers).context("序列化更新后配置失败")?;
@@ -3254,31 +4106,14 @@ async fn validate_candidate_with_binary(yaml: &str, directory: &Path, binary: &P
 pub(crate) fn validate_managed_snapshot(config_path: &Path, state_path: &Path) -> Result<()> {
     let servers = load_servers(config_path)?;
     let state = load_state_from(state_path)?;
-    if servers.len() != state.profiles.len() {
-        bail!(
-            "备份中的配置条目数 {} 与管理状态条目数 {} 不一致",
-            servers.len(),
-            state.profiles.len()
-        );
-    }
-    for (server, profile) in servers.iter().zip(&state.profiles) {
-        let expected = format!("0.0.0.0:{}", profile.port);
-        if server.address != expected {
-            bail!(
-                "备份配置 {} 的监听地址 {} 与管理状态端口不一致",
-                profile.id,
-                server.address
-            );
-        }
-    }
-    Ok(())
+    ensure_servers_match_state(&servers, &state.profiles).context("备份内容不一致")
 }
 
 pub async fn validate_with_shoes(config_path: &Path) -> Result<()> {
     validate_with_binary(Path::new(utils::SHOES_BIN), config_path).await
 }
 
-async fn validate_with_binary(binary: &Path, config_path: &Path) -> Result<()> {
+pub(crate) async fn validate_with_binary(binary: &Path, config_path: &Path) -> Result<()> {
     if !binary.is_file() {
         bail!("shoes 尚未安装，无法执行 --dry-run 验证");
     }
@@ -3472,6 +4307,50 @@ mod tests {
     }
 
     #[test]
+    fn managed_state_rejects_reordered_or_wrong_protocol_servers() {
+        let first_request = request(Protocol::Reality, PathBuf::from("unused.yaml"));
+        let (first_server, first_credentials, _, _) = generate_reality(&first_request);
+        let mut second_request = request(Protocol::Reality, PathBuf::from("unused.yaml"));
+        second_request.port = 8443;
+        let (second_server, second_credentials, _, _) = generate_reality(&second_request);
+        let profiles = vec![
+            ManagedProfile {
+                id: Uuid::new_v4(),
+                name: "first".to_owned(),
+                port: first_request.port,
+                server_address: None,
+                credentials: first_credentials,
+                certificate_path: None,
+                certificate_key_path: None,
+                self_signed_certificate: false,
+            },
+            ManagedProfile {
+                id: Uuid::new_v4(),
+                name: "second".to_owned(),
+                port: second_request.port,
+                server_address: None,
+                credentials: second_credentials,
+                certificate_path: None,
+                certificate_key_path: None,
+                self_signed_certificate: false,
+            },
+        ];
+        ensure_servers_match_state(&[first_server.clone(), second_server.clone()], &profiles)
+            .unwrap();
+        assert!(ensure_servers_match_state(&[second_server, first_server], &profiles).is_err());
+
+        let (wrong_protocol, _, _, _) = generate_shadowsocks(&request(
+            Protocol::Shadowsocks,
+            PathBuf::from("unused.yaml"),
+        ));
+        assert!(ensure_servers_match_state(
+            &[wrong_protocol, generate_reality(&second_request).0],
+            &profiles,
+        )
+        .is_err());
+    }
+
+    #[test]
     fn validates_reality_destination_host_and_port() {
         validate_host_port("www.cloudflare.com:443").unwrap();
         validate_host_port("[2001:db8::1]:443").unwrap();
@@ -3551,6 +4430,162 @@ mod tests {
         assert!(restored.server_address.is_none());
     }
 
+    #[test]
+    fn profile_name_validation_rejects_case_insensitive_duplicates() {
+        let existing = ManagedProfile {
+            id: Uuid::new_v4(),
+            name: "Main".to_owned(),
+            port: 443,
+            server_address: None,
+            credentials: Credentials::Reality {
+                user_id: Uuid::new_v4(),
+                private_key: "private".to_owned(),
+                public_key: "public".to_owned(),
+                short_id: "0123456789abcdef".to_owned(),
+                server_name: DEFAULT_SNI.to_owned(),
+            },
+            certificate_path: None,
+            certificate_key_path: None,
+            self_signed_certificate: false,
+        };
+        assert!(validate_profile_name("main", std::slice::from_ref(&existing), None).is_err());
+        validate_profile_name("main", std::slice::from_ref(&existing), Some(existing.id)).unwrap();
+    }
+
+    #[test]
+    fn reality_profile_changes_keep_yaml_and_client_credentials_aligned() {
+        let request = request(Protocol::Reality, PathBuf::from("unused.yaml"));
+        let (mut server, credentials, _, _) = generate_reality(&request);
+        let mut profile = ManagedProfile {
+            id: Uuid::new_v4(),
+            name: "reality-main".to_owned(),
+            port: request.port,
+            server_address: Some("203.0.113.10".to_owned()),
+            credentials,
+            certificate_path: None,
+            certificate_key_path: None,
+            self_signed_certificate: false,
+        };
+        let old_public_key = match &profile.credentials {
+            Credentials::Reality { public_key, .. } => public_key.clone(),
+            _ => unreachable!(),
+        };
+
+        apply_profile_change(&mut server, &mut profile, ProfileChange::Port(24443)).unwrap();
+        apply_profile_change(
+            &mut server,
+            &mut profile,
+            ProfileChange::RealityServerName("www.example.com".to_owned()),
+        )
+        .unwrap();
+        apply_profile_change(
+            &mut server,
+            &mut profile,
+            ProfileChange::RegenerateCredentials,
+        )
+        .unwrap();
+
+        assert_eq!(profile.port, 24443);
+        assert_eq!(server.address, "0.0.0.0:24443");
+        let Credentials::Reality {
+            public_key,
+            server_name,
+            ..
+        } = &profile.credentials
+        else {
+            unreachable!()
+        };
+        assert_ne!(public_key, &old_public_key);
+        assert_eq!(server_name, "www.example.com");
+        let ServerProtocol::Tls {
+            reality_targets, ..
+        } = &server.protocol
+        else {
+            unreachable!()
+        };
+        let target = reality_targets.get("www.example.com").unwrap();
+        assert_eq!(target.dest, "www.example.com:443");
+        validate_yaml(&serde_yaml::to_string(&vec![server]).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn shadowsocks_cipher_change_generates_matching_key_length() {
+        let request = request(Protocol::Shadowsocks, PathBuf::from("unused.yaml"));
+        let (mut server, credentials, _, _) = generate_shadowsocks(&request);
+        let mut profile = ManagedProfile {
+            id: Uuid::new_v4(),
+            name: "ss-main".to_owned(),
+            port: request.port,
+            server_address: None,
+            credentials,
+            certificate_path: None,
+            certificate_key_path: None,
+            self_signed_certificate: false,
+        };
+
+        apply_profile_change(
+            &mut server,
+            &mut profile,
+            ProfileChange::ShadowsocksCipher(ShadowsocksCipher::Aes128Gcm2022),
+        )
+        .unwrap();
+        let Credentials::Shadowsocks {
+            cipher, password, ..
+        } = &profile.credentials
+        else {
+            unreachable!()
+        };
+        assert_eq!(*cipher, ShadowsocksCipher::Aes128Gcm2022);
+        assert_eq!(STANDARD.decode(password).unwrap().len(), 16);
+        let ServerProtocol::Shadowsocks {
+            cipher: server_cipher,
+            password: server_password,
+            ..
+        } = &server.protocol
+        else {
+            unreachable!()
+        };
+        assert_eq!(server_cipher, cipher.as_str());
+        assert_eq!(server_password, password);
+    }
+
+    #[test]
+    fn anytls_user_password_change_updates_server_and_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut request = request(Protocol::AnyTls, dir.path().join("unused.yaml"));
+        request
+            .options
+            .anytls_users
+            .push(generated_anytls_user("alice"));
+        let (mut server, credentials, certificate, certificate_key) =
+            generate_anytls(&request, dir.path(), Uuid::new_v4()).unwrap();
+        let mut profile = ManagedProfile {
+            id: Uuid::new_v4(),
+            name: "anytls-main".to_owned(),
+            port: request.port,
+            server_address: None,
+            credentials,
+            certificate_path: certificate,
+            certificate_key_path: certificate_key,
+            self_signed_certificate: true,
+        };
+
+        apply_profile_change(
+            &mut server,
+            &mut profile,
+            ProfileChange::AnyTlsUserPassword {
+                index: 0,
+                password: "new-anytls-password".to_owned(),
+            },
+        )
+        .unwrap();
+        let Credentials::AnyTls { users, .. } = &profile.credentials else {
+            unreachable!()
+        };
+        assert_eq!(users[0].password, "new-anytls-password");
+        assert_eq!(anytls_users_mut(&mut server).unwrap(), users);
+    }
+
     #[tokio::test]
     async fn rejected_candidate_is_removed_without_touching_live_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -3582,16 +4617,21 @@ mod tests {
 ## `src/deployment.rs`
 
 ````rust
+use std::path::Path;
+
 use anyhow::{bail, Result};
 
 use crate::{
-    config::{self, GenerationRequest, GenerationResult},
-    service,
+    config::{self, GenerationRequest, GenerationResult, ProfileChange},
+    service, utils,
 };
+use uuid::Uuid;
 
 pub async fn generate_and_activate(request: GenerationRequest) -> Result<GenerationResult> {
+    utils::require_linux_root()?;
+    let lock = utils::exclusive_lock(Path::new(utils::LOCK_FILE))?;
     let service_snapshot = service::capture_snapshot()?;
-    let mut result = config::generate(request).await?;
+    let mut result = config::generate_locked(request, lock).await?;
     if let Err(activation) = service::activate_and_verify() {
         let config_rollback = result.rollback_managed();
         let service_rollback = service::restore_snapshot(service_snapshot);
@@ -3607,6 +4647,32 @@ pub async fn generate_and_activate(request: GenerationRequest) -> Result<Generat
             ),
             (Err(config), Err(service)) => bail!(
                 "shoes 激活失败，配置与服务状态回滚均失败：激活={activation:#}；配置={config:#}；服务={service:#}"
+            ),
+        };
+    }
+    Ok(result)
+}
+
+pub async fn update_and_activate(id: Uuid, change: ProfileChange) -> Result<GenerationResult> {
+    utils::require_linux_root()?;
+    let lock = utils::exclusive_lock(Path::new(utils::LOCK_FILE))?;
+    let service_snapshot = service::capture_snapshot()?;
+    let mut result = config::update_profile_locked(id, change, lock).await?;
+    if let Err(activation) = service::activate_and_verify() {
+        let config_rollback = result.rollback_managed();
+        let service_rollback = service::restore_snapshot(service_snapshot);
+        return match (config_rollback, service_rollback) {
+            (Ok(()), Ok(())) => {
+                Err(activation.context("shoes 激活失败，配置修改和服务状态已回滚"))
+            }
+            (Err(config), Ok(())) => bail!(
+                "shoes 激活失败，服务状态已恢复，但配置修改回滚失败：激活={activation:#}；配置={config:#}"
+            ),
+            (Ok(()), Err(service)) => bail!(
+                "shoes 激活失败，配置修改已回滚，但服务状态恢复失败：激活={activation:#}；服务={service:#}"
+            ),
+            (Err(config), Err(service)) => bail!(
+                "shoes 激活失败，配置修改与服务状态回滚均失败：激活={activation:#}；配置={config:#}；服务={service:#}"
             ),
         };
     }
@@ -3779,21 +4845,45 @@ fn is_private_address(address: IpAddr) -> bool {
 }
 
 fn select_port(protocol: Protocol, requested: Option<u16>) -> Result<u16> {
+    select_port_excluding(protocol, requested, None)
+}
+
+pub(crate) fn select_port_for_update(
+    protocol: Protocol,
+    requested: Option<u16>,
+    profile_id: uuid::Uuid,
+    current_port: u16,
+) -> Result<u16> {
+    if requested == Some(current_port) {
+        return Ok(current_port);
+    }
+    select_port_excluding(protocol, requested, Some(profile_id))
+}
+
+fn select_port_excluding(
+    protocol: Protocol,
+    requested: Option<u16>,
+    excluded_profile: Option<uuid::Uuid>,
+) -> Result<u16> {
     if let Some(port) = requested {
-        ensure_port_available(protocol, port)?;
+        ensure_port_available(protocol, port, excluded_profile)?;
         return Ok(port);
     }
     let mut random = rand::rng();
     for _ in 0..RANDOM_PORT_ATTEMPTS {
         let port = random.random_range(RANDOM_PORT_MIN..=u16::MAX);
-        if ensure_port_available(protocol, port).is_ok() {
+        if ensure_port_available(protocol, port, excluded_profile).is_ok() {
             return Ok(port);
         }
     }
     bail!("自动获取可用端口失败次数达到 233 次，请检查端口占用情况")
 }
 
-fn ensure_port_available(protocol: Protocol, port: u16) -> Result<()> {
+fn ensure_port_available(
+    protocol: Protocol,
+    port: u16,
+    excluded_profile: Option<uuid::Uuid>,
+) -> Result<()> {
     if port == 0 {
         bail!("端口必须在 1..=65535 范围内");
     }
@@ -3801,7 +4891,7 @@ fn ensure_port_available(protocol: Protocol, port: u16) -> Result<()> {
         && config::load_state()?
             .profiles
             .iter()
-            .any(|profile| profile.port == port)
+            .any(|profile| Some(profile.id) != excluded_profile && profile.port == port)
     {
         bail!("端口 {port} 已由 ping-rust 配置使用");
     }
@@ -3952,6 +5042,15 @@ pub fn install_unit(enable_now: bool) -> Result<()> {
 
 pub fn activate_and_verify() -> Result<()> {
     install_unit(true)?;
+    verify_active_stable(systemctl_is_active, || {
+        thread::sleep(Duration::from_millis(750))
+    })
+}
+
+pub fn restart_and_verify() -> Result<()> {
+    utils::require_linux_root()?;
+    ensure_systemctl()?;
+    systemctl_after_reset(RESTART_COMMAND)?;
     verify_active_stable(systemctl_is_active, || {
         thread::sleep(Duration::from_millis(750))
     })
@@ -4320,6 +5419,7 @@ fn is_executable(path: &Path) -> bool {
     path.is_file()
 }
 
+#[derive(Debug)]
 pub struct ExclusiveLock(File);
 
 pub fn exclusive_lock(path: &Path) -> Result<ExclusiveLock> {
@@ -4360,6 +5460,11 @@ pub fn atomic_write(destination: &Path, contents: &[u8], mode: u32) -> Result<()
     persist_replace(temp, destination)
 }
 
+pub fn ensure_directory(path: &Path, mode: u32) -> Result<()> {
+    fs::create_dir_all(path).with_context(|| format!("创建目录 {} 失败", path.display()))?;
+    set_mode(path, mode).with_context(|| format!("设置目录 {} 权限失败", path.display()))
+}
+
 pub fn atomic_copy(source: &Path, destination: &Path, mode: u32) -> Result<()> {
     let bytes = fs::read(source).with_context(|| format!("读取 {} 失败", source.display()))?;
     atomic_write(destination, &bytes, mode)
@@ -4378,13 +5483,13 @@ fn persist_replace(temp: tempfile::NamedTempFile, destination: &Path) -> Result<
 }
 
 #[cfg(unix)]
-fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
+pub(crate) fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(mode))
 }
 
 #[cfg(not(unix))]
-fn set_mode(_path: &Path, _mode: u32) -> io::Result<()> {
+pub(crate) fn set_mode(_path: &Path, _mode: u32) -> io::Result<()> {
     Ok(())
 }
 
@@ -4580,6 +5685,10 @@ pub async fn restore(archive_path: &Path) -> Result<Option<PathBuf>> {
         rollback_restore(destination, &rollback, had_existing)?;
         return Err(error.context("复制恢复文件失败，原配置已回滚"));
     }
+    if let Err(error) = harden_config_tree(destination) {
+        rollback_restore(destination, &rollback, had_existing)?;
+        return Err(error.context("收紧恢复配置权限失败，原配置已回滚"));
+    }
     if let Err(error) = config::validate_with_shoes(Path::new(utils::CONFIG_FILE)).await {
         rollback_restore(destination, &rollback, had_existing)?;
         return Err(error.context("恢复配置未通过 shoes 校验，原配置已回滚"));
@@ -4637,6 +5746,24 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<()> {
             fs::copy(entry.path(), target)?;
         } else {
             bail!("恢复源包含链接或特殊文件 {}", entry.path().display());
+        }
+    }
+    Ok(())
+}
+
+fn harden_config_tree(path: &Path) -> Result<()> {
+    utils::set_mode(path, 0o700)
+        .with_context(|| format!("设置目录 {} 权限失败", path.display()))?;
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            harden_config_tree(&entry.path())?;
+        } else if file_type.is_file() {
+            utils::set_mode(&entry.path(), 0o600)
+                .with_context(|| format!("设置文件 {} 权限失败", entry.path().display()))?;
+        } else {
+            bail!("配置目录包含链接或特殊文件 {}", entry.path().display());
         }
     }
     Ok(())
@@ -4801,14 +5928,21 @@ pub fn select_profile<'a>(
     match selector {
         Some(selector) => {
             let selector = selector.trim();
-            let id = Uuid::parse_str(selector).ok();
-            profiles
+            if let Ok(id) = Uuid::parse_str(selector) {
+                if let Some(profile) = profiles.iter().find(|profile| profile.id == id) {
+                    return Ok(profile);
+                }
+            }
+            let mut matches = profiles
                 .iter()
-                .find(|profile| {
-                    id.is_some_and(|id| profile.id == id)
-                        || profile.name.eq_ignore_ascii_case(selector)
-                })
-                .with_context(|| format!("未找到配置 {selector}"))
+                .filter(|profile| profile.name.eq_ignore_ascii_case(selector));
+            let profile = matches
+                .next()
+                .with_context(|| format!("未找到配置 {selector}"))?;
+            if matches.next().is_some() {
+                bail!("配置名称 {selector} 存在重复，请改用 UUID 指定");
+            }
+            Ok(profile)
         }
         None if profiles.len() == 1 => Ok(&profiles[0]),
         None if profiles.is_empty() => bail!("没有可用配置"),
@@ -5260,6 +6394,18 @@ mod tests {
             second.id
         );
         assert!(select_profile(&profiles, None).is_err());
+
+        let mut duplicate = second.clone();
+        duplicate.id = Uuid::new_v4();
+        duplicate.name = "SECOND".to_owned();
+        let duplicates = vec![second, duplicate.clone()];
+        assert!(select_profile(&duplicates, Some("second")).is_err());
+        assert_eq!(
+            select_profile(&duplicates, Some(&duplicate.id.to_string()))
+                .unwrap()
+                .id,
+            duplicate.id
+        );
     }
 
     #[test]
@@ -5928,7 +7074,7 @@ mod tests {
 
 核心逻辑全部位于 Rust 源码中；`scripts/install.sh` 负责下载、校验并安装官方预编译二进制，随后调用 Rust 的安全首次部署入口。
 
-> v0.1.7 已包含 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks 和 AnyTLS 五协议；运行一键安装脚本即可零输入部署默认 VLESS-REALITY。
+> v0.1.8 已包含 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks 和 AnyTLS 五协议；运行一键安装脚本即可零输入部署默认 VLESS-REALITY，菜单 `2` 可直接安全更改现有配置。
 
 ## 一键安装（推荐）
 
@@ -5958,7 +7104,7 @@ bash <(curl --proto '=https' --tlsv1.2 -fsSL \
 ## 功能
 
 - 从 GitHub Release 下载 shoes，自动匹配 x86_64/aarch64 与 GNU/musl，强制校验官方 SHA-256 digest；GNU 资产不兼容时安全回退 static musl
-- 使用 `cargo install shoes` 从 crates.io 编译安装；低于 1 GiB 内存时自动单任务并关闭 LTO，避免换页风暴
+- 使用 cargo 从与 schema CI 相同的 cfal/shoes 固定源码提交编译安装；低于 1 GiB 内存时自动单任务并关闭 LTO，避免换页风暴
 - 生成 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks、AnyTLS 服务端配置
 - `prs` 数字菜单与 `prs add/a` 快捷命令：自动端口、自动凭据、部署完成直接输出分享链接
 - 在 Rust 内生成 X25519 Reality 密钥、UUID、short ID、随机密码和自签名证书
@@ -5993,7 +7139,7 @@ sudo apt-get install -y build-essential pkg-config git ca-certificates
 sudo dnf install -y gcc gcc-c++ make pkgconf-pkg-config git ca-certificates
 ```
 
-从 [crates.io](https://crates.io/crates/ping-rust) 安装已发布的 `0.1.7`：
+从 [crates.io](https://crates.io/crates/ping-rust) 安装已发布的稳定版本：
 
 ```bash
 cargo install ping-rust --locked
@@ -6070,6 +7216,8 @@ ping-rust · shoes 管理工具
 ------------- URL 链接 -------------
 vless://...security=reality...pbk=...&sid=...
 ```
+
+菜单 `2. 更改配置` 会先选择现有配置，再按协议提供端口、名称、公网地址、凭据、Reality SNI、Shadowsocks cipher 或 AnyTLS 用户密码等修改项。新配置必须通过真实 `shoes --dry-run` 才会原子提交；服务重启失败时自动恢复修改前的配置与 systemd 状态，成功后直接输出新的分享链接。
 
 首次安装流程是：`install.sh → 自动安装 ping-rust/shoes → 自动随机端口部署 VLESS-REALITY → 复制 URL`，中间零输入。后续日常流程是：`prs → 1 → 4（VLESS）或 3（SS）→ 输入端口/直接回车随机 → 复制 URL 到 v2rayN`。所有协议选择固定使用连续编号 `1/2/3/4/5`；主菜单输入 `0` 退出，任意子菜单输入 `0` 返回主菜单。UUID、Reality 密钥、short ID 或 SS 2022 密码全部安全随机生成。链接只会在配置通过 `shoes --dry-run`、原子写入、systemd 启动且确认为 active 后输出；失败会恢复原配置和服务状态。
 

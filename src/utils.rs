@@ -146,6 +146,7 @@ fn is_executable(path: &Path) -> bool {
     path.is_file()
 }
 
+#[derive(Debug)]
 pub struct ExclusiveLock(File);
 
 pub fn exclusive_lock(path: &Path) -> Result<ExclusiveLock> {
@@ -186,6 +187,11 @@ pub fn atomic_write(destination: &Path, contents: &[u8], mode: u32) -> Result<()
     persist_replace(temp, destination)
 }
 
+pub fn ensure_directory(path: &Path, mode: u32) -> Result<()> {
+    fs::create_dir_all(path).with_context(|| format!("创建目录 {} 失败", path.display()))?;
+    set_mode(path, mode).with_context(|| format!("设置目录 {} 权限失败", path.display()))
+}
+
 pub fn atomic_copy(source: &Path, destination: &Path, mode: u32) -> Result<()> {
     let bytes = fs::read(source).with_context(|| format!("读取 {} 失败", source.display()))?;
     atomic_write(destination, &bytes, mode)
@@ -204,13 +210,13 @@ fn persist_replace(temp: tempfile::NamedTempFile, destination: &Path) -> Result<
 }
 
 #[cfg(unix)]
-fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
+pub(crate) fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(mode))
 }
 
 #[cfg(not(unix))]
-fn set_mode(_path: &Path, _mode: u32) -> io::Result<()> {
+pub(crate) fn set_mode(_path: &Path, _mode: u32) -> io::Result<()> {
     Ok(())
 }
 

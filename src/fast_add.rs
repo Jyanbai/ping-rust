@@ -159,21 +159,45 @@ fn is_private_address(address: IpAddr) -> bool {
 }
 
 fn select_port(protocol: Protocol, requested: Option<u16>) -> Result<u16> {
+    select_port_excluding(protocol, requested, None)
+}
+
+pub(crate) fn select_port_for_update(
+    protocol: Protocol,
+    requested: Option<u16>,
+    profile_id: uuid::Uuid,
+    current_port: u16,
+) -> Result<u16> {
+    if requested == Some(current_port) {
+        return Ok(current_port);
+    }
+    select_port_excluding(protocol, requested, Some(profile_id))
+}
+
+fn select_port_excluding(
+    protocol: Protocol,
+    requested: Option<u16>,
+    excluded_profile: Option<uuid::Uuid>,
+) -> Result<u16> {
     if let Some(port) = requested {
-        ensure_port_available(protocol, port)?;
+        ensure_port_available(protocol, port, excluded_profile)?;
         return Ok(port);
     }
     let mut random = rand::rng();
     for _ in 0..RANDOM_PORT_ATTEMPTS {
         let port = random.random_range(RANDOM_PORT_MIN..=u16::MAX);
-        if ensure_port_available(protocol, port).is_ok() {
+        if ensure_port_available(protocol, port, excluded_profile).is_ok() {
             return Ok(port);
         }
     }
     bail!("自动获取可用端口失败次数达到 233 次，请检查端口占用情况")
 }
 
-fn ensure_port_available(protocol: Protocol, port: u16) -> Result<()> {
+fn ensure_port_available(
+    protocol: Protocol,
+    port: u16,
+    excluded_profile: Option<uuid::Uuid>,
+) -> Result<()> {
     if port == 0 {
         bail!("端口必须在 1..=65535 范围内");
     }
@@ -181,7 +205,7 @@ fn ensure_port_available(protocol: Protocol, port: u16) -> Result<()> {
         && config::load_state()?
             .profiles
             .iter()
-            .any(|profile| profile.port == port)
+            .any(|profile| Some(profile.id) != excluded_profile && profile.port == port)
     {
         bail!("端口 {port} 已由 ping-rust 配置使用");
     }

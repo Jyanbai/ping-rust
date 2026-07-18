@@ -49,14 +49,21 @@ pub fn select_profile<'a>(
     match selector {
         Some(selector) => {
             let selector = selector.trim();
-            let id = Uuid::parse_str(selector).ok();
-            profiles
+            if let Ok(id) = Uuid::parse_str(selector) {
+                if let Some(profile) = profiles.iter().find(|profile| profile.id == id) {
+                    return Ok(profile);
+                }
+            }
+            let mut matches = profiles
                 .iter()
-                .find(|profile| {
-                    id.is_some_and(|id| profile.id == id)
-                        || profile.name.eq_ignore_ascii_case(selector)
-                })
-                .with_context(|| format!("未找到配置 {selector}"))
+                .filter(|profile| profile.name.eq_ignore_ascii_case(selector));
+            let profile = matches
+                .next()
+                .with_context(|| format!("未找到配置 {selector}"))?;
+            if matches.next().is_some() {
+                bail!("配置名称 {selector} 存在重复，请改用 UUID 指定");
+            }
+            Ok(profile)
         }
         None if profiles.len() == 1 => Ok(&profiles[0]),
         None if profiles.is_empty() => bail!("没有可用配置"),
@@ -508,6 +515,18 @@ mod tests {
             second.id
         );
         assert!(select_profile(&profiles, None).is_err());
+
+        let mut duplicate = second.clone();
+        duplicate.id = Uuid::new_v4();
+        duplicate.name = "SECOND".to_owned();
+        let duplicates = vec![second, duplicate.clone()];
+        assert!(select_profile(&duplicates, Some("second")).is_err());
+        assert_eq!(
+            select_profile(&duplicates, Some(&duplicate.id.to_string()))
+                .unwrap()
+                .id,
+            duplicate.id
+        );
     }
 
     #[test]

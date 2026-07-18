@@ -4,6 +4,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     process::Stdio,
+    time::Duration,
 };
 
 use anyhow::{bail, Context, Result};
@@ -17,9 +18,12 @@ use sha2::{Digest, Sha256};
 use tar::Archive;
 use tokio::process::Command;
 
-use crate::utils;
+use crate::{config, utils};
 
 const LATEST_RELEASE_API: &str = "https://api.github.com/repos/cfal/shoes/releases/latest";
+const SHOES_GIT_REPOSITORY: &str = "https://github.com/cfal/shoes";
+const SHOES_SCHEMA_REVISION: &str = "386b11532424b8665ee3e46340c6236fb3c47595";
+const MAX_ARCHIVE_SIZE: u64 = 128 * 1024 * 1024;
 const MAX_BINARY_SIZE: u64 = 128 * 1024 * 1024;
 const LOW_MEMORY_THRESHOLD_KIB: u64 = 1024 * 1024;
 
@@ -27,7 +31,7 @@ const LOW_MEMORY_THRESHOLD_KIB: u64 = 1024 * 1024;
 pub enum InstallMethod {
     /// 下载 GitHub Release 预编译文件
     Release,
-    /// 执行 cargo install shoes
+    /// 用 cargo 编译 schema 验证过的 shoes 固定源码提交
     Cargo,
 }
 
@@ -36,6 +40,56 @@ pub struct InstallReport {
     pub version: String,
     pub source: String,
     pub destination: PathBuf,
+    _lock: Option<utils::ExclusiveLock>,
+    rollback: Option<BinaryRollback>,
+}
+
+#[derive(Debug)]
+struct BinaryRollback {
+    destination: PathBuf,
+    previous: Option<PathBuf>,
+    _work: tempfile::TempDir,
+}
+
+impl InstallReport {
+    pub fn rollback_binary(&mut self) -> Result<()> {
+        self.rollback
+            .take()
+            .context("更新结果不包含可回滚的 shoes 二进制事务")?
+            .restore()
+    }
+}
+
+impl BinaryRollback {
+    fn capture(destination: &Path) -> Result<Self> {
+        let work = tempfile::tempdir().context("创建 shoes 更新回滚目录失败")?;
+        let previous = if destination.exists() {
+            if !destination.is_file() {
+                bail!("shoes 目标路径不是普通文件：{}", destination.display());
+            }
+            let snapshot = work.path().join("shoes.previous");
+            fs::copy(destination, &snapshot).context("备份现有 shoes 二进制失败")?;
+            Some(snapshot)
+        } else {
+            None
+        };
+        Ok(Self {
+            destination: destination.to_path_buf(),
+            previous,
+            _work: work,
+        })
+    }
+
+    fn restore(self) -> Result<()> {
+        if let Some(previous) = self.previous {
+            utils::atomic_copy(&previous, &self.destination, 0o755)
+                .context("恢复旧 shoes 二进制失败")
+        } else if self.destination.exists() {
+            fs::remove_file(&self.destination).context("删除失败安装产生的 shoes 二进制失败")
+        } else {
+            Ok(())
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -54,15 +108,59 @@ struct ReleaseAsset {
 
 pub async fn install(method: InstallMethod, force: bool) -> Result<InstallReport> {
     utils::require_linux_root()?;
-    match method {
+    let lock = utils::exclusive_lock(Path::new(utils::LOCK_FILE))?;
+    install_locked(method, force, lock).await
+}
+
+pub(crate) async fn install_locked(
+    method: InstallMethod,
+    force: bool,
+    lock: utils::ExclusiveLock,
+) -> Result<InstallReport> {
+    utils::require_linux_root()?;
+    let rollback = BinaryRollback::capture(Path::new(utils::SHOES_BIN))?;
+    let installation = match method {
         InstallMethod::Release => install_release(Path::new(utils::SHOES_BIN)).await,
         InstallMethod::Cargo => install_cargo(force).await,
+    };
+    match installation {
+        Ok(mut report) => {
+            if Path::new(utils::CONFIG_FILE).is_file() {
+                if let Err(validation) = config::validate_with_binary(
+                    Path::new(utils::SHOES_BIN),
+                    Path::new(utils::CONFIG_FILE),
+                )
+                .await
+                {
+                    return match rollback.restore() {
+                        Ok(()) => Err(validation.context(
+                            "新版 shoes 无法加载现有配置，旧二进制已恢复",
+                        )),
+                        Err(restore) => bail!(
+                            "新版 shoes 无法加载现有配置且旧二进制恢复失败：验证={validation:#}；回滚={restore:#}"
+                        ),
+                    };
+                }
+            }
+            report._lock = Some(lock);
+            report.rollback = Some(rollback);
+            Ok(report)
+        }
+        Err(installation) => match rollback.restore() {
+            Ok(()) => Err(installation.context("shoes 安装失败，原二进制状态已恢复")),
+            Err(restore) => {
+                bail!("shoes 安装失败且原二进制恢复失败：安装={installation:#}；回滚={restore:#}")
+            }
+        },
     }
 }
 
 async fn install_release(destination: &Path) -> Result<InstallReport> {
     let client = Client::builder()
         .user_agent(concat!("ping-rust/", env!("CARGO_PKG_VERSION")))
+        .https_only(true)
+        .connect_timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(300))
         .build()
         .context("创建 HTTP 客户端失败")?;
 
@@ -94,6 +192,8 @@ async fn install_release(destination: &Path) -> Result<InstallReport> {
                     version: release.tag_name,
                     source: format!("GitHub Release ({})", asset.name),
                     destination: destination.to_path_buf(),
+                    _lock: None,
+                    rollback: None,
                 });
             }
             Err(error) => failures.push(format!("{target}: {error:#}")),
@@ -134,7 +234,17 @@ async fn install_cargo(force: bool) -> Result<InstallReport> {
         "无法找到 cargo；请安装 Rust toolchain，或确认 cargo 与 ping-rust 位于同一目录/已加入 PATH",
     )?;
     let mut command = Command::new(cargo);
-    command.args(["install", "shoes", "--locked", "--root", "/usr/local"]);
+    command.args([
+        "install",
+        "--git",
+        SHOES_GIT_REPOSITORY,
+        "--rev",
+        SHOES_SCHEMA_REVISION,
+        "shoes",
+        "--locked",
+        "--root",
+        "/usr/local",
+    ]);
     if is_low_memory_linux() {
         eprintln!("检测到系统内存低于 1 GiB：cargo 源码安装将使用单任务并关闭 LTO，避免严重换页。");
         command
@@ -162,8 +272,10 @@ async fn install_cargo(force: bool) -> Result<InstallReport> {
         .unwrap_or_else(|_| "unknown".to_owned());
     Ok(InstallReport {
         version,
-        source: "crates.io (cargo install)".to_owned(),
+        source: format!("GitHub source ({})", &SHOES_SCHEMA_REVISION[..12]),
         destination: PathBuf::from(utils::SHOES_BIN),
+        _lock: None,
+        rollback: None,
     })
 }
 
@@ -185,6 +297,7 @@ fn mem_total_below_threshold(meminfo: &str) -> bool {
 }
 
 async fn download(client: &Client, asset: &ReleaseAsset, destination: &Path) -> Result<String> {
+    validate_release_asset(asset)?;
     let response = client
         .get(&asset.browser_download_url)
         .send()
@@ -193,6 +306,12 @@ async fn download(client: &Client, asset: &ReleaseAsset, destination: &Path) -> 
         .error_for_status()
         .with_context(|| format!("下载 {} 时服务器返回错误", asset.name))?;
 
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_ARCHIVE_SIZE)
+    {
+        bail!("{} 响应尺寸超过安全上限", asset.name);
+    }
     let total = response.content_length().unwrap_or(asset.size);
     let progress = ProgressBar::new(total);
     progress.set_style(
@@ -207,16 +326,42 @@ async fn download(client: &Client, asset: &ReleaseAsset, destination: &Path) -> 
         .with_context(|| format!("无法创建临时文件 {}", destination.display()))?;
     let mut hasher = Sha256::new();
     let mut stream = response.bytes_stream();
+    let mut received = 0u64;
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.context("下载流中断")?;
+        received = received
+            .checked_add(chunk.len() as u64)
+            .context("下载尺寸溢出")?;
+        if received > MAX_ARCHIVE_SIZE || received > asset.size {
+            bail!("{} 下载内容超过 Release 声明尺寸，已终止", asset.name);
+        }
         output.write_all(&chunk).context("写入下载文件失败")?;
         hasher.update(&chunk);
         progress.inc(chunk.len() as u64);
     }
     output.sync_all().context("同步下载文件失败")?;
+    if received != asset.size {
+        bail!(
+            "{} 下载尺寸不一致：Release 声明 {} bytes，实际 {} bytes",
+            asset.name,
+            asset.size,
+            received
+        );
+    }
     progress.finish_with_message("下载完成并已校验");
 
     Ok(hex::encode(hasher.finalize()))
+}
+
+fn validate_release_asset(asset: &ReleaseAsset) -> Result<()> {
+    if asset.size == 0 || asset.size > MAX_ARCHIVE_SIZE {
+        bail!("{} 尺寸异常：{} bytes", asset.name, asset.size);
+    }
+    let url = reqwest::Url::parse(&asset.browser_download_url).context("Release 下载 URL 无效")?;
+    if url.scheme() != "https" || url.host_str() != Some("github.com") {
+        bail!("拒绝非 GitHub HTTPS Release 下载地址：{url}");
+    }
+    Ok(())
 }
 
 fn extract_shoes(archive_path: &Path, work_dir: &Path) -> Result<PathBuf> {
@@ -387,5 +532,48 @@ mod tests {
         assert!(mem_total_below_threshold("MemTotal:         413696 kB\n"));
         assert!(!mem_total_below_threshold("MemTotal:        2097152 kB\n"));
         assert!(!mem_total_below_threshold("SwapTotal:       2097152 kB\n"));
+    }
+
+    #[test]
+    fn validates_release_asset_origin_and_size() {
+        let valid = ReleaseAsset {
+            name: "shoes-x86_64-unknown-linux-musl.tar.gz".to_owned(),
+            browser_download_url: "https://github.com/cfal/shoes/releases/download/v1/shoes.tar.gz"
+                .to_owned(),
+            size: 1024,
+            digest: None,
+        };
+        validate_release_asset(&valid).unwrap();
+
+        let mut invalid = ReleaseAsset {
+            browser_download_url: "http://github.com/cfal/shoes/releases/download/v1/shoes.tar.gz"
+                .to_owned(),
+            ..valid
+        };
+        assert!(validate_release_asset(&invalid).is_err());
+        invalid.browser_download_url =
+            "https://example.com/cfal/shoes/releases/download/v1/shoes.tar.gz".to_owned();
+        assert!(validate_release_asset(&invalid).is_err());
+        invalid.browser_download_url =
+            "https://github.com/cfal/shoes/releases/download/v1/shoes.tar.gz".to_owned();
+        invalid.size = MAX_ARCHIVE_SIZE + 1;
+        assert!(validate_release_asset(&invalid).is_err());
+    }
+
+    #[test]
+    fn binary_rollback_restores_previous_or_removes_new_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let existing = dir.path().join("existing-shoes");
+        fs::write(&existing, b"old").unwrap();
+        let rollback = BinaryRollback::capture(&existing).unwrap();
+        fs::write(&existing, b"new").unwrap();
+        rollback.restore().unwrap();
+        assert_eq!(fs::read(&existing).unwrap(), b"old");
+
+        let fresh = dir.path().join("fresh-shoes");
+        let rollback = BinaryRollback::capture(&fresh).unwrap();
+        fs::write(&fresh, b"new").unwrap();
+        rollback.restore().unwrap();
+        assert!(!fresh.exists());
     }
 }

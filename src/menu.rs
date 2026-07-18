@@ -1,13 +1,13 @@
 use anyhow::Result;
 use colored::Colorize;
-use dialoguer::{theme::ColorfulTheme, Confirm, Input};
+use dialoguer::{theme::ColorfulTheme, Confirm, Input, Password};
 
 use crate::{
     cli,
     client::{self, ClientFormat},
     config::{
-        self, AnyTlsMode, AnyTlsUser, GenerationOptions, GenerationRequest, Protocol,
-        ShadowsocksCipher,
+        self, AnyTlsMode, AnyTlsUser, Credentials, GenerationOptions, GenerationRequest,
+        ProfileChange, Protocol, ShadowsocksCipher,
     },
     deployment, fast_add,
     installer::{self, InstallMethod},
@@ -37,6 +37,18 @@ const PROTOCOL_MENU_ITEMS: &[(usize, &str)] = &[
     (5, "AnyTLS"),
     (0, "返回"),
 ];
+
+#[derive(Clone, Copy)]
+enum ChangeAction {
+    Port,
+    Name,
+    ServerAddress,
+    RegenerateCredentials,
+    Password,
+    RealityServerName,
+    ShadowsocksCipher,
+    AnyTlsUserPassword,
+}
 
 fn parse_numbered_choice(value: &str, count: usize) -> Option<Option<usize>> {
     match value.trim().parse::<usize>().ok()? {
@@ -108,10 +120,7 @@ pub async fn run() -> Result<()> {
         let result = match selected {
             0 => break,
             1 => fast_add_config_menu().await,
-            2 => {
-                println!("更改配置请使用完整 generate 参数，或删除后通过快速添加安全重建。");
-                Ok(())
-            }
+            2 => change_config_menu().await,
             3 => cli::show_info(None).await,
             4 => delete_config_menu().await,
             5 => service_menu(),
@@ -134,6 +143,198 @@ pub async fn run() -> Result<()> {
         result?;
     }
     println!("{}", "已退出。".green());
+    Ok(())
+}
+
+async fn change_config_menu() -> Result<()> {
+    let state = config::load_state()?;
+    if state.profiles.is_empty() {
+        println!("没有可更改的配置。");
+        return Ok(());
+    }
+    let labels = state
+        .profiles
+        .iter()
+        .map(|profile| {
+            format!(
+                "{} · {} · :{} · {}",
+                profile.name,
+                profile.protocol_name(),
+                profile.port,
+                profile.id
+            )
+        })
+        .collect::<Vec<_>>();
+    let Some(selected) = select_numbered("选择要更改的配置", &labels)? else {
+        return Ok(());
+    };
+    let profile = state.profiles[selected].clone();
+    let mut actions = vec![
+        (ChangeAction::Port, "更改端口"),
+        (ChangeAction::Name, "更改配置名称"),
+        (ChangeAction::ServerAddress, "更改客户端公网地址"),
+        (ChangeAction::RegenerateCredentials, "重新生成全部协议凭据"),
+    ];
+    match profile.protocol() {
+        Protocol::Reality => actions.push((ChangeAction::RealityServerName, "更改 SNI")),
+        Protocol::Hysteria2 | Protocol::Tuic => {
+            actions.push((ChangeAction::Password, "更改密码"));
+        }
+        Protocol::Shadowsocks => {
+            actions.push((ChangeAction::Password, "更改密码"));
+            actions.push((ChangeAction::ShadowsocksCipher, "更改加密方式"));
+        }
+        Protocol::AnyTls => {
+            actions.push((ChangeAction::AnyTlsUserPassword, "更改用户密码"));
+        }
+    }
+    let action_labels = actions.iter().map(|(_, label)| *label).collect::<Vec<_>>();
+    let Some(action_index) = select_numbered("选择更改项目", &action_labels)? else {
+        return Ok(());
+    };
+    let action = actions[action_index].0;
+    let change = match action {
+        ChangeAction::Port => {
+            let value = Input::<String>::with_theme(&ColorfulTheme::default())
+                .with_prompt("输入新端口（直接回车自动选择随机端口）")
+                .allow_empty(true)
+                .validate_with(|value: &String| {
+                    if value.trim().is_empty() {
+                        return Ok(());
+                    }
+                    match value.trim().parse::<u16>() {
+                        Ok(port) if port > 0 => Ok(()),
+                        _ => Err("端口必须在 1..=65535 范围内，或直接回车"),
+                    }
+                })
+                .interact_text()?;
+            let requested = if value.trim().is_empty() {
+                None
+            } else {
+                Some(value.trim().parse::<u16>()?)
+            };
+            let port = fast_add::select_port_for_update(
+                profile.protocol(),
+                requested,
+                profile.id,
+                profile.port,
+            )?;
+            ProfileChange::Port(port)
+        }
+        ChangeAction::Name => {
+            let name = Input::<String>::with_theme(&ColorfulTheme::default())
+                .with_prompt("新配置名称")
+                .default(profile.name.clone())
+                .interact_text()?;
+            ProfileChange::Name(name)
+        }
+        ChangeAction::ServerAddress => {
+            let value = Input::<String>::with_theme(&ColorfulTheme::default())
+                .with_prompt("VPS 公网域名或 IP（留空自动检测）")
+                .allow_empty(true)
+                .interact_text()?;
+            let address = if value.trim().is_empty() {
+                fast_add::resolve_server_address(None).await?
+            } else {
+                client::normalize_server_address(&value)?
+            };
+            ProfileChange::ServerAddress(Some(address))
+        }
+        ChangeAction::RegenerateCredentials => {
+            if !Confirm::with_theme(&ColorfulTheme::default())
+                .with_prompt("确认重新生成凭据？旧分享链接将立即失效")
+                .default(false)
+                .interact()?
+            {
+                return Ok(());
+            }
+            ProfileChange::RegenerateCredentials
+        }
+        ChangeAction::Password => {
+            let password = Password::with_theme(&ColorfulTheme::default())
+                .with_prompt("新密码（留空安全随机生成）")
+                .allow_empty_password(true)
+                .interact()?;
+            if password.is_empty() {
+                if matches!(profile.protocol(), Protocol::Shadowsocks) {
+                    ProfileChange::RegenerateCredentials
+                } else {
+                    ProfileChange::Password(config::generated_password())
+                }
+            } else {
+                ProfileChange::Password(password)
+            }
+        }
+        ChangeAction::RealityServerName => {
+            let server_name = Input::<String>::with_theme(&ColorfulTheme::default())
+                .with_prompt("新 SNI")
+                .default(profile.server_name().to_owned())
+                .interact_text()?;
+            ProfileChange::RealityServerName(server_name)
+        }
+        ChangeAction::ShadowsocksCipher => {
+            let ciphers = [
+                ShadowsocksCipher::Aes256Gcm2022,
+                ShadowsocksCipher::Aes128Gcm2022,
+                ShadowsocksCipher::Chacha20IetfPoly13052022,
+                ShadowsocksCipher::Aes256Gcm,
+                ShadowsocksCipher::Aes128Gcm,
+                ShadowsocksCipher::Chacha20IetfPoly1305,
+            ];
+            let labels = ciphers
+                .iter()
+                .map(|cipher| cipher.as_str())
+                .collect::<Vec<_>>();
+            let Some(selected) = select_numbered("选择新加密方式", &labels)? else {
+                return Ok(());
+            };
+            ProfileChange::ShadowsocksCipher(ciphers[selected])
+        }
+        ChangeAction::AnyTlsUserPassword => {
+            let Credentials::AnyTls { users, .. } = &profile.credentials else {
+                anyhow::bail!("配置协议与管理状态不一致");
+            };
+            let user_labels = users
+                .iter()
+                .enumerate()
+                .map(|(index, user)| {
+                    if user.name.is_empty() {
+                        format!("用户 {}", index + 1)
+                    } else {
+                        user.name.clone()
+                    }
+                })
+                .collect::<Vec<_>>();
+            let Some(index) = select_numbered("选择 AnyTLS 用户", &user_labels)? else {
+                return Ok(());
+            };
+            let password = Password::with_theme(&ColorfulTheme::default())
+                .with_prompt("新密码（留空安全随机生成）")
+                .allow_empty_password(true)
+                .interact()?;
+            let password = if password.is_empty() {
+                config::generated_password()
+            } else {
+                password
+            };
+            ProfileChange::AnyTlsUserPassword { index, password }
+        }
+    };
+
+    let result = deployment::update_and_activate(profile.id, change).await?;
+    println!(
+        "{} {} · {} · :{}",
+        "配置更改成功：".green(),
+        result.profile.name,
+        result.profile.protocol_name(),
+        result.profile.port
+    );
+    if let Some(server) = result.profile.server_address.as_deref() {
+        match client::share_uri(&result.profile, server) {
+            Ok(uri) => println!("\n{uri}\n"),
+            Err(error) => eprintln!("分享链接生成失败：{error:#}"),
+        }
+    }
     Ok(())
 }
 
@@ -416,10 +617,10 @@ async fn advanced_add_config_menu() -> Result<()> {
                 .with_prompt("AnyTLS 用户名")
                 .default(default_name)
                 .interact_text()?;
-            let password = Input::<String>::with_theme(&ColorfulTheme::default())
+            let password = Password::with_theme(&ColorfulTheme::default())
                 .with_prompt("AnyTLS 密码（留空则安全随机生成）")
-                .allow_empty(true)
-                .interact_text()?;
+                .allow_empty_password(true)
+                .interact()?;
             options.anytls_users.push(if password.is_empty() {
                 config::generated_anytls_user(user_name)
             } else {
@@ -526,7 +727,7 @@ async fn advanced_add_config_menu() -> Result<()> {
 }
 
 async fn update_menu() -> Result<()> {
-    let choices = ["GitHub Release（推荐）", "cargo install shoes"];
+    let choices = ["GitHub Release（推荐）", "cargo 固定源码编译 shoes"];
     let Some(selected) = select_numbered("选择更新方式", &choices)? else {
         return Ok(());
     };
@@ -535,12 +736,7 @@ async fn update_menu() -> Result<()> {
         1 => InstallMethod::Cargo,
         _ => unreachable!("更新菜单编号已验证"),
     };
-    let unit_exists = std::path::Path::new(crate::utils::SERVICE_FILE).exists();
-    let was_active = unit_exists && service::is_active()?;
-    let report = installer::install(method, true).await?;
-    if was_active {
-        service::execute(ServiceAction::Restart)?;
-    }
+    let report = cli::update_shoes(method).await?;
     println!("{} {}", "更新成功：".green(), report.version);
     Ok(())
 }
@@ -574,6 +770,8 @@ fn uninstall_menu() -> Result<()> {
         .with_prompt("同时永久删除 /etc/shoes 配置与凭据？")
         .default(false)
         .interact()?;
+    crate::utils::require_linux_root()?;
+    let _lock = crate::utils::exclusive_lock(std::path::Path::new(crate::utils::LOCK_FILE))?;
     let unit_removed = service::uninstall_unit()?;
     let binary_removed = installer::uninstall_binary()?;
     let aliases_removed = crate::utils::remove_command_aliases()?;

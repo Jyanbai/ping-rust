@@ -4,7 +4,7 @@
 
 核心逻辑全部位于 Rust 源码中；`scripts/install.sh` 负责下载、校验并安装官方预编译二进制，随后调用 Rust 的安全首次部署入口。
 
-> v0.1.7 已包含 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks 和 AnyTLS 五协议；运行一键安装脚本即可零输入部署默认 VLESS-REALITY。
+> v0.1.8 已包含 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks 和 AnyTLS 五协议；运行一键安装脚本即可零输入部署默认 VLESS-REALITY，菜单 `2` 可直接安全更改现有配置。
 
 ## 一键安装（推荐）
 
@@ -34,7 +34,7 @@ bash <(curl --proto '=https' --tlsv1.2 -fsSL \
 ## 功能
 
 - 从 GitHub Release 下载 shoes，自动匹配 x86_64/aarch64 与 GNU/musl，强制校验官方 SHA-256 digest；GNU 资产不兼容时安全回退 static musl
-- 使用 `cargo install shoes` 从 crates.io 编译安装；低于 1 GiB 内存时自动单任务并关闭 LTO，避免换页风暴
+- 使用 cargo 从与 schema CI 相同的 cfal/shoes 固定源码提交编译安装；低于 1 GiB 内存时自动单任务并关闭 LTO，避免换页风暴
 - 生成 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks、AnyTLS 服务端配置
 - `prs` 数字菜单与 `prs add/a` 快捷命令：自动端口、自动凭据、部署完成直接输出分享链接
 - 在 Rust 内生成 X25519 Reality 密钥、UUID、short ID、随机密码和自签名证书
@@ -69,7 +69,7 @@ sudo apt-get install -y build-essential pkg-config git ca-certificates
 sudo dnf install -y gcc gcc-c++ make pkgconf-pkg-config git ca-certificates
 ```
 
-从 [crates.io](https://crates.io/crates/ping-rust) 安装已发布的 `0.1.7`：
+从 [crates.io](https://crates.io/crates/ping-rust) 安装已发布的稳定版本：
 
 ```bash
 cargo install ping-rust --locked
@@ -146,6 +146,8 @@ ping-rust · shoes 管理工具
 ------------- URL 链接 -------------
 vless://...security=reality...pbk=...&sid=...
 ```
+
+菜单 `2. 更改配置` 会先选择现有配置，再按协议提供端口、名称、公网地址、凭据、Reality SNI、Shadowsocks cipher 或 AnyTLS 用户密码等修改项。新配置必须通过真实 `shoes --dry-run` 才会原子提交；服务重启失败时自动恢复修改前的配置与 systemd 状态，成功后直接输出新的分享链接。
 
 首次安装流程是：`install.sh → 自动安装 ping-rust/shoes → 自动随机端口部署 VLESS-REALITY → 复制 URL`，中间零输入。后续日常流程是：`prs → 1 → 4（VLESS）或 3（SS）→ 输入端口/直接回车随机 → 复制 URL 到 v2rayN`。所有协议选择固定使用连续编号 `1/2/3/4/5`；主菜单输入 `0` 退出，任意子菜单输入 `0` 返回主菜单。UUID、Reality 密钥、short ID 或 SS 2022 密码全部安全随机生成。链接只会在配置通过 `shoes --dry-run`、原子写入、systemd 启动且确认为 active 后输出；失败会恢复原配置和服务状态。
 

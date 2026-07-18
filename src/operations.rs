@@ -131,6 +131,10 @@ pub async fn restore(archive_path: &Path) -> Result<Option<PathBuf>> {
         rollback_restore(destination, &rollback, had_existing)?;
         return Err(error.context("复制恢复文件失败，原配置已回滚"));
     }
+    if let Err(error) = harden_config_tree(destination) {
+        rollback_restore(destination, &rollback, had_existing)?;
+        return Err(error.context("收紧恢复配置权限失败，原配置已回滚"));
+    }
     if let Err(error) = config::validate_with_shoes(Path::new(utils::CONFIG_FILE)).await {
         rollback_restore(destination, &rollback, had_existing)?;
         return Err(error.context("恢复配置未通过 shoes 校验，原配置已回滚"));
@@ -188,6 +192,24 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<()> {
             fs::copy(entry.path(), target)?;
         } else {
             bail!("恢复源包含链接或特殊文件 {}", entry.path().display());
+        }
+    }
+    Ok(())
+}
+
+fn harden_config_tree(path: &Path) -> Result<()> {
+    utils::set_mode(path, 0o700)
+        .with_context(|| format!("设置目录 {} 权限失败", path.display()))?;
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            harden_config_tree(&entry.path())?;
+        } else if file_type.is_file() {
+            utils::set_mode(&entry.path(), 0o600)
+                .with_context(|| format!("设置文件 {} 权限失败", entry.path().display()))?;
+        } else {
+            bail!("配置目录包含链接或特殊文件 {}", entry.path().display());
         }
     }
     Ok(())

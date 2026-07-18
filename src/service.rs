@@ -88,6 +88,15 @@ pub fn activate_and_verify() -> Result<()> {
     })
 }
 
+pub fn restart_and_verify() -> Result<()> {
+    utils::require_linux_root()?;
+    ensure_systemctl()?;
+    systemctl_after_reset(RESTART_COMMAND)?;
+    verify_active_stable(systemctl_is_active, || {
+        thread::sleep(Duration::from_millis(750))
+    })
+}
+
 fn verify_active_stable(
     mut probe: impl FnMut() -> Result<bool>,
     mut pause: impl FnMut(),

@@ -24,11 +24,11 @@ jobs:
     timeout-minutes: 20
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       - name: Install PTY test dependency
         shell: bash
@@ -294,6 +294,43 @@ jobs:
           }
           wait_listener t 25448
           wait_listener t 25449
+
+          profile_number="$(sudo python3 - <<'PY'
+          import json
+          with open('/etc/shoes/ping-rust-state.json', encoding='utf-8') as stream:
+              profiles = json.load(stream)['profiles']
+          print(next(index for index, profile in enumerate(profiles, 1) if profile['port'] == 25448))
+          PY
+          )"
+          sudo env PRS_COMMAND="$PRS" PROFILE_NUMBER="$profile_number" expect <<'EXPECT'
+          log_user 0
+          set timeout 180
+          proc wait_for {pattern stage} {
+            expect {
+              -re $pattern { return }
+              eof { puts stderr "unexpected EOF at $stage"; exit 31 }
+              timeout { puts stderr "timeout at $stage"; exit 32 }
+            }
+          }
+          spawn $env(PRS_COMMAND)
+          wait_for {请输入序号} main-menu
+          send "2\r"
+          wait_for {选择要更改的配置} profile-menu
+          wait_for {请输入序号} profile-prompt
+          send "$env(PROFILE_NUMBER)\r"
+          wait_for {选择更改项目} change-menu
+          wait_for {请输入序号} change-prompt
+          send "1\r"
+          wait_for {输入新端口} port-prompt
+          send "25450\r"
+          wait_for {配置更改成功} change-success
+          wait_for {请输入序号} main-menu-return
+          send "0\r"
+          wait_for {已退出} exit-message
+          expect { eof {} timeout { puts stderr "timeout waiting for change exit"; exit 33 } }
+          EXPECT
+          wait_listener t 25450
+          ! sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)25448$'
 
       - name: Roll back config and systemd state when activation fails
         shell: bash

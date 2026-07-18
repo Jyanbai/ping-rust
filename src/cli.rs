@@ -381,17 +381,15 @@ pub async fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Command::Update { method } => {
-            let unit_exists = std::path::Path::new(crate::utils::SERVICE_FILE).exists();
-            let was_active = unit_exists && service::is_active()?;
-            let report = installer::install(method, true).await?;
-            if was_active {
-                service::execute(ServiceAction::Restart)?;
-            }
+            let report = update_shoes(method).await?;
             println!("{} {}", "shoes 更新完成：".green(), report.version);
             Ok(())
         }
         Command::SelfUpdate { version, force } => run_self_update(version.as_deref(), force).await,
         Command::Uninstall { purge } => {
+            crate::utils::require_linux_root()?;
+            let _lock =
+                crate::utils::exclusive_lock(std::path::Path::new(crate::utils::LOCK_FILE))?;
             let unit_removed = service::uninstall_unit()?;
             let binary_removed = installer::uninstall_binary()?;
             let aliases_removed = crate::utils::remove_command_aliases()?;
@@ -408,6 +406,37 @@ pub async fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
     }
+}
+
+pub(crate) async fn update_shoes(method: InstallMethod) -> Result<installer::InstallReport> {
+    crate::utils::require_linux_root()?;
+    let lock = crate::utils::exclusive_lock(std::path::Path::new(crate::utils::LOCK_FILE))?;
+    let unit_exists = std::path::Path::new(crate::utils::SERVICE_FILE).exists();
+    let was_active = unit_exists && service::is_active()?;
+    let mut report = installer::install_locked(method, true, lock).await?;
+    if !was_active {
+        return Ok(report);
+    }
+    if let Err(restart) = service::restart_and_verify() {
+        let binary_rollback = report.rollback_binary();
+        let service_rollback = if binary_rollback.is_ok() {
+            service::restart_and_verify()
+        } else {
+            Ok(())
+        };
+        return match (binary_rollback, service_rollback) {
+            (Ok(()), Ok(())) => {
+                Err(restart.context("新版 shoes 启动失败，旧二进制和服务已恢复"))
+            }
+            (Err(binary), _) => anyhow::bail!(
+                "新版 shoes 启动失败且旧二进制恢复失败：启动={restart:#}；二进制={binary:#}"
+            ),
+            (Ok(()), Err(service)) => anyhow::bail!(
+                "新版 shoes 启动失败，旧二进制已恢复但服务恢复失败：启动={restart:#}；服务={service:#}"
+            ),
+        };
+    }
+    Ok(report)
 }
 
 async fn run_add(args: AddArgs) -> Result<()> {
