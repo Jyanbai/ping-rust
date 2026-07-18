@@ -243,7 +243,7 @@ jobs:
               MENU_PORT="$port" SHARE_SCHEME="$scheme" expect <<'EXPECT'
           log_user 0
           set timeout 180
-          spawn -- $env(SB_COMMAND)
+          spawn $env(SB_COMMAND)
           expect -re {请输入序号}
           send -- "1\r"
           expect -re {请输入序号}
