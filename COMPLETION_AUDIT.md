@@ -104,9 +104,9 @@
 - `cargo build --locked --release`
 - `cargo doc --locked --no-deps`
 - `cargo install --path . --locked` 后执行 `ping-rust --help`
-- `cargo package --locked` / `cargo publish --dry-run --locked`：当前 clean worktree 打包 29 个文件，包含五协议示例与固定 shoes workflow；隔离解包重编译与上传前校验均通过
+- `cargo package --locked` / `cargo publish --dry-run --locked`：当前 clean worktree 打包 29 个文件，254.3 KiB / 64.7 KiB compressed，包含五协议示例与固定 shoes workflow；隔离解包重编译与上传前校验均通过
 - `cargo-audit 0.22.2`：扫描当前 Cargo.lock 的 224 个依赖，RustSec 1166 条 advisory 中无命中
-- `SOURCE_SNAPSHOT.md`：12/12 section、175,403 bytes，Cargo/主要 Rust/README 全部与真实文件逐字一致
+- `SOURCE_SNAPSHOT.md`：12/12 section、175,405 bytes，Cargo/主要 Rust/README 全部与真实文件逐字一致
 - actionlint v1.7.12：`ci.yml`、`release.yml`、`shoes-schema.yml`、`ubuntu-acceptance.yml` 零诊断；ShellCheck v0.11.0 对一键安装器零诊断
 - GitHub shoes schema run `29635018245`：固定 shoes 0.2.8 commit 的五单协议、五协议联合、六 Shadowsocks cipher、Reality+AnyTLS 共 13 次显式 dry-run 全部成功，且日志敏感信息扫描为零命中
 - GitHub Actions CI run `29635018243`：五个目标发行版全部成功

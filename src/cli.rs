@@ -141,7 +141,7 @@ pub struct GenerateArgs {
     /// AnyTLS 外层安全模式
     #[arg(long, value_enum, default_value_t = AnyTlsMode::default())]
     anytls_mode: AnyTlsMode,
-    /// AnyTLS 用户，可重复；格式为 [名称:]密码
+    /// AnyTLS 用户，可重复；格式为 `[名称:]密码`
     #[arg(long = "user")]
     anytls_users: Vec<AnyTlsUser>,
     /// AnyTLS padding 条目，可重复，例如 --padding stop=8 --padding 0=30-30
