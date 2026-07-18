@@ -537,8 +537,8 @@ jobs:
           backup="$RUNNER_TEMP/shoes-backup.tar.gz"
           sudo "$PING_RUST" backup "$backup"
           sudo test -s "$backup"
-          tar -tzf "$backup" | grep -q 'shoes/profiles/VLESS-REALITY-'
-          tar -tzf "$backup" | grep -q 'shoes/profiles/HYSTERIA2-'
+          sudo tar -tzf "$backup" | grep -q 'shoes/profiles/VLESS-REALITY-'
+          sudo tar -tzf "$backup" | grep -q 'shoes/profiles/HYSTERIA2-'
           sudo "$PING_RUST" restore "$backup"
           sudo test -s "/etc/shoes/profiles/VLESS-REALITY-${REALITY_PORT}.yaml"
           sudo "$PING_RUST" update --method release
