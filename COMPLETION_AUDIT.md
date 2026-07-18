@@ -24,9 +24,9 @@
 | ARM64 次优先支持 | 构建与模拟运行已证实 | `src/installer.rs`、Release workflow | aarch64 GNU ELF 最高 GLIBC 2.34；v0.1.2 aarch64 musl 静态 binary 通过 qemu-user-static `--version` 并公开发布 |
 | ping-rust 预编译一键安装 | 已发布并端到端验证 | `.github/workflows/release.yml`、`scripts/install.sh` | v0.1.2 的 x86_64/aarch64 musl、SHA256SUMS 已公开；tag workflow 3/3 jobs 成功，并从公开 URL 完成指定版本安装与 version 验证 |
 | ping-rust 原生自更新 | 已发布并端到端验证 | `src/self_update.rs`、`src/cli.rs`、`src/menu.rs` | 独立 `self-update` 保留 shoes `update` 语义；v0.1.2 发布 job 在非 root 自定义目录真实完成公开资产下载、双重 SHA-256、运行中原子替换和安装后版本复核 |
-| README、MIT、cargo install 发布准备 | 已实现 | `README.md`、`LICENSE`、`scripts/install.sh` | README 第一屏提供无需 Rust 的一键入口，并保留 crates.io/Git/源码安装；release build、doc、隔离 `cargo package` 门禁通过 |
+| README、MIT、cargo install 发布 | 已发布并验证 | `README.md`、`LICENSE`、`scripts/install.sh` | README 第一屏提供无需 Rust 的一键入口，并保留 crates.io/Git/源码安装；release build、doc、隔离 `cargo package` 门禁通过 |
 | GitHub 源码开源 | 已发布 | `Cargo.toml`、GitHub `main` | `Jyanbai/ping-rust` 已为 Public/非空并建立 `main`；首个提交与跨平台 CI 修复均已推送 |
-| 公开 `cargo install ping-rust` | 等待 crates.io 认证 | 发布包 | crates.io API 当前显示 `ping-rust` 名称未占用，publish dry-run 已通过；尚未真实发布 crate，不能宣称该安装命令已上线 |
+| 公开 `cargo install ping-rust` | 已发布并验证 | crates.io `ping-rust 0.1.2` | 正式 `cargo publish --locked` 成功；官方 API、`cargo search` 与独立 `cargo install ping-rust --version 0.1.2 --locked` 均验证公开安装路径可用 |
 | 干净 Ubuntu 24.04 三分钟部署并公网连通 | Debian 路径通过，Ubuntu 待实机 | `README.md` 验收清单 | Debian 12 上已安装 ping-rust 后，Release + 三协议生成远低于 3 分钟；Windows 外部 Reality 客户端经代理观察到 VPS 公网出口；提供的 VPS 不是 Ubuntu |
 
 ## Milestone 6 修复结果
@@ -90,4 +90,4 @@
 
 仍需要一台允许 root/systemd/公网入站的全新 Ubuntu 24.04 x86_64 VPS 重复 README 清单。Debian 12 已给出 Linux/systemd/公网路径的强证据，但不能替代明确指定的 Ubuntu 24.04 成功标准。
 
-公开源码已推送到 `Jyanbai/ping-rust` 的 `main`，当前远程 CI 5/5 jobs 成功；v0.1.2 是 latest Release，README 一键安装与 Rust 原生自更新均由 Ubuntu runner 端到端验证。`cargo publish --dry-run` 已通过，真正发布 crates.io 仍需用户提供发布授权与登录凭据。
+公开源码已推送到 `Jyanbai/ping-rust` 的 `main`，当前远程 CI 5/5 jobs 成功；v0.1.2 是 latest Release，README 一键安装与 Rust 原生自更新均由 Ubuntu runner 端到端验证。`ping-rust 0.1.2` 已发布到 crates.io，并由独立公共安装、版本及帮助命令完成验证。

@@ -3707,7 +3707,7 @@ bash <(curl --proto '=https' --tlsv1.2 -fsSL \
 
 ## 其他安装方式
 
-crate 发布到 crates.io 后：
+从 [crates.io](https://crates.io/crates/ping-rust) 安装已发布的 `0.1.2`：
 
 ```bash
 cargo install ping-rust --locked
