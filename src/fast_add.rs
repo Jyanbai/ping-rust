@@ -78,25 +78,25 @@ pub async fn execute(request: AddRequest) -> Result<AddResult> {
     })
 }
 
-pub fn protocol_from_reference_number(number: usize) -> Result<Protocol> {
+pub fn protocol_from_menu_number(number: usize) -> Result<Protocol> {
     match number {
         1 => Ok(Protocol::Tuic),
-        3 => Ok(Protocol::Hysteria2),
-        8 => Ok(Protocol::Shadowsocks),
-        18 => Ok(Protocol::Reality),
-        20 => Ok(Protocol::AnyTls),
-        _ => bail!("协议编号无效；可选 1、3、8、18、20"),
+        2 => Ok(Protocol::Hysteria2),
+        3 => Ok(Protocol::Shadowsocks),
+        4 => Ok(Protocol::Reality),
+        5 => Ok(Protocol::AnyTls),
+        _ => bail!("协议编号无效；可选 1、2、3、4、5"),
     }
 }
 
 #[cfg(test)]
-fn reference_number(protocol: Protocol) -> usize {
+fn menu_number(protocol: Protocol) -> usize {
     match protocol {
         Protocol::Tuic => 1,
-        Protocol::Hysteria2 => 3,
-        Protocol::Shadowsocks => 8,
-        Protocol::Reality => 18,
-        Protocol::AnyTls => 20,
+        Protocol::Hysteria2 => 2,
+        Protocol::Shadowsocks => 3,
+        Protocol::Reality => 4,
+        Protocol::AnyTls => 5,
     }
 }
 
@@ -213,18 +213,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn preserves_reference_protocol_numbers() {
+    fn uses_sequential_protocol_numbers() {
         for (number, protocol) in [
             (1, Protocol::Tuic),
-            (3, Protocol::Hysteria2),
-            (8, Protocol::Shadowsocks),
-            (18, Protocol::Reality),
-            (20, Protocol::AnyTls),
+            (2, Protocol::Hysteria2),
+            (3, Protocol::Shadowsocks),
+            (4, Protocol::Reality),
+            (5, Protocol::AnyTls),
         ] {
-            assert_eq!(protocol_from_reference_number(number).unwrap(), protocol);
-            assert_eq!(reference_number(protocol), number);
+            assert_eq!(protocol_from_menu_number(number).unwrap(), protocol);
+            assert_eq!(menu_number(protocol), number);
         }
-        assert!(protocol_from_reference_number(2).is_err());
+        assert!(protocol_from_menu_number(0).is_err());
+        assert!(protocol_from_menu_number(6).is_err());
     }
 
     #[test]

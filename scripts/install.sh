@@ -3,7 +3,8 @@ set -Eeuo pipefail
 
 readonly REPOSITORY="Jyanbai/ping-rust"
 readonly PROGRAM="ping-rust"
-readonly SHORT_COMMAND="sb"
+readonly SHORT_COMMAND="prs"
+readonly LEGACY_SHORT_COMMAND="sb"
 
 VERSION="latest"
 INSTALL_DIR="${PING_RUST_INSTALL_DIR:-/usr/local/bin}"
@@ -222,11 +223,25 @@ install_short_command() {
   privileged ln -s -- "${PROGRAM}" "${alias_path}"
 }
 
+remove_owned_legacy_short_command() {
+  local alias_path="${INSTALL_DIR}/${LEGACY_SHORT_COMMAND}"
+  local existing_target=""
+  [ -L "${alias_path}" ] || return 0
+  existing_target="$(readlink -- "${alias_path}")"
+  case "${existing_target}" in
+    "${PROGRAM}" | "${INSTALL_DIR}/${PROGRAM}")
+      privileged rm -f -- "${alias_path}"
+      log "已移除旧快捷命令 ${LEGACY_SHORT_COMMAND}。"
+      ;;
+  esac
+}
+
 if install_short_command; then
   RUN_COMMAND="${SHORT_COMMAND}"
 else
   RUN_COMMAND="${PROGRAM}"
 fi
+remove_owned_legacy_short_command
 
 INSTALLED_VERSION="$("${INSTALL_DIR}/${PROGRAM}" --version)" \
   || die "安装后的版本验证失败。"

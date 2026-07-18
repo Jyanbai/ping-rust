@@ -68,10 +68,10 @@ jobs:
           current_root="$RUNNER_TEMP/ping-rust-current"
           cargo install --path . --locked --root "$current_root"
           ping_rust="$current_root/bin/ping-rust"
-          ln -s ping-rust "$current_root/bin/sb"
+          ln -s ping-rust "$current_root/bin/prs"
           "$ping_rust" --version
           printf 'PING_RUST=%s\n' "$ping_rust" >> "$GITHUB_ENV"
-          printf 'SB=%s\n' "$current_root/bin/sb" >> "$GITHUB_ENV"
+          printf 'PRS=%s\n' "$current_root/bin/prs" >> "$GITHUB_ENV"
 
       - name: Deploy Reality within three minutes
         id: reality
@@ -235,7 +235,7 @@ jobs:
           printf 'ANYTLS_PROFILE=%s\n' "$anytls_profile" >> "$GITHUB_ENV"
           sudo rm -f "$anytls_output"
 
-      - name: Verify sb numeric PTY flow for Reality and Shadowsocks
+      - name: Verify prs numeric PTY flow for Reality and Shadowsocks
         shell: bash
         run: |
           set -euo pipefail
@@ -243,7 +243,7 @@ jobs:
             local protocol_number="$1"
             local port="$2"
             local scheme="$3"
-            sudo env SB_COMMAND="$SB" PROTOCOL_NUMBER="$protocol_number" \
+            sudo env PRS_COMMAND="$PRS" PROTOCOL_NUMBER="$protocol_number" \
               MENU_PORT="$port" SHARE_SCHEME="$scheme" expect <<'EXPECT'
           log_user 0
           set timeout 180
@@ -254,7 +254,7 @@ jobs:
               timeout { puts stderr "timeout at $stage"; exit 22 }
             }
           }
-          spawn $env(SB_COMMAND)
+          spawn $env(PRS_COMMAND)
           wait_for {请输入序号} main-menu
           send "1\r"
           wait_for {请输入序号} protocol-menu
@@ -262,12 +262,15 @@ jobs:
           wait_for {输入端口} port-prompt
           send "$env(MENU_PORT)\r"
           wait_for "$env(SHARE_SCHEME)://" share-uri
+          wait_for {请输入序号} main-menu-return
+          send "0\r"
+          wait_for {已退出} exit-message
           expect { eof {} timeout { puts stderr "timeout waiting for exit"; exit 23 } }
           EXPECT
           }
 
-          run_menu_add 18 25448 vless
-          run_menu_add 8 25449 ss
+          run_menu_add 4 25448 vless
+          run_menu_add 3 25449 ss
           sudo systemctl is-active --quiet shoes.service
           wait_listener() {
             local kind="$1"

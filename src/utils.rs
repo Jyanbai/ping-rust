@@ -16,12 +16,16 @@ pub const STATE_FILE: &str = "/etc/shoes/ping-rust-state.json";
 pub const LOCK_FILE: &str = "/run/lock/ping-rust.lock";
 pub const SERVICE_FILE: &str = "/etc/systemd/system/shoes.service";
 
-pub fn remove_sb_alias() -> Result<bool> {
+pub fn remove_command_aliases() -> Result<usize> {
     let executable = env::current_exe().context("无法确定 ping-rust 当前路径")?;
     let Some(parent) = executable.parent() else {
-        return Ok(false);
+        return Ok(0);
     };
-    remove_owned_alias(&parent.join("sb"), &executable)
+    let mut removed = 0;
+    for name in ["prs", "sb"] {
+        removed += usize::from(remove_owned_alias(&parent.join(name), &executable)?);
+    }
+    Ok(removed)
 }
 
 #[cfg(unix)]
@@ -36,7 +40,7 @@ fn remove_owned_alias(alias: &Path, executable: &Path) -> Result<bool> {
     } else {
         alias
             .parent()
-            .context("sb 符号链接没有父目录")?
+            .context("快捷命令符号链接没有父目录")?
             .join(target)
     };
     let resolved = resolved
@@ -241,7 +245,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn removes_only_alias_owned_by_the_executable() {
+    fn removes_current_and_legacy_aliases_only_when_owned() {
         use std::os::unix::fs::symlink;
 
         let dir = tempfile::tempdir().unwrap();
@@ -250,13 +254,16 @@ mod tests {
         fs::write(&executable, b"binary").unwrap();
         fs::write(&other, b"other").unwrap();
 
-        let alias = dir.path().join("sb");
-        symlink("ping-rust", &alias).unwrap();
-        assert!(remove_owned_alias(&alias, &executable).unwrap());
-        assert!(!alias.exists());
+        for name in ["prs", "sb"] {
+            let alias = dir.path().join(name);
+            symlink("ping-rust", &alias).unwrap();
+            assert!(remove_owned_alias(&alias, &executable).unwrap());
+            assert!(!alias.exists());
 
-        symlink("other", &alias).unwrap();
-        assert!(!remove_owned_alias(&alias, &executable).unwrap());
-        assert!(alias.is_symlink());
+            symlink("other", &alias).unwrap();
+            assert!(!remove_owned_alias(&alias, &executable).unwrap());
+            assert!(alias.is_symlink());
+            fs::remove_file(alias).unwrap();
+        }
     }
 }

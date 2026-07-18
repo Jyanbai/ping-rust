@@ -4,7 +4,7 @@
 
 核心逻辑全部位于 Rust 源码中；`scripts/install.sh` 只负责下载、校验并安装官方预编译二进制。
 
-> v0.1.5 已包含 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks 和 AnyTLS 五协议，并提供与 233boy 日常操作一致的 `sb` 快速入口。
+> v0.1.6 已包含 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks 和 AnyTLS 五协议，并提供简短的 `prs` 快速入口。
 
 ## 一键安装（推荐）
 
@@ -13,7 +13,7 @@
 ```bash
 bash <(curl --proto '=https' --tlsv1.2 -fsSL \
   https://raw.githubusercontent.com/Jyanbai/ping-rust/main/scripts/install.sh)
-sudo sb
+sudo prs
 ```
 
 安装指定版本或目录：
@@ -21,21 +21,21 @@ sudo sb
 ```bash
 bash <(curl --proto '=https' --tlsv1.2 -fsSL \
   https://raw.githubusercontent.com/Jyanbai/ping-rust/main/scripts/install.sh) \
-  --version v0.1.5
+  --version v0.1.6
 
 bash <(curl --proto '=https' --tlsv1.2 -fsSL \
   https://raw.githubusercontent.com/Jyanbai/ping-rust/main/scripts/install.sh) \
   --install-dir /usr/local/bin --quiet
 ```
 
-安装器自动识别 x86_64/aarch64，从 GitHub Releases 下载对应 musl 静态包，强制验证 `SHA256SUMS` 和二进制版本后原子安装到 `/usr/local/bin/ping-rust`，并安全创建 `sb → ping-rust` 符号链接。若系统已有其它 `sb` 命令，安装器会保留它并提示改用 `ping-rust`，绝不强制覆盖。写入系统目录时会调用 `sudo`；令牌、密码和代理配置都不会被上传。
+安装器自动识别 x86_64/aarch64，从 GitHub Releases 下载对应 musl 静态包，强制验证 `SHA256SUMS` 和二进制版本后原子安装到 `/usr/local/bin/ping-rust`，并安全创建 `prs → ping-rust` 符号链接。若系统已有其它 `prs` 命令，安装器会保留它并提示改用 `ping-rust`，绝不强制覆盖；升级时只会移除确实指向 `ping-rust` 的旧 `sb` 链接，不会删除用户自己的 `sb` 程序。写入系统目录时会调用 `sudo`；令牌、密码和代理配置都不会被上传。
 
 ## 功能
 
 - 从 GitHub Release 下载 shoes，自动匹配 x86_64/aarch64 与 GNU/musl，强制校验官方 SHA-256 digest；GNU 资产不兼容时安全回退 static musl
 - 使用 `cargo install shoes` 从 crates.io 编译安装；低于 1 GiB 内存时自动单任务并关闭 LTO，避免换页风暴
 - 生成 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks、AnyTLS 服务端配置
-- `sb` 数字菜单与 `sb add/a` 快捷命令：自动端口、自动凭据、部署完成直接输出分享链接
+- `prs` 数字菜单与 `prs add/a` 快捷命令：自动端口、自动凭据、部署完成直接输出分享链接
 - 在 Rust 内生成 X25519 Reality 密钥、UUID、short ID、随机密码和自签名证书
 - 在同目录候选文件上调用 `shoes --dry-run`，通过后才原子提交并启用 systemd 服务
 - 多配置添加、列表、删除、端口冲突保护
@@ -68,7 +68,7 @@ sudo apt-get install -y build-essential pkg-config git ca-certificates
 sudo dnf install -y gcc gcc-c++ make pkgconf-pkg-config git ca-certificates
 ```
 
-从 [crates.io](https://crates.io/crates/ping-rust) 安装已发布的 `0.1.5`：
+从 [crates.io](https://crates.io/crates/ping-rust) 安装已发布的 `0.1.6`：
 
 ```bash
 cargo install ping-rust --locked
@@ -96,7 +96,7 @@ sudo ping-rust
 ## 233boy 风格快速部署
 
 ```text
-$ sudo sb
+$ sudo prs
 
 ping-rust · shoes 管理工具
 ────────────────────────────
@@ -111,15 +111,17 @@ ping-rust · shoes 管理工具
   8. 帮助
   9. 其他
   10. 关于
-请输入序号（直接回车退出）: 1
+  0. 退出
+请输入序号: 1
 
 选择协议
   1. TUIC
-  3. Hysteria2
-  8. Shadowsocks
-  18. VLESS-REALITY（推荐）
-  20. AnyTLS
-请输入序号: 18
+  2. Hysteria2
+  3. Shadowsocks
+  4. VLESS-REALITY（推荐）
+  5. AnyTLS
+  0. 返回
+请输入序号: 4
 输入端口（直接回车自动选择随机端口）:
 
 部署成功，shoes 服务已启动。
@@ -127,20 +129,20 @@ ping-rust · shoes 管理工具
 vless://...security=reality...pbk=...&sid=...
 ```
 
-实际日常流程就是：`sb → 1 → 18（VLESS）或 8（SS）→ 输入端口/直接回车随机 → 复制 URL 到 v2rayN`。首次使用时若 shoes 未安装，菜单会询问是否自动从 Release 安装；UUID、Reality 密钥、short ID 或 SS 2022 密码全部安全随机生成。链接只会在配置通过 `shoes --dry-run`、原子写入、systemd 启动且确认为 active 后输出；失败会恢复原配置和服务状态。
+实际日常流程就是：`prs → 1 → 4（VLESS）或 3（SS）→ 输入端口/直接回车随机 → 复制 URL 到 v2rayN`。所有协议选择固定使用连续编号 `1/2/3/4/5`；主菜单输入 `0` 退出，任意子菜单输入 `0` 返回主菜单。首次使用时若 shoes 未安装，菜单会询问是否自动从 Release 安装；UUID、Reality 密钥、short ID 或 SS 2022 密码全部安全随机生成。链接只会在配置通过 `shoes --dry-run`、原子写入、systemd 启动且确认为 active 后输出；失败会恢复原配置和服务状态。
 
 非交互方式：
 
 ```bash
 # 自动安装 shoes、随机端口和凭据；标准输出只返回一行链接
-sudo sb add reality --yes --plain
+sudo prs add reality --yes --plain
 
 # 233boy 风格短别名和指定端口
-sudo sb a r 443
-sudo sb add ss 8388
+sudo prs a r 443
+sudo prs add ss 8388
 
 # 自动随机端口也可显式写出；指定公网地址可跳过自动探测
-sudo sb add reality --random-port --server-address 203.0.113.10
+sudo prs add reality --random-port --server-address 203.0.113.10
 ```
 
 高级用户原有的 `generate` 命令全部保留，可精细指定 cipher、证书、Reality fallback、AnyTLS 用户等参数。
@@ -148,9 +150,9 @@ sudo sb add reality --random-port --server-address 203.0.113.10
 重新显示已保存链接（多个配置时使用名称或 UUID）：
 
 ```bash
-sudo sb info
-sudo sb url reality-main
-sudo sb qr reality-main
+sudo prs info
+sudo prs url reality-main
+sudo prs qr reality-main
 ```
 
 `qr` 使用本机 `qrencode` 在终端生成二维码，不会把含凭据的 URL 发送给第三方网站；未安装 `qrencode` 时会退化为原样输出 URL。
@@ -225,8 +227,8 @@ sudo ping-rust generate anytls \
 ```bash
 ping-rust --help
 sudo ping-rust info
-sudo sb url <配置名或 UUID>
-sudo sb qr <配置名或 UUID>
+sudo prs url <配置名或 UUID>
+sudo prs qr <配置名或 UUID>
 sudo ping-rust service status
 sudo ping-rust service restart
 sudo ping-rust logs -n 200
@@ -276,7 +278,7 @@ sudo ping-rust restore ./shoes-backup.tar.gz
 | 路径 | 用途 | 权限 |
 |---|---|---:|
 | `/usr/local/bin/shoes` | shoes 内核 | `0755` |
-| `/usr/local/bin/sb` | 指向 ping-rust 的安全短命令符号链接 | symlink |
+| `/usr/local/bin/prs` | 指向 ping-rust 的安全短命令符号链接 | symlink |
 | `/etc/shoes/config.yaml` | shoes 配置 | `0600` |
 | `/etc/shoes/ping-rust-state.json` | 多配置元数据与客户端导出凭据 | `0600` |
 | `/etc/shoes/cert-*.pem` | 自动生成证书 | `0644` |

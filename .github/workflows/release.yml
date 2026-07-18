@@ -145,9 +145,10 @@ jobs:
             --quiet
           "${install_dir}/ping-rust" --version \
             | grep -Fx "ping-rust ${GITHUB_REF_NAME#v}"
-          test -L "${install_dir}/sb"
-          test "$(readlink "${install_dir}/sb")" = ping-rust
-          "${install_dir}/sb" --version \
+          test -L "${install_dir}/prs"
+          test "$(readlink "${install_dir}/prs")" = ping-rust
+          test ! -e "${install_dir}/sb"
+          "${install_dir}/prs" --version \
             | grep -Fx "ping-rust ${GITHUB_REF_NAME#v}"
           "${install_dir}/ping-rust" self-update \
             --version "${GITHUB_REF_NAME}" \
@@ -157,10 +158,20 @@ jobs:
 
           conflict_dir="${RUNNER_TEMP}/ping-rust-conflict"
           mkdir -p "${conflict_dir}"
-          printf 'owned-by-another-program\n' > "${conflict_dir}/sb"
+          printf 'owned-by-another-program\n' > "${conflict_dir}/prs"
           bash scripts/install.sh \
             --version "${GITHUB_REF_NAME}" \
             --install-dir "${conflict_dir}" \
             --quiet
-          grep -Fx 'owned-by-another-program' "${conflict_dir}/sb"
+          grep -Fx 'owned-by-another-program' "${conflict_dir}/prs"
           test -x "${conflict_dir}/ping-rust"
+
+          legacy_dir="${RUNNER_TEMP}/ping-rust-legacy-alias"
+          mkdir -p "${legacy_dir}"
+          ln -s ping-rust "${legacy_dir}/sb"
+          bash scripts/install.sh \
+            --version "${GITHUB_REF_NAME}" \
+            --install-dir "${legacy_dir}" \
+            --quiet
+          test ! -e "${legacy_dir}/sb"
+          test "$(readlink "${legacy_dir}/prs")" = ping-rust

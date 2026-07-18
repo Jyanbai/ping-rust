@@ -134,7 +134,7 @@ pub enum Command {
 pub struct AddArgs {
     #[arg(value_enum)]
     pub protocol: Protocol,
-    /// 兼容 233boy：位置参数端口，例如 `sb add reality 443`
+    /// 快速添加位置参数端口，例如 `prs add reality 443`
     #[arg(value_name = "PORT", conflicts_with_all = ["port", "random_port"])]
     pub legacy_port: Option<u16>,
     /// 指定监听端口
@@ -385,7 +385,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Uninstall { purge } => {
             let unit_removed = service::uninstall_unit()?;
             let binary_removed = installer::uninstall_binary()?;
-            let alias_removed = crate::utils::remove_sb_alias()?;
+            let aliases_removed = crate::utils::remove_command_aliases()?;
             if purge {
                 let config_dir = std::path::Path::new(crate::utils::CONFIG_DIR);
                 if config_dir.exists() {
@@ -393,8 +393,8 @@ pub async fn run(cli: Cli) -> Result<()> {
                 }
             }
             println!(
-                "卸载完成：二进制={}，systemd={}，sb 别名={}，配置清理={}",
-                binary_removed, unit_removed, alias_removed, purge
+                "卸载完成：二进制={}，systemd={}，快捷命令清理={}，配置清理={}",
+                binary_removed, unit_removed, aliases_removed, purge
             );
             Ok(())
         }
@@ -751,9 +751,9 @@ mod tests {
     }
 
     #[test]
-    fn parses_233boy_style_add_aliases_and_output_controls() {
+    fn parses_prs_add_aliases_and_output_controls() {
         let cli = Cli::try_parse_from([
-            "sb",
+            "prs",
             "a",
             "r",
             "443",
@@ -771,7 +771,7 @@ mod tests {
         assert!(args.yes);
         assert!(args.plain);
 
-        let cli = Cli::try_parse_from(["sb", "add", "ss", "--random-port"]).unwrap();
+        let cli = Cli::try_parse_from(["prs", "add", "ss", "--random-port"]).unwrap();
         let Some(Command::Add(args)) = cli.command else {
             panic!("expected add command");
         };
@@ -781,21 +781,21 @@ mod tests {
 
     #[test]
     fn rejects_conflicting_fast_add_port_options() {
-        assert!(Cli::try_parse_from(["sb", "add", "reality", "443", "--random-port"]).is_err());
+        assert!(Cli::try_parse_from(["prs", "add", "reality", "443", "--random-port"]).is_err());
     }
 
     #[test]
     fn parses_info_url_and_qr_commands() {
         assert!(matches!(
-            Cli::try_parse_from(["sb", "i", "main"]).unwrap().command,
+            Cli::try_parse_from(["prs", "i", "main"]).unwrap().command,
             Some(Command::Info { profile: Some(profile) }) if profile == "main"
         ));
         assert!(matches!(
-            Cli::try_parse_from(["sb", "url", "main"]).unwrap().command,
+            Cli::try_parse_from(["prs", "url", "main"]).unwrap().command,
             Some(Command::Url { profile: Some(profile), .. }) if profile == "main"
         ));
         assert!(matches!(
-            Cli::try_parse_from(["sb", "qr", "main"]).unwrap().command,
+            Cli::try_parse_from(["prs", "qr", "main"]).unwrap().command,
             Some(Command::Qr { profile: Some(profile), .. }) if profile == "main"
         ));
     }

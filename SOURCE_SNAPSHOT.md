@@ -2,12 +2,13 @@
 
 > 由真实仓库文件逐个机械合并并校验；实际构建仍使用原始文件。
 
+
 ## `Cargo.toml`
 
 ````toml
 [package]
 name = "ping-rust"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2021"
 description = "Menu-driven installer and manager for the shoes proxy server"
 license = "MIT"
@@ -54,6 +55,7 @@ codegen-units = 1
 strip = true
 ````
 
+
 ## `src/main.rs`
 
 ````rust
@@ -77,6 +79,7 @@ async fn main() -> Result<()> {
     cli::run(cli::Cli::parse()).await
 }
 ````
+
 
 ## `src/cli.rs`
 
@@ -217,7 +220,7 @@ pub enum Command {
 pub struct AddArgs {
     #[arg(value_enum)]
     pub protocol: Protocol,
-    /// 兼容 233boy：位置参数端口，例如 `sb add reality 443`
+    /// 快速添加位置参数端口，例如 `prs add reality 443`
     #[arg(value_name = "PORT", conflicts_with_all = ["port", "random_port"])]
     pub legacy_port: Option<u16>,
     /// 指定监听端口
@@ -468,7 +471,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Uninstall { purge } => {
             let unit_removed = service::uninstall_unit()?;
             let binary_removed = installer::uninstall_binary()?;
-            let alias_removed = crate::utils::remove_sb_alias()?;
+            let aliases_removed = crate::utils::remove_command_aliases()?;
             if purge {
                 let config_dir = std::path::Path::new(crate::utils::CONFIG_DIR);
                 if config_dir.exists() {
@@ -476,8 +479,8 @@ pub async fn run(cli: Cli) -> Result<()> {
                 }
             }
             println!(
-                "卸载完成：二进制={}，systemd={}，sb 别名={}，配置清理={}",
-                binary_removed, unit_removed, alias_removed, purge
+                "卸载完成：二进制={}，systemd={}，快捷命令清理={}，配置清理={}",
+                binary_removed, unit_removed, aliases_removed, purge
             );
             Ok(())
         }
@@ -834,9 +837,9 @@ mod tests {
     }
 
     #[test]
-    fn parses_233boy_style_add_aliases_and_output_controls() {
+    fn parses_prs_add_aliases_and_output_controls() {
         let cli = Cli::try_parse_from([
-            "sb",
+            "prs",
             "a",
             "r",
             "443",
@@ -854,7 +857,7 @@ mod tests {
         assert!(args.yes);
         assert!(args.plain);
 
-        let cli = Cli::try_parse_from(["sb", "add", "ss", "--random-port"]).unwrap();
+        let cli = Cli::try_parse_from(["prs", "add", "ss", "--random-port"]).unwrap();
         let Some(Command::Add(args)) = cli.command else {
             panic!("expected add command");
         };
@@ -864,26 +867,27 @@ mod tests {
 
     #[test]
     fn rejects_conflicting_fast_add_port_options() {
-        assert!(Cli::try_parse_from(["sb", "add", "reality", "443", "--random-port"]).is_err());
+        assert!(Cli::try_parse_from(["prs", "add", "reality", "443", "--random-port"]).is_err());
     }
 
     #[test]
     fn parses_info_url_and_qr_commands() {
         assert!(matches!(
-            Cli::try_parse_from(["sb", "i", "main"]).unwrap().command,
+            Cli::try_parse_from(["prs", "i", "main"]).unwrap().command,
             Some(Command::Info { profile: Some(profile) }) if profile == "main"
         ));
         assert!(matches!(
-            Cli::try_parse_from(["sb", "url", "main"]).unwrap().command,
+            Cli::try_parse_from(["prs", "url", "main"]).unwrap().command,
             Some(Command::Url { profile: Some(profile), .. }) if profile == "main"
         ));
         assert!(matches!(
-            Cli::try_parse_from(["sb", "qr", "main"]).unwrap().command,
+            Cli::try_parse_from(["prs", "qr", "main"]).unwrap().command,
             Some(Command::Qr { profile: Some(profile), .. }) if profile == "main"
         ));
     }
 }
 ````
+
 
 ## `src/menu.rs`
 
@@ -916,17 +920,35 @@ const MAIN_MENU_ITEMS: &[(usize, &str)] = &[
     (8, "帮助"),
     (9, "其他"),
     (10, "关于"),
+    (0, "退出"),
 ];
 
 const PROTOCOL_MENU_ITEMS: &[(usize, &str)] = &[
     (1, "TUIC"),
-    (3, "Hysteria2"),
-    (8, "Shadowsocks"),
-    (18, "VLESS-REALITY（推荐）"),
-    (20, "AnyTLS"),
+    (2, "Hysteria2"),
+    (3, "Shadowsocks"),
+    (4, "VLESS-REALITY（推荐）"),
+    (5, "AnyTLS"),
+    (0, "返回"),
 ];
 
-fn select_numbered<T: AsRef<str>>(prompt: &str, items: &[T]) -> Result<usize> {
+fn parse_numbered_choice(value: &str, count: usize) -> Option<Option<usize>> {
+    match value.trim().parse::<usize>().ok()? {
+        0 => Some(None),
+        selected if (1..=count).contains(&selected) => Some(Some(selected - 1)),
+        _ => None,
+    }
+}
+
+fn parse_keyed_choice(value: &str, items: &[(usize, &str)]) -> Option<usize> {
+    let key = value.trim().parse::<usize>().ok()?;
+    items
+        .iter()
+        .any(|(candidate, _)| *candidate == key)
+        .then_some(key)
+}
+
+fn select_numbered<T: AsRef<str>>(prompt: &str, items: &[T]) -> Result<Option<usize>> {
     if items.is_empty() {
         anyhow::bail!("菜单没有可选项");
     }
@@ -934,44 +956,30 @@ fn select_numbered<T: AsRef<str>>(prompt: &str, items: &[T]) -> Result<usize> {
     for (index, item) in items.iter().enumerate() {
         println!("  {}. {}", index + 1, item.as_ref());
     }
+    println!("  0. 返回");
     let count = items.len();
-    let selected = Input::<usize>::with_theme(&ColorfulTheme::default())
-        .with_prompt(format!("请输入序号 [1-{count}]"))
-        .default(1)
-        .validate_with(move |value: &usize| {
-            if (1..=count).contains(value) {
-                Ok(())
-            } else {
-                Err(format!("请输入 1 到 {count} 之间的数字"))
-            }
-        })
-        .interact_text()?;
-    Ok(selected - 1)
+    loop {
+        let value = Input::<String>::with_theme(&ColorfulTheme::default())
+            .with_prompt("请输入序号（0 返回）")
+            .interact_text()?;
+        if let Some(selected) = parse_numbered_choice(&value, count) {
+            return Ok(selected);
+        }
+        println!("无效序号；请输入 0 到 {count} 之间的数字。");
+    }
 }
 
-fn select_keyed(prompt: &str, items: &[(usize, &str)], empty_exits: bool) -> Result<Option<usize>> {
+fn select_keyed(prompt: &str, items: &[(usize, &str)]) -> Result<usize> {
     println!("{prompt}");
     for (key, label) in items {
         println!("  {key}. {label}");
     }
     loop {
         let value = Input::<String>::with_theme(&ColorfulTheme::default())
-            .with_prompt(if empty_exits {
-                "请输入序号（直接回车退出）"
-            } else {
-                "请输入序号"
-            })
-            .allow_empty(empty_exits)
+            .with_prompt("请输入序号")
             .interact_text()?;
-        if value.trim().is_empty() && empty_exits {
-            return Ok(None);
-        }
-        let Ok(key) = value.trim().parse::<usize>() else {
-            println!("请输入有效数字。");
-            continue;
-        };
-        if items.iter().any(|(candidate, _)| *candidate == key) {
-            return Ok(Some(key));
+        if let Some(key) = parse_keyed_choice(&value, items) {
+            return Ok(key);
         }
         println!(
             "无效序号；可选 {}。",
@@ -985,38 +993,41 @@ fn select_keyed(prompt: &str, items: &[(usize, &str)], empty_exits: bool) -> Res
 }
 
 pub async fn run() -> Result<()> {
-    println!();
-    println!("{}", "ping-rust · shoes 管理工具".bright_cyan().bold());
-    println!("{}", "────────────────────────────".bright_black());
-    let Some(selected) = select_keyed("请选择操作", MAIN_MENU_ITEMS, true)? else {
-        println!("{}", "已退出。".green());
-        return Ok(());
-    };
-    match selected {
-        1 => fast_add_config_menu().await,
-        2 => {
-            println!("更改配置请使用完整 generate 参数，或删除后通过快速添加安全重建。");
-            Ok(())
-        }
-        3 => cli::show_info(None).await,
-        4 => delete_config_menu().await,
-        5 => service_menu(),
-        6 => update_menu().await,
-        7 => uninstall_menu(),
-        8 => {
-            println!("常用命令：sb add reality、sb add ss、sb info、sb url、sb qr");
-            println!("高级帮助：ping-rust --help");
-            Ok(())
-        }
-        9 => operations_menu().await,
-        10 => {
-            println!("ping-rust {}", env!("CARGO_PKG_VERSION"));
-            println!("Rust 实现的 shoes 菜单式安装与管理工具");
-            println!("https://github.com/Jyanbai/ping-rust");
-            Ok(())
-        }
-        _ => anyhow::bail!("菜单返回了无效选项"),
+    loop {
+        println!();
+        println!("{}", "ping-rust · shoes 管理工具".bright_cyan().bold());
+        println!("{}", "────────────────────────────".bright_black());
+        let selected = select_keyed("请选择操作", MAIN_MENU_ITEMS)?;
+        let result = match selected {
+            0 => break,
+            1 => fast_add_config_menu().await,
+            2 => {
+                println!("更改配置请使用完整 generate 参数，或删除后通过快速添加安全重建。");
+                Ok(())
+            }
+            3 => cli::show_info(None).await,
+            4 => delete_config_menu().await,
+            5 => service_menu(),
+            6 => update_menu().await,
+            7 => uninstall_menu(),
+            8 => {
+                println!("常用命令：prs add reality、prs add ss、prs info、prs url、prs qr");
+                println!("高级帮助：ping-rust --help");
+                Ok(())
+            }
+            9 => operations_menu().await,
+            10 => {
+                println!("ping-rust {}", env!("CARGO_PKG_VERSION"));
+                println!("Rust 实现的 shoes 菜单式安装与管理工具");
+                println!("https://github.com/Jyanbai/ping-rust");
+                Ok(())
+            }
+            _ => anyhow::bail!("菜单返回了无效选项"),
+        };
+        result?;
     }
+    println!("{}", "已退出。".green());
+    Ok(())
 }
 
 async fn delete_config_menu() -> Result<()> {
@@ -1038,7 +1049,9 @@ async fn delete_config_menu() -> Result<()> {
             )
         })
         .collect::<Vec<_>>();
-    let selected = select_numbered("选择要删除的配置", &labels)?;
+    let Some(selected) = select_numbered("选择要删除的配置", &labels)? else {
+        return Ok(());
+    };
     let profile = &state.profiles[selected];
     if !Confirm::with_theme(&ColorfulTheme::default())
         .with_prompt(format!("确认删除 {}？", profile.name))
@@ -1072,9 +1085,10 @@ async fn operations_menu() -> Result<()> {
         "恢复配置",
         "导出客户端配置",
         "更新 ping-rust",
-        "返回",
     ];
-    let selected = select_numbered("运维工具", &choices)?;
+    let Some(selected) = select_numbered("运维工具", &choices)? else {
+        return Ok(());
+    };
     match selected {
         0 => advanced_add_config_menu().await,
         1 => service::logs(100),
@@ -1122,7 +1136,7 @@ async fn operations_menu() -> Result<()> {
         }
         6 => export_menu(),
         7 => cli::run_self_update(None, false).await,
-        _ => Ok(()),
+        _ => unreachable!("运维菜单编号已验证"),
     }
 }
 
@@ -1137,9 +1151,14 @@ fn export_menu() -> Result<()> {
         .iter()
         .map(|profile| format!("{} · {}", profile.name, profile.protocol_name()))
         .collect::<Vec<_>>();
-    let selected = select_numbered("选择配置", &labels)?;
+    let Some(selected) = select_numbered("选择配置", &labels)? else {
+        return Ok(());
+    };
     let formats = ["Clash Meta", "sing-box", "Nekobox 分享链接"];
-    let format = match select_numbered("客户端格式", &formats)? {
+    let Some(format_index) = select_numbered("客户端格式", &formats)? else {
+        return Ok(());
+    };
+    let format = match format_index {
         0 => ClientFormat::ClashMeta,
         1 => ClientFormat::SingBox,
         _ => ClientFormat::Nekobox,
@@ -1159,10 +1178,12 @@ fn export_menu() -> Result<()> {
 }
 
 async fn fast_add_config_menu() -> Result<()> {
+    let protocol_number = select_keyed("选择协议", PROTOCOL_MENU_ITEMS)?;
+    if protocol_number == 0 {
+        return Ok(());
+    }
     cli::ensure_shoes_for_add(false).await?;
-    let protocol_number = select_keyed("选择协议", PROTOCOL_MENU_ITEMS, false)?
-        .ok_or_else(|| anyhow::anyhow!("未选择协议"))?;
-    let protocol = fast_add::protocol_from_reference_number(protocol_number)?;
+    let protocol = fast_add::protocol_from_menu_number(protocol_number)?;
     let port_text = Input::<String>::with_theme(&ColorfulTheme::default())
         .with_prompt("输入端口（直接回车自动选择随机端口）")
         .allow_empty(true)
@@ -1204,21 +1225,22 @@ async fn fast_add_config_menu() -> Result<()> {
 
 async fn advanced_add_config_menu() -> Result<()> {
     let choices = [
-        "VLESS-Reality-Vision（推荐）",
-        "Hysteria2",
         "TUIC v5",
+        "Hysteria2",
         "Shadowsocks 2022",
+        "VLESS-Reality-Vision（推荐）",
         "AnyTLS",
-        "返回",
     ];
-    let selected = select_numbered("选择协议", &choices)?;
+    let Some(selected) = select_numbered("选择协议", &choices)? else {
+        return Ok(());
+    };
     let protocol = match selected {
-        0 => Protocol::Reality,
+        0 => Protocol::Tuic,
         1 => Protocol::Hysteria2,
-        2 => Protocol::Tuic,
-        3 => Protocol::Shadowsocks,
+        2 => Protocol::Shadowsocks,
+        3 => Protocol::Reality,
         4 => Protocol::AnyTls,
-        _ => return Ok(()),
+        _ => unreachable!("协议菜单编号已验证"),
     };
     let name = Input::<String>::with_theme(&ColorfulTheme::default())
         .with_prompt("配置名称")
@@ -1251,7 +1273,10 @@ async fn advanced_add_config_menu() -> Result<()> {
             "aes-128-gcm",
             "chacha20-ietf-poly1305",
         ];
-        options.shadowsocks_cipher = match select_numbered("选择加密方式", &ciphers)? {
+        let Some(cipher) = select_numbered("选择加密方式", &ciphers)? else {
+            return Ok(());
+        };
+        options.shadowsocks_cipher = match cipher {
             0 => ShadowsocksCipher::Aes256Gcm2022,
             1 => ShadowsocksCipher::Aes128Gcm2022,
             2 => ShadowsocksCipher::Chacha20IetfPoly13052022,
@@ -1261,12 +1286,15 @@ async fn advanced_add_config_menu() -> Result<()> {
         };
     }
     if matches!(protocol, Protocol::AnyTls) {
-        options.anytls_mode =
-            match select_numbered("AnyTLS 外层安全模式", &["TLS（推荐）", "Reality（高级）"])?
-            {
-                0 => AnyTlsMode::Tls,
-                _ => AnyTlsMode::Reality,
-            };
+        let Some(mode) =
+            select_numbered("AnyTLS 外层安全模式", &["TLS（推荐）", "Reality（高级）"])?
+        else {
+            return Ok(());
+        };
+        options.anytls_mode = match mode {
+            0 => AnyTlsMode::Tls,
+            _ => AnyTlsMode::Reality,
+        };
         loop {
             let default_name = if options.anytls_users.is_empty() {
                 "default".to_owned()
@@ -1387,12 +1415,14 @@ async fn advanced_add_config_menu() -> Result<()> {
 }
 
 async fn update_menu() -> Result<()> {
-    let choices = ["GitHub Release（推荐）", "cargo install shoes", "返回"];
-    let selected = select_numbered("选择更新方式", &choices)?;
+    let choices = ["GitHub Release（推荐）", "cargo install shoes"];
+    let Some(selected) = select_numbered("选择更新方式", &choices)? else {
+        return Ok(());
+    };
     let method = match selected {
         0 => InstallMethod::Release,
         1 => InstallMethod::Cargo,
-        _ => return Ok(()),
+        _ => unreachable!("更新菜单编号已验证"),
     };
     let unit_exists = std::path::Path::new(crate::utils::SERVICE_FILE).exists();
     let was_active = unit_exists && service::is_active()?;
@@ -1405,8 +1435,10 @@ async fn update_menu() -> Result<()> {
 }
 
 fn service_menu() -> Result<()> {
-    let choices = ["启动", "停止", "重启", "状态", "启用并启动", "禁用", "返回"];
-    let selected = select_numbered("服务管理", &choices)?;
+    let choices = ["启动", "停止", "重启", "状态", "启用并启动", "禁用"];
+    let Some(selected) = select_numbered("服务管理", &choices)? else {
+        return Ok(());
+    };
     let action = match selected {
         0 => ServiceAction::Start,
         1 => ServiceAction::Stop,
@@ -1414,7 +1446,7 @@ fn service_menu() -> Result<()> {
         3 => ServiceAction::Status,
         4 => ServiceAction::Enable,
         5 => ServiceAction::Disable,
-        _ => return Ok(()),
+        _ => unreachable!("服务菜单编号已验证"),
     };
     service::execute(action)
 }
@@ -1433,13 +1465,13 @@ fn uninstall_menu() -> Result<()> {
         .interact()?;
     let unit_removed = service::uninstall_unit()?;
     let binary_removed = installer::uninstall_binary()?;
-    let alias_removed = crate::utils::remove_sb_alias()?;
+    let aliases_removed = crate::utils::remove_command_aliases()?;
     if purge && std::path::Path::new(crate::utils::CONFIG_DIR).exists() {
         std::fs::remove_dir_all(crate::utils::CONFIG_DIR)?;
     }
     println!(
-        "卸载完成：二进制={}，systemd={}，sb 别名={}，配置清理={}",
-        binary_removed, unit_removed, alias_removed, purge
+        "卸载完成：二进制={}，systemd={}，快捷命令清理={}，配置清理={}",
+        binary_removed, unit_removed, aliases_removed, purge
     );
     Ok(())
 }
@@ -1449,25 +1481,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn preserves_reference_main_and_protocol_numbers() {
+    fn uses_zero_for_exit_and_sequential_protocol_numbers() {
         assert_eq!(MAIN_MENU_ITEMS.first().unwrap().0, 1);
-        assert_eq!(MAIN_MENU_ITEMS.last().unwrap().0, 10);
+        assert_eq!(MAIN_MENU_ITEMS.last(), Some(&(0, "退出")));
+        assert_eq!(PROTOCOL_MENU_ITEMS.last(), Some(&(0, "返回")));
         for (number, protocol) in [
             (1, Protocol::Tuic),
-            (3, Protocol::Hysteria2),
-            (8, Protocol::Shadowsocks),
-            (18, Protocol::Reality),
-            (20, Protocol::AnyTls),
+            (2, Protocol::Hysteria2),
+            (3, Protocol::Shadowsocks),
+            (4, Protocol::Reality),
+            (5, Protocol::AnyTls),
         ] {
             assert!(PROTOCOL_MENU_ITEMS.iter().any(|item| item.0 == number));
             assert_eq!(
-                fast_add::protocol_from_reference_number(number).unwrap(),
+                fast_add::protocol_from_menu_number(number).unwrap(),
                 protocol
             );
         }
     }
+
+    #[test]
+    fn zero_is_the_only_menu_return_value() {
+        assert_eq!(parse_numbered_choice("0", 5), Some(None));
+        assert_eq!(parse_numbered_choice("", 5), None);
+        assert_eq!(parse_numbered_choice("6", 5), None);
+        assert_eq!(parse_keyed_choice("0", MAIN_MENU_ITEMS), Some(0));
+        assert_eq!(parse_keyed_choice("0", PROTOCOL_MENU_ITEMS), Some(0));
+        assert_eq!(parse_keyed_choice("", MAIN_MENU_ITEMS), None);
+    }
 }
 ````
+
 
 ## `src/installer.rs`
 
@@ -1864,6 +1908,7 @@ mod tests {
     }
 }
 ````
+
 
 ## `src/config.rs`
 
@@ -3469,6 +3514,7 @@ mod tests {
 }
 ````
 
+
 ## `src/deployment.rs`
 
 ````rust
@@ -3503,6 +3549,7 @@ pub async fn generate_and_activate(request: GenerationRequest) -> Result<Generat
     Ok(result)
 }
 ````
+
 
 ## `src/fast_add.rs`
 
@@ -3587,25 +3634,25 @@ pub async fn execute(request: AddRequest) -> Result<AddResult> {
     })
 }
 
-pub fn protocol_from_reference_number(number: usize) -> Result<Protocol> {
+pub fn protocol_from_menu_number(number: usize) -> Result<Protocol> {
     match number {
         1 => Ok(Protocol::Tuic),
-        3 => Ok(Protocol::Hysteria2),
-        8 => Ok(Protocol::Shadowsocks),
-        18 => Ok(Protocol::Reality),
-        20 => Ok(Protocol::AnyTls),
-        _ => bail!("协议编号无效；可选 1、3、8、18、20"),
+        2 => Ok(Protocol::Hysteria2),
+        3 => Ok(Protocol::Shadowsocks),
+        4 => Ok(Protocol::Reality),
+        5 => Ok(Protocol::AnyTls),
+        _ => bail!("协议编号无效；可选 1、2、3、4、5"),
     }
 }
 
 #[cfg(test)]
-fn reference_number(protocol: Protocol) -> usize {
+fn menu_number(protocol: Protocol) -> usize {
     match protocol {
         Protocol::Tuic => 1,
-        Protocol::Hysteria2 => 3,
-        Protocol::Shadowsocks => 8,
-        Protocol::Reality => 18,
-        Protocol::AnyTls => 20,
+        Protocol::Hysteria2 => 2,
+        Protocol::Shadowsocks => 3,
+        Protocol::Reality => 4,
+        Protocol::AnyTls => 5,
     }
 }
 
@@ -3722,18 +3769,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn preserves_reference_protocol_numbers() {
+    fn uses_sequential_protocol_numbers() {
         for (number, protocol) in [
             (1, Protocol::Tuic),
-            (3, Protocol::Hysteria2),
-            (8, Protocol::Shadowsocks),
-            (18, Protocol::Reality),
-            (20, Protocol::AnyTls),
+            (2, Protocol::Hysteria2),
+            (3, Protocol::Shadowsocks),
+            (4, Protocol::Reality),
+            (5, Protocol::AnyTls),
         ] {
-            assert_eq!(protocol_from_reference_number(number).unwrap(), protocol);
-            assert_eq!(reference_number(protocol), number);
+            assert_eq!(protocol_from_menu_number(number).unwrap(), protocol);
+            assert_eq!(menu_number(protocol), number);
         }
-        assert!(protocol_from_reference_number(2).is_err());
+        assert!(protocol_from_menu_number(0).is_err());
+        assert!(protocol_from_menu_number(6).is_err());
     }
 
     #[test]
@@ -3750,6 +3798,7 @@ mod tests {
     }
 }
 ````
+
 
 ## `src/service.rs`
 
@@ -4055,6 +4104,7 @@ mod tests {
 }
 ````
 
+
 ## `src/utils.rs`
 
 ````rust
@@ -4076,12 +4126,16 @@ pub const STATE_FILE: &str = "/etc/shoes/ping-rust-state.json";
 pub const LOCK_FILE: &str = "/run/lock/ping-rust.lock";
 pub const SERVICE_FILE: &str = "/etc/systemd/system/shoes.service";
 
-pub fn remove_sb_alias() -> Result<bool> {
+pub fn remove_command_aliases() -> Result<usize> {
     let executable = env::current_exe().context("无法确定 ping-rust 当前路径")?;
     let Some(parent) = executable.parent() else {
-        return Ok(false);
+        return Ok(0);
     };
-    remove_owned_alias(&parent.join("sb"), &executable)
+    let mut removed = 0;
+    for name in ["prs", "sb"] {
+        removed += usize::from(remove_owned_alias(&parent.join(name), &executable)?);
+    }
+    Ok(removed)
 }
 
 #[cfg(unix)]
@@ -4096,7 +4150,7 @@ fn remove_owned_alias(alias: &Path, executable: &Path) -> Result<bool> {
     } else {
         alias
             .parent()
-            .context("sb 符号链接没有父目录")?
+            .context("快捷命令符号链接没有父目录")?
             .join(target)
     };
     let resolved = resolved
@@ -4301,7 +4355,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn removes_only_alias_owned_by_the_executable() {
+    fn removes_current_and_legacy_aliases_only_when_owned() {
         use std::os::unix::fs::symlink;
 
         let dir = tempfile::tempdir().unwrap();
@@ -4310,17 +4364,21 @@ mod tests {
         fs::write(&executable, b"binary").unwrap();
         fs::write(&other, b"other").unwrap();
 
-        let alias = dir.path().join("sb");
-        symlink("ping-rust", &alias).unwrap();
-        assert!(remove_owned_alias(&alias, &executable).unwrap());
-        assert!(!alias.exists());
+        for name in ["prs", "sb"] {
+            let alias = dir.path().join(name);
+            symlink("ping-rust", &alias).unwrap();
+            assert!(remove_owned_alias(&alias, &executable).unwrap());
+            assert!(!alias.exists());
 
-        symlink("other", &alias).unwrap();
-        assert!(!remove_owned_alias(&alias, &executable).unwrap());
-        assert!(alias.is_symlink());
+            symlink("other", &alias).unwrap();
+            assert!(!remove_owned_alias(&alias, &executable).unwrap());
+            assert!(alias.is_symlink());
+            fs::remove_file(alias).unwrap();
+        }
     }
 }
 ````
+
 
 ## `src/operations.rs`
 
@@ -4623,6 +4681,7 @@ mod tests {
     }
 }
 ````
+
 
 ## `src/client.rs`
 
@@ -5283,6 +5342,7 @@ mod tests {
 }
 ````
 
+
 ## `src/self_update.rs`
 
 ````rust
@@ -5794,6 +5854,7 @@ mod tests {
 }
 ````
 
+
 ## `README.md`
 
 ````markdown
@@ -5803,7 +5864,7 @@ mod tests {
 
 核心逻辑全部位于 Rust 源码中；`scripts/install.sh` 只负责下载、校验并安装官方预编译二进制。
 
-> v0.1.5 已包含 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks 和 AnyTLS 五协议，并提供与 233boy 日常操作一致的 `sb` 快速入口。
+> v0.1.6 已包含 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks 和 AnyTLS 五协议，并提供简短的 `prs` 快速入口。
 
 ## 一键安装（推荐）
 
@@ -5812,7 +5873,7 @@ mod tests {
 ```bash
 bash <(curl --proto '=https' --tlsv1.2 -fsSL \
   https://raw.githubusercontent.com/Jyanbai/ping-rust/main/scripts/install.sh)
-sudo sb
+sudo prs
 ```
 
 安装指定版本或目录：
@@ -5820,21 +5881,21 @@ sudo sb
 ```bash
 bash <(curl --proto '=https' --tlsv1.2 -fsSL \
   https://raw.githubusercontent.com/Jyanbai/ping-rust/main/scripts/install.sh) \
-  --version v0.1.5
+  --version v0.1.6
 
 bash <(curl --proto '=https' --tlsv1.2 -fsSL \
   https://raw.githubusercontent.com/Jyanbai/ping-rust/main/scripts/install.sh) \
   --install-dir /usr/local/bin --quiet
 ```
 
-安装器自动识别 x86_64/aarch64，从 GitHub Releases 下载对应 musl 静态包，强制验证 `SHA256SUMS` 和二进制版本后原子安装到 `/usr/local/bin/ping-rust`，并安全创建 `sb → ping-rust` 符号链接。若系统已有其它 `sb` 命令，安装器会保留它并提示改用 `ping-rust`，绝不强制覆盖。写入系统目录时会调用 `sudo`；令牌、密码和代理配置都不会被上传。
+安装器自动识别 x86_64/aarch64，从 GitHub Releases 下载对应 musl 静态包，强制验证 `SHA256SUMS` 和二进制版本后原子安装到 `/usr/local/bin/ping-rust`，并安全创建 `prs → ping-rust` 符号链接。若系统已有其它 `prs` 命令，安装器会保留它并提示改用 `ping-rust`，绝不强制覆盖；升级时只会移除确实指向 `ping-rust` 的旧 `sb` 链接，不会删除用户自己的 `sb` 程序。写入系统目录时会调用 `sudo`；令牌、密码和代理配置都不会被上传。
 
 ## 功能
 
 - 从 GitHub Release 下载 shoes，自动匹配 x86_64/aarch64 与 GNU/musl，强制校验官方 SHA-256 digest；GNU 资产不兼容时安全回退 static musl
 - 使用 `cargo install shoes` 从 crates.io 编译安装；低于 1 GiB 内存时自动单任务并关闭 LTO，避免换页风暴
 - 生成 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks、AnyTLS 服务端配置
-- `sb` 数字菜单与 `sb add/a` 快捷命令：自动端口、自动凭据、部署完成直接输出分享链接
+- `prs` 数字菜单与 `prs add/a` 快捷命令：自动端口、自动凭据、部署完成直接输出分享链接
 - 在 Rust 内生成 X25519 Reality 密钥、UUID、short ID、随机密码和自签名证书
 - 在同目录候选文件上调用 `shoes --dry-run`，通过后才原子提交并启用 systemd 服务
 - 多配置添加、列表、删除、端口冲突保护
@@ -5867,7 +5928,7 @@ sudo apt-get install -y build-essential pkg-config git ca-certificates
 sudo dnf install -y gcc gcc-c++ make pkgconf-pkg-config git ca-certificates
 ```
 
-从 [crates.io](https://crates.io/crates/ping-rust) 安装已发布的 `0.1.5`：
+从 [crates.io](https://crates.io/crates/ping-rust) 安装已发布的 `0.1.6`：
 
 ```bash
 cargo install ping-rust --locked
@@ -5895,7 +5956,7 @@ sudo ping-rust
 ## 233boy 风格快速部署
 
 ```text
-$ sudo sb
+$ sudo prs
 
 ping-rust · shoes 管理工具
 ────────────────────────────
@@ -5910,15 +5971,17 @@ ping-rust · shoes 管理工具
   8. 帮助
   9. 其他
   10. 关于
-请输入序号（直接回车退出）: 1
+  0. 退出
+请输入序号: 1
 
 选择协议
   1. TUIC
-  3. Hysteria2
-  8. Shadowsocks
-  18. VLESS-REALITY（推荐）
-  20. AnyTLS
-请输入序号: 18
+  2. Hysteria2
+  3. Shadowsocks
+  4. VLESS-REALITY（推荐）
+  5. AnyTLS
+  0. 返回
+请输入序号: 4
 输入端口（直接回车自动选择随机端口）:
 
 部署成功，shoes 服务已启动。
@@ -5926,20 +5989,20 @@ ping-rust · shoes 管理工具
 vless://...security=reality...pbk=...&sid=...
 ```
 
-实际日常流程就是：`sb → 1 → 18（VLESS）或 8（SS）→ 输入端口/直接回车随机 → 复制 URL 到 v2rayN`。首次使用时若 shoes 未安装，菜单会询问是否自动从 Release 安装；UUID、Reality 密钥、short ID 或 SS 2022 密码全部安全随机生成。链接只会在配置通过 `shoes --dry-run`、原子写入、systemd 启动且确认为 active 后输出；失败会恢复原配置和服务状态。
+实际日常流程就是：`prs → 1 → 4（VLESS）或 3（SS）→ 输入端口/直接回车随机 → 复制 URL 到 v2rayN`。所有协议选择固定使用连续编号 `1/2/3/4/5`；主菜单输入 `0` 退出，任意子菜单输入 `0` 返回主菜单。首次使用时若 shoes 未安装，菜单会询问是否自动从 Release 安装；UUID、Reality 密钥、short ID 或 SS 2022 密码全部安全随机生成。链接只会在配置通过 `shoes --dry-run`、原子写入、systemd 启动且确认为 active 后输出；失败会恢复原配置和服务状态。
 
 非交互方式：
 
 ```bash
 # 自动安装 shoes、随机端口和凭据；标准输出只返回一行链接
-sudo sb add reality --yes --plain
+sudo prs add reality --yes --plain
 
 # 233boy 风格短别名和指定端口
-sudo sb a r 443
-sudo sb add ss 8388
+sudo prs a r 443
+sudo prs add ss 8388
 
 # 自动随机端口也可显式写出；指定公网地址可跳过自动探测
-sudo sb add reality --random-port --server-address 203.0.113.10
+sudo prs add reality --random-port --server-address 203.0.113.10
 ```
 
 高级用户原有的 `generate` 命令全部保留，可精细指定 cipher、证书、Reality fallback、AnyTLS 用户等参数。
@@ -5947,9 +6010,9 @@ sudo sb add reality --random-port --server-address 203.0.113.10
 重新显示已保存链接（多个配置时使用名称或 UUID）：
 
 ```bash
-sudo sb info
-sudo sb url reality-main
-sudo sb qr reality-main
+sudo prs info
+sudo prs url reality-main
+sudo prs qr reality-main
 ```
 
 `qr` 使用本机 `qrencode` 在终端生成二维码，不会把含凭据的 URL 发送给第三方网站；未安装 `qrencode` 时会退化为原样输出 URL。
@@ -6024,8 +6087,8 @@ sudo ping-rust generate anytls \
 ```bash
 ping-rust --help
 sudo ping-rust info
-sudo sb url <配置名或 UUID>
-sudo sb qr <配置名或 UUID>
+sudo prs url <配置名或 UUID>
+sudo prs qr <配置名或 UUID>
 sudo ping-rust service status
 sudo ping-rust service restart
 sudo ping-rust logs -n 200
@@ -6075,7 +6138,7 @@ sudo ping-rust restore ./shoes-backup.tar.gz
 | 路径 | 用途 | 权限 |
 |---|---|---:|
 | `/usr/local/bin/shoes` | shoes 内核 | `0755` |
-| `/usr/local/bin/sb` | 指向 ping-rust 的安全短命令符号链接 | symlink |
+| `/usr/local/bin/prs` | 指向 ping-rust 的安全短命令符号链接 | symlink |
 | `/etc/shoes/config.yaml` | shoes 配置 | `0600` |
 | `/etc/shoes/ping-rust-state.json` | 多配置元数据与客户端导出凭据 | `0600` |
 | `/etc/shoes/cert-*.pem` | 自动生成证书 | `0644` |

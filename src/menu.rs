@@ -26,17 +26,35 @@ const MAIN_MENU_ITEMS: &[(usize, &str)] = &[
     (8, "帮助"),
     (9, "其他"),
     (10, "关于"),
+    (0, "退出"),
 ];
 
 const PROTOCOL_MENU_ITEMS: &[(usize, &str)] = &[
     (1, "TUIC"),
-    (3, "Hysteria2"),
-    (8, "Shadowsocks"),
-    (18, "VLESS-REALITY（推荐）"),
-    (20, "AnyTLS"),
+    (2, "Hysteria2"),
+    (3, "Shadowsocks"),
+    (4, "VLESS-REALITY（推荐）"),
+    (5, "AnyTLS"),
+    (0, "返回"),
 ];
 
-fn select_numbered<T: AsRef<str>>(prompt: &str, items: &[T]) -> Result<usize> {
+fn parse_numbered_choice(value: &str, count: usize) -> Option<Option<usize>> {
+    match value.trim().parse::<usize>().ok()? {
+        0 => Some(None),
+        selected if (1..=count).contains(&selected) => Some(Some(selected - 1)),
+        _ => None,
+    }
+}
+
+fn parse_keyed_choice(value: &str, items: &[(usize, &str)]) -> Option<usize> {
+    let key = value.trim().parse::<usize>().ok()?;
+    items
+        .iter()
+        .any(|(candidate, _)| *candidate == key)
+        .then_some(key)
+}
+
+fn select_numbered<T: AsRef<str>>(prompt: &str, items: &[T]) -> Result<Option<usize>> {
     if items.is_empty() {
         anyhow::bail!("菜单没有可选项");
     }
@@ -44,44 +62,30 @@ fn select_numbered<T: AsRef<str>>(prompt: &str, items: &[T]) -> Result<usize> {
     for (index, item) in items.iter().enumerate() {
         println!("  {}. {}", index + 1, item.as_ref());
     }
+    println!("  0. 返回");
     let count = items.len();
-    let selected = Input::<usize>::with_theme(&ColorfulTheme::default())
-        .with_prompt(format!("请输入序号 [1-{count}]"))
-        .default(1)
-        .validate_with(move |value: &usize| {
-            if (1..=count).contains(value) {
-                Ok(())
-            } else {
-                Err(format!("请输入 1 到 {count} 之间的数字"))
-            }
-        })
-        .interact_text()?;
-    Ok(selected - 1)
+    loop {
+        let value = Input::<String>::with_theme(&ColorfulTheme::default())
+            .with_prompt("请输入序号（0 返回）")
+            .interact_text()?;
+        if let Some(selected) = parse_numbered_choice(&value, count) {
+            return Ok(selected);
+        }
+        println!("无效序号；请输入 0 到 {count} 之间的数字。");
+    }
 }
 
-fn select_keyed(prompt: &str, items: &[(usize, &str)], empty_exits: bool) -> Result<Option<usize>> {
+fn select_keyed(prompt: &str, items: &[(usize, &str)]) -> Result<usize> {
     println!("{prompt}");
     for (key, label) in items {
         println!("  {key}. {label}");
     }
     loop {
         let value = Input::<String>::with_theme(&ColorfulTheme::default())
-            .with_prompt(if empty_exits {
-                "请输入序号（直接回车退出）"
-            } else {
-                "请输入序号"
-            })
-            .allow_empty(empty_exits)
+            .with_prompt("请输入序号")
             .interact_text()?;
-        if value.trim().is_empty() && empty_exits {
-            return Ok(None);
-        }
-        let Ok(key) = value.trim().parse::<usize>() else {
-            println!("请输入有效数字。");
-            continue;
-        };
-        if items.iter().any(|(candidate, _)| *candidate == key) {
-            return Ok(Some(key));
+        if let Some(key) = parse_keyed_choice(&value, items) {
+            return Ok(key);
         }
         println!(
             "无效序号；可选 {}。",
@@ -95,38 +99,41 @@ fn select_keyed(prompt: &str, items: &[(usize, &str)], empty_exits: bool) -> Res
 }
 
 pub async fn run() -> Result<()> {
-    println!();
-    println!("{}", "ping-rust · shoes 管理工具".bright_cyan().bold());
-    println!("{}", "────────────────────────────".bright_black());
-    let Some(selected) = select_keyed("请选择操作", MAIN_MENU_ITEMS, true)? else {
-        println!("{}", "已退出。".green());
-        return Ok(());
-    };
-    match selected {
-        1 => fast_add_config_menu().await,
-        2 => {
-            println!("更改配置请使用完整 generate 参数，或删除后通过快速添加安全重建。");
-            Ok(())
-        }
-        3 => cli::show_info(None).await,
-        4 => delete_config_menu().await,
-        5 => service_menu(),
-        6 => update_menu().await,
-        7 => uninstall_menu(),
-        8 => {
-            println!("常用命令：sb add reality、sb add ss、sb info、sb url、sb qr");
-            println!("高级帮助：ping-rust --help");
-            Ok(())
-        }
-        9 => operations_menu().await,
-        10 => {
-            println!("ping-rust {}", env!("CARGO_PKG_VERSION"));
-            println!("Rust 实现的 shoes 菜单式安装与管理工具");
-            println!("https://github.com/Jyanbai/ping-rust");
-            Ok(())
-        }
-        _ => anyhow::bail!("菜单返回了无效选项"),
+    loop {
+        println!();
+        println!("{}", "ping-rust · shoes 管理工具".bright_cyan().bold());
+        println!("{}", "────────────────────────────".bright_black());
+        let selected = select_keyed("请选择操作", MAIN_MENU_ITEMS)?;
+        let result = match selected {
+            0 => break,
+            1 => fast_add_config_menu().await,
+            2 => {
+                println!("更改配置请使用完整 generate 参数，或删除后通过快速添加安全重建。");
+                Ok(())
+            }
+            3 => cli::show_info(None).await,
+            4 => delete_config_menu().await,
+            5 => service_menu(),
+            6 => update_menu().await,
+            7 => uninstall_menu(),
+            8 => {
+                println!("常用命令：prs add reality、prs add ss、prs info、prs url、prs qr");
+                println!("高级帮助：ping-rust --help");
+                Ok(())
+            }
+            9 => operations_menu().await,
+            10 => {
+                println!("ping-rust {}", env!("CARGO_PKG_VERSION"));
+                println!("Rust 实现的 shoes 菜单式安装与管理工具");
+                println!("https://github.com/Jyanbai/ping-rust");
+                Ok(())
+            }
+            _ => anyhow::bail!("菜单返回了无效选项"),
+        };
+        result?;
     }
+    println!("{}", "已退出。".green());
+    Ok(())
 }
 
 async fn delete_config_menu() -> Result<()> {
@@ -148,7 +155,9 @@ async fn delete_config_menu() -> Result<()> {
             )
         })
         .collect::<Vec<_>>();
-    let selected = select_numbered("选择要删除的配置", &labels)?;
+    let Some(selected) = select_numbered("选择要删除的配置", &labels)? else {
+        return Ok(());
+    };
     let profile = &state.profiles[selected];
     if !Confirm::with_theme(&ColorfulTheme::default())
         .with_prompt(format!("确认删除 {}？", profile.name))
@@ -182,9 +191,10 @@ async fn operations_menu() -> Result<()> {
         "恢复配置",
         "导出客户端配置",
         "更新 ping-rust",
-        "返回",
     ];
-    let selected = select_numbered("运维工具", &choices)?;
+    let Some(selected) = select_numbered("运维工具", &choices)? else {
+        return Ok(());
+    };
     match selected {
         0 => advanced_add_config_menu().await,
         1 => service::logs(100),
@@ -232,7 +242,7 @@ async fn operations_menu() -> Result<()> {
         }
         6 => export_menu(),
         7 => cli::run_self_update(None, false).await,
-        _ => Ok(()),
+        _ => unreachable!("运维菜单编号已验证"),
     }
 }
 
@@ -247,9 +257,14 @@ fn export_menu() -> Result<()> {
         .iter()
         .map(|profile| format!("{} · {}", profile.name, profile.protocol_name()))
         .collect::<Vec<_>>();
-    let selected = select_numbered("选择配置", &labels)?;
+    let Some(selected) = select_numbered("选择配置", &labels)? else {
+        return Ok(());
+    };
     let formats = ["Clash Meta", "sing-box", "Nekobox 分享链接"];
-    let format = match select_numbered("客户端格式", &formats)? {
+    let Some(format_index) = select_numbered("客户端格式", &formats)? else {
+        return Ok(());
+    };
+    let format = match format_index {
         0 => ClientFormat::ClashMeta,
         1 => ClientFormat::SingBox,
         _ => ClientFormat::Nekobox,
@@ -269,10 +284,12 @@ fn export_menu() -> Result<()> {
 }
 
 async fn fast_add_config_menu() -> Result<()> {
+    let protocol_number = select_keyed("选择协议", PROTOCOL_MENU_ITEMS)?;
+    if protocol_number == 0 {
+        return Ok(());
+    }
     cli::ensure_shoes_for_add(false).await?;
-    let protocol_number = select_keyed("选择协议", PROTOCOL_MENU_ITEMS, false)?
-        .ok_or_else(|| anyhow::anyhow!("未选择协议"))?;
-    let protocol = fast_add::protocol_from_reference_number(protocol_number)?;
+    let protocol = fast_add::protocol_from_menu_number(protocol_number)?;
     let port_text = Input::<String>::with_theme(&ColorfulTheme::default())
         .with_prompt("输入端口（直接回车自动选择随机端口）")
         .allow_empty(true)
@@ -314,21 +331,22 @@ async fn fast_add_config_menu() -> Result<()> {
 
 async fn advanced_add_config_menu() -> Result<()> {
     let choices = [
-        "VLESS-Reality-Vision（推荐）",
-        "Hysteria2",
         "TUIC v5",
+        "Hysteria2",
         "Shadowsocks 2022",
+        "VLESS-Reality-Vision（推荐）",
         "AnyTLS",
-        "返回",
     ];
-    let selected = select_numbered("选择协议", &choices)?;
+    let Some(selected) = select_numbered("选择协议", &choices)? else {
+        return Ok(());
+    };
     let protocol = match selected {
-        0 => Protocol::Reality,
+        0 => Protocol::Tuic,
         1 => Protocol::Hysteria2,
-        2 => Protocol::Tuic,
-        3 => Protocol::Shadowsocks,
+        2 => Protocol::Shadowsocks,
+        3 => Protocol::Reality,
         4 => Protocol::AnyTls,
-        _ => return Ok(()),
+        _ => unreachable!("协议菜单编号已验证"),
     };
     let name = Input::<String>::with_theme(&ColorfulTheme::default())
         .with_prompt("配置名称")
@@ -361,7 +379,10 @@ async fn advanced_add_config_menu() -> Result<()> {
             "aes-128-gcm",
             "chacha20-ietf-poly1305",
         ];
-        options.shadowsocks_cipher = match select_numbered("选择加密方式", &ciphers)? {
+        let Some(cipher) = select_numbered("选择加密方式", &ciphers)? else {
+            return Ok(());
+        };
+        options.shadowsocks_cipher = match cipher {
             0 => ShadowsocksCipher::Aes256Gcm2022,
             1 => ShadowsocksCipher::Aes128Gcm2022,
             2 => ShadowsocksCipher::Chacha20IetfPoly13052022,
@@ -371,12 +392,15 @@ async fn advanced_add_config_menu() -> Result<()> {
         };
     }
     if matches!(protocol, Protocol::AnyTls) {
-        options.anytls_mode =
-            match select_numbered("AnyTLS 外层安全模式", &["TLS（推荐）", "Reality（高级）"])?
-            {
-                0 => AnyTlsMode::Tls,
-                _ => AnyTlsMode::Reality,
-            };
+        let Some(mode) =
+            select_numbered("AnyTLS 外层安全模式", &["TLS（推荐）", "Reality（高级）"])?
+        else {
+            return Ok(());
+        };
+        options.anytls_mode = match mode {
+            0 => AnyTlsMode::Tls,
+            _ => AnyTlsMode::Reality,
+        };
         loop {
             let default_name = if options.anytls_users.is_empty() {
                 "default".to_owned()
@@ -497,12 +521,14 @@ async fn advanced_add_config_menu() -> Result<()> {
 }
 
 async fn update_menu() -> Result<()> {
-    let choices = ["GitHub Release（推荐）", "cargo install shoes", "返回"];
-    let selected = select_numbered("选择更新方式", &choices)?;
+    let choices = ["GitHub Release（推荐）", "cargo install shoes"];
+    let Some(selected) = select_numbered("选择更新方式", &choices)? else {
+        return Ok(());
+    };
     let method = match selected {
         0 => InstallMethod::Release,
         1 => InstallMethod::Cargo,
-        _ => return Ok(()),
+        _ => unreachable!("更新菜单编号已验证"),
     };
     let unit_exists = std::path::Path::new(crate::utils::SERVICE_FILE).exists();
     let was_active = unit_exists && service::is_active()?;
@@ -515,8 +541,10 @@ async fn update_menu() -> Result<()> {
 }
 
 fn service_menu() -> Result<()> {
-    let choices = ["启动", "停止", "重启", "状态", "启用并启动", "禁用", "返回"];
-    let selected = select_numbered("服务管理", &choices)?;
+    let choices = ["启动", "停止", "重启", "状态", "启用并启动", "禁用"];
+    let Some(selected) = select_numbered("服务管理", &choices)? else {
+        return Ok(());
+    };
     let action = match selected {
         0 => ServiceAction::Start,
         1 => ServiceAction::Stop,
@@ -524,7 +552,7 @@ fn service_menu() -> Result<()> {
         3 => ServiceAction::Status,
         4 => ServiceAction::Enable,
         5 => ServiceAction::Disable,
-        _ => return Ok(()),
+        _ => unreachable!("服务菜单编号已验证"),
     };
     service::execute(action)
 }
@@ -543,13 +571,13 @@ fn uninstall_menu() -> Result<()> {
         .interact()?;
     let unit_removed = service::uninstall_unit()?;
     let binary_removed = installer::uninstall_binary()?;
-    let alias_removed = crate::utils::remove_sb_alias()?;
+    let aliases_removed = crate::utils::remove_command_aliases()?;
     if purge && std::path::Path::new(crate::utils::CONFIG_DIR).exists() {
         std::fs::remove_dir_all(crate::utils::CONFIG_DIR)?;
     }
     println!(
-        "卸载完成：二进制={}，systemd={}，sb 别名={}，配置清理={}",
-        binary_removed, unit_removed, alias_removed, purge
+        "卸载完成：二进制={}，systemd={}，快捷命令清理={}，配置清理={}",
+        binary_removed, unit_removed, aliases_removed, purge
     );
     Ok(())
 }
@@ -559,21 +587,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn preserves_reference_main_and_protocol_numbers() {
+    fn uses_zero_for_exit_and_sequential_protocol_numbers() {
         assert_eq!(MAIN_MENU_ITEMS.first().unwrap().0, 1);
-        assert_eq!(MAIN_MENU_ITEMS.last().unwrap().0, 10);
+        assert_eq!(MAIN_MENU_ITEMS.last(), Some(&(0, "退出")));
+        assert_eq!(PROTOCOL_MENU_ITEMS.last(), Some(&(0, "返回")));
         for (number, protocol) in [
             (1, Protocol::Tuic),
-            (3, Protocol::Hysteria2),
-            (8, Protocol::Shadowsocks),
-            (18, Protocol::Reality),
-            (20, Protocol::AnyTls),
+            (2, Protocol::Hysteria2),
+            (3, Protocol::Shadowsocks),
+            (4, Protocol::Reality),
+            (5, Protocol::AnyTls),
         ] {
             assert!(PROTOCOL_MENU_ITEMS.iter().any(|item| item.0 == number));
             assert_eq!(
-                fast_add::protocol_from_reference_number(number).unwrap(),
+                fast_add::protocol_from_menu_number(number).unwrap(),
                 protocol
             );
         }
+    }
+
+    #[test]
+    fn zero_is_the_only_menu_return_value() {
+        assert_eq!(parse_numbered_choice("0", 5), Some(None));
+        assert_eq!(parse_numbered_choice("", 5), None);
+        assert_eq!(parse_numbered_choice("6", 5), None);
+        assert_eq!(parse_keyed_choice("0", MAIN_MENU_ITEMS), Some(0));
+        assert_eq!(parse_keyed_choice("0", PROTOCOL_MENU_ITEMS), Some(0));
+        assert_eq!(parse_keyed_choice("", MAIN_MENU_ITEMS), None);
     }
 }

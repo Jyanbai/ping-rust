@@ -9,7 +9,7 @@
 | 原始需求 | 状态 | 实现位置 | 当前证据 |
 |---|---|---|---|
 | Rust 2021、Rust 代码占绝对主导 | 已实现 | `Cargo.toml`、`src/` | 5,309 行 Rust / 206 行安装 shell，Rust 占 96.26%；代理、配置、服务、运维、自更新与快速部署事务核心均为 Rust |
-| clap v4 子命令与 233boy 风格数字菜单 | 已实现 | `src/cli.rs`、`src/menu.rs` | `sb` 主菜单固定 1..10，协议兼容编号固定为 1/3/8/18/20；VLESS/SS 日常路径只需协议和可选端口 |
+| clap v4 子命令与数字菜单 | 已实现 | `src/cli.rs`、`src/menu.rs` | `prs` 主菜单固定 1..10，协议编号固定为连续的 1/2/3/4/5；主菜单 0 退出、所有子菜单 0 返回；VLESS/SS 日常路径只需协议和可选端口 |
 | 快速添加与直接分享 | 已实现，Ubuntu 24.04 实测 | `src/fast_add.rs`、`src/deployment.rs`、`src/client.rs` | `add/a`、协议短别名、随机端口/凭据、公网地址探测、`--yes/--plain`；真实 PTY 的 Reality/SS 添加、URI 与监听均通过 |
 | 分享信息重显与隐私边界 | 已实现 | `src/cli.rs`、`src/client.rs` | `info/i`、`url`、`qr` 按名称/UUID 读取保存地址；Reality URL 含 flow/pbk/sid 且不含私钥；二维码只调用本机 qrencode |
 | 激活失败事务回滚 | 已实现，Ubuntu 24.04 实测 | `src/deployment.rs`、`src/config.rs`、`src/service.rs` | 一次性 ExecStartPre 故障注入证明失败后 config/state/unit 哈希、enabled/active 和端口均精确恢复，且不输出分享 URI |
@@ -23,7 +23,7 @@
 | 多配置添加、查看、删除 | 已实现 | `src/config.rs`、`src/cli.rs`、`src/menu.rs` | sidecar 状态、端口冲突和条目一致性检查；多 server 与精确回滚测试 |
 | 候选验证与安全提交 | 已实现 | `src/config.rs`、`src/utils.rs` | 进程间 advisory lock；同目录候选先执行 shoes dry-run；失败候选不触碰正式配置测试 |
 | systemd unit 与启停/重启/状态/日志 | 已实现，Debian/Ubuntu 实测 | `src/service.rs`、`systemd/ping-rust.service` | 首次、active、failed 三态启用策略和 start-limit 恢复均通过；Ubuntu 真实 reboot 后自动 active，三协议端口全部监听 |
-| 更新与卸载 | 已实现，Debian/Ubuntu 实测 | `src/installer.rs`、`src/service.rs`、`src/utils.rs` | Release/cargo 更新、连续重启、逐配置删除、最后一条自动停服、默认保留与 `--purge` 清理均通过；只删除确实指向当前 ping-rust 的 sb symlink |
+| 更新与卸载 | 已实现，Debian/Ubuntu 实测 | `src/installer.rs`、`src/service.rs`、`src/utils.rs` | Release/cargo 更新、连续重启、逐配置删除、最后一条自动停服、默认保留与 `--purge` 清理均通过；只删除确实指向当前 ping-rust 的 `prs` 或旧 `sb` symlink |
 | BBR、端口检查、备份恢复 | 已实现，Debian/Ubuntu 实测 | `src/operations.rs` | 两台 VPS 均由 ping-rust 写入并验证 bbr/fq；TCP/UDP 端口判断、0600 备份 round-trip 和服务状态恢复均通过 |
 | Clash Meta、sing-box、Nekobox 客户端导出 | 已实现，前三协议 Debian/Ubuntu 实测 | `src/client.rs` | 五协议 YAML/JSON/URI 解析测试；Reality 私钥不泄漏；普通 AnyTLS 支持三格式，AnyTLS+Reality 仅输出 sing-box，Mihomo/标准 URI 不支持时明确报错 |
 | Ubuntu 22.04/24.04、Debian 12、Rocky/Alma 9 x86_64 | 构建/测试通过；Ubuntu/Debian 运行态实测 | `.github/workflows/ci.yml`、`.github/workflows/ubuntu-acceptance.yml` | CI 覆盖五个目标系统；Ubuntu acceptance run `29635760772` 实际加载五协议并复核监听，另有 Ubuntu 24.04.3 与 Debian 12 独立 systemd/公网验收；GNU ELF 最高 GLIBC 2.34 |
@@ -60,6 +60,15 @@
 - 本地门禁：53/53 tests、fmt、check、clippy `-D warnings`、release build、doc、严格 package/publish dry-run、actionlint v1.7.12、ShellCheck 全通过。
 - GitHub CI run `29640353028` 五发行版全绿；固定 shoes schema run `29639726196` 的五协议矩阵全绿。
 - Ubuntu 24.04 acceptance run `29640353088` 在 2m33s 内完成公开 crate 基线、当前源码、五协议、真实 `sb` Reality/SS PTY、事务故障回滚、客户端导出、运维与卸载清理。
+
+## Milestone 12：prs 与连续菜单编号
+
+- 快速命令由 `sb` 改为 `prs`；一键安装创建相对链接 `prs → ping-rust`，已存在的非本工具 `prs` 文件或链接保持不变。
+- 从旧版升级时，只移除目标精确为同目录 `ping-rust` 的旧 `sb` 符号链接；Rust 卸载同样通过 canonical path 判断所有权，不删除用户自己的命令。
+- 快速与高级协议菜单统一为 `1=TUIC`、`2=Hysteria2`、`3=Shadowsocks`、`4=VLESS-REALITY`、`5=AnyTLS`；不再接受 8/18/20 等旧菜单编号。
+- 主菜单显式显示 `0. 退出` 并循环运行；协议、运维、服务、更新、配置选择、导出格式等子菜单统一显示 `0. 返回`，空输入不再表示退出。
+- `prs → 1 → 4/3 → 端口或回车随机 → URL → 0 退出` 已写入 Ubuntu 24.04 expect PTY 验收；Release workflow 同时验证 `prs`、冲突保护和旧 `sb` 安全迁移。
+- 本地门禁：54/54 tests、fmt、check、clippy `-D warnings`、release build、doc、package/publish dry-run、actionlint v1.7.12、ShellCheck 全通过。
 
 ## Milestone 6 修复结果
 
@@ -115,14 +124,14 @@
 
 - `cargo fmt -- --check`
 - `cargo check --all-targets`
-- `cargo test --all-targets`：53/53 通过
+- `cargo test --all-targets`：54/54 通过
 - `cargo clippy --all-targets -- -D warnings`
 - `cargo build --locked --release`
 - `cargo doc --locked --no-deps`
 - `cargo install --path . --locked` 后执行 `ping-rust --help`
 - `cargo package --locked` / `cargo publish --dry-run --locked`：发布前 clean worktree 打包 31 个文件，包含五协议示例、固定 shoes workflow 与 sb acceptance；隔离解包重编译与上传前校验均通过
 - `cargo-audit 0.22.2`：扫描当前 Cargo.lock 的 224 个依赖，RustSec 1166 条 advisory 中无命中
-- `SOURCE_SNAPSHOT.md`：14/14 section、212,046 bytes，Cargo/主要 Rust（含 deployment/fast_add）/README 全部与真实文件逐字一致
+- `SOURCE_SNAPSHOT.md`：14/14 section、213,873 bytes，Cargo/主要 Rust（含 deployment/fast_add）/README 全部与真实文件逐字一致
 - actionlint v1.7.12：`ci.yml`、`release.yml`、`shoes-schema.yml`、`ubuntu-acceptance.yml` 零诊断；ShellCheck v0.11.0 对一键安装器零诊断
 - GitHub shoes schema run `29635356030`：固定 shoes 0.2.8 commit 的五单协议、五协议联合、六 Shadowsocks cipher、Reality+AnyTLS 共 13 次显式 dry-run 全部成功，且日志敏感信息扫描为零命中
 - GitHub Actions CI run `29635356053`：五个目标发行版全部成功
@@ -150,4 +159,4 @@
 
 ## 发布状态
 
-公开源码已推送到 `Jyanbai/ping-rust` 的 `main`。Ubuntu 24.04 成功标准已由独立 VPS 与 GitHub runner 双重完成；v0.1.5 的 sb 快速路径已通过本地、五发行版 CI、固定 shoes schema、Ubuntu 24.04 PTY/systemd 验收，并已正式发布到 crates.io 与 GitHub Release。
+公开稳定版 v0.1.5 已发布到 crates.io 与 GitHub Release。v0.1.6 已在本地完成 `prs`、连续协议编号和统一 0 返回的实现与门禁，等待远端五发行版 CI、Ubuntu 24.04 PTY/systemd 验收及正式发布。
