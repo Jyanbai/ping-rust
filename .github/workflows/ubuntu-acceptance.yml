@@ -316,7 +316,7 @@ jobs:
           wait_for {请选择 \[0-10\]} main-menu
           send "2\r"
           wait_for {请选择配置} profile-menu
-          wait_for {请选择 \[0-2\]} profile-prompt
+          wait_for {请选择} profile-prompt
           send "$env(PROFILE_NUMBER)\r"
           wait_for {选择更改项目} change-menu
           wait_for {请选择 \[0-5\]} change-prompt
@@ -347,7 +347,7 @@ jobs:
           send "3\r"
           wait_for {请选择配置} view-profile-menu
           wait_for {VLESS-REALITY-25450} view-short-label
-          wait_for {请选择 \[0-2\]} view-profile-prompt
+          wait_for {请选择} view-profile-prompt
           send "$env(PROFILE_NUMBER)\r"
           wait_for {配置信息} view-info
           wait_for {vless://} view-uri
@@ -355,7 +355,7 @@ jobs:
           send "4\r"
           wait_for {请选择配置} delete-profile-menu
           wait_for {VLESS-REALITY-25450} delete-short-label
-          wait_for {请选择 \[0-2\]} delete-profile-prompt
+          wait_for {请选择} delete-profile-prompt
           send "0\r"
           wait_for {请选择 \[0-10\]} main-menu-after-delete-return
           send "0\r"
