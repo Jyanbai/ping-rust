@@ -35,6 +35,9 @@ pub struct Cli {
 pub enum Command {
     /// 打开数字菜单（不带子命令时的默认行为）
     Menu,
+    /// 首次安装时零输入部署默认 VLESS-REALITY
+    #[command(hide = true)]
+    Bootstrap,
     /// 安装 shoes
     Install {
         #[arg(long, value_enum, default_value_t = InstallMethod::Release)]
@@ -228,6 +231,12 @@ pub enum PortKind {
 pub async fn run(cli: Cli) -> Result<()> {
     match cli.command.unwrap_or(Command::Menu) {
         Command::Menu => menu::run().await,
+        Command::Bootstrap => {
+            if !bootstrap_default_reality().await? {
+                println!("检测到已有 shoes 配置，跳过默认 VLESS-REALITY 部署。");
+            }
+            Ok(())
+        }
         Command::Install { method } => {
             let report = installer::install(method, false).await?;
             service::install_unit(false)?;
@@ -417,6 +426,37 @@ async fn run_add(args: AddArgs) -> Result<()> {
     }
     print_add_result(&result);
     Ok(())
+}
+
+pub(crate) async fn bootstrap_default_reality() -> Result<bool> {
+    if !bootstrap_required(
+        Path::new(crate::utils::CONFIG_FILE),
+        Path::new(crate::utils::STATE_FILE),
+    ) {
+        return Ok(false);
+    }
+    println!();
+    println!(
+        "{}",
+        "首次安装：自动部署 VLESS-REALITY".bright_cyan().bold()
+    );
+    println!("正在自动安装 shoes、选择随机端口并生成安全凭据……");
+    ensure_shoes_for_add(true).await?;
+    let server_address = fast_add::resolve_server_address(None).await?;
+    let result = fast_add::execute(fast_add::AddRequest {
+        name: Some("reality-default".to_owned()),
+        protocol: Protocol::Reality,
+        port: None,
+        server_address: Some(server_address),
+        server_name: None,
+    })
+    .await?;
+    print_add_result(&result);
+    Ok(true)
+}
+
+fn bootstrap_required(config: &Path, state: &Path) -> bool {
+    !config.exists() && !state.exists()
 }
 
 pub(crate) fn print_add_result(result: &fast_add::AddResult) {
@@ -797,6 +837,25 @@ mod tests {
         assert!(matches!(
             Cli::try_parse_from(["prs", "qr", "main"]).unwrap().command,
             Some(Command::Qr { profile: Some(profile), .. }) if profile == "main"
+        ));
+    }
+
+    #[test]
+    fn bootstrap_only_runs_when_both_managed_files_are_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.yaml");
+        let state = dir.path().join("state.json");
+        assert!(bootstrap_required(&config, &state));
+        std::fs::write(&config, b"servers: []").unwrap();
+        assert!(!bootstrap_required(&config, &state));
+        std::fs::remove_file(&config).unwrap();
+        std::fs::write(&state, b"{}").unwrap();
+        assert!(!bootstrap_required(&config, &state));
+        assert!(matches!(
+            Cli::try_parse_from(["ping-rust", "bootstrap"])
+                .unwrap()
+                .command,
+            Some(Command::Bootstrap)
         ));
     }
 }

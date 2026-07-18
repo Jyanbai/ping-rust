@@ -99,6 +99,7 @@ fn select_keyed(prompt: &str, items: &[(usize, &str)]) -> Result<usize> {
 }
 
 pub async fn run() -> Result<()> {
+    cli::bootstrap_default_reality().await?;
     loop {
         println!();
         println!("{}", "ping-rust · shoes 管理工具".bright_cyan().bold());
@@ -308,6 +309,10 @@ async fn fast_add_config_menu() -> Result<()> {
     } else {
         Some(port_text.trim().parse::<u16>()?)
     };
+    deploy_fast_config(protocol, port).await
+}
+
+async fn deploy_fast_config(protocol: Protocol, port: Option<u16>) -> Result<()> {
     let server_address = match fast_add::resolve_server_address(None).await {
         Ok(address) => address,
         Err(error) => {

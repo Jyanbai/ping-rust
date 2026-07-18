@@ -8,7 +8,7 @@
 ````toml
 [package]
 name = "ping-rust"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 description = "Menu-driven installer and manager for the shoes proxy server"
 license = "MIT"
@@ -121,6 +121,9 @@ pub struct Cli {
 pub enum Command {
     /// 打开数字菜单（不带子命令时的默认行为）
     Menu,
+    /// 首次安装时零输入部署默认 VLESS-REALITY
+    #[command(hide = true)]
+    Bootstrap,
     /// 安装 shoes
     Install {
         #[arg(long, value_enum, default_value_t = InstallMethod::Release)]
@@ -314,6 +317,12 @@ pub enum PortKind {
 pub async fn run(cli: Cli) -> Result<()> {
     match cli.command.unwrap_or(Command::Menu) {
         Command::Menu => menu::run().await,
+        Command::Bootstrap => {
+            if !bootstrap_default_reality().await? {
+                println!("检测到已有 shoes 配置，跳过默认 VLESS-REALITY 部署。");
+            }
+            Ok(())
+        }
         Command::Install { method } => {
             let report = installer::install(method, false).await?;
             service::install_unit(false)?;
@@ -503,6 +512,37 @@ async fn run_add(args: AddArgs) -> Result<()> {
     }
     print_add_result(&result);
     Ok(())
+}
+
+pub(crate) async fn bootstrap_default_reality() -> Result<bool> {
+    if !bootstrap_required(
+        Path::new(crate::utils::CONFIG_FILE),
+        Path::new(crate::utils::STATE_FILE),
+    ) {
+        return Ok(false);
+    }
+    println!();
+    println!(
+        "{}",
+        "首次安装：自动部署 VLESS-REALITY".bright_cyan().bold()
+    );
+    println!("正在自动安装 shoes、选择随机端口并生成安全凭据……");
+    ensure_shoes_for_add(true).await?;
+    let server_address = fast_add::resolve_server_address(None).await?;
+    let result = fast_add::execute(fast_add::AddRequest {
+        name: Some("reality-default".to_owned()),
+        protocol: Protocol::Reality,
+        port: None,
+        server_address: Some(server_address),
+        server_name: None,
+    })
+    .await?;
+    print_add_result(&result);
+    Ok(true)
+}
+
+fn bootstrap_required(config: &Path, state: &Path) -> bool {
+    !config.exists() && !state.exists()
 }
 
 pub(crate) fn print_add_result(result: &fast_add::AddResult) {
@@ -885,6 +925,25 @@ mod tests {
             Some(Command::Qr { profile: Some(profile), .. }) if profile == "main"
         ));
     }
+
+    #[test]
+    fn bootstrap_only_runs_when_both_managed_files_are_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.yaml");
+        let state = dir.path().join("state.json");
+        assert!(bootstrap_required(&config, &state));
+        std::fs::write(&config, b"servers: []").unwrap();
+        assert!(!bootstrap_required(&config, &state));
+        std::fs::remove_file(&config).unwrap();
+        std::fs::write(&state, b"{}").unwrap();
+        assert!(!bootstrap_required(&config, &state));
+        assert!(matches!(
+            Cli::try_parse_from(["ping-rust", "bootstrap"])
+                .unwrap()
+                .command,
+            Some(Command::Bootstrap)
+        ));
+    }
 }
 ````
 
@@ -993,6 +1052,7 @@ fn select_keyed(prompt: &str, items: &[(usize, &str)]) -> Result<usize> {
 }
 
 pub async fn run() -> Result<()> {
+    cli::bootstrap_default_reality().await?;
     loop {
         println!();
         println!("{}", "ping-rust · shoes 管理工具".bright_cyan().bold());
@@ -1202,6 +1262,10 @@ async fn fast_add_config_menu() -> Result<()> {
     } else {
         Some(port_text.trim().parse::<u16>()?)
     };
+    deploy_fast_config(protocol, port).await
+}
+
+async fn deploy_fast_config(protocol: Protocol, port: Option<u16>) -> Result<()> {
     let server_address = match fast_add::resolve_server_address(None).await {
         Ok(address) => address,
         Err(error) => {
@@ -5862,9 +5926,9 @@ mod tests {
 
 `ping-rust` 是一个纯 Rust 编写的 [cfal/shoes](https://github.com/cfal/shoes) 安装与管理工具。它提供类似 233boy 脚本的数字菜单，在 Linux VPS 上完成 shoes 安装、VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks、AnyTLS 配置、systemd 管理和日常运维。
 
-核心逻辑全部位于 Rust 源码中；`scripts/install.sh` 只负责下载、校验并安装官方预编译二进制。
+核心逻辑全部位于 Rust 源码中；`scripts/install.sh` 负责下载、校验并安装官方预编译二进制，随后调用 Rust 的安全首次部署入口。
 
-> v0.1.6 已包含 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks 和 AnyTLS 五协议，并提供简短的 `prs` 快速入口。
+> v0.1.7 已包含 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks 和 AnyTLS 五协议；运行一键安装脚本即可零输入部署默认 VLESS-REALITY。
 
 ## 一键安装（推荐）
 
@@ -5873,22 +5937,23 @@ mod tests {
 ```bash
 bash <(curl --proto '=https' --tlsv1.2 -fsSL \
   https://raw.githubusercontent.com/Jyanbai/ping-rust/main/scripts/install.sh)
-sudo prs
 ```
+
+这一个命令会继续自动下载 shoes、选择随机可用端口、生成全部安全凭据、启动 systemd，并直接输出可导入 v2rayN 的 `vless://` 链接，不询问协议或端口。部署完成后使用 `sudo prs` 进入日常管理菜单。
 
 安装指定版本或目录：
 
 ```bash
 bash <(curl --proto '=https' --tlsv1.2 -fsSL \
   https://raw.githubusercontent.com/Jyanbai/ping-rust/main/scripts/install.sh) \
-  --version v0.1.6
+  --version v0.1.7
 
 bash <(curl --proto '=https' --tlsv1.2 -fsSL \
   https://raw.githubusercontent.com/Jyanbai/ping-rust/main/scripts/install.sh) \
-  --install-dir /usr/local/bin --quiet
+  --install-dir /usr/local/bin --quiet --no-bootstrap
 ```
 
-安装器自动识别 x86_64/aarch64，从 GitHub Releases 下载对应 musl 静态包，强制验证 `SHA256SUMS` 和二进制版本后原子安装到 `/usr/local/bin/ping-rust`，并安全创建 `prs → ping-rust` 符号链接。若系统已有其它 `prs` 命令，安装器会保留它并提示改用 `ping-rust`，绝不强制覆盖；升级时只会移除确实指向 `ping-rust` 的旧 `sb` 链接，不会删除用户自己的 `sb` 程序。写入系统目录时会调用 `sudo`；令牌、密码和代理配置都不会被上传。
+安装器自动识别 x86_64/aarch64，从 GitHub Releases 下载对应 musl 静态包，强制验证 `SHA256SUMS` 和二进制版本后原子安装到 `/usr/local/bin/ping-rust`，并安全创建 `prs → ping-rust` 符号链接。默认调用 Rust `bootstrap` 完成首次 Reality 部署；检测到已有配置时自动跳过，`--no-bootstrap` 可用于只安装管理工具。若系统已有其它 `prs` 命令，安装器会保留它并提示改用 `ping-rust`，绝不强制覆盖；升级时只会移除确实指向 `ping-rust` 的旧 `sb` 链接，不会删除用户自己的 `sb` 程序。写入系统目录时会调用 `sudo`；令牌、密码和代理配置都不会被上传。
 
 ## 功能
 
@@ -5928,7 +5993,7 @@ sudo apt-get install -y build-essential pkg-config git ca-certificates
 sudo dnf install -y gcc gcc-c++ make pkgconf-pkg-config git ca-certificates
 ```
 
-从 [crates.io](https://crates.io/crates/ping-rust) 安装已发布的 `0.1.6`：
+从 [crates.io](https://crates.io/crates/ping-rust) 安装已发布的 `0.1.7`：
 
 ```bash
 cargo install ping-rust --locked
@@ -5954,6 +6019,23 @@ sudo ping-rust
 首次启动、生成系统配置、管理 systemd、BBR、备份恢复和卸载都需要 root。生成到自定义路径、查看帮助和本地端口检查不要求 root。
 
 ## 233boy 风格快速部署
+
+执行一键安装命令后，无需再输入任何内容：
+
+```text
+$ bash <(curl -fsSL https://raw.githubusercontent.com/Jyanbai/ping-rust/main/scripts/install.sh)
+
+首次安装：自动部署 VLESS-REALITY
+正在自动安装 shoes、选择随机端口并生成安全凭据……
+
+部署成功，shoes 服务已启动。
+------------- URL 链接 -------------
+vless://...security=reality...pbk=...&sid=...
+```
+
+安装脚本只在配置文件和管理状态都不存在时触发默认部署。Rust `bootstrap` 会自动下载 shoes、选择随机可用端口、生成 UUID/X25519 密钥/short ID、执行 `shoes --dry-run`、启动并确认 systemd 服务，然后输出可直接导入 v2rayN 的链接；检测到任何已有配置时绝不覆盖。通过 cargo 安装的用户第一次运行 `sudo prs` 时也会执行同一安全入口。
+
+部署完成后的常规菜单如下：
 
 ```text
 $ sudo prs
@@ -5989,7 +6071,7 @@ ping-rust · shoes 管理工具
 vless://...security=reality...pbk=...&sid=...
 ```
 
-实际日常流程就是：`prs → 1 → 4（VLESS）或 3（SS）→ 输入端口/直接回车随机 → 复制 URL 到 v2rayN`。所有协议选择固定使用连续编号 `1/2/3/4/5`；主菜单输入 `0` 退出，任意子菜单输入 `0` 返回主菜单。首次使用时若 shoes 未安装，菜单会询问是否自动从 Release 安装；UUID、Reality 密钥、short ID 或 SS 2022 密码全部安全随机生成。链接只会在配置通过 `shoes --dry-run`、原子写入、systemd 启动且确认为 active 后输出；失败会恢复原配置和服务状态。
+首次安装流程是：`install.sh → 自动安装 ping-rust/shoes → 自动随机端口部署 VLESS-REALITY → 复制 URL`，中间零输入。后续日常流程是：`prs → 1 → 4（VLESS）或 3（SS）→ 输入端口/直接回车随机 → 复制 URL 到 v2rayN`。所有协议选择固定使用连续编号 `1/2/3/4/5`；主菜单输入 `0` 退出，任意子菜单输入 `0` 返回主菜单。UUID、Reality 密钥、short ID 或 SS 2022 密码全部安全随机生成。链接只会在配置通过 `shoes --dry-run`、原子写入、systemd 启动且确认为 active 后输出；失败会恢复原配置和服务状态。
 
 非交互方式：
 

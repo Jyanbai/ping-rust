@@ -142,7 +142,8 @@ jobs:
           bash scripts/install.sh \
             --version "${GITHUB_REF_NAME}" \
             --install-dir "${install_dir}" \
-            --quiet
+            --quiet \
+            --no-bootstrap
           "${install_dir}/ping-rust" --version \
             | grep -Fx "ping-rust ${GITHUB_REF_NAME#v}"
           test -L "${install_dir}/prs"
@@ -162,7 +163,8 @@ jobs:
           bash scripts/install.sh \
             --version "${GITHUB_REF_NAME}" \
             --install-dir "${conflict_dir}" \
-            --quiet
+            --quiet \
+            --no-bootstrap
           grep -Fx 'owned-by-another-program' "${conflict_dir}/prs"
           test -x "${conflict_dir}/ping-rust"
 
@@ -172,6 +174,36 @@ jobs:
           bash scripts/install.sh \
             --version "${GITHUB_REF_NAME}" \
             --install-dir "${legacy_dir}" \
-            --quiet
+            --quiet \
+            --no-bootstrap
           test ! -e "${legacy_dir}/sb"
           test "$(readlink "${legacy_dir}/prs")" = ping-rust
+
+          bootstrap_dir="${RUNNER_TEMP}/ping-rust-bootstrap"
+          bootstrap_output="${RUNNER_TEMP}/ping-rust-bootstrap-output.txt"
+          mkdir -p "${bootstrap_dir}"
+          bash scripts/install.sh \
+            --version "${GITHUB_REF_NAME}" \
+            --install-dir "${bootstrap_dir}" \
+            > "${bootstrap_output}"
+          ! grep -Eq '选择协议|输入端口' "${bootstrap_output}"
+          grep -q '首次安装：自动部署 VLESS-REALITY' "${bootstrap_output}"
+          bootstrap_uri="$(grep '^vless://' "${bootstrap_output}" | tail -n 1)"
+          test -n "${bootstrap_uri}"
+          test "$(sudo "${bootstrap_dir}/ping-rust" url)" = "${bootstrap_uri}"
+          sudo systemctl is-active --quiet shoes.service
+          bootstrap_info="$(sudo "${bootstrap_dir}/ping-rust" info)"
+          bootstrap_port="$(
+            printf '%s' "${bootstrap_info}" \
+              | sed -nE 's/.*0\.0\.0\.0:([0-9]+).*/\1/p' \
+              | head -n 1
+          )"
+          test -n "${bootstrap_port}"
+          sudo ss -H -lnt \
+            | awk '{print $4}' \
+            | grep -Eq "(^|:)${bootstrap_port}$"
+          second_bootstrap="$(sudo "${bootstrap_dir}/ping-rust" bootstrap)"
+          printf '%s' "${second_bootstrap}" \
+            | grep -q '检测到已有 shoes 配置，跳过默认 VLESS-REALITY 部署。'
+          rm -f "${bootstrap_output}"
+          sudo "${bootstrap_dir}/ping-rust" uninstall --purge

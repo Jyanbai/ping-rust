@@ -15,7 +15,7 @@ permissions:
   contents: read
 
 env:
-  PUBLIC_VERSION: 0.1.4
+  PUBLIC_VERSION: 0.1.6
 
 jobs:
   root-systemd:
@@ -73,28 +73,35 @@ jobs:
           printf 'PING_RUST=%s\n' "$ping_rust" >> "$GITHUB_ENV"
           printf 'PRS=%s\n' "$current_root/bin/prs" >> "$GITHUB_ENV"
 
-      - name: Deploy Reality within three minutes
+      - name: Installer bootstrap deploys random-port Reality without input
         id: reality
         shell: bash
         run: |
           set -euo pipefail
           started_at="$(date +%s)"
 
-          reality_uri="$(sudo "$PING_RUST" add reality \
-            --name acceptance-reality \
-            --port 24443 \
-            --server-address 203.0.113.10 \
-            --server-name www.cloudflare.com \
-            --yes \
-            --plain)"
+          bootstrap_output="$RUNNER_TEMP/reality-bootstrap.txt"
+          sudo "$PING_RUST" bootstrap | sudo tee "$bootstrap_output" >/dev/null
+          ! sudo grep -Eq '选择协议|输入端口' "$bootstrap_output"
+          sudo grep -q '首次安装：自动部署 VLESS-REALITY' "$bootstrap_output"
+
+          reality_uri="$(sudo grep '^vless://' "$bootstrap_output" | tail -n 1)"
+          sudo rm -f "$bootstrap_output"
           printf '%s' "$reality_uri" | grep -q '^vless://'
           for parameter in security=reality flow=xtls-rprx-vision pbk= sid=; do
             printf '%s' "$reality_uri" | grep -q "$parameter"
           done
-          test "$(sudo "$PING_RUST" url acceptance-reality)" = "$reality_uri"
-          test "$(sudo "$PING_RUST" qr acceptance-reality 2>/dev/null)" = "$reality_uri"
-          info_output="$(sudo "$PING_RUST" info acceptance-reality)"
-          printf '%s' "$info_output" | grep -q '客户端地址：203.0.113.10'
+          test "$(sudo "$PING_RUST" qr 2>/dev/null)" = "$reality_uri"
+          info_output="$(sudo "$PING_RUST" info)"
+          printf '%s' "$info_output" | grep -q '客户端地址：'
+          reality_port="$(
+            printf '%s' "$info_output" \
+              | sed -nE 's/.*0\.0\.0\.0:([0-9]+).*/\1/p' \
+              | head -n 1
+          )"
+          test -n "$reality_port"
+          test "$reality_port" -ge 20000
+          printf 'REALITY_PORT=%s\n' "$reality_port" >> "$GITHUB_ENV"
 
           elapsed="$(( $(date +%s) - started_at ))"
           test "$elapsed" -le 180
@@ -103,12 +110,12 @@ jobs:
           sudo systemctl is-active --quiet shoes.service
           sudo systemctl is-enabled --quiet shoes.service
           for _ in {1..20}; do
-            if sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)24443$'; then
+            if sudo ss -H -lnt | awk '{print $4}' | grep -Eq "(^|:)${reality_port}$"; then
               break
             fi
             sleep 0.5
           done
-          sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)24443$'
+          sudo ss -H -lnt | awk '{print $4}' | grep -Eq "(^|:)${reality_port}$"
 
           reality_profile="$(
             printf '%s' "$info_output" \
@@ -390,7 +397,7 @@ jobs:
           sudo "$PING_RUST" info
 
           sudo systemctl is-active --quiet shoes.service
-          sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)24443$'
+          sudo ss -H -lnt | awk '{print $4}' | grep -Eq "(^|:)${REALITY_PORT}$"
           sudo ss -H -lun | awk '{print $4}' | grep -Eq '(^|:)24444$'
           sudo ss -H -lun | awk '{print $4}' | grep -Eq '(^|:)24445$'
           sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)24446$'

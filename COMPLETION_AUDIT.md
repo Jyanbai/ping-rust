@@ -8,7 +8,7 @@
 
 | 原始需求 | 状态 | 实现位置 | 当前证据 |
 |---|---|---|---|
-| Rust 2021、Rust 代码占绝对主导 | 已实现 | `Cargo.toml`、`src/` | 5,353 行 Rust / 220 行安装 shell，Rust 占 96.05%；代理、配置、服务、运维、自更新与快速部署事务核心均为 Rust |
+| Rust 2021、Rust 代码占绝对主导 | 已实现 | `Cargo.toml`、`src/` | 5,413 行 Rust / 241 行安装 shell，Rust 占 95.74%；代理、配置、服务、运维、自更新与快速部署事务核心均为 Rust |
 | clap v4 子命令与数字菜单 | 已实现 | `src/cli.rs`、`src/menu.rs` | `prs` 主菜单固定 1..10，协议编号固定为连续的 1/2/3/4/5；主菜单 0 退出、所有子菜单 0 返回；VLESS/SS 日常路径只需协议和可选端口 |
 | 快速添加与直接分享 | 已实现，Ubuntu 24.04 实测 | `src/fast_add.rs`、`src/deployment.rs`、`src/client.rs` | `add/a`、协议短别名、随机端口/凭据、公网地址探测、`--yes/--plain`；真实 PTY 的 Reality/SS 添加、URI 与监听均通过 |
 | 分享信息重显与隐私边界 | 已实现 | `src/cli.rs`、`src/client.rs` | `info/i`、`url`、`qr` 按名称/UUID 读取保存地址；Reality URL 含 flow/pbk/sid 且不含私钥；二维码只调用本机 qrencode |
@@ -74,6 +74,16 @@
 - v0.1.6 公开资产：x86_64 2,597,445 bytes / SHA-256 `548dbb89a8dbe1dee2b322ff2cd9deaf0a56258c20be5ec28b4aad5bf6fb8f63`；aarch64 2,428,751 bytes / SHA-256 `466a2a09bdd1ee780af94a3c8caddceff8e68e66b3359510aaa5c1dce6dac88f`；公开 SHA256SUMS 与 GitHub API digest 一致。
 - crates.io 0.1.6 已正式发布；全新隔离 Cargo root 从 registry 编译安装后返回 `ping-rust 0.1.6`，并确认 `--random-port`、`--yes`、`--plain` 快速添加帮助存在。
 
+## Milestone 13：安装脚本零输入默认 Reality
+
+- `scripts/install.sh` 默认在安装并验证 ping-rust 后，以 root 调用 Rust `bootstrap`；无需再运行 `prs`，不询问协议或端口。
+- `bootstrap` 在配置和状态均不存在时自动安装 shoes、探测公网地址、选择随机可用端口、生成 VLESS-Reality-Vision 全部安全凭据、dry-run、原子提交、激活 systemd 并输出 `vless://`。
+- 任一配置或状态文件存在时 bootstrap 安全跳过，避免升级或重跑安装器时重复添加；高级用户可用 `--no-bootstrap` 只安装管理工具。
+- 菜单入口也复用同一 Rust bootstrap，因此 cargo 安装后首次运行 `prs` 仍具备相同安全默认行为；部署和回滚核心未移入 Bash。
+- Ubuntu acceptance 直接运行安装器调用的 bootstrap 命令，断言输出中没有“选择协议/输入端口”、端口为随机高位端口、URI 完整、systemd active 且实际监听。
+- Release workflow 从公开 tag 资产运行默认 install.sh 全链路，静默捕获敏感 URI，验证监听、重复 bootstrap 幂等，再卸载清理；普通安装/冲突/迁移测试使用 `--no-bootstrap` 保持职责独立。
+- 本地门禁：55/55 tests、fmt、check、clippy `-D warnings`、actionlint v1.7.12、ShellCheck 全通过。
+
 ## Milestone 6 修复结果
 
 - 修复第二个受管配置必然被“仅一个 server”校验拒绝的问题。
@@ -128,14 +138,14 @@
 
 - `cargo fmt -- --check`
 - `cargo check --all-targets`
-- `cargo test --all-targets`：54/54 通过
+- `cargo test --all-targets`：55/55 通过
 - `cargo clippy --all-targets -- -D warnings`
 - `cargo build --locked --release`
 - `cargo doc --locked --no-deps`
 - `cargo install --path . --locked` 后执行 `ping-rust --help`
 - `cargo package --locked` / `cargo publish --dry-run --locked`：发布前 clean worktree 打包 31 个文件，包含五协议示例、固定 shoes workflow 与 sb acceptance；隔离解包重编译与上传前校验均通过
 - `cargo-audit 0.22.2`：扫描当前 Cargo.lock 的 224 个依赖，RustSec 1166 条 advisory 中无命中
-- `SOURCE_SNAPSHOT.md`：14/14 section、213,873 bytes，Cargo/主要 Rust（含 deployment/fast_add）/README 全部与真实文件逐字一致
+- `SOURCE_SNAPSHOT.md`：14/14 section、217,512 bytes，Cargo/主要 Rust（含 deployment/fast_add）/README 全部与真实文件逐字一致
 - actionlint v1.7.12：`ci.yml`、`release.yml`、`shoes-schema.yml`、`ubuntu-acceptance.yml` 零诊断；ShellCheck v0.11.0 对一键安装器零诊断
 - GitHub shoes schema run `29635356030`：固定 shoes 0.2.8 commit 的五单协议、五协议联合、六 Shadowsocks cipher、Reality+AnyTLS 共 13 次显式 dry-run 全部成功，且日志敏感信息扫描为零命中
 - GitHub Actions CI run `29635356053`：五个目标发行版全部成功
@@ -166,4 +176,4 @@
 
 ## 发布状态
 
-公开源码已推送到 `Jyanbai/ping-rust` 的 `main`。v0.1.6 的 `prs`、连续协议编号和统一 0 返回已通过本地、五发行版 CI、固定 shoes schema、Ubuntu 24.04 PTY/systemd 验收，并已正式发布到 crates.io 与 GitHub Release。
+公开稳定版 v0.1.6 已发布。v0.1.7 的安装脚本零输入默认 Reality 已完成本地实现与静态门禁，等待远端五发行版 CI、Ubuntu 24.04 bootstrap/systemd 验收及正式发布。

@@ -9,6 +9,7 @@ readonly LEGACY_SHORT_COMMAND="sb"
 VERSION="latest"
 INSTALL_DIR="${PING_RUST_INSTALL_DIR:-/usr/local/bin}"
 QUIET=0
+BOOTSTRAP=1
 TEMP_DIR=""
 STAGED_PATH=""
 USE_SUDO=0
@@ -24,6 +25,7 @@ usage() {
   --version <版本>       安装指定版本，例如 v0.1.2；默认 latest
   --install-dir <目录>   安装目录；默认 /usr/local/bin
   --quiet                只显示错误和最终结果
+  --no-bootstrap         只安装管理工具，不自动部署默认 Reality
   -h, --help             显示帮助
 
 环境变量：
@@ -55,6 +57,16 @@ privileged() {
   if [ "${USE_SUDO}" -eq 0 ]; then
     "$@"
   else
+    sudo "$@"
+  fi
+}
+
+run_as_root() {
+  if [ "$(id -u)" -eq 0 ]; then
+    "$@"
+  else
+    command -v sudo >/dev/null 2>&1 \
+      || die "自动部署 VLESS-REALITY 需要 root 权限，但系统没有 sudo；请以 root 运行。"
     sudo "$@"
   fi
 }
@@ -125,6 +137,10 @@ while [ "$#" -gt 0 ]; do
       QUIET=1
       shift
       ;;
+    --no-bootstrap)
+      BOOTSTRAP=0
+      shift
+      ;;
     -h | --help)
       usage
       exit 0
@@ -142,6 +158,7 @@ esac
 require_command curl
 require_command grep
 require_command install
+require_command id
 require_command mktemp
 require_command ln
 require_command readlink
@@ -246,4 +263,9 @@ remove_owned_legacy_short_command
 INSTALLED_VERSION="$("${INSTALL_DIR}/${PROGRAM}" --version)" \
   || die "安装后的版本验证失败。"
 printf '安装成功：%s\n' "${INSTALLED_VERSION}"
-printf '运行：sudo %s\n' "${RUN_COMMAND}"
+if [ "${BOOTSTRAP}" -eq 1 ]; then
+  log "正在零输入部署默认 VLESS-REALITY（随机端口）..."
+  run_as_root "${INSTALL_DIR}/${PROGRAM}" bootstrap \
+    || die "默认 VLESS-REALITY 部署失败；ping-rust 已安装，可修复网络后运行 sudo ${RUN_COMMAND} 重试。"
+fi
+printf '管理命令：sudo %s\n' "${RUN_COMMAND}"
