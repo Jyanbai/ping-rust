@@ -113,7 +113,9 @@
 - 查看、更改、删除与导出统一显示 `VLESS-REALITY-53453`、`SHADOWSOCKS-端口` 等 `协议-端口` 名称，不展示 UUID；内部仍使用 UUID 精确定位，安全性不变。
 - 只有一个配置时直接选中，多个配置时才显示数字列表；查看配置只展示协议、端口、SNI、地址和可复制 URI。添加、修改和删除成功提示也不再输出内部 UUID。
 - 保留用户指定的 `0`：主菜单退出，所有子菜单返回。Ubuntu 24.04 PTY 验收已扩展到查看配置、短名称显示、删除菜单输入 0 返回且不误删。
-- 当前版本号为 0.1.9；本地 63/63 tests、check、clippy `-D warnings`、actionlint 与 diff check 已通过，等待推送后的 Ubuntu 24.04 真实终端验收。
+- 产品提交 `910e369` 的 CI run `29646166398` 与固定 shoes schema run `29646166410` 成功。首次 PTY run 因验收脚本把完整环境的配置数量误写死为 2 而超时；菜单实际正确显示 7 项，未发现产品故障。
+- 配置数量无关的测试修正提交 `2fdd1b7` 后，CI run `29646275985` 与 Ubuntu 24.04 acceptance run `29646275983` 全绿；后者真实完成短配置名、查看 URI、删除菜单输入 0 返回、修改配置、五协议、故障回滚、导出与卸载清理。
+- 当前版本号为 0.1.9；本地 63/63 tests、check、clippy `-D warnings`、release build、doc、严格 package/publish dry-run、actionlint、ShellCheck 与 diff check 全部通过。源码已推送 main，尚未创建不可覆盖的 crates.io/GitHub Release 0.1.9。
 
 ## Milestone 6 修复结果
 
@@ -180,6 +182,7 @@
 - actionlint v1.7.12：`ci.yml`、`release.yml`、`shoes-schema.yml`、`ubuntu-acceptance.yml` 零诊断；ShellCheck v0.11.0 对一键安装器零诊断
 - v0.1.8 产品提交 `960edde`：main CI `29645174662`、Ubuntu 24.04 acceptance `29645174670`、固定 shoes schema `29645174650` 全部成功；tag CI `29645387085` 与 schema `29645387104` 再次成功
 - v0.1.8 Release run `29645387081`：双架构 MUSL、SHA256SUMS、公开一键安装默认 Reality 全部成功；crates.io 公开隔离安装返回 `ping-rust 0.1.8`
+- v0.1.9 简洁菜单：CI `29646275985` 与 Ubuntu 24.04 acceptance `29646275983` 成功；真实 PTY 覆盖查看短名称/URI、删除菜单 0 返回且不误删
 - GitHub shoes schema run `29635356030`：固定 shoes 0.2.8 commit 的五单协议、五协议联合、六 Shadowsocks cipher、Reality+AnyTLS 共 13 次显式 dry-run 全部成功，且日志敏感信息扫描为零命中
 - GitHub Actions CI run `29635356053`：五个目标发行版全部成功
 - GitHub main CI run `29635760760`：五个目标发行版全部成功；Ubuntu 24.04 acceptance run `29635760772`：五协议 systemd、导出、运维和清理全成功
