@@ -8,7 +8,7 @@
 
 | 原始需求 | 状态 | 实现位置 | 当前证据 |
 |---|---|---|---|
-| Rust 2021、Rust 代码占绝对主导 | 已实现 | `Cargo.toml`、`src/` | 5,309 行 Rust / 206 行安装 shell，Rust 占 96.26%；代理、配置、服务、运维、自更新与快速部署事务核心均为 Rust |
+| Rust 2021、Rust 代码占绝对主导 | 已实现 | `Cargo.toml`、`src/` | 5,353 行 Rust / 220 行安装 shell，Rust 占 96.05%；代理、配置、服务、运维、自更新与快速部署事务核心均为 Rust |
 | clap v4 子命令与数字菜单 | 已实现 | `src/cli.rs`、`src/menu.rs` | `prs` 主菜单固定 1..10，协议编号固定为连续的 1/2/3/4/5；主菜单 0 退出、所有子菜单 0 返回；VLESS/SS 日常路径只需协议和可选端口 |
 | 快速添加与直接分享 | 已实现，Ubuntu 24.04 实测 | `src/fast_add.rs`、`src/deployment.rs`、`src/client.rs` | `add/a`、协议短别名、随机端口/凭据、公网地址探测、`--yes/--plain`；真实 PTY 的 Reality/SS 添加、URI 与监听均通过 |
 | 分享信息重显与隐私边界 | 已实现 | `src/cli.rs`、`src/client.rs` | `info/i`、`url`、`qr` 按名称/UUID 读取保存地址；Reality URL 含 flow/pbk/sid 且不含私钥；二维码只调用本机 qrencode |
@@ -27,12 +27,12 @@
 | BBR、端口检查、备份恢复 | 已实现，Debian/Ubuntu 实测 | `src/operations.rs` | 两台 VPS 均由 ping-rust 写入并验证 bbr/fq；TCP/UDP 端口判断、0600 备份 round-trip 和服务状态恢复均通过 |
 | Clash Meta、sing-box、Nekobox 客户端导出 | 已实现，前三协议 Debian/Ubuntu 实测 | `src/client.rs` | 五协议 YAML/JSON/URI 解析测试；Reality 私钥不泄漏；普通 AnyTLS 支持三格式，AnyTLS+Reality 仅输出 sing-box，Mihomo/标准 URI 不支持时明确报错 |
 | Ubuntu 22.04/24.04、Debian 12、Rocky/Alma 9 x86_64 | 构建/测试通过；Ubuntu/Debian 运行态实测 | `.github/workflows/ci.yml`、`.github/workflows/ubuntu-acceptance.yml` | CI 覆盖五个目标系统；Ubuntu acceptance run `29635760772` 实际加载五协议并复核监听，另有 Ubuntu 24.04.3 与 Debian 12 独立 systemd/公网验收；GNU ELF 最高 GLIBC 2.34 |
-| ARM64 次优先支持 | 构建与模拟运行已证实 | `src/installer.rs`、Release workflow | aarch64 GNU ELF 最高 GLIBC 2.34；v0.1.5 aarch64 musl 静态 binary 通过 qemu-user-static `--version` 并公开发布 |
-| ping-rust 预编译一键安装 | 已发布并端到端验证 | `.github/workflows/release.yml`、`scripts/install.sh` | v0.1.5 的 x86_64/aarch64 musl、SHA256SUMS 已公开；Release workflow 全部成功，并从公开 URL 完成指定版本安装、`sb` 链接、冲突保护、自更新与 version 验证 |
-| ping-rust 原生自更新 | 已发布并端到端验证 | `src/self_update.rs`、`src/cli.rs`、`src/menu.rs` | 独立 `self-update` 保留 shoes `update` 语义；v0.1.5 发布 job 在非 root 自定义目录真实完成公开资产下载、双重 SHA-256、运行中原子替换和安装后版本复核 |
+| ARM64 次优先支持 | 构建与模拟运行已证实 | `src/installer.rs`、Release workflow | aarch64 GNU ELF 最高 GLIBC 2.34；v0.1.6 aarch64 musl 静态 binary 通过 qemu-user-static `--version` 并公开发布 |
+| ping-rust 预编译一键安装 | 已发布并端到端验证 | `.github/workflows/release.yml`、`scripts/install.sh` | v0.1.6 的 x86_64/aarch64 musl、SHA256SUMS 已公开；Release workflow 全部成功，并从公开 URL 完成指定版本安装、`prs` 链接、冲突保护、旧 `sb` 迁移、自更新与 version 验证 |
+| ping-rust 原生自更新 | 已发布并端到端验证 | `src/self_update.rs`、`src/cli.rs`、`src/menu.rs` | 独立 `self-update` 保留 shoes `update` 语义；v0.1.6 发布 job 在非 root 自定义目录真实完成公开资产下载、双重 SHA-256、运行中原子替换和安装后版本复核 |
 | README、MIT、cargo install 发布 | 已发布并验证 | `README.md`、`LICENSE`、`scripts/install.sh` | README 第一屏提供无需 Rust 的一键入口，并保留 crates.io/Git/源码安装；release build、doc、隔离 `cargo package` 门禁通过 |
 | GitHub 源码开源 | 已发布 | `Cargo.toml`、GitHub `main` | `Jyanbai/ping-rust` 已为 Public/非空并建立 `main`；首个提交与跨平台 CI 修复均已推送 |
-| 公开 `cargo install ping-rust` | 已发布并验证 | crates.io `ping-rust 0.1.5` | 正式 `cargo publish --locked` 成功；公开 registry 搜索与独立 `cargo install ping-rust --version 0.1.5 --locked` 均验证版本、`add --help` 和 `--plain` 入口 |
+| 公开 `cargo install ping-rust` | 已发布并验证 | crates.io `ping-rust 0.1.6` | 正式 `cargo publish --locked` 成功；公开 registry 搜索与独立 `cargo install ping-rust --version 0.1.6 --locked` 均验证版本、`add --help` 和 `--plain` 入口 |
 | 干净 Ubuntu 24.04 三分钟部署并公网连通 | 已完成 | `README.md` 验收清单、Ubuntu acceptance workflow | Ubuntu 24.04.3 干净基线安装后，Reality 部署约 2 秒；官方 Windows sing-box 在 reboot 前后均握手成功且观察到 VPS 公网出口 |
 
 ## Milestone 10：latest shoes 五协议 schema 对齐
@@ -69,6 +69,10 @@
 - 主菜单显式显示 `0. 退出` 并循环运行；协议、运维、服务、更新、配置选择、导出格式等子菜单统一显示 `0. 返回`，空输入不再表示退出。
 - `prs → 1 → 4/3 → 端口或回车随机 → URL → 0 退出` 已写入 Ubuntu 24.04 expect PTY 验收；Release workflow 同时验证 `prs`、冲突保护和旧 `sb` 安全迁移。
 - 本地门禁：54/54 tests、fmt、check、clippy `-D warnings`、release build、doc、package/publish dry-run、actionlint v1.7.12、ShellCheck 全通过。
+- 精确产品提交 `d9ef776` 的 main CI run `29641525438`、固定 shoes schema run `29641525465`、Ubuntu 24.04 acceptance run `29641525455` 全部成功；tag CI/schema 也再次全绿。
+- GitHub Release run `29641681305` 全部成功；发布 job 从公开资产验证 `prs`、非本工具命令冲突保护、旧 `sb` 安全迁移和原生自更新。
+- v0.1.6 公开资产：x86_64 2,597,445 bytes / SHA-256 `548dbb89a8dbe1dee2b322ff2cd9deaf0a56258c20be5ec28b4aad5bf6fb8f63`；aarch64 2,428,751 bytes / SHA-256 `466a2a09bdd1ee780af94a3c8caddceff8e68e66b3359510aaa5c1dce6dac88f`；公开 SHA256SUMS 与 GitHub API digest 一致。
+- crates.io 0.1.6 已正式发布；全新隔离 Cargo root 从 registry 编译安装后返回 `ping-rust 0.1.6`，并确认 `--random-port`、`--yes`、`--plain` 快速添加帮助存在。
 
 ## Milestone 6 修复结果
 
@@ -156,7 +160,10 @@
 - GitHub Release run `29640482140` 全部成功：x86_64/aarch64 MUSL 构建与运行探针、正式 Release、公开一键安装、`sb` 相对链接与既有命令冲突保护、自更新均通过。
 - v0.1.5 公开资产：x86_64 2,601,613 bytes / SHA-256 `c810560be21889a44275190c42a80d9d36f6c9b7fe1b13d8aa01db44f3f2205d`；aarch64 2,433,902 bytes / SHA-256 `39a3e32b03994bc44148151652c08d61dd15e15526a3b34ecfca71451951cfc9`；两者与公开 `SHA256SUMS` 和 GitHub API digest 一致。
 - crates.io 0.1.5 正式发布；`cargo search ping-rust` 返回 0.1.5，全新隔离 Cargo root 从 registry 下载编译后 `ping-rust --version` 返回 `ping-rust 0.1.5`，并确认快速添加帮助包含 `--plain`。
+- v0.1.6 main 门禁：CI run `29641525438`、shoes schema run `29641525465`、Ubuntu acceptance run `29641525455` 全部成功；真实 PTY 使用连续协议编号并输入 0 退出。
+- v0.1.6 Release run `29641681305` 全部成功；双架构 MUSL、SHA256SUMS、一键安装、`prs`、冲突保护、旧 `sb` 迁移与自更新均通过。
+- crates.io 0.1.6 正式发布且公开检索可见；独立 registry 安装、版本和快速添加帮助验证成功。
 
 ## 发布状态
 
-公开稳定版 v0.1.5 已发布到 crates.io 与 GitHub Release。v0.1.6 已在本地完成 `prs`、连续协议编号和统一 0 返回的实现与门禁，等待远端五发行版 CI、Ubuntu 24.04 PTY/systemd 验收及正式发布。
+公开源码已推送到 `Jyanbai/ping-rust` 的 `main`。v0.1.6 的 `prs`、连续协议编号和统一 0 返回已通过本地、五发行版 CI、固定 shoes schema、Ubuntu 24.04 PTY/systemd 验收，并已正式发布到 crates.io 与 GitHub Release。
