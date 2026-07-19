@@ -437,6 +437,8 @@ async fn run_add(args: AddArgs) -> Result<()> {
         port: args.port.or(args.legacy_port),
         server_address: args.server_address,
         server_name: args.server_name,
+        shadowsocks_cipher: None,
+        shadowsocks_password: None,
     })
     .await?;
     if args.plain {
@@ -468,6 +470,8 @@ pub(crate) async fn bootstrap_default_reality() -> Result<bool> {
         port: None,
         server_address: Some(server_address),
         server_name: None,
+        shadowsocks_cipher: None,
+        shadowsocks_password: None,
     })
     .await?;
     print_add_result(&result);
@@ -481,13 +485,146 @@ fn bootstrap_required(config: &Path, state: &Path) -> bool {
 pub(crate) fn print_add_result(result: &fast_add::AddResult) {
     let profile = &result.generation.profile;
     println!("{}", "部署成功，shoes 服务已启动。".green().bold());
-    println!("配置：{}", profile.config_file_name());
-    println!("协议：{}", profile.protocol_name());
-    println!("端口：{}", profile.port);
-    println!("\n------------- URL 链接 -------------\n");
-    println!("{}", result.share_uri.underline());
+    print_profile_details(profile, Some(&result.share_uri));
     println!("\n复制上方链接即可导入客户端。");
     println!("{}", "安全提示：分享链接包含访问凭据，请勿公开。".yellow());
+}
+
+pub(crate) fn print_profile_details(profile: &config::ManagedProfile, share_uri: Option<&str>) {
+    println!("{}", profile_details_text(profile, share_uri));
+}
+
+fn profile_details_text(profile: &config::ManagedProfile, share_uri: Option<&str>) -> String {
+    let mut lines = vec![format!(
+        "\n-------------- {} -------------",
+        profile.config_file_name()
+    )];
+    let address = profile.server_address.as_deref().unwrap_or("未保存");
+    match &profile.credentials {
+        config::Credentials::Reality {
+            user_id,
+            public_key,
+            short_id,
+            server_name,
+            ..
+        } => {
+            lines.push("协议 (protocol)         = vless".to_owned());
+            lines.push(format!("地址 (address)          = {address}"));
+            lines.push(format!("端口 (port)             = {}", profile.port));
+            lines.push(format!("用户ID (id)             = {user_id}"));
+            lines.push("流控 (flow)             = xtls-rprx-vision".to_owned());
+            lines.push("传输协议 (network)      = tcp".to_owned());
+            lines.push("传输层安全 (TLS)        = reality".to_owned());
+            lines.push(format!("SNI (serverName)        = {server_name}"));
+            lines.push("指纹 (Fingerprint)      = chrome".to_owned());
+            lines.push(format!("公钥 (Public key)       = {public_key}"));
+            lines.push(format!("短 ID (shortId)         = {short_id}"));
+        }
+        config::Credentials::Hysteria2 {
+            password,
+            server_name,
+            alpn_protocols,
+        } => {
+            lines.push("协议 (protocol)         = hysteria2".to_owned());
+            lines.push(format!("地址 (address)          = {address}"));
+            lines.push(format!("端口 (port)             = {}", profile.port));
+            lines.push(format!("密码 (password)         = {password}"));
+            lines.push("传输层安全 (TLS)        = tls".to_owned());
+            lines.push(format!(
+                "应用层协议协商 (Alpn)   = {}",
+                alpn_protocols.join(",")
+            ));
+            lines.push(format!("SNI (serverName)        = {server_name}"));
+            lines.push(format!(
+                "跳过证书验证 (allowInsecure) = {}",
+                profile.self_signed_certificate
+            ));
+        }
+        config::Credentials::Tuic {
+            user_id,
+            password,
+            server_name,
+            alpn_protocols,
+            zero_rtt_handshake,
+        } => {
+            lines.push("协议 (protocol)         = tuic".to_owned());
+            lines.push(format!("地址 (address)          = {address}"));
+            lines.push(format!("端口 (port)             = {}", profile.port));
+            lines.push(format!("用户ID (id)             = {user_id}"));
+            lines.push(format!("密码 (password)         = {password}"));
+            lines.push("传输层安全 (TLS)        = tls".to_owned());
+            lines.push(format!(
+                "应用层协议协商 (Alpn)   = {}",
+                alpn_protocols.join(",")
+            ));
+            lines.push(format!("SNI (serverName)        = {server_name}"));
+            lines.push(format!(
+                "跳过证书验证 (allowInsecure) = {}",
+                profile.self_signed_certificate
+            ));
+            lines.push("拥塞控制算法 (congestion_control) = bbr".to_owned());
+            lines.push(format!("0-RTT                   = {zero_rtt_handshake}"));
+        }
+        config::Credentials::Shadowsocks {
+            cipher, password, ..
+        } => {
+            lines.push("协议 (protocol)         = shadowsocks".to_owned());
+            lines.push(format!("地址 (address)          = {address}"));
+            lines.push(format!("端口 (port)             = {}", profile.port));
+            lines.push(format!("密码 (password)         = {password}"));
+            lines.push(format!("加密方式 (encryption)   = {}", cipher.as_str()));
+        }
+        config::Credentials::AnyTls {
+            users,
+            server_name,
+            alpn_protocols,
+            security,
+            ..
+        } => {
+            lines.push("协议 (protocol)         = anytls".to_owned());
+            lines.push(format!("地址 (address)          = {address}"));
+            lines.push(format!("端口 (port)             = {}", profile.port));
+            for user in users {
+                if !user.name.is_empty() {
+                    lines.push(format!("用户名 (Username)      = {}", user.name));
+                }
+                lines.push(format!("密码 (password)         = {}", user.password));
+            }
+            lines.push(format!("SNI (serverName)        = {server_name}"));
+            lines.push(format!(
+                "应用层协议协商 (Alpn)   = {}",
+                alpn_protocols.join(",")
+            ));
+            match security {
+                config::AnyTlsSecurity::Tls => {
+                    lines.push("传输层安全 (TLS)        = tls".to_owned());
+                    lines.push(format!(
+                        "跳过证书验证 (allowInsecure) = {}",
+                        profile.self_signed_certificate
+                    ));
+                }
+                config::AnyTlsSecurity::Reality {
+                    public_key,
+                    short_id,
+                    ..
+                } => {
+                    lines.push("传输层安全 (TLS)        = reality".to_owned());
+                    lines.push("指纹 (Fingerprint)      = chrome".to_owned());
+                    lines.push(format!("公钥 (Public key)       = {public_key}"));
+                    lines.push(format!("短 ID (shortId)         = {short_id}"));
+                }
+            }
+        }
+    }
+    if let Some(uri) = share_uri {
+        lines.push("------------- 链接 (URL) -------------".to_owned());
+        lines.push(uri.to_owned());
+    }
+    if profile.self_signed_certificate {
+        lines.push("警告! 客户端需启用跳过证书验证 (allowInsecure)，或换用受信任证书。".to_owned());
+    }
+    lines.push("------------- END -------------".to_owned());
+    lines.join("\n")
 }
 
 pub(crate) async fn ensure_shoes_for_add(yes: bool) -> Result<()> {
@@ -876,5 +1013,157 @@ mod tests {
                 .command,
             Some(Command::Bootstrap)
         ));
+    }
+
+    #[test]
+    fn shadowsocks_details_include_import_fields() {
+        let profile = config::ManagedProfile {
+            id: Uuid::nil(),
+            name: "ss-main".to_owned(),
+            port: 34333,
+            server_address: Some("203.0.113.8".to_owned()),
+            credentials: config::Credentials::Shadowsocks {
+                cipher: ShadowsocksCipher::Aes256Gcm2022,
+                password: "generated-password".to_owned(),
+                udp_enabled: true,
+            },
+            certificate_path: None,
+            certificate_key_path: None,
+            self_signed_certificate: false,
+        };
+        let output = profile_details_text(&profile, Some("ss://import-link"));
+        for expected in [
+            "SHADOWSOCKS-34333.yaml",
+            "协议 (protocol)         = shadowsocks",
+            "地址 (address)          = 203.0.113.8",
+            "端口 (port)             = 34333",
+            "密码 (password)         = generated-password",
+            "加密方式 (encryption)   = 2022-blake3-aes-256-gcm",
+            "ss://import-link",
+            "------------- END -------------",
+        ] {
+            assert!(
+                output.contains(expected),
+                "missing {expected:?} in {output}"
+            );
+        }
+    }
+
+    #[test]
+    fn all_protocol_details_include_client_fields() {
+        let reality = config::ManagedProfile {
+            id: Uuid::nil(),
+            name: "reality".to_owned(),
+            port: 443,
+            server_address: Some("203.0.113.8".to_owned()),
+            credentials: config::Credentials::Reality {
+                user_id: Uuid::nil(),
+                private_key: "never-print-private".to_owned(),
+                public_key: "reality-public".to_owned(),
+                short_id: "0123456789abcdef".to_owned(),
+                server_name: "www.cloudflare.com".to_owned(),
+            },
+            certificate_path: None,
+            certificate_key_path: None,
+            self_signed_certificate: false,
+        };
+        let reality_uri = client::share_uri(&reality, "203.0.113.8").unwrap();
+        let reality_output = profile_details_text(&reality, Some(&reality_uri));
+        for expected in [
+            "协议 (protocol)         = vless",
+            "用户ID (id)",
+            "xtls-rprx-vision",
+            "reality-public",
+            "0123456789abcdef",
+            "vless://",
+        ] {
+            assert!(reality_output.contains(expected));
+        }
+        assert!(!reality_output.contains("never-print-private"));
+
+        let hysteria2 = config::ManagedProfile {
+            id: Uuid::nil(),
+            name: "hysteria2".to_owned(),
+            port: 2443,
+            server_address: Some("203.0.113.8".to_owned()),
+            credentials: config::Credentials::Hysteria2 {
+                password: "hy2-password".to_owned(),
+                server_name: "proxy.example.com".to_owned(),
+                alpn_protocols: vec!["h3".to_owned()],
+            },
+            certificate_path: None,
+            certificate_key_path: None,
+            self_signed_certificate: true,
+        };
+        let hysteria2_uri = client::share_uri(&hysteria2, "203.0.113.8").unwrap();
+        let hysteria2_output = profile_details_text(&hysteria2, Some(&hysteria2_uri));
+        for expected in [
+            "协议 (protocol)         = hysteria2",
+            "密码 (password)         = hy2-password",
+            "应用层协议协商 (Alpn)   = h3",
+            "allowInsecure) = true",
+            "hysteria2://",
+        ] {
+            assert!(hysteria2_output.contains(expected));
+        }
+
+        let tuic = config::ManagedProfile {
+            id: Uuid::nil(),
+            name: "tuic".to_owned(),
+            port: 3443,
+            server_address: Some("203.0.113.8".to_owned()),
+            credentials: config::Credentials::Tuic {
+                user_id: Uuid::nil(),
+                password: "tuic-password".to_owned(),
+                server_name: "proxy.example.com".to_owned(),
+                alpn_protocols: vec!["h3".to_owned()],
+                zero_rtt_handshake: false,
+            },
+            certificate_path: None,
+            certificate_key_path: None,
+            self_signed_certificate: true,
+        };
+        let tuic_uri = client::share_uri(&tuic, "203.0.113.8").unwrap();
+        let tuic_output = profile_details_text(&tuic, Some(&tuic_uri));
+        for expected in [
+            "协议 (protocol)         = tuic",
+            "用户ID (id)",
+            "密码 (password)         = tuic-password",
+            "congestion_control) = bbr",
+            "tuic://",
+        ] {
+            assert!(tuic_output.contains(expected));
+        }
+
+        let anytls = config::ManagedProfile {
+            id: Uuid::nil(),
+            name: "anytls".to_owned(),
+            port: 4443,
+            server_address: Some("203.0.113.8".to_owned()),
+            credentials: config::Credentials::AnyTls {
+                users: vec![config::AnyTlsUser {
+                    name: "default".to_owned(),
+                    password: "anytls-password".to_owned(),
+                }],
+                server_name: "proxy.example.com".to_owned(),
+                alpn_protocols: vec!["h2".to_owned(), "http/1.1".to_owned()],
+                udp_enabled: true,
+                security: config::AnyTlsSecurity::Tls,
+            },
+            certificate_path: None,
+            certificate_key_path: None,
+            self_signed_certificate: true,
+        };
+        let anytls_uri = client::share_uri(&anytls, "203.0.113.8").unwrap();
+        let anytls_output = profile_details_text(&anytls, Some(&anytls_uri));
+        for expected in [
+            "协议 (protocol)         = anytls",
+            "用户名 (Username)      = default",
+            "密码 (password)         = anytls-password",
+            "传输层安全 (TLS)        = tls",
+            "anytls://",
+        ] {
+            assert!(anytls_output.contains(expected));
+        }
     }
 }

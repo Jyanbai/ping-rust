@@ -25,6 +25,8 @@ pub struct AddRequest {
     pub port: Option<u16>,
     pub server_address: Option<String>,
     pub server_name: Option<String>,
+    pub shadowsocks_cipher: Option<ShadowsocksCipher>,
+    pub shadowsocks_password: Option<String>,
 }
 
 pub struct AddResult {
@@ -45,7 +47,8 @@ pub async fn execute(request: AddRequest) -> Result<AddResult> {
         .unwrap_or_else(|| config::DEFAULT_SNI.to_owned());
     let mut options = GenerationOptions::default();
     if matches!(request.protocol, Protocol::Shadowsocks) {
-        options.shadowsocks_cipher = ShadowsocksCipher::default();
+        options.shadowsocks_cipher = request.shadowsocks_cipher.unwrap_or_default();
+        options.shadowsocks_password = request.shadowsocks_password;
     }
     if matches!(request.protocol, Protocol::AnyTls) {
         options

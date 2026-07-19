@@ -52,6 +52,26 @@ enum ChangeAction {
     AnyTlsUserPassword,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MenuControl {
+    Continue,
+    Exit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PortChoice {
+    Back,
+    Random,
+    Fixed(u16),
+}
+
+fn control_after_success(main_menu_choice: usize) -> MenuControl {
+    match main_menu_choice {
+        1 | 3 => MenuControl::Exit,
+        _ => MenuControl::Continue,
+    }
+}
+
 fn parse_numbered_choice(value: &str, count: usize) -> Option<Option<usize>> {
     match value.trim().parse::<usize>().ok()? {
         0 => Some(None),
@@ -66,6 +86,17 @@ fn parse_keyed_choice(value: &str, items: &[(usize, &str)]) -> Option<usize> {
         .iter()
         .any(|(candidate, _)| *candidate == key)
         .then_some(key)
+}
+
+fn parse_port_choice(value: &str) -> Option<PortChoice> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Some(PortChoice::Random);
+    }
+    match value.parse::<u16>().ok()? {
+        0 => Some(PortChoice::Back),
+        port => Some(PortChoice::Fixed(port)),
+    }
 }
 
 fn read_menu_choice(max: usize) -> Result<String> {
@@ -155,33 +186,54 @@ pub async fn run() -> Result<()> {
         println!("shoes: {shoes_status}");
         println!("项目: https://github.com/Jyanbai/ping-rust\n");
         let selected = select_keyed("", MAIN_MENU_ITEMS)?;
-        let result = match selected {
-            0 => break,
+        let control = match selected {
+            0 => {
+                println!("{}", "已退出。".green());
+                return Ok(());
+            }
             1 => fast_add_config_menu().await,
-            2 => change_config_menu().await,
+            2 => {
+                change_config_menu().await?;
+                Ok(MenuControl::Continue)
+            }
             3 => view_config_menu(),
-            4 => delete_config_menu().await,
-            5 => service_menu(),
-            6 => update_menu().await,
-            7 => uninstall_menu(),
+            4 => {
+                delete_config_menu().await?;
+                Ok(MenuControl::Continue)
+            }
+            5 => {
+                service_menu()?;
+                Ok(MenuControl::Continue)
+            }
+            6 => {
+                update_menu().await?;
+                Ok(MenuControl::Continue)
+            }
+            7 => {
+                uninstall_menu()?;
+                Ok(MenuControl::Continue)
+            }
             8 => {
                 println!("常用命令：prs add reality、prs add ss、prs info、prs url、prs qr");
                 println!("高级帮助：ping-rust --help");
-                Ok(())
+                Ok(MenuControl::Continue)
             }
-            9 => operations_menu().await,
+            9 => {
+                operations_menu().await?;
+                Ok(MenuControl::Continue)
+            }
             10 => {
                 println!("ping-rust {}", env!("CARGO_PKG_VERSION"));
                 println!("Rust 实现的 shoes 菜单式安装与管理工具");
                 println!("https://github.com/Jyanbai/ping-rust");
-                Ok(())
+                Ok(MenuControl::Continue)
             }
             _ => anyhow::bail!("菜单返回了无效选项"),
-        };
-        result?;
+        }?;
+        if control == MenuControl::Exit {
+            return Ok(());
+        }
     }
-    println!("{}", "已退出。".green());
-    Ok(())
 }
 
 async fn change_config_menu() -> Result<()> {
@@ -361,31 +413,23 @@ async fn change_config_menu() -> Result<()> {
     Ok(())
 }
 
-fn view_config_menu() -> Result<()> {
+fn view_config_menu() -> Result<MenuControl> {
     let state = config::load_state()?;
     if state.profiles.is_empty() {
         println!("没有配置。");
-        return Ok(());
+        return Ok(MenuControl::Continue);
     }
     let Some(selected) = select_profile(&state.profiles)? else {
-        return Ok(());
+        return Ok(MenuControl::Continue);
     };
     let profile = &state.profiles[selected];
-    println!("\n------------- 配置信息 -------------\n");
-    println!("文件: {}", profile.config_file_name());
-    println!("协议: {}", profile.protocol_name());
-    println!("端口: {}", profile.port);
-    if profile.server_name() != "-" {
-        println!("SNI: {}", profile.server_name());
-    }
-    if let Some(server) = profile.server_address.as_deref() {
-        println!("地址: {server}");
-        match client::share_uri(profile, server) {
-            Ok(uri) => println!("\n{uri}\n"),
-            Err(error) => println!("\n分享链接生成失败: {error}\n"),
-        }
-    }
-    Ok(())
+    let share_uri = profile
+        .server_address
+        .as_deref()
+        .map(|server| client::share_uri(profile, server))
+        .transpose()?;
+    cli::print_profile_details(profile, share_uri.as_deref());
+    Ok(control_after_success(3))
 }
 
 async fn delete_config_menu() -> Result<()> {
@@ -507,35 +551,112 @@ fn export_menu() -> Result<()> {
     Ok(())
 }
 
-async fn fast_add_config_menu() -> Result<()> {
+async fn fast_add_config_menu() -> Result<MenuControl> {
     let protocol_number = select_keyed("选择协议", PROTOCOL_MENU_ITEMS)?;
     if protocol_number == 0 {
-        return Ok(());
+        return Ok(MenuControl::Continue);
     }
-    cli::ensure_shoes_for_add(false).await?;
     let protocol = fast_add::protocol_from_menu_number(protocol_number)?;
-    let port_text = Input::<String>::with_theme(&ColorfulTheme::default())
-        .with_prompt("输入端口（直接回车自动选择随机端口）")
-        .allow_empty(true)
-        .validate_with(|value: &String| {
-            if value.trim().is_empty() {
-                return Ok(());
-            }
-            match value.trim().parse::<u16>() {
-                Ok(port) if port > 0 => Ok(()),
-                _ => Err("端口必须在 1..=65535 范围内，或直接回车"),
-            }
-        })
-        .interact_text()?;
-    let port = if port_text.trim().is_empty() {
-        None
-    } else {
-        Some(port_text.trim().parse::<u16>()?)
+    let port = loop {
+        print!("\n请输入端口（直接回车随机，输入 0 返回）: ");
+        io::stdout().flush().context("输出端口提示失败")?;
+        let mut value = String::new();
+        if io::stdin().read_line(&mut value).context("读取端口失败")? == 0 {
+            anyhow::bail!("输入已结束");
+        }
+        match parse_port_choice(&value) {
+            Some(PortChoice::Back) => return Ok(MenuControl::Continue),
+            Some(PortChoice::Random) => break None,
+            Some(PortChoice::Fixed(port)) => break Some(port),
+            None => println!("错误! 请输入 1..=65535 的端口、直接回车随机，或输入 0 返回。"),
+        }
     };
-    deploy_fast_config(protocol, port).await
+    let (shadowsocks_cipher, shadowsocks_password) = if protocol == Protocol::Shadowsocks {
+        let Some(cipher) = select_shadowsocks_cipher()? else {
+            return Ok(MenuControl::Continue);
+        };
+        let entered_password = Password::with_theme(&ColorfulTheme::default())
+            .with_prompt("请设置密码（留空安全随机生成，输入 0 返回）")
+            .allow_empty_password(true)
+            .interact()?;
+        if entered_password == "0" {
+            return Ok(MenuControl::Continue);
+        }
+        let (password, warning) = prepare_shadowsocks_password(cipher, entered_password);
+        if let Some(warning) = warning {
+            println!(
+                "\n警告! Shadowsocks 协议 ({}) 不支持使用该密码。",
+                cipher.as_str()
+            );
+            println!("原因：{warning}");
+            println!("脚本将自动创建可用密码。\n");
+        }
+        (Some(cipher), Some(password))
+    } else {
+        (None, None)
+    };
+    cli::ensure_shoes_for_add(false).await?;
+    deploy_fast_config(protocol, port, shadowsocks_cipher, shadowsocks_password).await
 }
 
-async fn deploy_fast_config(protocol: Protocol, port: Option<u16>) -> Result<()> {
+fn select_shadowsocks_cipher() -> Result<Option<ShadowsocksCipher>> {
+    let ciphers = [
+        ShadowsocksCipher::Aes128Gcm,
+        ShadowsocksCipher::Aes256Gcm,
+        ShadowsocksCipher::Chacha20IetfPoly1305,
+        ShadowsocksCipher::Aes128Gcm2022,
+        ShadowsocksCipher::Aes256Gcm2022,
+        ShadowsocksCipher::Chacha20IetfPoly13052022,
+    ];
+    println!("\n请选择加密方式:\n");
+    for (index, cipher) in ciphers.iter().enumerate() {
+        println!("{}) {}", index + 1, cipher.as_str());
+    }
+    println!("0) 返回");
+    println!("\n(默认 {}):\n", ShadowsocksCipher::default().as_str());
+    loop {
+        let value = read_menu_choice(ciphers.len())?;
+        let value = value.trim();
+        if value.is_empty() {
+            return Ok(Some(ShadowsocksCipher::default()));
+        }
+        if value == "0" {
+            return Ok(None);
+        }
+        if let Ok(selected) = value.parse::<usize>() {
+            if let Some(cipher) = ciphers.get(selected.saturating_sub(1)) {
+                return Ok(Some(*cipher));
+            }
+        }
+        println!(
+            "无效序号；请输入 0 到 {} 之间的数字，或直接回车使用默认值。",
+            ciphers.len()
+        );
+    }
+}
+
+fn prepare_shadowsocks_password(
+    cipher: ShadowsocksCipher,
+    entered_password: String,
+) -> (String, Option<String>) {
+    if entered_password.is_empty() {
+        return (config::generate_shadowsocks_password(cipher), None);
+    }
+    match config::validate_shadowsocks_password(cipher, &entered_password) {
+        Ok(()) => (entered_password, None),
+        Err(error) => (
+            config::generate_shadowsocks_password(cipher),
+            Some(error.to_string()),
+        ),
+    }
+}
+
+async fn deploy_fast_config(
+    protocol: Protocol,
+    port: Option<u16>,
+    shadowsocks_cipher: Option<ShadowsocksCipher>,
+    shadowsocks_password: Option<String>,
+) -> Result<MenuControl> {
     let server_address = match fast_add::resolve_server_address(None).await {
         Ok(address) => address,
         Err(error) => {
@@ -551,10 +672,12 @@ async fn deploy_fast_config(protocol: Protocol, port: Option<u16>) -> Result<()>
         port,
         server_address: Some(server_address),
         server_name: None,
+        shadowsocks_cipher,
+        shadowsocks_password,
     })
     .await?;
     cli::print_add_result(&result);
-    Ok(())
+    Ok(control_after_success(1))
 }
 
 async fn advanced_add_config_menu() -> Result<()> {
@@ -839,6 +962,48 @@ mod tests {
         assert_eq!(parse_keyed_choice("0", MAIN_MENU_ITEMS), Some(0));
         assert_eq!(parse_keyed_choice("0", PROTOCOL_MENU_ITEMS), Some(0));
         assert_eq!(parse_keyed_choice("", MAIN_MENU_ITEMS), None);
+        assert_eq!(parse_port_choice("0"), Some(PortChoice::Back));
+        assert_eq!(parse_port_choice(""), Some(PortChoice::Random));
+        assert_eq!(parse_port_choice("443"), Some(PortChoice::Fixed(443)));
+        assert_eq!(parse_port_choice("65536"), None);
+    }
+
+    #[test]
+    fn add_and_view_success_exit_the_menu() {
+        assert_eq!(control_after_success(1), MenuControl::Exit);
+        assert_eq!(control_after_success(3), MenuControl::Exit);
+        assert_eq!(control_after_success(2), MenuControl::Continue);
+        assert_eq!(control_after_success(4), MenuControl::Continue);
+    }
+
+    #[test]
+    fn invalid_shadowsocks_2022_password_is_replaced() {
+        let cipher = ShadowsocksCipher::Aes256Gcm2022;
+        let invalid = "ordinary-password".to_owned();
+        let (password, warning) = prepare_shadowsocks_password(cipher, invalid.clone());
+        assert_ne!(password, invalid);
+        assert!(warning.is_some());
+        config::validate_shadowsocks_password(cipher, &password).unwrap();
+    }
+
+    #[test]
+    fn valid_shadowsocks_password_is_preserved() {
+        let cipher = ShadowsocksCipher::Aes128Gcm2022;
+        let valid = config::generate_shadowsocks_password(cipher);
+        let (password, warning) = prepare_shadowsocks_password(cipher, valid.clone());
+        assert_eq!(password, valid);
+        assert!(warning.is_none());
+
+        let legacy = "user-selected-password".to_owned();
+        let (password, warning) =
+            prepare_shadowsocks_password(ShadowsocksCipher::Aes256Gcm, legacy.clone());
+        assert_eq!(password, legacy);
+        assert!(warning.is_none());
+
+        let (password, warning) =
+            prepare_shadowsocks_password(ShadowsocksCipher::Aes256Gcm2022, String::new());
+        assert!(warning.is_none());
+        config::validate_shadowsocks_password(ShadowsocksCipher::Aes256Gcm2022, &password).unwrap();
     }
 
     #[test]

@@ -1708,7 +1708,7 @@ fn quic_server(
     }
 }
 
-fn generate_shadowsocks_password(cipher: ShadowsocksCipher) -> String {
+pub(crate) fn generate_shadowsocks_password(cipher: ShadowsocksCipher) -> String {
     let bytes = cipher.key_len().unwrap_or(24);
     let mut value = vec![0u8; bytes];
     rand::rng().fill_bytes(&mut value);
@@ -1894,7 +1894,10 @@ fn validate_reality_short_id(value: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_shadowsocks_password(cipher: ShadowsocksCipher, password: &str) -> Result<()> {
+pub(crate) fn validate_shadowsocks_password(
+    cipher: ShadowsocksCipher,
+    password: &str,
+) -> Result<()> {
     if password.is_empty() || password.contains(char::is_control) {
         bail!("Shadowsocks 密码不能为空或包含控制字符");
     }

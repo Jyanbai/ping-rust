@@ -326,9 +326,13 @@ pub fn share_uri(profile: &ManagedProfile, server: &str) -> Result<String> {
             ..
         } => {
             let mut query = Serializer::new(String::new());
-            query.append_pair("sni", server_name);
+            query
+                .append_pair("sni", server_name)
+                .append_pair("alpn", "h3");
             if profile.self_signed_certificate {
-                query.append_pair("insecure", "1");
+                query
+                    .append_pair("insecure", "1")
+                    .append_pair("allowInsecure", "1");
             }
             Ok(format!(
                 "hysteria2://{}@{host}:{}?{}#{fragment}",
@@ -349,7 +353,9 @@ pub fn share_uri(profile: &ManagedProfile, server: &str) -> Result<String> {
                 .append_pair("alpn", "h3")
                 .append_pair("sni", server_name);
             if profile.self_signed_certificate {
-                query.append_pair("allow_insecure", "1");
+                query
+                    .append_pair("insecure", "1")
+                    .append_pair("allowInsecure", "1");
             }
             Ok(format!(
                 "tuic://{user_id}:{}@{host}:{}?{}#{fragment}",
@@ -376,7 +382,9 @@ pub fn share_uri(profile: &ManagedProfile, server: &str) -> Result<String> {
             let mut query = Serializer::new(String::new());
             query.append_pair("sni", server_name);
             if profile.self_signed_certificate {
-                query.append_pair("insecure", "1");
+                query
+                    .append_pair("insecure", "1")
+                    .append_pair("allowInsecure", "1");
             }
             Ok(format!(
                 "anytls://{}@{host}:{}/?{}#{fragment}",
@@ -569,6 +577,53 @@ mod tests {
         let sing_box = render(&profile, ClientFormat::SingBox, "203.0.113.2").unwrap();
         assert!(clash.contains("skip-cert-verify: true"));
         assert!(sing_box.contains("\"insecure\": true"));
+    }
+
+    #[test]
+    fn self_signed_share_uris_include_v2rayn_insecure_flags() {
+        let hysteria2 = ManagedProfile {
+            id: Uuid::nil(),
+            name: "hy2".to_owned(),
+            port: 443,
+            server_address: None,
+            credentials: Credentials::Hysteria2 {
+                password: "secret".to_owned(),
+                server_name: "proxy.example.com".to_owned(),
+                alpn_protocols: vec!["h3".to_owned()],
+            },
+            certificate_path: None,
+            certificate_key_path: None,
+            self_signed_certificate: true,
+        };
+        let tuic = ManagedProfile {
+            id: Uuid::nil(),
+            name: "tuic".to_owned(),
+            port: 443,
+            server_address: None,
+            credentials: Credentials::Tuic {
+                user_id: Uuid::nil(),
+                password: "secret".to_owned(),
+                server_name: "proxy.example.com".to_owned(),
+                alpn_protocols: vec!["h3".to_owned()],
+                zero_rtt_handshake: false,
+            },
+            certificate_path: None,
+            certificate_key_path: None,
+            self_signed_certificate: true,
+        };
+        for uri in [
+            share_uri(&hysteria2, "203.0.113.2").unwrap(),
+            share_uri(&tuic, "203.0.113.3").unwrap(),
+            share_uri(&anytls_profile(AnyTlsSecurity::Tls), "203.0.113.5").unwrap(),
+        ] {
+            assert!(uri.contains("insecure=1"), "missing insecure flag: {uri}");
+            assert!(
+                uri.contains("allowInsecure=1"),
+                "missing v2rayN allowInsecure flag: {uri}"
+            );
+        }
+        let hysteria2_uri = share_uri(&hysteria2, "203.0.113.2").unwrap();
+        assert!(hysteria2_uri.contains("alpn=h3"));
     }
 
     #[test]
