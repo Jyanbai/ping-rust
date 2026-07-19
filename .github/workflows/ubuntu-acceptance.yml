@@ -416,7 +416,7 @@ jobs:
           wait_for {VLESS-REALITY-25450\.yaml} view-profile-file
           wait_for {请选择} view-profile-prompt
           send "$env(PROFILE_NUMBER)\r"
-          wait_for {协议 \(protocol\).*vless} view-info
+          wait_for {协议 \(protocol\)[^\r\n]*= vless} view-info
           wait_for {vless://} view-uri
           expect { eof {} timeout { puts stderr "timeout waiting for view exit"; exit 36 } }
 
