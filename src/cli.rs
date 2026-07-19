@@ -174,9 +174,9 @@ pub struct GenerateArgs {
     port: u16,
     #[arg(long)]
     output: Option<PathBuf>,
-    /// Reality SNI 或 QUIC/TLS 证书域名
-    #[arg(long, default_value = config::DEFAULT_SNI)]
-    server_name: String,
+    /// Reality SNI 或 QUIC/TLS 证书域名；Reality 未指定时随机选择非 Apple 大厂域名
+    #[arg(long)]
+    server_name: Option<String>,
     /// Reality fallback，格式为 host:port
     #[arg(long)]
     dest: Option<String>,
@@ -271,6 +271,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             if matches!(protocol, Protocol::AnyTls) && anytls_users.is_empty() {
                 anytls_users.push(config::generated_anytls_user("default"));
             }
+            let server_name = config::resolve_server_name(server_name, protocol, anytls_mode);
             let output = output.unwrap_or_else(|| PathBuf::from(crate::utils::CONFIG_FILE));
             let managed = output == Path::new(crate::utils::CONFIG_FILE);
             let request = GenerationRequest {
@@ -516,7 +517,10 @@ fn profile_details_text(profile: &config::ManagedProfile, share_uri: Option<&str
             lines.push("传输协议 (network)      = tcp".to_owned());
             lines.push("传输层安全 (TLS)        = reality".to_owned());
             lines.push(format!("SNI (serverName)        = {server_name}"));
-            lines.push("指纹 (Fingerprint)      = chrome".to_owned());
+            lines.push(format!(
+                "指纹 (Fingerprint)      = {}",
+                config::REALITY_FINGERPRINT
+            ));
             lines.push(format!("公钥 (Public key)       = {public_key}"));
             lines.push(format!("短 ID (shortId)         = {short_id}"));
         }
@@ -609,7 +613,10 @@ fn profile_details_text(profile: &config::ManagedProfile, share_uri: Option<&str
                     ..
                 } => {
                     lines.push("传输层安全 (TLS)        = reality".to_owned());
-                    lines.push("指纹 (Fingerprint)      = chrome".to_owned());
+                    lines.push(format!(
+                        "指纹 (Fingerprint)      = {}",
+                        config::REALITY_FINGERPRINT
+                    ));
                     lines.push(format!("公钥 (Public key)       = {public_key}"));
                     lines.push(format!("短 ID (shortId)         = {short_id}"));
                 }

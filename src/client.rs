@@ -106,7 +106,7 @@ fn clash_meta(profile: &ManagedProfile, server: &str) -> Result<String> {
             "tls": true,
             "servername": server_name,
             "flow": "xtls-rprx-vision",
-            "client-fingerprint": "chrome",
+            "client-fingerprint": config::REALITY_FINGERPRINT,
             "reality-opts": { "public-key": public_key, "short-id": short_id }
         }),
         Credentials::Hysteria2 {
@@ -172,7 +172,7 @@ fn clash_meta(profile: &ManagedProfile, server: &str) -> Result<String> {
                 "server": server,
                 "port": profile.port,
                 "password": first_anytls_password(users)?,
-                "client-fingerprint": "chrome",
+                "client-fingerprint": config::REALITY_FINGERPRINT,
                 "udp": udp_enabled,
                 "sni": server_name,
                 "alpn": alpn_protocols,
@@ -209,7 +209,7 @@ fn sing_box(profile: &ManagedProfile, server: &str) -> Result<String> {
             "tls": {
                 "enabled": true,
                 "server_name": server_name,
-                "utls": { "enabled": true, "fingerprint": "chrome" },
+                "utls": { "enabled": true, "fingerprint": config::REALITY_FINGERPRINT },
                 "reality": { "enabled": true, "public_key": public_key, "short_id": short_id }
             }
         }),
@@ -270,7 +270,7 @@ fn sing_box(profile: &ManagedProfile, server: &str) -> Result<String> {
                 } => json!({
                     "enabled": true,
                     "server_name": server_name,
-                    "utls": { "enabled": true, "fingerprint": "chrome" },
+                    "utls": { "enabled": true, "fingerprint": config::REALITY_FINGERPRINT },
                     "reality": {
                         "enabled": true,
                         "public_key": public_key,
@@ -310,7 +310,7 @@ pub fn share_uri(profile: &ManagedProfile, server: &str) -> Result<String> {
                 .append_pair("flow", "xtls-rprx-vision")
                 .append_pair("security", "reality")
                 .append_pair("sni", server_name)
-                .append_pair("fp", "chrome")
+                .append_pair("fp", config::REALITY_FINGERPRINT)
                 .append_pair("pbk", public_key)
                 .append_pair("sid", short_id)
                 .append_pair("type", "tcp");

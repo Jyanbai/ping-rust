@@ -4,7 +4,7 @@
 
 核心逻辑全部位于 Rust 源码中；`scripts/install.sh` 负责下载、校验并安装官方预编译二进制，随后调用 Rust 的安全首次部署入口。
 
-> v0.1.10 开发版包含 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks 和 AnyTLS 五协议；运行一键安装脚本即可零输入部署默认 VLESS-REALITY，数字菜单与配置列表保持 233boy 风格的简洁输出。
+> v0.1.11 开发版包含 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks 和 AnyTLS 五协议；运行一键安装脚本即可零输入部署默认 VLESS-REALITY，数字菜单与配置列表保持 233boy 风格的简洁输出。
 
 ## 一键安装（推荐）
 
@@ -38,6 +38,7 @@ bash <(curl --proto '=https' --tlsv1.2 -fsSL \
 - 生成 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks、AnyTLS 服务端配置
 - `prs` 数字菜单与 `prs add/a` 快捷命令：自动端口、自动凭据、部署完成直接输出分享链接
 - 在 Rust 内生成 X25519 Reality 密钥、UUID、short ID、随机密码和自签名证书
+- Reality 未显式指定 SNI 时，从与本地 233boy 脚本一致的 Amazon、eBay、PayPal、Cloudflare 域名列表中随机选择（不含 Apple）；客户端指纹与该脚本一致固定为 `chrome`
 - 在同目录候选文件上调用 `shoes --dry-run`，通过后才原子提交并启用 systemd 服务
 - 多配置添加、列表、删除、端口冲突保护
 - 跨进程配置锁、配置/sidecar 精确回滚，更新与恢复保留服务原运行状态
@@ -155,7 +156,7 @@ vless://...security=reality...pbk=...&sid=...
 
 每个节点都会保存为 `/etc/shoes/profiles/` 下的真实独立 YAML 文件；查看、更改和删除时直接显示该文件名，例如 `VLESS-REALITY-53453.yaml`。只有一个配置时自动选中，多个配置时才显示数字列表。shoes 继续加载由 Rust 确定性聚合的 `/etc/shoes/config.yaml`，内部 UUID 仅用于安全定位。
 
-首次安装流程是：`install.sh → 自动安装 ping-rust/shoes → 自动随机端口部署 VLESS-REALITY → 复制 URL`，中间零输入。后续日常流程是：`prs → 1 → 选择协议 → 输入端口/直接回车随机 → 复制 URL 到 v2rayN`；Shadowsocks 会额外选择加密方式和密码，SS 2022 密码不符合所选 cipher 的 Base64 密钥长度时会警告并自动替换。TUIC、Hysteria2、VLESS-REALITY 和 AnyTLS 自动生成各自的 UUID、密码、密钥或证书。五个协议都会输出公网地址、端口、客户端所需凭据、协议参数和分享链接。添加或查看配置成功后直接退出 `prs`；主菜单输入 `0` 退出，任意子菜单输入 `0` 返回主菜单。自动端口从 `20000..=65535` 的高位范围选择；所有协议选择固定使用连续编号 `1/2/3/4/5`。链接只会在配置通过 `shoes --dry-run`、原子写入、systemd 启动且确认为 active 后输出；失败会恢复原配置和服务状态。
+首次安装流程是：`install.sh → 自动安装 ping-rust/shoes → 自动随机端口部署 VLESS-REALITY → 复制 URL`，中间零输入。Reality 未指定 `--server-name` 时会从 `www.amazon.com`、`www.ebay.com`、`www.paypal.com`、`www.cloudflare.com`、`dash.cloudflare.com`、`aws.amazon.com` 中随机选择 SNI；列表不含 Apple，客户端指纹固定为本地 233boy 脚本使用的 `chrome`。后续日常流程是：`prs → 1 → 选择协议 → 输入端口/直接回车随机 → 复制 URL 到 v2rayN`；Shadowsocks 会额外选择加密方式和密码，SS 2022 密码不符合所选 cipher 的 Base64 密钥长度时会警告并自动替换。TUIC、Hysteria2、VLESS-REALITY 和 AnyTLS 自动生成各自的 UUID、密码、密钥或证书。五个协议都会输出公网地址、端口、客户端所需凭据、协议参数和分享链接。添加或查看配置成功后直接退出 `prs`；主菜单输入 `0` 退出，任意子菜单输入 `0` 返回主菜单。自动端口从 `20000..=65535` 的高位范围选择；所有协议选择固定使用连续编号 `1/2/3/4/5`。链接只会在配置通过 `shoes --dry-run`、原子写入、systemd 启动且确认为 active 后输出；失败会恢复原配置和服务状态。
 
 非交互方式：
 

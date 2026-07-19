@@ -98,11 +98,33 @@ jobs:
             printf '%s' "$reality_uri" | grep -q "$parameter" \
               || { echo 'saved URI parameter missing' >&2; exit 1; }
           done
+          read -r reality_sni reality_fingerprint < <(
+            REALITY_URI="$reality_uri" python3 - <<'PY'
+          import os
+          from urllib.parse import parse_qs, urlparse
+
+          query = parse_qs(urlparse(os.environ['REALITY_URI']).query)
+          print(query.get('sni', [''])[0], query.get('fp', [''])[0])
+          PY
+          )
+          case "$reality_sni" in
+            www.amazon.com|www.ebay.com|www.paypal.com|www.cloudflare.com|dash.cloudflare.com|aws.amazon.com) ;;
+            *) echo "unexpected Reality SNI: $reality_sni" >&2; exit 1 ;;
+          esac
+          test "$reality_fingerprint" = chrome \
+            || { echo "unexpected Reality fingerprint: $reality_fingerprint" >&2; exit 1; }
           test "$(sudo "$PING_RUST" qr 2>/dev/null)" = "$reality_uri" \
             || { echo 'QR fallback URI mismatch' >&2; exit 1; }
           info_output="$(sudo "$PING_RUST" info)"
           printf '%s' "$info_output" | grep -q '客户端地址：' \
             || { echo 'client address missing from info' >&2; exit 1; }
+          printf '%s' "$info_output" | grep -Fq "| $reality_sni" \
+            || { echo 'Reality SNI differs between info summary and URI' >&2; exit 1; }
+          sudo grep -Fq "$reality_sni:" /etc/shoes/config.yaml \
+            || { echo 'Reality SNI missing from shoes YAML' >&2; exit 1; }
+          sudo grep -Fq "\"server_name\": \"$reality_sni\"" \
+            /etc/shoes/ping-rust-state.json \
+            || { echo 'Reality SNI missing from managed state' >&2; exit 1; }
           reality_port="$(
             printf '%s' "$info_output" \
               | sed -nE 's/.*0\.0\.0\.0:([0-9]+).*/\1/p' \
@@ -142,6 +164,51 @@ jobs:
           test -n "$reality_profile" \
             || { echo 'Reality profile UUID missing' >&2; exit 1; }
           printf 'REALITY_PROFILE=%s\n' "$reality_profile" >> "$GITHUB_ENV"
+
+      - name: View the only profile without a selection menu
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo env PRS_COMMAND="$PRS" expect <<'EXPECT'
+          log_user 0
+          set timeout 180
+          spawn $env(PRS_COMMAND)
+          expect -re {请选择 \[0-10\]}
+          send "3\r"
+          expect {
+            -re {请选择配置} {
+              puts stderr "single profile unexpectedly showed a selection menu"
+              exit 41
+            }
+            -re {协议 \(protocol\)[^\r\n]*= vless} {}
+            eof {
+              puts stderr "view exited before rendering the only profile"
+              exit 42
+            }
+            timeout {
+              puts stderr "timeout waiting for the only profile details"
+              exit 43
+            }
+          }
+          expect {
+            -re {vless://} {}
+            eof {
+              puts stderr "view exited before rendering the share URI"
+              exit 44
+            }
+            timeout {
+              puts stderr "timeout waiting for the only profile URI"
+              exit 45
+            }
+          }
+          expect {
+            eof {}
+            timeout {
+              puts stderr "single-profile view did not exit"
+              exit 46
+            }
+          }
+          EXPECT
 
       - name: Add Hysteria2 and confirm service reload
         shell: bash

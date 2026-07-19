@@ -12,7 +12,7 @@ use base64::{
     Engine,
 };
 use clap::ValueEnum;
-use rand::RngCore;
+use rand::{Rng, RngCore};
 use rcgen::{generate_simple_self_signed, CertifiedKey};
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
@@ -22,6 +22,20 @@ use x25519_dalek::{PublicKey, StaticSecret};
 use crate::utils;
 
 pub const DEFAULT_SNI: &str = "www.cloudflare.com";
+pub const REALITY_FINGERPRINT: &str = "chrome";
+pub const REALITY_SERVER_NAMES: &[&str] = &[
+    "www.amazon.com",
+    "www.ebay.com",
+    "www.paypal.com",
+    "www.cloudflare.com",
+    "dash.cloudflare.com",
+    "aws.amazon.com",
+];
+
+fn random_reality_server_name() -> &'static str {
+    let index = rand::rng().random_range(0..REALITY_SERVER_NAMES.len());
+    REALITY_SERVER_NAMES[index]
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum Protocol {
@@ -94,6 +108,22 @@ pub enum AnyTlsMode {
     #[default]
     Tls,
     Reality,
+}
+
+pub fn resolve_server_name(
+    explicit: Option<String>,
+    protocol: Protocol,
+    anytls_mode: AnyTlsMode,
+) -> String {
+    explicit.unwrap_or_else(|| {
+        if matches!(protocol, Protocol::Reality)
+            || (matches!(protocol, Protocol::AnyTls) && anytls_mode == AnyTlsMode::Reality)
+        {
+            random_reality_server_name().to_owned()
+        } else {
+            DEFAULT_SNI.to_owned()
+        }
+    })
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -2091,6 +2121,52 @@ mod tests {
             certificate_key: None,
             options: GenerationOptions::default(),
         }
+    }
+
+    #[test]
+    fn reality_defaults_match_the_local_233boy_source() {
+        assert_eq!(
+            REALITY_SERVER_NAMES,
+            [
+                "www.amazon.com",
+                "www.ebay.com",
+                "www.paypal.com",
+                "www.cloudflare.com",
+                "dash.cloudflare.com",
+                "aws.amazon.com",
+            ]
+        );
+        assert!(REALITY_SERVER_NAMES
+            .iter()
+            .all(|name| !name.to_ascii_lowercase().contains("apple")));
+        assert_eq!(REALITY_FINGERPRINT, "chrome");
+
+        for _ in 0..64 {
+            let selected = resolve_server_name(None, Protocol::Reality, AnyTlsMode::Tls);
+            assert!(REALITY_SERVER_NAMES.contains(&selected.as_str()));
+        }
+        let anytls_reality = resolve_server_name(None, Protocol::AnyTls, AnyTlsMode::Reality);
+        assert!(REALITY_SERVER_NAMES.contains(&anytls_reality.as_str()));
+    }
+
+    #[test]
+    fn explicit_and_tls_server_names_keep_existing_behavior() {
+        assert_eq!(
+            resolve_server_name(
+                Some("custom.example.com".to_owned()),
+                Protocol::Reality,
+                AnyTlsMode::Tls,
+            ),
+            "custom.example.com"
+        );
+        assert_eq!(
+            resolve_server_name(None, Protocol::Hysteria2, AnyTlsMode::Tls),
+            DEFAULT_SNI
+        );
+        assert_eq!(
+            resolve_server_name(None, Protocol::AnyTls, AnyTlsMode::Tls),
+            DEFAULT_SNI
+        );
     }
 
     fn reality_server_and_profile(port: u16) -> (ServerConfig, ManagedProfile) {

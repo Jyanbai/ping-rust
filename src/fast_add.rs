@@ -42,9 +42,11 @@ pub async fn execute(request: AddRequest) -> Result<AddResult> {
 
     let server_address = resolve_server_address(request.server_address.as_deref()).await?;
     let port = select_port(request.protocol, request.port)?;
-    let server_name = request
-        .server_name
-        .unwrap_or_else(|| config::DEFAULT_SNI.to_owned());
+    let server_name = config::resolve_server_name(
+        request.server_name,
+        request.protocol,
+        config::AnyTlsMode::Tls,
+    );
     let mut options = GenerationOptions::default();
     if matches!(request.protocol, Protocol::Shadowsocks) {
         options.shadowsocks_cipher = request.shadowsocks_cipher.unwrap_or_default();

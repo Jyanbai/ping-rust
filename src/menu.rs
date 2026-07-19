@@ -806,25 +806,22 @@ async fn advanced_add_config_menu() -> Result<()> {
             );
         }
     }
+    let reality_outer = matches!(protocol, Protocol::Reality)
+        || (matches!(protocol, Protocol::AnyTls) && options.anytls_mode == AnyTlsMode::Reality);
     let server_name = if matches!(protocol, Protocol::Shadowsocks) {
         config::DEFAULT_SNI.to_owned()
     } else {
+        let default_server_name = config::resolve_server_name(None, protocol, options.anytls_mode);
         Input::<String>::with_theme(&ColorfulTheme::default())
-            .with_prompt(
-                if matches!(protocol, Protocol::Reality)
-                    || options.anytls_mode == AnyTlsMode::Reality
-                {
-                    "Reality SNI"
-                } else {
-                    "证书域名/服务器名称"
-                },
-            )
-            .default(config::DEFAULT_SNI.to_owned())
+            .with_prompt(if reality_outer {
+                "Reality SNI"
+            } else {
+                "证书域名/服务器名称"
+            })
+            .default(default_server_name)
             .interact_text()?
     };
-    let reality_dest = if matches!(protocol, Protocol::Reality)
-        || (matches!(protocol, Protocol::AnyTls) && options.anytls_mode == AnyTlsMode::Reality)
-    {
+    let reality_dest = if reality_outer {
         Some(
             Input::<String>::with_theme(&ColorfulTheme::default())
                 .with_prompt("Reality fallback")
@@ -974,6 +971,28 @@ mod tests {
         assert_eq!(control_after_success(3), MenuControl::Exit);
         assert_eq!(control_after_success(2), MenuControl::Continue);
         assert_eq!(control_after_success(4), MenuControl::Continue);
+    }
+
+    #[test]
+    fn single_profile_is_selected_without_showing_a_choice_menu() {
+        let profile = config::ManagedProfile {
+            id: uuid::Uuid::new_v4(),
+            name: "only-profile".to_owned(),
+            port: 443,
+            server_address: None,
+            credentials: Credentials::Reality {
+                user_id: uuid::Uuid::new_v4(),
+                private_key: "private".to_owned(),
+                public_key: "public".to_owned(),
+                short_id: "0123456789abcdef".to_owned(),
+                server_name: config::DEFAULT_SNI.to_owned(),
+            },
+            certificate_path: None,
+            certificate_key_path: None,
+            self_signed_certificate: false,
+        };
+
+        assert_eq!(select_profile(&[profile]).unwrap(), Some(0));
     }
 
     #[test]
