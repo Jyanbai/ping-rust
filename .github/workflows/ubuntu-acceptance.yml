@@ -320,11 +320,14 @@ jobs:
           send "$env(PROTOCOL_NUMBER)\r"
           wait_for {输入端口} port-prompt
           send "$env(MENU_PORT)\r"
+          if {$env(PROTOCOL_NUMBER) == "3"} {
+            wait_for {请选择加密方式} shadowsocks-cipher-menu
+            send "\r"
+            wait_for {请设置密码} shadowsocks-password-prompt
+            send "\r"
+          }
           wait_for "$env(SHARE_SCHEME)://" share-uri
-          wait_for {请选择 \[0-10\]} main-menu-return
-          send "0\r"
-          wait_for {已退出} exit-message
-          expect { eof {} timeout { puts stderr "timeout waiting for exit"; exit 23 } }
+          expect { eof {} timeout { puts stderr "timeout waiting for add exit"; exit 23 } }
           EXPECT
           }
 
@@ -413,8 +416,11 @@ jobs:
           wait_for {VLESS-REALITY-25450\.yaml} view-profile-file
           wait_for {请选择} view-profile-prompt
           send "$env(PROFILE_NUMBER)\r"
-          wait_for {配置信息} view-info
+          wait_for {协议 \(protocol\).*vless} view-info
           wait_for {vless://} view-uri
+          expect { eof {} timeout { puts stderr "timeout waiting for view exit"; exit 36 } }
+
+          spawn $env(PRS_COMMAND)
           wait_for {请选择 \[0-10\]} main-menu-after-view
           send "4\r"
           wait_for {请选择配置} delete-profile-menu
@@ -432,7 +438,7 @@ jobs:
           wait_for {请选择 \[0-10\]} main-menu-after-delete
           send "0\r"
           wait_for {已退出} exit-message
-          expect { eof {} timeout { puts stderr "timeout waiting for view/delete exit"; exit 36 } }
+          expect { eof {} timeout { puts stderr "timeout waiting for delete exit"; exit 37 } }
           EXPECT
           sudo test ! -e /etc/shoes/profiles/SHADOWSOCKS-25449.yaml
           ! sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)25449$'
