@@ -196,15 +196,6 @@ PING_RUST_CHAIN_TEST_URL="http://10.231.1.1:${origin_port}/probe" \
 [[ "$(tr -d '\r\n' <"$work_dir/peer.log")" == "10.231.1.2" ]]
 current_stage="adding second Shadowsocks chain node"
 expect "$REPO_DIR/tests/chain_menu.exp" "$PING_RUST_BIN" add "$uri_two"
-current_stage="rejecting reachable node with invalid protocol credentials"
-expect "$REPO_DIR/tests/chain_menu.exp" "$PING_RUST_BIN" add "$uri_invalid"
-if PING_RUST_CHAIN_TEST_URL="http://10.231.1.1:${origin_port}/probe" \
-    expect "$REPO_DIR/tests/chain_menu.exp" "$PING_RUST_BIN" test 3; then
-    echo "full proxy test accepted a node with invalid credentials" >&2
-    exit 1
-fi
-current_stage="removing invalid protocol node"
-expect "$REPO_DIR/tests/chain_menu.exp" "$PING_RUST_BIN" delete 3
 current_stage="enabling first chain node"
 expect "$REPO_DIR/tests/chain_menu.exp" "$PING_RUST_BIN" enable
 
@@ -297,6 +288,15 @@ probe_expect_peer 10.231.1.1
 current_stage="deleting first chain node"
 expect "$REPO_DIR/tests/chain_menu.exp" "$PING_RUST_BIN" delete 1
 current_stage="deleting final chain node"
+expect "$REPO_DIR/tests/chain_menu.exp" "$PING_RUST_BIN" delete 1
+current_stage="rejecting reachable node with invalid protocol credentials"
+expect "$REPO_DIR/tests/chain_menu.exp" "$PING_RUST_BIN" add "$uri_invalid"
+if PING_RUST_CHAIN_TEST_URL="http://10.231.1.1:${origin_port}/probe" \
+    expect "$REPO_DIR/tests/chain_menu.exp" "$PING_RUST_BIN" test 1; then
+    echo "full proxy test accepted a node with invalid credentials" >&2
+    exit 1
+fi
+current_stage="removing invalid protocol node"
 expect "$REPO_DIR/tests/chain_menu.exp" "$PING_RUST_BIN" delete 1
 python3 - <<'PY'
 import json
