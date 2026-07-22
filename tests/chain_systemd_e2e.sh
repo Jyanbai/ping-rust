@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 PING_RUST_BIN="${PING_RUST_BIN:-/usr/local/bin/ping-rust}"
 SHOES_BIN="${SHOES_BIN:-/usr/local/bin/shoes}"
@@ -30,6 +30,20 @@ origin_pid=""
 upstream_one_pid=""
 upstream_two_pid=""
 client_pid=""
+current_stage="initializing"
+
+show_failure_diagnostics() {
+    local line="$1" status="$2"
+    echo "chain acceptance failed during '${current_stage}' at line ${line} (exit ${status})" >&2
+    for log in upstream-one upstream-two client; do
+        if [[ -s "$work_dir/${log}.log" ]]; then
+            echo "--- ${log}.log (last 80 lines) ---" >&2
+            tail -n 80 "$work_dir/${log}.log" >&2
+        fi
+    done
+    echo "--- shoes.service journal (last 80 lines) ---" >&2
+    journalctl -u shoes.service --no-pager -n 80 >&2 || true
+}
 
 cleanup() {
     set +e
@@ -44,6 +58,7 @@ cleanup() {
     systemctl daemon-reload >/dev/null 2>&1
     rm -rf /etc/shoes "$work_dir"
 }
+trap 'show_failure_diagnostics "$LINENO" "$?"' ERR
 trap cleanup EXIT
 
 choose_ports() {
@@ -64,6 +79,7 @@ finally:
 PY
 }
 
+current_stage="creating isolated network exits"
 read -r origin_port upstream_one_port upstream_two_port client_port < <(choose_ports 4)
 
 ip netns add "$namespace_one"
@@ -153,6 +169,7 @@ wait_port() {
 wait_port 10.231.1.2 "$upstream_one_port"
 wait_port 10.231.2.2 "$upstream_two_port"
 
+current_stage="bootstrapping managed Reality listener"
 "$PING_RUST_BIN" bootstrap >"$work_dir/bootstrap.out"
 grep -q '^vless://' "$work_dir/bootstrap.out"
 rm -f "$work_dir/bootstrap.out"
@@ -164,8 +181,11 @@ userinfo_two="$(printf '%s' 'aes-128-gcm:chain-two-password' | base64 -w 0)"
 uri_one="ss://${userinfo_one}@10.231.1.2:${upstream_one_port}#namespace-one"
 uri_two="ss://${userinfo_two}@10.231.2.2:${upstream_two_port}#namespace-two"
 
+current_stage="adding first Shadowsocks chain node"
 expect "$REPO_DIR/tests/chain_menu.exp" "$PING_RUST_BIN" add "$uri_one"
+current_stage="adding second Shadowsocks chain node"
 expect "$REPO_DIR/tests/chain_menu.exp" "$PING_RUST_BIN" add "$uri_two"
+current_stage="enabling first chain node"
 expect "$REPO_DIR/tests/chain_menu.exp" "$PING_RUST_BIN" enable
 
 python3 - "$client_port" >"$work_dir/client.yaml" <<'PY'
@@ -232,23 +252,31 @@ probe_must_fail() {
     }
 }
 
+current_stage="routing through first chain node"
 probe_expect_peer 10.231.1.2
+current_stage="restarting systemd service"
 systemctl restart shoes.service
+current_stage="routing through first node after systemd restart"
 systemctl is-active --quiet shoes.service
 probe_expect_peer 10.231.1.2
 
 kill "$upstream_one_pid"
 wait "$upstream_one_pid" 2>/dev/null || true
+current_stage="verifying no direct fallback while first node is offline"
 upstream_one_pid=""
 probe_must_fail
 
+current_stage="switching to second chain node"
 expect "$REPO_DIR/tests/chain_menu.exp" "$PING_RUST_BIN" select 2
 probe_expect_peer 10.231.2.2
 
+current_stage="disabling chain proxy and restoring direct routing"
 expect "$REPO_DIR/tests/chain_menu.exp" "$PING_RUST_BIN" disable
 probe_expect_peer 10.231.1.1
 
+current_stage="deleting first chain node"
 expect "$REPO_DIR/tests/chain_menu.exp" "$PING_RUST_BIN" delete 1
+current_stage="deleting final chain node"
 expect "$REPO_DIR/tests/chain_menu.exp" "$PING_RUST_BIN" delete 1
 python3 - <<'PY'
 import json
