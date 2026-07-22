@@ -182,8 +182,10 @@ systemctl is-enabled --quiet shoes.service
 
 userinfo_one="$(printf '%s' 'aes-128-gcm:chain-one-password' | base64 -w 0)"
 userinfo_two="$(printf '%s' 'aes-128-gcm:chain-two-password' | base64 -w 0)"
+userinfo_invalid="$(printf '%s' 'aes-128-gcm:wrong-password' | base64 -w 0)"
 uri_one="ss://${userinfo_one}@10.231.1.2:${upstream_one_port}#namespace-one"
 uri_two="ss://${userinfo_two}@10.231.2.2:${upstream_two_port}#namespace-two"
+uri_invalid="ss://${userinfo_invalid}@10.231.1.2:${upstream_one_port}#invalid-auth"
 
 current_stage="adding first Shadowsocks chain node"
 expect "$REPO_DIR/tests/chain_menu.exp" "$PING_RUST_BIN" add "$uri_one"
@@ -194,6 +196,15 @@ PING_RUST_CHAIN_TEST_URL="http://10.231.1.1:${origin_port}/probe" \
 [[ "$(tr -d '\r\n' <"$work_dir/peer.log")" == "10.231.1.2" ]]
 current_stage="adding second Shadowsocks chain node"
 expect "$REPO_DIR/tests/chain_menu.exp" "$PING_RUST_BIN" add "$uri_two"
+current_stage="rejecting reachable node with invalid protocol credentials"
+expect "$REPO_DIR/tests/chain_menu.exp" "$PING_RUST_BIN" add "$uri_invalid"
+if PING_RUST_CHAIN_TEST_URL="http://10.231.1.1:${origin_port}/probe" \
+    expect "$REPO_DIR/tests/chain_menu.exp" "$PING_RUST_BIN" test 3; then
+    echo "full proxy test accepted a node with invalid credentials" >&2
+    exit 1
+fi
+current_stage="removing invalid protocol node"
+expect "$REPO_DIR/tests/chain_menu.exp" "$PING_RUST_BIN" delete 3
 current_stage="enabling first chain node"
 expect "$REPO_DIR/tests/chain_menu.exp" "$PING_RUST_BIN" enable
 
