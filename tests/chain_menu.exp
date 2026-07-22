@@ -1,0 +1,103 @@
+#!/usr/bin/expect -f
+
+set timeout 180
+log_user 0
+
+if {$argc < 2} {
+    puts stderr "usage: chain_menu.exp <ping-rust> <action> ?argument?"
+    exit 2
+}
+
+set binary [lindex $argv 0]
+set action [lindex $argv 1]
+set argument ""
+if {$argc >= 3} {
+    set argument [lindex $argv 2]
+}
+
+proc expect_or_fail {pattern stage} {
+    expect {
+        -re $pattern { return }
+        eof {
+            puts stderr "chain menu ended during $stage"
+            exit 1
+        }
+        timeout {
+            puts stderr "chain menu timed out during $stage"
+            exit 1
+        }
+    }
+}
+
+proc send_choice {value} {
+    send -- "$value\r"
+}
+
+spawn $binary
+expect_or_fail {请选择 \[0-10\]} "main menu"
+send_choice 9
+expect_or_fail {运维工具} "operations menu"
+expect_or_fail {请输入序号} "operations choice"
+send_choice 1
+expect_or_fail {链式代理管理} "chain menu"
+expect_or_fail {请输入序号} "chain choice"
+
+switch -- $action {
+    add {
+        if {$argument eq ""} {
+            puts stderr "add action requires a share URI"
+            exit 2
+        }
+        send_choice 1
+        expect_or_fail {粘贴分享链接} "share URI prompt"
+        send_choice $argument
+        expect_or_fail {节点名称} "node name prompt"
+        send_choice ""
+        expect_or_fail {节点已添加} "node add result"
+    }
+    enable {
+        send_choice 3
+        expect_or_fail {链式代理已启用} "enable result"
+    }
+    disable {
+        send_choice 3
+        expect_or_fail {链式代理已关闭} "disable result"
+    }
+    select {
+        if {![string is integer -strict $argument] || $argument < 1} {
+            puts stderr "select action requires a positive node index"
+            exit 2
+        }
+        send_choice 2
+        expect_or_fail {选择出口节点} "node selector"
+        expect_or_fail {请输入序号} "node selection"
+        send_choice $argument
+        expect_or_fail {当前出口已切换为} "select result"
+    }
+    delete {
+        if {![string is integer -strict $argument] || $argument < 1} {
+            puts stderr "delete action requires a positive node index"
+            exit 2
+        }
+        send_choice 6
+        expect_or_fail {选择删除节点} "delete selector"
+        expect_or_fail {请输入序号} "delete selection"
+        send_choice $argument
+        expect_or_fail {确认删除链式节点} "delete confirmation"
+        send_choice y
+        expect_or_fail {节点已删除} "delete result"
+    }
+    default {
+        puts stderr "unknown action: $action"
+        exit 2
+    }
+}
+
+expect_or_fail {链式代理管理} "return to chain menu"
+expect_or_fail {请输入序号} "return choice"
+send_choice 0
+expect_or_fail {请选择 \[0-10\]} "return to main menu"
+send_choice 0
+expect_or_fail {已退出} "program exit"
+expect eof
+

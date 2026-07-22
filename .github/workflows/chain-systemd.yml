@@ -1,0 +1,123 @@
+name: Chain proxy systemd acceptance
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/chain-systemd.yml
+      - tests/chain_menu.exp
+      - tests/chain_systemd_e2e.sh
+      - src/**
+      - Cargo.toml
+      - Cargo.lock
+
+permissions:
+  contents: read
+
+env:
+  SHOES_ARCHIVE_SHA256: e60ccde92490624d9ff399dd58e69d4d6943b33c5cc4f0b0d1509b0c644fbc2a
+  SHOES_URL: https://github.com/cfal/shoes/releases/download/v0.2.7/shoes-x86_64-unknown-linux-musl.tar.gz
+
+jobs:
+  ubuntu-24-04:
+    name: Ubuntu 24.04 real systemd and isolated exits
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Build ping-rust and install test dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --release
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends expect iproute2
+          sudo install -m 0755 target/release/ping-rust /usr/local/bin/ping-rust
+      - name: Install checksum-pinned shoes v0.2.7
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/shoes.tar.gz"
+          directory="$RUNNER_TEMP/shoes"
+          curl --fail --location --retry 3 --proto '=https' --tlsv1.2 \
+            --output "$archive" "$SHOES_URL"
+          echo "$SHOES_ARCHIVE_SHA256  $archive" | sha256sum --check --strict
+          mkdir -p "$directory"
+          tar -xzf "$archive" -C "$directory"
+          sudo install -m 0755 "$directory/shoes" /usr/local/bin/shoes
+      - name: Exercise production menu, state, network exits and systemd
+        shell: bash
+        run: sudo env REPO_DIR="$PWD" bash tests/chain_systemd_e2e.sh
+
+  debian-12:
+    name: Debian 12 real systemd and isolated exits
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Build static ping-rust and fetch checksum-pinned shoes
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools
+          rustup target add x86_64-unknown-linux-musl
+          cargo build --locked --release --target x86_64-unknown-linux-musl
+          archive="$RUNNER_TEMP/shoes.tar.gz"
+          mkdir -p "$RUNNER_TEMP/shoes"
+          curl --fail --location --retry 3 --proto '=https' --tlsv1.2 \
+            --output "$archive" "$SHOES_URL"
+          echo "$SHOES_ARCHIVE_SHA256  $archive" | sha256sum --check --strict
+          tar -xzf "$archive" -C "$RUNNER_TEMP/shoes"
+      - name: Start privileged Debian 12 with systemd
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --detach --name ping-rust-debian \
+            --privileged --cgroupns=host \
+            --tmpfs /run --tmpfs /run/lock \
+            --volume /sys/fs/cgroup:/sys/fs/cgroup:rw \
+            --volume "$PWD:/workspace:ro" \
+            debian:12 bash -lc \
+              'apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends systemd ca-certificates curl expect iproute2 python3 && exec /sbin/init'
+          for _ in {1..180}; do
+            system_state="$(
+              docker exec ping-rust-debian systemctl is-system-running 2>/dev/null || true
+            )"
+            if [[ "$system_state" == running || "$system_state" == degraded ]]; then
+              break
+            fi
+            status="$(docker inspect --format '{{.State.Status}}' ping-rust-debian)"
+            [[ "$status" == running ]] || { docker logs ping-rust-debian; exit 1; }
+            sleep 1
+          done
+          docker exec ping-rust-debian test -f /etc/debian_version
+          docker exec ping-rust-debian systemctl --version
+      - name: Exercise production menu, state, network exits and systemd
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker cp target/x86_64-unknown-linux-musl/release/ping-rust \
+            ping-rust-debian:/usr/local/bin/ping-rust
+          docker cp "$RUNNER_TEMP/shoes/shoes" ping-rust-debian:/usr/local/bin/shoes
+          docker exec ping-rust-debian chmod 0755 \
+            /usr/local/bin/ping-rust /usr/local/bin/shoes
+          docker exec --env REPO_DIR=/workspace ping-rust-debian \
+            bash /workspace/tests/chain_systemd_e2e.sh
+      - name: Show Debian diagnostics on failure
+        if: failure()
+        shell: bash
+        run: |
+          docker logs ping-rust-debian 2>&1 || true
+          docker exec ping-rust-debian systemctl status shoes.service \
+            --no-pager 2>&1 || true
+          docker exec ping-rust-debian journalctl -u shoes.service \
+            --no-pager -n 80 2>&1 || true
+      - name: Remove Debian container
+        if: always()
+        run: docker rm --force ping-rust-debian >/dev/null 2>&1 || true
