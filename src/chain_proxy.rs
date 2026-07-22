@@ -1,4 +1,9 @@
-use std::{collections::BTreeMap, net::ToSocketAddrs, time::Duration};
+use std::{
+    collections::BTreeMap,
+    net::{TcpListener, TcpStream, ToSocketAddrs},
+    process::Stdio,
+    time::{Duration, Instant},
+};
 
 use anyhow::{bail, Context, Result};
 use base64::{
@@ -9,6 +14,10 @@ use percent_encoding::percent_decode_str;
 use serde::{Deserialize, Serialize};
 use url::Url;
 use uuid::Uuid;
+
+use crate::utils;
+
+const DEFAULT_PROXY_PROBE_URL: &str = "https://www.gstatic.com/generate_204";
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ChainProxyState {
@@ -139,6 +148,27 @@ impl ChainNode {
 pub struct ShoesClientConfig {
     pub address: String,
     pub protocol: ShoesClientProtocol,
+}
+
+#[derive(Serialize)]
+struct ProbeServer<'a> {
+    address: String,
+    protocol: ProbeSocksProtocol,
+    rules: Vec<ProbeRule<'a>>,
+}
+
+#[derive(Serialize)]
+struct ProbeSocksProtocol {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    udp_enabled: bool,
+}
+
+#[derive(Serialize)]
+struct ProbeRule<'a> {
+    masks: &'static str,
+    action: &'static str,
+    client_chains: &'a ShoesClientConfig,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -610,29 +640,113 @@ fn validate_node_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn test_tcp_connect(node: &ChainNode, timeout: Duration) -> Result<Duration> {
-    let started = std::time::Instant::now();
-    let addresses = node
-        .address()
+fn probe_config(node: &ChainNode, port: u16) -> Result<String> {
+    let servers = [ProbeServer {
+        address: format!("127.0.0.1:{port}"),
+        protocol: ProbeSocksProtocol {
+            kind: "socks",
+            udp_enabled: false,
+        },
+        rules: vec![ProbeRule {
+            masks: "0.0.0.0/0",
+            action: "allow",
+            client_chains: &node.client,
+        }],
+    }];
+    serde_yaml::to_string(&servers).context("生成链式节点测试配置失败")
+}
+
+fn reserve_loopback_port() -> Result<u16> {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).context("无法分配链式节点测试端口")?;
+    listener
+        .local_addr()
+        .map(|address| address.port())
+        .context("无法读取链式节点测试端口")
+}
+
+fn wait_for_loopback_port(port: u16, timeout: Duration) -> Result<()> {
+    let address = ("127.0.0.1", port)
         .to_socket_addrs()
-        .with_context(|| format!("无法解析节点地址 {}", node.address()))?;
-    let mut last_error = None;
-    for address in addresses {
-        match std::net::TcpStream::connect_timeout(&address, timeout) {
-            Ok(stream) => {
-                drop(stream);
-                return Ok(started.elapsed());
-            }
-            Err(error) => last_error = Some(error),
+        .context("无法解析链式节点测试监听地址")?
+        .next()
+        .context("链式节点测试监听地址为空")?;
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if TcpStream::connect_timeout(&address, Duration::from_millis(100)).is_ok() {
+            return Ok(());
         }
+        std::thread::sleep(Duration::from_millis(50));
     }
-    let cause = last_error
-        .map(anyhow::Error::from)
-        .unwrap_or_else(|| anyhow::anyhow!("节点地址没有可用的 IP"));
-    Err(anyhow::anyhow!(
-        "无法连接链式节点 {}：{cause}",
-        node.address()
-    ))
+    bail!("临时 shoes 测试入口未能在限定时间内启动")
+}
+
+pub async fn test_proxy_handshake(node: &ChainNode, timeout: Duration) -> Result<Duration> {
+    utils::require_linux_root()?;
+    if !std::path::Path::new(utils::SHOES_BIN).is_file() {
+        bail!("未找到 shoes：{}", utils::SHOES_BIN);
+    }
+
+    let directory = tempfile::tempdir().context("创建链式节点测试目录失败")?;
+    let config_path = directory.path().join("probe.yaml");
+    let port = reserve_loopback_port()?;
+    let yaml = probe_config(node, port)?;
+    utils::atomic_write(&config_path, yaml.as_bytes(), 0o600)?;
+
+    let dry_run = tokio::process::Command::new(utils::SHOES_BIN)
+        .arg("--dry-run")
+        .arg(&config_path)
+        .output()
+        .await
+        .context("无法执行临时 shoes 配置校验")?;
+    if !dry_run.status.success() {
+        let error = String::from_utf8_lossy(&dry_run.stderr);
+        bail!("shoes 拒绝链式节点测试配置：{}", error.trim());
+    }
+
+    let mut child = tokio::process::Command::new(utils::SHOES_BIN)
+        .arg(&config_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .context("无法启动临时 shoes 节点测试进程")?;
+
+    let result = async {
+        tokio::task::spawn_blocking(move || wait_for_loopback_port(port, Duration::from_secs(3)))
+            .await
+            .context("等待临时 shoes 测试入口的任务异常退出")??;
+
+        let probe_url = std::env::var("PING_RUST_CHAIN_TEST_URL")
+            .unwrap_or_else(|_| DEFAULT_PROXY_PROBE_URL.to_owned());
+        let proxy = reqwest::Proxy::all(format!("socks5h://127.0.0.1:{port}"))
+            .context("创建链式节点测试代理失败")?;
+        let client = reqwest::Client::builder()
+            .proxy(proxy)
+            .timeout(timeout)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .context("创建链式节点测试客户端失败")?;
+        let started = Instant::now();
+        let response = client
+            .get(&probe_url)
+            .send()
+            .await
+            .with_context(|| format!("完整代理请求失败，节点 {} 未通过协议握手", node.name))?;
+        if !response.status().is_success() {
+            bail!(
+                "完整代理请求返回 HTTP {}，节点 {} 不可用",
+                response.status(),
+                node.name
+            );
+        }
+        Ok(started.elapsed())
+    }
+    .await;
+
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+    result
 }
 
 #[cfg(test)]
@@ -724,5 +838,16 @@ mod tests {
         state.apply(ChainProxyChange::Delete(id)).unwrap();
         assert!(!state.enabled);
         assert!(state.active_node.is_none());
+    }
+
+    #[test]
+    fn proxy_probe_uses_the_selected_node_as_client_chain() {
+        let node = parse_share_uri("socks5://alice:secret@127.0.0.1:1080#edge").unwrap();
+        let yaml = probe_config(&node, 19080).unwrap();
+        assert!(yaml.contains("address: 127.0.0.1:19080"));
+        assert!(yaml.contains("client_chains:"));
+        assert!(yaml.contains("address: 127.0.0.1:1080"));
+        assert!(yaml.contains("username: alice"));
+        assert!(yaml.contains("password: secret"));
     }
 }

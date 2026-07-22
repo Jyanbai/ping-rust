@@ -177,17 +177,19 @@ vless://...security=reality...pbk=...&sid=...
 1) 添加节点（分享链接）
 2) 选择出口节点
 3) 启用链式代理
-4) 测试节点（TCP 连通性）
+4) 测试节点（完整代理）
 5) 查看节点
 6) 删除节点
 0) 返回
 ```
 
-第一版支持 SOCKS5、HTTP/HTTPS、Shadowsocks、VLESS TCP/TLS/Reality/WebSocket 和 Trojan TLS/WebSocket 分享链接。由于当前 shoes 内核没有对应客户端实现，Hysteria2、TUIC、WireGuard/WARP 不能作为链式出口；ping-rust 会返回明确错误，不会生成近似配置。HTTP、SOCKS5 和 Trojan 出口不支持 UDP-over-TCP，启用或切换时会再次警告；相关 UDP 请求会失败，不会自动回退直连。测试菜单只检查上游地址与 TCP 端口是否可达，不等同于认证、协议握手或出口验证；完整配置仍必须通过 `shoes --dry-run` 后才会原子写入并重启服务。
+第一版支持 SOCKS5、HTTP/HTTPS、Shadowsocks、VLESS TCP/TLS/Reality/WebSocket 和 Trojan TLS/WebSocket 分享链接。由于当前 shoes 内核没有对应客户端实现，Hysteria2、TUIC、WireGuard/WARP 不能作为链式出口；ping-rust 会返回明确错误，不会生成近似配置。HTTP、SOCKS5 和 Trojan 出口不支持 UDP-over-TCP，启用或切换时会再次警告；相关 UDP 请求会失败，不会自动回退直连。
+
+“测试节点（完整代理）”严格复用当前节点生成临时 shoes SOCKS5 入口，再通过该入口访问 `https://www.gstatic.com/generate_204`。只有地址可达、协议认证/Reality 握手和 HTTP 出口全部成功才报告节点可用；测试进程和权限为 `0600` 的临时配置随后立即删除。它不会修改当前出口或线上 systemd 服务。
 
 添加第一个节点时会自动选为当前出口，但不会自动启用。启用后，受支持的 TCP 流量使用同一个上游节点；关闭或删除正在使用的节点会恢复 `allow-all-direct`。固定 shoes 0.2.8 的 Hysteria2/TUIC UDP 服务端路径会忽略 client chain 并直接创建 UDP socket，因此只要当前存在 Hysteria2 或 TUIC 入站，ping-rust 就会拒绝启用全局链式代理，避免静默直连泄漏；链式代理已经启用时也不能新增这两类入站。节点凭据保存在权限为 `0600` 的管理状态和配置文件中，备份同样包含这些敏感信息。
 
-CI 使用带认证 SOCKS5 上游执行真实链路测试：上游未启动时请求必须失败，启动后请求成功，停止后再次失败。该测试证明稳定 TCP 路径不会在上游不可用时静默回退直连；它不代表 shoes 已支持 UDP 链式转发。
+CI 在 Debian 12 与 Ubuntu 24.04 的真实 systemd 环境中，从 PTY 菜单完成添加、完整协议测试、选择、启用、切换、关闭和删除。两个隔离网络命名空间提供可区分的 Shadowsocks 出口；测试会核对 HTTP 服务观察到的源地址，并验证 systemd 重启后仍使用所选出口、上游离线时请求失败且不会静默直连。该测试覆盖稳定 TCP 路径，不代表 shoes 已支持 UDP 链式转发。
 
 首次安装流程是：`install.sh → 自动安装 ping-rust/shoes → 自动随机端口部署 VLESS-REALITY → 复制 URL`，中间零输入。Reality 未指定 `--server-name` 时会从 `www.amazon.com`、`www.ebay.com`、`www.paypal.com`、`www.cloudflare.com`、`dash.cloudflare.com`、`aws.amazon.com` 中随机选择 SNI；列表不含 Apple，客户端指纹固定为本地 233boy 脚本使用的 `chrome`。后续日常流程是：`prs → 1 → 选择协议 → 输入端口/直接回车随机 → 复制 URL 到 v2rayN`；Shadowsocks 会额外选择加密方式和密码，SS 2022 密码不符合所选 cipher 的 Base64 密钥长度时会警告并自动替换。其余协议自动生成 UUID、密码、Reality 密钥、WebSocket 路径或证书。十个协议都会输出公网地址、端口、客户端所需凭据、协议参数和分享链接。添加或查看配置成功后直接退出 `prs`；主菜单输入 `0` 退出，任意子菜单输入 `0` 返回主菜单。自动端口从 `20000..=65535` 的高位范围选择；协议选择固定使用连续编号 `1..=10`。链接只会在配置通过 `shoes --dry-run`、原子写入、systemd 启动且确认为 active 后输出；失败会恢复原配置和服务状态。
 
@@ -381,6 +383,7 @@ sudo /usr/local/bin/shoes --dry-run /etc/shoes/config.yaml
 - Hysteria2/TUIC 失败：确认 UDP 端口已放行，并检查证书域名。
 - Shadowsocks 2022 导入失败：确认客户端 cipher 使用标准名称，且 Base64 密钥解码长度与 AES-128（16 字节）或 AES-256/ChaCha20（32 字节）一致。
 - AnyTLS 失败：确认选择的 TLS/Reality 模式、SNI、密码与证书校验设置一致；AnyTLS+Reality 请使用 sing-box 导出。
+- 链式节点显示端口可达但不能使用：进入 `9) 其他 → 1) 链式代理 → 4) 测试节点（完整代理）`；新版测试会验证密码/UUID、TLS/Reality 握手和真实 HTTP 出口，不再只测 TCP 端口。
 - `systemctl` 不存在：当前系统不是 systemd 环境，服务管理功能无法使用。
 - GitHub API 限流：稍后重试，或使用 `install --method cargo`。
 - 自更新提示权限不足：若当前程序位于 `/usr/local/bin`，改用 `sudo ping-rust self-update`；不要手工覆盖正在更新的文件。
@@ -404,6 +407,7 @@ cargo doc --no-deps
 - `shoes-schema.yml` 固定 cfal/shoes commit `386b11532424b8665ee3e46340c6236fb3c47595`（0.2.8），对十协议单独配置、十协议联合配置、全部六种 Shadowsocks cipher 和 Reality+AnyTLS 执行真实 `shoes --dry-run`，并启动十协议聚合配置检查 TCP/UDP 监听。
 - 通过 cargo-zigbuild + Zig 生成 x86_64/aarch64 Linux GNU release ELF，最高 GLIBC 需求为 2.34，覆盖 Rocky/Alma 9 及更新的目标发行版基线。
 - CI 覆盖 Ubuntu 22.04/24.04，并在 Debian 12、Rocky Linux 9、AlmaLinux 9 容器中执行锁定依赖测试和 release 构建；shoes schema 作业实际启动十协议聚合监听，Ubuntu 24.04 acceptance 继续覆盖 root 路径、systemd 和核心管理流程。
+- 独立链式代理验收在 Ubuntu 24.04 主机和 Debian 12 特权 systemd 容器中运行，使用真实 PTY 菜单、两条隔离 Shadowsocks 出口和 HTTP 源地址核验覆盖完整生命周期与无直连回退。
 - 使用 RustSec `cargo audit` 扫描锁定依赖，当前未报告安全公告。
 - 在一台干净代理环境的 Debian 12 x86_64 VPS 上完成原生安装与运行验收：Release 路径约 2 秒完成 shoes v0.2.7 musl 安装，三协议同时通过 dry-run 并由 systemd 启动，外部 Reality 客户端的代理出口与 VPS 公网 IP 一致。
 - 实机完成 9 份客户端导出解析、BBR、端口检查、日志、备份恢复、inactive 状态保持和 Release 更新；详细证据见完成度审计。

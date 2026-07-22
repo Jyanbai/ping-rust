@@ -71,6 +71,16 @@ switch -- $action {
         send_choice $argument
         expect_or_fail {当前出口已切换为} "select result"
     }
+    test {
+        if {![string is integer -strict $argument] || $argument < 1} {
+            puts stderr "test action requires a positive node index"
+            exit 2
+        }
+        send_choice 4
+        expect_or_fail {选择测试节点} "test node selector"
+        send_choice $argument
+        expect_or_fail {节点可用} "full proxy test result"
+    }
     delete {
         if {![string is integer -strict $argument] || $argument < 1} {
             puts stderr "delete action requires a positive node index"

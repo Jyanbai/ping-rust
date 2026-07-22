@@ -567,7 +567,7 @@ async fn chain_proxy_menu() -> Result<()> {
             (1, "添加节点（分享链接）"),
             (2, "选择出口节点"),
             (3, action),
-            (4, "测试节点（TCP 连通性）"),
+            (4, "测试节点（完整代理）"),
             (5, "查看节点"),
             (6, "删除节点"),
             (0, "返回"),
@@ -690,19 +690,15 @@ async fn test_chain_node() -> Result<()> {
         return Ok(());
     };
     let node = state.chain_proxy.nodes[index].clone();
-    let tested = node.clone();
-    let elapsed = tokio::task::spawn_blocking(move || {
-        chain_proxy::test_tcp_connect(&tested, Duration::from_secs(5))
-    })
-    .await
-    .context("节点测试任务异常退出")??;
+    println!("正在通过该节点执行协议握手和 HTTP 出口测试...");
+    let elapsed = chain_proxy::test_proxy_handshake(&node, Duration::from_secs(10)).await?;
     println!(
-        "{} {}（TCP 建连 {} ms）",
-        "节点端口可达：".green(),
+        "{} {}（完整代理 {} ms）",
+        "节点可用：".green(),
         node.name,
         elapsed.as_millis()
     );
-    println!("说明：该测试只验证地址和端口；启用时仍会由 shoes --dry-run 校验完整配置。");
+    println!("已验证：地址可达、协议认证成功，并能通过该节点完成 HTTP 请求。");
     Ok(())
 }
 

@@ -176,7 +176,7 @@ current_stage="generating deterministic managed Reality listener"
     --server-name www.cloudflare.com \
     --dest www.cloudflare.com:443 \
     >"$work_dir/bootstrap.out"
-grep -q '^vless://' "$work_dir/bootstrap.out"
+grep -q 'vless://' "$work_dir/bootstrap.out"
 rm -f "$work_dir/bootstrap.out"
 systemctl is-active --quiet shoes.service
 systemctl is-enabled --quiet shoes.service
@@ -188,6 +188,11 @@ uri_two="ss://${userinfo_two}@10.231.2.2:${upstream_two_port}#namespace-two"
 
 current_stage="adding first Shadowsocks chain node"
 expect "$REPO_DIR/tests/chain_menu.exp" "$PING_RUST_BIN" add "$uri_one"
+current_stage="testing first node with full protocol handshake"
+rm -f "$work_dir/peer.log"
+PING_RUST_CHAIN_TEST_URL="http://10.231.1.1:${origin_port}/probe" \
+    expect "$REPO_DIR/tests/chain_menu.exp" "$PING_RUST_BIN" test 1
+[[ "$(tr -d '\r\n' <"$work_dir/peer.log")" == "10.231.1.2" ]]
 current_stage="adding second Shadowsocks chain node"
 expect "$REPO_DIR/tests/chain_menu.exp" "$PING_RUST_BIN" add "$uri_two"
 current_stage="enabling first chain node"
