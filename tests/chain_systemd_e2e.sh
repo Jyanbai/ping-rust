@@ -234,19 +234,26 @@ wait_port 127.0.0.1 "$client_port"
 
 probe_expect_peer() {
     local expected_peer="$1"
-    rm -f "$work_dir/peer.log" "$work_dir/body"
-    curl --fail --silent --show-error --max-time 10 \
-        --socks5-hostname "127.0.0.1:${client_port}" \
-        "http://10.231.1.1:${origin_port}/probe" >"$work_dir/body"
-    grep -qx 'ping-rust-production-chain' "$work_dir/body"
-    for _ in {1..50}; do
-        [[ -s "$work_dir/peer.log" ]] && break
-        sleep 0.1
+    for _ in {1..20}; do
+        rm -f "$work_dir/peer.log" "$work_dir/body"
+        if curl --fail --silent --max-time 2 \
+            --socks5-hostname "127.0.0.1:${client_port}" \
+            "http://10.231.1.1:${origin_port}/probe" >"$work_dir/body" 2>/dev/null; then
+            grep -qx 'ping-rust-production-chain' "$work_dir/body"
+            for _ in {1..20}; do
+                [[ -s "$work_dir/peer.log" ]] && break
+                sleep 0.05
+            done
+            [[ "$(tr -d '\r\n' <"$work_dir/peer.log")" == "$expected_peer" ]] || {
+                echo "unexpected origin peer; expected ${expected_peer}" >&2
+                return 1
+            }
+            return 0
+        fi
+        sleep 0.25
     done
-    [[ "$(tr -d '\r\n' <"$work_dir/peer.log")" == "$expected_peer" ]] || {
-        echo "unexpected origin peer; expected ${expected_peer}" >&2
-        return 1
-    }
+    echo "proxy request did not become ready through expected peer ${expected_peer}" >&2
+    return 1
 }
 
 probe_must_fail() {
