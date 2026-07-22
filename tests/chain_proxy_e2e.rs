@@ -185,6 +185,21 @@ fn request_through_socks(socks_port: u16, origin: SocketAddr) -> io::Result<Stri
     Ok(response)
 }
 
+fn reached_test_origin(result: &io::Result<String>) -> bool {
+    result.as_ref().is_ok_and(|response| {
+        response.starts_with("HTTP/1.1 200 OK") && response.ends_with("ping-rust-chain-e2e")
+    })
+}
+
+#[test]
+fn origin_detection_rejects_empty_or_failed_responses() {
+    assert!(!reached_test_origin(&Ok(String::new())));
+    assert!(!reached_test_origin(&Err(io::Error::other("offline"))));
+    assert!(reached_test_origin(&Ok(
+        "HTTP/1.1 200 OK\r\nContent-Length: 19\r\n\r\nping-rust-chain-e2e".to_owned()
+    )));
+}
+
 #[test]
 fn chain_proxy_uses_authenticated_upstream_without_direct_fallback() -> io::Result<()> {
     let Some(shoes) = env::var_os("PING_RUST_SHOES_E2E_BIN") else {
@@ -235,9 +250,10 @@ fn chain_proxy_uses_authenticated_upstream_without_direct_fallback() -> io::Resu
     let _client = spawn_shoes(shoes, &client)?;
     wait_for_port(*downstream_port)?;
     wait_for_port(*client_port)?;
+    let offline_result = request_through_socks(*client_port, origin.address);
     assert!(
-        request_through_socks(*client_port, origin.address).is_err(),
-        "request unexpectedly succeeded while the required upstream was offline"
+        !reached_test_origin(&offline_result),
+        "request unexpectedly reached the origin while the required upstream was offline"
     );
 
     let mut upstream_process = spawn_shoes(shoes, &upstream)?;
@@ -248,9 +264,10 @@ fn chain_proxy_uses_authenticated_upstream_without_direct_fallback() -> io::Resu
 
     upstream_process.0.kill()?;
     upstream_process.0.wait()?;
+    let stopped_result = request_through_socks(*client_port, origin.address);
     assert!(
-        request_through_socks(*client_port, origin.address).is_err(),
-        "request unexpectedly succeeded after the required upstream stopped"
+        !reached_test_origin(&stopped_result),
+        "request unexpectedly reached the origin after the required upstream stopped"
     );
     Ok(())
 }
