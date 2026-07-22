@@ -6,6 +6,8 @@
 
 > 当前稳定版 `v0.1.12` 支持 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks、AnyTLS、VLESS-TLS-Vision、VLESS-WS-TLS、Trojan-TLS、Trojan-Reality 和 VMess-WS-TLS。用户只选择完整协议，不需要理解或手动组合传输层、安全层与内层协议。
 
+> `main` 当前为 `v0.1.13` 发布候选，正在补强链式代理的 fail-closed 限制与真实流量验收；尚未发布到 crates.io 或 GitHub Release。
+
 完整文档：[Wiki](https://github.com/Jyanbai/ping-rust/wiki) · [快速开始](https://github.com/Jyanbai/ping-rust/wiki/Quick-Start) · [链式代理](https://github.com/Jyanbai/ping-rust/wiki/Chain-Proxy) · [故障排查](https://github.com/Jyanbai/ping-rust/wiki/Troubleshooting)
 
 ## 一键安装（推荐）
@@ -183,9 +185,11 @@ vless://...security=reality...pbk=...&sid=...
 0) 返回
 ```
 
-第一版支持 SOCKS5、HTTP/HTTPS、Shadowsocks、VLESS TCP/TLS/Reality/WebSocket 和 Trojan TLS/WebSocket 分享链接。由于当前 shoes 内核没有对应客户端实现，Hysteria2、TUIC、WireGuard/WARP 不能作为链式出口；ping-rust 会返回明确错误，不会生成近似配置。HTTP 和 SOCKS5 出口在 shoes 中只支持 TCP，启用前会再次警告。测试菜单只检查上游地址与 TCP 端口是否可达，完整协议配置仍必须通过 `shoes --dry-run` 后才会写入并重启服务。
+第一版支持 SOCKS5、HTTP/HTTPS、Shadowsocks、VLESS TCP/TLS/Reality/WebSocket 和 Trojan TLS/WebSocket 分享链接。由于当前 shoes 内核没有对应客户端实现，Hysteria2、TUIC、WireGuard/WARP 不能作为链式出口；ping-rust 会返回明确错误，不会生成近似配置。HTTP、SOCKS5 和 Trojan 出口不支持 UDP-over-TCP，启用或切换时会再次警告；相关 UDP 请求会失败，不会自动回退直连。测试菜单只检查上游地址与 TCP 端口是否可达，不等同于认证、协议握手或出口验证；完整配置仍必须通过 `shoes --dry-run` 后才会原子写入并重启服务。
 
-添加第一个节点时会自动选为当前出口，但不会自动启用。启用后，所有受管入站使用同一个上游节点；关闭或删除正在使用的节点会恢复 `allow-all-direct`。节点凭据保存在权限为 `0600` 的管理状态和配置文件中，备份同样包含这些敏感信息。
+添加第一个节点时会自动选为当前出口，但不会自动启用。启用后，受支持的 TCP 流量使用同一个上游节点；关闭或删除正在使用的节点会恢复 `allow-all-direct`。固定 shoes 0.2.8 的 Hysteria2/TUIC UDP 服务端路径会忽略 client chain 并直接创建 UDP socket，因此只要当前存在 Hysteria2 或 TUIC 入站，ping-rust 就会拒绝启用全局链式代理，避免静默直连泄漏；链式代理已经启用时也不能新增这两类入站。节点凭据保存在权限为 `0600` 的管理状态和配置文件中，备份同样包含这些敏感信息。
+
+CI 使用带认证 SOCKS5 上游执行真实链路测试：上游未启动时请求必须失败，启动后请求成功，停止后再次失败。该测试证明稳定 TCP 路径不会在上游不可用时静默回退直连；它不代表 shoes 已支持 UDP 链式转发。
 
 首次安装流程是：`install.sh → 自动安装 ping-rust/shoes → 自动随机端口部署 VLESS-REALITY → 复制 URL`，中间零输入。Reality 未指定 `--server-name` 时会从 `www.amazon.com`、`www.ebay.com`、`www.paypal.com`、`www.cloudflare.com`、`dash.cloudflare.com`、`aws.amazon.com` 中随机选择 SNI；列表不含 Apple，客户端指纹固定为本地 233boy 脚本使用的 `chrome`。后续日常流程是：`prs → 1 → 选择协议 → 输入端口/直接回车随机 → 复制 URL 到 v2rayN`；Shadowsocks 会额外选择加密方式和密码，SS 2022 密码不符合所选 cipher 的 Base64 密钥长度时会警告并自动替换。其余协议自动生成 UUID、密码、Reality 密钥、WebSocket 路径或证书。十个协议都会输出公网地址、端口、客户端所需凭据、协议参数和分享链接。添加或查看配置成功后直接退出 `prs`；主菜单输入 `0` 退出，任意子菜单输入 `0` 返回主菜单。自动端口从 `20000..=65535` 的高位范围选择；协议选择固定使用连续编号 `1..=10`。链接只会在配置通过 `shoes --dry-run`、原子写入、systemd 启动且确认为 active 后输出；失败会恢复原配置和服务状态。
 

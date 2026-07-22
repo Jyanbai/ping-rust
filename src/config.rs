@@ -691,7 +691,8 @@ enum ServerRule {
 struct ChainRule {
     masks: String,
     action: String,
-    client_chain: ShoesClientConfig,
+    #[serde(rename = "client_chains", alias = "client_chain")]
+    client_chains: ShoesClientConfig,
 }
 
 fn direct_rules() -> Vec<ServerRule> {
@@ -702,7 +703,7 @@ fn chain_rules(client: &ShoesClientConfig) -> Vec<ServerRule> {
     vec![ServerRule::Inline(ChainRule {
         masks: "0.0.0.0/0".to_owned(),
         action: "allow".to_owned(),
-        client_chain: client.clone(),
+        client_chains: client.clone(),
     })]
 }
 
@@ -731,6 +732,25 @@ fn ensure_chain_proxy_matches_state(servers: &[ServerConfig], state: &ManagedSta
             .any(|rule| matches!(rule, ServerRule::Inline(_)))
     }) {
         bail!("链式代理状态为关闭，但 shoes 配置仍包含链式出口");
+    }
+    Ok(())
+}
+
+fn ensure_chain_proxy_has_no_direct_udp_path(state: &ManagedState) -> Result<()> {
+    if state.chain_proxy.effective().is_none() {
+        return Ok(());
+    }
+    let unsafe_profiles = state
+        .profiles
+        .iter()
+        .filter(|profile| matches!(profile.protocol(), Protocol::Hysteria2 | Protocol::Tuic))
+        .map(ManagedProfile::config_file_name)
+        .collect::<Vec<_>>();
+    if !unsafe_profiles.is_empty() {
+        bail!(
+            "无法启用全局链式代理：当前 shoes 的 Hysteria2/TUIC UDP 路径会绕过 client chain 并直连。请先删除这些配置：{}",
+            unsafe_profiles.join("、")
+        );
     }
     Ok(())
 }
@@ -984,6 +1004,7 @@ async fn generate_inner_with_lock(
     ensure_chain_proxy_matches_state(&servers, &state)?;
     servers.push(server);
     state.profiles.push(profile.clone());
+    ensure_chain_proxy_has_no_direct_udp_path(&state)?;
     if state.chain_proxy.effective().is_some() {
         apply_chain_proxy_rules(&mut servers, &state);
     }
@@ -1519,6 +1540,7 @@ pub(crate) fn prepare_managed_snapshot(directory: &Path) -> Result<bool> {
     let servers = load_servers(&config_path)?;
     ensure_servers_match_state(&servers, &state.profiles).context("备份内容不一致")?;
     ensure_chain_proxy_matches_state(&servers, &state).context("备份内容不一致")?;
+    ensure_chain_proxy_has_no_direct_udp_path(&state).context("备份内容不安全")?;
     let documents = profile_documents(&servers, &state.profiles)?;
     let profiles_path = directory.join("profiles");
     if profile_documents_are_current(&profiles_path, &documents)? {
@@ -1695,6 +1717,7 @@ pub(crate) async fn update_chain_proxy_locked(
     };
     let old_effective = state.chain_proxy.effective().map(|node| node.id);
     state.chain_proxy.apply(change)?;
+    ensure_chain_proxy_has_no_direct_udp_path(&state)?;
     let new_effective = state.chain_proxy.effective().map(|node| node.id);
     let configuration_changed = old_effective != new_effective;
     if configuration_changed {
@@ -2699,6 +2722,7 @@ pub(crate) fn validate_managed_snapshot(config_path: &Path, state_path: &Path) -
     let state = load_state_from(state_path)?;
     ensure_servers_match_state(&servers, &state.profiles).context("备份内容不一致")?;
     ensure_chain_proxy_matches_state(&servers, &state).context("备份内容不一致")?;
+    ensure_chain_proxy_has_no_direct_udp_path(&state).context("备份内容不安全")?;
     let profiles_path = config_path
         .parent()
         .context("备份配置没有父目录")?
@@ -2861,7 +2885,7 @@ mod tests {
         ensure_chain_proxy_matches_state(&servers, &state).unwrap();
         let yaml = serde_yaml::to_string(&servers).unwrap();
         validate_yaml(&yaml).unwrap();
-        assert_eq!(yaml.matches("client_chain:").count(), 2);
+        assert_eq!(yaml.matches("client_chains:").count(), 2);
         assert_eq!(yaml.matches("masks: 0.0.0.0/0").count(), 2);
         assert!(yaml.contains("type: socks"));
         assert!(yaml.contains("username: alice"));
@@ -2875,8 +2899,109 @@ mod tests {
         apply_chain_proxy_rules(&mut servers, &state);
         ensure_chain_proxy_matches_state(&servers, &state).unwrap();
         let direct_yaml = serde_yaml::to_string(&servers).unwrap();
-        assert!(!direct_yaml.contains("client_chain:"));
+        assert!(!direct_yaml.contains("client_chains:"));
         assert_eq!(direct_yaml.matches("allow-all-direct").count(), 2);
+    }
+
+    #[test]
+    fn chain_proxy_reads_legacy_singular_field_and_writes_current_plural_field() {
+        let (mut server, profile) = reality_server_and_profile(53453);
+        let node = crate::chain_proxy::parse_share_uri(
+            "socks5://alice:secret@proxy.example.com:1080#exit",
+        )
+        .unwrap();
+        let mut state = ManagedState {
+            schema_version: 2,
+            profiles: vec![profile],
+            chain_proxy: ChainProxyState::default(),
+        };
+        let id = node.id;
+        state
+            .chain_proxy
+            .apply(ChainProxyChange::Add(node))
+            .unwrap();
+        state
+            .chain_proxy
+            .apply(ChainProxyChange::Select(id))
+            .unwrap();
+        state
+            .chain_proxy
+            .apply(ChainProxyChange::SetEnabled(true))
+            .unwrap();
+        apply_chain_proxy_rules(std::slice::from_mut(&mut server), &state);
+        let current = serde_yaml::to_string(std::slice::from_ref(&server)).unwrap();
+        assert!(current.contains("client_chains:"));
+        let legacy = current.replace("client_chains:", "client_chain:");
+        let parsed: Vec<ServerConfig> = serde_yaml::from_str(&legacy).unwrap();
+        assert!(parsed[0].rules == server.rules);
+    }
+
+    #[test]
+    fn enabled_chain_rejects_quic_inbounds_that_can_bypass_the_chain() {
+        let (_, safe_profile) = reality_server_and_profile(53453);
+        let node = crate::chain_proxy::parse_share_uri(
+            "socks5://alice:secret@proxy.example.com:1080#exit",
+        )
+        .unwrap();
+        let id = node.id;
+        let mut state = ManagedState {
+            schema_version: 2,
+            profiles: vec![safe_profile.clone()],
+            chain_proxy: ChainProxyState::default(),
+        };
+        state
+            .chain_proxy
+            .apply(ChainProxyChange::Add(node))
+            .unwrap();
+        state
+            .chain_proxy
+            .apply(ChainProxyChange::Select(id))
+            .unwrap();
+        state
+            .chain_proxy
+            .apply(ChainProxyChange::SetEnabled(true))
+            .unwrap();
+        ensure_chain_proxy_has_no_direct_udp_path(&state).unwrap();
+
+        for credentials in [
+            Credentials::Hysteria2 {
+                password: "test-password".to_owned(),
+                server_name: "hy2.example.com".to_owned(),
+                alpn_protocols: vec!["h3".to_owned()],
+            },
+            Credentials::Tuic {
+                user_id: Uuid::new_v4(),
+                password: "test-password".to_owned(),
+                server_name: "tuic.example.com".to_owned(),
+                alpn_protocols: vec!["h3".to_owned()],
+                zero_rtt_handshake: false,
+            },
+        ] {
+            let mut unsafe_profile = safe_profile.clone();
+            unsafe_profile.port += 1;
+            unsafe_profile.credentials = credentials;
+            let expected_name = unsafe_profile.config_file_name();
+            state.profiles.push(unsafe_profile);
+            let error = ensure_chain_proxy_has_no_direct_udp_path(&state)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("会绕过 client chain 并直连"));
+            assert!(error.contains(&expected_name));
+            state.profiles.pop();
+        }
+
+        state
+            .chain_proxy
+            .apply(ChainProxyChange::SetEnabled(false))
+            .unwrap();
+        let mut unsafe_profile = safe_profile;
+        unsafe_profile.credentials = Credentials::Hysteria2 {
+            password: "test-password".to_owned(),
+            server_name: "hy2.example.com".to_owned(),
+            alpn_protocols: vec!["h3".to_owned()],
+        };
+        state.profiles.push(unsafe_profile);
+        ensure_chain_proxy_has_no_direct_udp_path(&state).unwrap();
     }
 
     #[test]

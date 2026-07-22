@@ -1,0 +1,15 @@
+- address: 127.0.0.1:18082
+  protocol:
+    type: shadowsocks
+    cipher: aes-128-gcm
+    password: downstream-password
+    udp_enabled: false
+  rules:
+    - masks: 0.0.0.0/0
+      action: allow
+      client_chains:
+        address: 127.0.0.1:18081
+        protocol:
+          type: socks
+          username: chain-user
+          password: chain-password

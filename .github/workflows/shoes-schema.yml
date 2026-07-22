@@ -48,6 +48,15 @@ jobs:
           grep -F "$SHOES_VERSION" <<<"$shoes_version"
       - name: Build ping-rust
         run: cargo build --locked
+      - name: Validate and exercise chain proxy with fixed shoes revision
+        env:
+          PING_RUST_SHOES_E2E_BIN: /usr/local/bin/shoes
+        run: |
+          shoes --dry-run examples/chain-proxy.yaml
+          shoes --dry-run examples/chain-e2e-upstream.yaml
+          shoes --dry-run examples/chain-e2e-downstream.yaml
+          shoes --dry-run examples/chain-e2e-client.yaml
+          cargo test --locked --test chain_proxy_e2e -- --nocapture
       - name: Generate and validate every protocol
         shell: bash
         run: |

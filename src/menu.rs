@@ -582,9 +582,9 @@ async fn chain_proxy_menu() -> Result<()> {
                     && state
                         .chain_proxy
                         .active()
-                        .is_some_and(|node| !node.supports_udp())
+                        .is_some_and(|node| !node.supports_udp_over_tcp())
                     && !Confirm::with_theme(&ColorfulTheme::default())
-                        .with_prompt("当前出口只支持 TCP，UDP 请求将失败；仍要启用？")
+                        .with_prompt("当前出口不支持 UDP-over-TCP，UDP 请求将失败；仍要启用？")
                         .default(false)
                         .interact()?
                 {
@@ -594,7 +594,7 @@ async fn chain_proxy_menu() -> Result<()> {
                 println!(
                     "{}",
                     if enabled {
-                        "链式代理已启用：所有受管入站流量将经当前节点转发。"
+                        "链式代理已启用：受支持的 TCP 流量将经当前节点转发。"
                     } else {
                         "链式代理已关闭：所有受管入站已恢复直连。"
                     }
@@ -625,8 +625,8 @@ async fn add_chain_node() -> Result<()> {
         parsed.protocol_name(),
         parsed.address()
     );
-    if !parsed.supports_udp() {
-        println!("提示：该节点在 shoes 中仅支持 TCP 链式转发。");
+    if !parsed.supports_udp_over_tcp() {
+        println!("提示：该节点不支持 UDP-over-TCP；UDP 请求将失败，不会回退直连。");
     }
     let name = Input::<String>::with_theme(&ColorfulTheme::default())
         .with_prompt("节点名称")
@@ -667,9 +667,9 @@ async fn select_chain_exit() -> Result<()> {
     };
     let node = &state.chain_proxy.nodes[index];
     if state.chain_proxy.enabled
-        && !node.supports_udp()
+        && !node.supports_udp_over_tcp()
         && !Confirm::with_theme(&ColorfulTheme::default())
-            .with_prompt("所选出口只支持 TCP，UDP 请求将失败；仍要切换？")
+            .with_prompt("所选出口不支持 UDP-over-TCP，UDP 请求将失败；仍要切换？")
             .default(false)
             .interact()?
     {

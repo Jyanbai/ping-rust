@@ -130,8 +130,8 @@ impl ChainNode {
         &self.client.address
     }
 
-    pub fn supports_udp(&self) -> bool {
-        self.client.protocol.supports_udp()
+    pub fn supports_udp_over_tcp(&self) -> bool {
+        self.client.protocol.supports_udp_over_tcp()
     }
 }
 
@@ -222,13 +222,14 @@ impl ShoesClientProtocol {
         }
     }
 
-    fn supports_udp(&self) -> bool {
+    fn supports_udp_over_tcp(&self) -> bool {
         match self {
             Self::Shadowsocks { udp_enabled, .. } | Self::Vless { udp_enabled, .. } => *udp_enabled,
-            Self::Trojan { .. } => true,
+            // shoes 0.2.8 still leaves Trojan UDP client handling unimplemented.
+            Self::Trojan { .. } => false,
             Self::Reality { protocol, .. }
             | Self::Tls { protocol, .. }
-            | Self::Websocket { protocol, .. } => protocol.supports_udp(),
+            | Self::Websocket { protocol, .. } => protocol.supports_udp_over_tcp(),
             Self::Http { .. } | Self::Socks { .. } => false,
         }
     }
@@ -650,7 +651,7 @@ mod tests {
                 password: Some(ref password)
             } if user == "alice" && password == "p@ss"
         ));
-        assert!(!socks.supports_udp());
+        assert!(!socks.supports_udp_over_tcp());
 
         let https = parse_share_uri("https://proxy.example.com:443?sni=edge.example.com").unwrap();
         assert!(matches!(
@@ -679,13 +680,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(vless.protocol_name(), "VLESS-Reality");
-        assert!(vless.supports_udp());
+        assert!(vless.supports_udp_over_tcp());
 
         let trojan = parse_share_uri(
             "trojan://secret@example.com:443?security=tls&type=ws&path=%2Fws&host=cdn.example.com&sni=example.com#trojan",
         )
         .unwrap();
         assert_eq!(trojan.protocol_name(), "Trojan-WS-TLS");
+        assert!(!trojan.supports_udp_over_tcp());
     }
 
     #[test]
