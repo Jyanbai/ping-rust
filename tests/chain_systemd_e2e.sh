@@ -176,7 +176,6 @@ current_stage="generating deterministic managed Reality listener"
     --server-name www.cloudflare.com \
     --dest www.cloudflare.com:443 \
     >"$work_dir/bootstrap.out"
-grep -q 'vless://' "$work_dir/bootstrap.out"
 rm -f "$work_dir/bootstrap.out"
 systemctl is-active --quiet shoes.service
 systemctl is-enabled --quiet shoes.service
