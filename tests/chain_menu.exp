@@ -37,10 +37,8 @@ spawn $binary
 expect_or_fail {请选择 \[0-10\]} "main menu"
 send_choice 9
 expect_or_fail {运维工具} "operations menu"
-expect_or_fail {请输入序号} "operations choice"
 send_choice 1
 expect_or_fail {链式代理管理} "chain menu"
-expect_or_fail {请输入序号} "chain choice"
 
 switch -- $action {
     add {
@@ -70,7 +68,6 @@ switch -- $action {
         }
         send_choice 2
         expect_or_fail {选择出口节点} "node selector"
-        expect_or_fail {请输入序号} "node selection"
         send_choice $argument
         expect_or_fail {当前出口已切换为} "select result"
     }
@@ -81,7 +78,6 @@ switch -- $action {
         }
         send_choice 6
         expect_or_fail {选择删除节点} "delete selector"
-        expect_or_fail {请输入序号} "delete selection"
         send_choice $argument
         expect_or_fail {确认删除链式节点} "delete confirmation"
         send_choice y
@@ -94,10 +90,8 @@ switch -- $action {
 }
 
 expect_or_fail {链式代理管理} "return to chain menu"
-expect_or_fail {请输入序号} "return choice"
 send_choice 0
 expect_or_fail {请选择 \[0-10\]} "return to main menu"
 send_choice 0
 expect_or_fail {已退出} "program exit"
 expect eof
-

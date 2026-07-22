@@ -263,4 +263,3 @@ systemctl restart shoes.service
 systemctl is-active --quiet shoes.service
 
 echo "chain systemd acceptance passed"
-

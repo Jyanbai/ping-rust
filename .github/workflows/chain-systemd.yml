@@ -84,7 +84,7 @@ jobs:
             --volume /sys/fs/cgroup:/sys/fs/cgroup:rw \
             --volume "$PWD:/workspace:ro" \
             debian:12 bash -lc \
-              'apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends systemd ca-certificates curl expect iproute2 python3 && exec /sbin/init'
+              'apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends systemd systemd-sysv ca-certificates curl expect iproute2 python3 && exec /sbin/init'
           for _ in {1..180}; do
             system_state="$(
               docker exec ping-rust-debian systemctl is-system-running 2>/dev/null || true
