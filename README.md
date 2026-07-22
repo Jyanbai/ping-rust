@@ -4,7 +4,9 @@
 
 核心逻辑全部位于 Rust 源码中；`scripts/install.sh` 负责下载、校验并安装官方预编译二进制，随后调用 Rust 的安全首次部署入口。
 
-> 当前开发版保留原有 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks、AnyTLS，并新增 VLESS-TLS-Vision、VLESS-WS-TLS、Trojan-TLS、Trojan-Reality、VMess-WS-TLS。用户只选择完整协议，不需要理解或手动组合传输层、安全层与内层协议。
+> 当前稳定版 `v0.1.12` 支持 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks、AnyTLS、VLESS-TLS-Vision、VLESS-WS-TLS、Trojan-TLS、Trojan-Reality 和 VMess-WS-TLS。用户只选择完整协议，不需要理解或手动组合传输层、安全层与内层协议。
+
+完整文档：[Wiki](https://github.com/Jyanbai/ping-rust/wiki) · [快速开始](https://github.com/Jyanbai/ping-rust/wiki/Quick-Start) · [链式代理](https://github.com/Jyanbai/ping-rust/wiki/Chain-Proxy) · [故障排查](https://github.com/Jyanbai/ping-rust/wiki/Troubleshooting)
 
 ## 一键安装（推荐）
 
@@ -22,7 +24,7 @@ bash <(curl --proto '=https' --tlsv1.2 -fsSL \
 ```bash
 bash <(curl --proto '=https' --tlsv1.2 -fsSL \
   https://raw.githubusercontent.com/Jyanbai/ping-rust/main/scripts/install.sh) \
-  --version v0.1.7
+  --version v0.1.12
 
 bash <(curl --proto '=https' --tlsv1.2 -fsSL \
   https://raw.githubusercontent.com/Jyanbai/ping-rust/main/scripts/install.sh) \
@@ -118,7 +120,7 @@ vless://...security=reality...pbk=...&sid=...
 ```text
 $ sudo prs
 
-------------- ping-rust v0.1.9 -------------
+------------- ping-rust v0.1.12 -------------
 shoes: running
 项目: https://github.com/Jyanbai/ping-rust
 
@@ -314,8 +316,8 @@ sudo ping-rust self-update
 `update` 只更新 shoes 内核；`self-update` 更新 ping-rust 本身。默认安装最新 Release，也可以指定版本；显式指定旧版本表示受控降级：
 
 ```bash
-sudo ping-rust self-update --version v0.1.5
-sudo ping-rust self-update --version v0.1.5 --force
+sudo ping-rust self-update --version v0.1.12
+sudo ping-rust self-update --version v0.1.12 --force
 ```
 
 自更新支持 Linux x86_64/aarch64，下载对应 musl 静态包，校验 GitHub API digest 与 `SHA256SUMS`，确认新二进制版本后才替换当前程序。程序位于 `/usr/local/bin` 时通常需要 `sudo`；用户目录内可写的 cargo 安装则不需要。
