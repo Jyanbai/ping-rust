@@ -80,7 +80,7 @@ PY
 }
 
 current_stage="creating isolated network exits"
-read -r origin_port upstream_one_port upstream_two_port client_port < <(choose_ports 4)
+read -r origin_port upstream_one_port upstream_two_port client_port server_port < <(choose_ports 5)
 
 ip netns add "$namespace_one"
 ip link add "$root_one" type veth peer name "$peer_one"
@@ -169,8 +169,13 @@ wait_port() {
 wait_port 10.231.1.2 "$upstream_one_port"
 wait_port 10.231.2.2 "$upstream_two_port"
 
-current_stage="bootstrapping managed Reality listener"
-"$PING_RUST_BIN" bootstrap >"$work_dir/bootstrap.out"
+current_stage="generating deterministic managed Reality listener"
+"$PING_RUST_BIN" generate reality \
+    --name chain-entry \
+    --port "$server_port" \
+    --server-name www.cloudflare.com \
+    --dest www.cloudflare.com:443 \
+    >"$work_dir/bootstrap.out"
 grep -q '^vless://' "$work_dir/bootstrap.out"
 rm -f "$work_dir/bootstrap.out"
 systemctl is-active --quiet shoes.service
