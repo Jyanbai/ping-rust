@@ -41,6 +41,7 @@ bash <(curl --proto '=https' --tlsv1.2 -fsSL \
 - Reality 未显式指定 SNI 时，从与本地 233boy 脚本一致的 Amazon、eBay、PayPal、Cloudflare 域名列表中随机选择（不含 Apple）；客户端指纹与该脚本一致固定为 `chrome`
 - 在同目录候选文件上调用 `shoes --dry-run`，通过后才原子提交并启用 systemd 服务
 - 多配置添加、列表、删除、端口冲突保护
+- 全局链式代理：从分享链接导入受支持的上游节点，选择、启停、测试和删除；启用后所有受管入站经当前节点转发
 - 跨进程配置锁、配置/sidecar 精确回滚，更新与恢复保留服务原运行状态
 - 服务启停、重启、状态、journalctl 日志、更新与卸载
 - BBR、TCP/UDP 端口检查、敏感配置备份与安全恢复
@@ -160,6 +161,29 @@ vless://...security=reality...pbk=...&sid=...
 菜单 `2. 更改配置` 会先选择现有配置，再按协议提供端口、名称、公网地址、凭据、Reality SNI、Shadowsocks cipher 或 AnyTLS 用户密码等修改项。新配置必须通过真实 `shoes --dry-run` 才会原子提交；服务重启失败时自动恢复修改前的配置与 systemd 状态，成功后直接输出新的分享链接。
 
 每个节点都会保存为 `/etc/shoes/profiles/` 下的真实独立 YAML 文件；查看、更改和删除时直接显示该文件名，例如 `VLESS-REALITY-53453.yaml`。只有一个配置时自动选中，多个配置时才显示数字列表。shoes 继续加载由 Rust 确定性聚合的 `/etc/shoes/config.yaml`，内部 UUID 仅用于安全定位。
+
+### 链式代理
+
+从主菜单进入 `9) 其他 → 1) 链式代理`：
+
+```text
+------------- 链式代理管理 -------------
+状态：○ 未启用
+当前出口：未选择
+节点数量：0
+
+1) 添加节点（分享链接）
+2) 选择出口节点
+3) 启用链式代理
+4) 测试节点（TCP 连通性）
+5) 查看节点
+6) 删除节点
+0) 返回
+```
+
+第一版支持 SOCKS5、HTTP/HTTPS、Shadowsocks、VLESS TCP/TLS/Reality/WebSocket 和 Trojan TLS/WebSocket 分享链接。由于当前 shoes 内核没有对应客户端实现，Hysteria2、TUIC、WireGuard/WARP 不能作为链式出口；ping-rust 会返回明确错误，不会生成近似配置。HTTP 和 SOCKS5 出口在 shoes 中只支持 TCP，启用前会再次警告。测试菜单只检查上游地址与 TCP 端口是否可达，完整协议配置仍必须通过 `shoes --dry-run` 后才会写入并重启服务。
+
+添加第一个节点时会自动选为当前出口，但不会自动启用。启用后，所有受管入站使用同一个上游节点；关闭或删除正在使用的节点会恢复 `allow-all-direct`。节点凭据保存在权限为 `0600` 的管理状态和配置文件中，备份同样包含这些敏感信息。
 
 首次安装流程是：`install.sh → 自动安装 ping-rust/shoes → 自动随机端口部署 VLESS-REALITY → 复制 URL`，中间零输入。Reality 未指定 `--server-name` 时会从 `www.amazon.com`、`www.ebay.com`、`www.paypal.com`、`www.cloudflare.com`、`dash.cloudflare.com`、`aws.amazon.com` 中随机选择 SNI；列表不含 Apple，客户端指纹固定为本地 233boy 脚本使用的 `chrome`。后续日常流程是：`prs → 1 → 选择协议 → 输入端口/直接回车随机 → 复制 URL 到 v2rayN`；Shadowsocks 会额外选择加密方式和密码，SS 2022 密码不符合所选 cipher 的 Base64 密钥长度时会警告并自动替换。其余协议自动生成 UUID、密码、Reality 密钥、WebSocket 路径或证书。十个协议都会输出公网地址、端口、客户端所需凭据、协议参数和分享链接。添加或查看配置成功后直接退出 `prs`；主菜单输入 `0` 退出，任意子菜单输入 `0` 返回主菜单。自动端口从 `20000..=65535` 的高位范围选择；协议选择固定使用连续编号 `1..=10`。链接只会在配置通过 `shoes --dry-run`、原子写入、systemd 启动且确认为 active 后输出；失败会恢复原配置和服务状态。
 

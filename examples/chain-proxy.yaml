@@ -1,0 +1,99 @@
+- address: 127.0.0.1:18388
+  protocol:
+    type: shadowsocks
+    cipher: aes-128-gcm
+    password: local-test-password
+    udp_enabled: true
+  rules:
+    - masks: 0.0.0.0/0
+      action: allow
+      client_chain:
+        address: 127.0.0.1:1080
+        protocol:
+          type: socks
+          username: upstream-user
+          password: upstream-password
+
+# The remaining entries exercise every protocol shape imported by ping-rust.
+- address: 127.0.0.1:18389
+  protocol:
+    type: shadowsocks
+    cipher: aes-128-gcm
+    password: local-test-password
+    udp_enabled: true
+  rules:
+    - masks: 0.0.0.0/0
+      action: allow
+      client_chain:
+        address: proxy.example.com:8388
+        protocol:
+          type: shadowsocks
+          cipher: aes-128-gcm
+          password: upstream-password
+          udp_enabled: true
+
+- address: 127.0.0.1:18390
+  protocol:
+    type: shadowsocks
+    cipher: aes-128-gcm
+    password: local-test-password
+    udp_enabled: true
+  rules:
+    - masks: 0.0.0.0/0
+      action: allow
+      client_chain:
+        address: reality.example.com:443
+        protocol:
+          type: reality
+          public_key: BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc
+          short_id: 0123456789abcdef
+          sni_hostname: www.cloudflare.com
+          vision: true
+          protocol:
+            type: vless
+            user_id: b85798ef-e9dc-46a4-9a87-8da4499d36d0
+
+- address: 127.0.0.1:18391
+  protocol:
+    type: shadowsocks
+    cipher: aes-128-gcm
+    password: local-test-password
+    udp_enabled: true
+  rules:
+    - masks: 0.0.0.0/0
+      action: allow
+      client_chain:
+        address: ws.example.com:443
+        protocol:
+          type: tls
+          verify: false
+          sni_hostname: ws.example.com
+          protocol:
+            type: websocket
+            matching_path: /vless
+            matching_headers:
+              Host: cdn.example.com
+            protocol:
+              type: vless
+              user_id: b85798ef-e9dc-46a4-9a87-8da4499d36d0
+
+- address: 127.0.0.1:18392
+  protocol:
+    type: shadowsocks
+    cipher: aes-128-gcm
+    password: local-test-password
+    udp_enabled: true
+  rules:
+    - masks: 0.0.0.0/0
+      action: allow
+      client_chain:
+        address: trojan.example.com:443
+        protocol:
+          type: tls
+          sni_hostname: trojan.example.com
+          protocol:
+            type: websocket
+            matching_path: /trojan
+            protocol:
+              type: trojan
+              password: upstream-password

@@ -1,10 +1,14 @@
-use std::io::{self, Write};
+use std::{
+    io::{self, Write},
+    time::Duration,
+};
 
 use anyhow::{Context, Result};
 use colored::Colorize;
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, Password};
 
 use crate::{
+    chain_proxy::{self, ChainNode, ChainProxyChange},
     cli,
     client::{self, ClientFormat},
     config::{
@@ -43,6 +47,18 @@ const PROTOCOL_MENU_ITEMS: &[(usize, &str)] = &[
     (9, "Trojan-REALITY"),
     (10, "VMess-WS-TLS"),
     (0, "返回"),
+];
+
+const OPERATIONS_MENU_ITEMS: [&str; 9] = [
+    "链式代理",
+    "高级添加配置",
+    "查看日志",
+    "端口检查",
+    "开启 BBR",
+    "备份配置",
+    "恢复配置",
+    "导出客户端配置",
+    "更新 ping-rust",
 ];
 
 #[derive(Clone, Copy)]
@@ -465,23 +481,14 @@ async fn delete_config_menu() -> Result<()> {
 }
 
 async fn operations_menu() -> Result<()> {
-    let choices = [
-        "高级添加配置",
-        "查看日志",
-        "端口检查",
-        "开启 BBR",
-        "备份配置",
-        "恢复配置",
-        "导出客户端配置",
-        "更新 ping-rust",
-    ];
-    let Some(selected) = select_numbered("运维工具", &choices)? else {
+    let Some(selected) = select_numbered("运维工具", &OPERATIONS_MENU_ITEMS)? else {
         return Ok(());
     };
     match selected {
-        0 => advanced_add_config_menu().await,
-        1 => service::logs(100),
-        2 => {
+        0 => chain_proxy_menu().await,
+        1 => advanced_add_config_menu().await,
+        2 => service::logs(100),
+        3 => {
             let port = Input::<u16>::with_theme(&ColorfulTheme::default())
                 .with_prompt("检查端口")
                 .default(443)
@@ -489,7 +496,7 @@ async fn operations_menu() -> Result<()> {
             cli::print_port_status(port, operations::check_port(port, true, true));
             Ok(())
         }
-        3 => {
+        4 => {
             if Confirm::with_theme(&ColorfulTheme::default())
                 .with_prompt("写入 sysctl 配置并启用 BBR？")
                 .default(true)
@@ -500,13 +507,13 @@ async fn operations_menu() -> Result<()> {
             }
             Ok(())
         }
-        4 => {
+        5 => {
             let path = operations::backup(None)?;
             println!("备份已创建：{}", path.display());
             println!("备份含私钥和密码，请安全保管。");
             Ok(())
         }
-        5 => {
+        6 => {
             let archive = Input::<String>::with_theme(&ColorfulTheme::default())
                 .with_prompt("备份文件路径")
                 .interact_text()?;
@@ -523,10 +530,228 @@ async fn operations_menu() -> Result<()> {
             }
             Ok(())
         }
-        6 => export_menu(),
-        7 => cli::run_self_update(None, false).await,
+        7 => export_menu(),
+        8 => cli::run_self_update(None, false).await,
         _ => unreachable!("运维菜单编号已验证"),
     }
+}
+
+async fn chain_proxy_menu() -> Result<()> {
+    loop {
+        let state = config::load_state()?;
+        println!("\n------------- 链式代理管理 -------------");
+        println!(
+            "状态：{}",
+            if state.chain_proxy.enabled {
+                "● 已启用"
+            } else {
+                "○ 未启用"
+            }
+        );
+        match state.chain_proxy.active() {
+            Some(node) => println!(
+                "当前出口：{} | {} | {}",
+                node.name,
+                node.protocol_name(),
+                node.address()
+            ),
+            None => println!("当前出口：未选择"),
+        }
+        println!("节点数量：{}\n", state.chain_proxy.nodes.len());
+        let action = if state.chain_proxy.enabled {
+            "关闭链式代理"
+        } else {
+            "启用链式代理"
+        };
+        let items = [
+            (1, "添加节点（分享链接）"),
+            (2, "选择出口节点"),
+            (3, action),
+            (4, "测试节点（TCP 连通性）"),
+            (5, "查看节点"),
+            (6, "删除节点"),
+            (0, "返回"),
+        ];
+        match select_keyed("", &items)? {
+            0 => return Ok(()),
+            1 => add_chain_node().await?,
+            2 => select_chain_exit().await?,
+            3 => {
+                let enabled = !state.chain_proxy.enabled;
+                if enabled
+                    && state
+                        .chain_proxy
+                        .active()
+                        .is_some_and(|node| !node.supports_udp())
+                    && !Confirm::with_theme(&ColorfulTheme::default())
+                        .with_prompt("当前出口只支持 TCP，UDP 请求将失败；仍要启用？")
+                        .default(false)
+                        .interact()?
+                {
+                    continue;
+                }
+                deployment::update_chain_proxy(ChainProxyChange::SetEnabled(enabled)).await?;
+                println!(
+                    "{}",
+                    if enabled {
+                        "链式代理已启用：所有受管入站流量将经当前节点转发。"
+                    } else {
+                        "链式代理已关闭：所有受管入站已恢复直连。"
+                    }
+                    .green()
+                );
+            }
+            4 => test_chain_node().await?,
+            5 => print_chain_nodes(&state.chain_proxy.nodes, state.chain_proxy.active_node),
+            6 => delete_chain_node().await?,
+            _ => unreachable!("链式代理菜单编号已验证"),
+        }
+    }
+}
+
+async fn add_chain_node() -> Result<()> {
+    println!("支持：SOCKS5、HTTP(S)、Shadowsocks、VLESS（TCP/TLS/Reality/WS）、Trojan（TLS/WS）");
+    println!("不支持：Hysteria2、TUIC、WireGuard/WARP、未经验证的分享链接格式");
+    let uri = Input::<String>::with_theme(&ColorfulTheme::default())
+        .with_prompt("粘贴分享链接（输入 0 返回）")
+        .interact_text()?;
+    if uri.trim() == "0" {
+        return Ok(());
+    }
+    let parsed = chain_proxy::parse_share_uri(&uri)?;
+    println!(
+        "识别结果：{} | {} | {}",
+        parsed.name,
+        parsed.protocol_name(),
+        parsed.address()
+    );
+    if !parsed.supports_udp() {
+        println!("提示：该节点在 shoes 中仅支持 TCP 链式转发。");
+    }
+    let name = Input::<String>::with_theme(&ColorfulTheme::default())
+        .with_prompt("节点名称")
+        .default(parsed.name.clone())
+        .interact_text()?;
+    let node = parsed.with_name(name)?;
+    let state = deployment::update_chain_proxy(ChainProxyChange::Add(node.clone())).await?;
+    println!("{} {}", "节点已添加：".green(), node.name);
+    if state.chain_proxy.active_node == Some(node.id) {
+        println!("该节点已设为当前出口；启用链式代理后生效。");
+    }
+    Ok(())
+}
+
+fn select_chain_node(nodes: &[ChainNode], prompt: &str) -> Result<Option<usize>> {
+    let labels = nodes
+        .iter()
+        .map(|node| {
+            format!(
+                "{} | {} | {}",
+                node.name,
+                node.protocol_name(),
+                node.address()
+            )
+        })
+        .collect::<Vec<_>>();
+    select_numbered(prompt, &labels)
+}
+
+async fn select_chain_exit() -> Result<()> {
+    let state = config::load_state()?;
+    if state.chain_proxy.nodes.is_empty() {
+        println!("没有可选择的链式代理节点。");
+        return Ok(());
+    }
+    let Some(index) = select_chain_node(&state.chain_proxy.nodes, "选择出口节点")? else {
+        return Ok(());
+    };
+    let node = &state.chain_proxy.nodes[index];
+    if state.chain_proxy.enabled
+        && !node.supports_udp()
+        && !Confirm::with_theme(&ColorfulTheme::default())
+            .with_prompt("所选出口只支持 TCP，UDP 请求将失败；仍要切换？")
+            .default(false)
+            .interact()?
+    {
+        return Ok(());
+    }
+    deployment::update_chain_proxy(ChainProxyChange::Select(node.id)).await?;
+    println!("{} {}", "当前出口已切换为：".green(), node.name);
+    Ok(())
+}
+
+async fn test_chain_node() -> Result<()> {
+    let state = config::load_state()?;
+    if state.chain_proxy.nodes.is_empty() {
+        println!("没有可测试的链式代理节点。");
+        return Ok(());
+    }
+    let Some(index) = select_chain_node(&state.chain_proxy.nodes, "选择测试节点")? else {
+        return Ok(());
+    };
+    let node = state.chain_proxy.nodes[index].clone();
+    let tested = node.clone();
+    let elapsed = tokio::task::spawn_blocking(move || {
+        chain_proxy::test_tcp_connect(&tested, Duration::from_secs(5))
+    })
+    .await
+    .context("节点测试任务异常退出")??;
+    println!(
+        "{} {}（TCP 建连 {} ms）",
+        "节点端口可达：".green(),
+        node.name,
+        elapsed.as_millis()
+    );
+    println!("说明：该测试只验证地址和端口；启用时仍会由 shoes --dry-run 校验完整配置。");
+    Ok(())
+}
+
+fn print_chain_nodes(nodes: &[ChainNode], active: Option<uuid::Uuid>) {
+    if nodes.is_empty() {
+        println!("没有链式代理节点。");
+        return;
+    }
+    println!("\n链式代理节点:\n");
+    for (index, node) in nodes.iter().enumerate() {
+        let marker = if active == Some(node.id) {
+            "●"
+        } else {
+            "○"
+        };
+        println!(
+            "{}) {} {} | {} | {}",
+            index + 1,
+            marker,
+            node.name,
+            node.protocol_name(),
+            node.address()
+        );
+    }
+}
+
+async fn delete_chain_node() -> Result<()> {
+    let state = config::load_state()?;
+    if state.chain_proxy.nodes.is_empty() {
+        println!("没有可删除的链式代理节点。");
+        return Ok(());
+    }
+    let Some(index) = select_chain_node(&state.chain_proxy.nodes, "选择删除节点")? else {
+        return Ok(());
+    };
+    let node = &state.chain_proxy.nodes[index];
+    if !Confirm::with_theme(&ColorfulTheme::default())
+        .with_prompt(format!("确认删除链式节点 {}？", node.name))
+        .default(false)
+        .interact()?
+    {
+        return Ok(());
+    }
+    deployment::update_chain_proxy(ChainProxyChange::Delete(node.id)).await?;
+    println!("{} {}", "节点已删除：".green(), node.name);
+    if state.chain_proxy.active_node == Some(node.id) && state.chain_proxy.enabled {
+        println!("被删除节点原为当前出口，链式代理已自动关闭并恢复直连。");
+    }
+    Ok(())
 }
 
 fn export_menu() -> Result<()> {
@@ -977,6 +1202,12 @@ mod tests {
                 protocol
             );
         }
+    }
+
+    #[test]
+    fn chain_proxy_is_the_first_other_tool() {
+        assert_eq!(OPERATIONS_MENU_ITEMS.first(), Some(&"链式代理"));
+        assert_eq!(OPERATIONS_MENU_ITEMS.len(), 9);
     }
 
     #[test]

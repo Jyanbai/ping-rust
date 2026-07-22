@@ -19,7 +19,10 @@ use tokio::process::Command;
 use uuid::Uuid;
 use x25519_dalek::{PublicKey, StaticSecret};
 
-use crate::utils;
+use crate::{
+    chain_proxy::{ChainProxyChange, ChainProxyState, ShoesClientConfig},
+    utils,
+};
 
 pub const DEFAULT_SNI: &str = "www.cloudflare.com";
 pub const REALITY_FINGERPRINT: &str = "chrome";
@@ -269,6 +272,14 @@ pub(crate) struct DeletionResult {
     _lock: Option<utils::ExclusiveLock>,
 }
 
+pub(crate) struct ChainProxyUpdateResult {
+    pub state: ManagedState,
+    pub configuration_changed: bool,
+    pub profiles_count: usize,
+    rollback: Option<ManagedRollback>,
+    _lock: Option<utils::ExclusiveLock>,
+}
+
 struct ManagedRollback {
     config: Option<Vec<u8>>,
     state: Option<Vec<u8>>,
@@ -329,6 +340,25 @@ impl DeletionResult {
             }
         }
         self.profile
+    }
+}
+
+impl ChainProxyUpdateResult {
+    pub fn rollback_managed(&mut self) -> Result<()> {
+        let rollback = self
+            .rollback
+            .take()
+            .context("该链式代理更新不包含可回滚的系统配置事务")?;
+        rollback.restore_to(
+            Path::new(utils::CONFIG_FILE),
+            Path::new(utils::STATE_FILE),
+            Path::new(utils::PROFILES_DIR),
+        )
+    }
+
+    pub fn finish(mut self) -> ManagedState {
+        self.rollback.take();
+        self.state
     }
 }
 
@@ -524,13 +554,16 @@ fn is_false(value: &bool) -> bool {
 pub struct ManagedState {
     pub schema_version: u8,
     pub profiles: Vec<ManagedProfile>,
+    #[serde(default)]
+    pub chain_proxy: ChainProxyState,
 }
 
 impl Default for ManagedState {
     fn default() -> Self {
         Self {
-            schema_version: 1,
+            schema_version: 2,
             profiles: Vec::new(),
+            chain_proxy: ChainProxyState::default(),
         }
     }
 }
@@ -644,7 +677,62 @@ struct ServerConfig {
     quic_settings: Option<QuicSettings>,
     protocol: ServerProtocol,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    rules: Vec<String>,
+    rules: Vec<ServerRule>,
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+enum ServerRule {
+    Group(String),
+    Inline(ChainRule),
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct ChainRule {
+    masks: String,
+    action: String,
+    client_chain: ShoesClientConfig,
+}
+
+fn direct_rules() -> Vec<ServerRule> {
+    vec![ServerRule::Group("allow-all-direct".to_owned())]
+}
+
+fn chain_rules(client: &ShoesClientConfig) -> Vec<ServerRule> {
+    vec![ServerRule::Inline(ChainRule {
+        masks: "0.0.0.0/0".to_owned(),
+        action: "allow".to_owned(),
+        client_chain: client.clone(),
+    })]
+}
+
+fn apply_chain_proxy_rules(servers: &mut [ServerConfig], state: &ManagedState) {
+    let rules = state
+        .chain_proxy
+        .effective()
+        .map(|node| chain_rules(&node.client))
+        .unwrap_or_else(direct_rules);
+    for server in servers {
+        server.rules.clone_from(&rules);
+    }
+}
+
+fn ensure_chain_proxy_matches_state(servers: &[ServerConfig], state: &ManagedState) -> Result<()> {
+    state.chain_proxy.validate().context("链式代理状态无效")?;
+    if let Some(node) = state.chain_proxy.effective() {
+        let expected = chain_rules(&node.client);
+        if servers.iter().any(|server| server.rules != expected) {
+            bail!("链式代理状态与 shoes 配置不一致");
+        }
+    } else if servers.iter().any(|server| {
+        server
+            .rules
+            .iter()
+            .any(|rule| matches!(rule, ServerRule::Inline(_)))
+    }) {
+        bail!("链式代理状态为关闭，但 shoes 配置仍包含链式出口");
+    }
+    Ok(())
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -893,8 +981,12 @@ async fn generate_inner_with_lock(
     };
     ensure_servers_match_state(&servers, &state.profiles)
         .context("配置文件与管理状态不一致；请先备份并修复，ping-rust 不会覆盖现有配置")?;
+    ensure_chain_proxy_matches_state(&servers, &state)?;
     servers.push(server);
     state.profiles.push(profile.clone());
+    if state.chain_proxy.effective().is_some() {
+        apply_chain_proxy_rules(&mut servers, &state);
+    }
 
     let yaml = serde_yaml::to_string(&servers).context("序列化 shoes YAML 失败")?;
     validate_yaml(&yaml)?;
@@ -954,6 +1046,7 @@ pub(crate) async fn update_profile_locked(
     let mut servers = load_servers(config_path)?;
     ensure_servers_match_state(&servers, &state.profiles)
         .context("配置文件与管理状态不一致；请先备份并修复，ping-rust 不会覆盖现有配置")?;
+    ensure_chain_proxy_matches_state(&servers, &state)?;
 
     match &change {
         ProfileChange::Name(name) => validate_profile_name(name, &state.profiles, Some(id))?,
@@ -1402,6 +1495,7 @@ pub async fn ensure_profile_files() -> Result<bool> {
     let servers = load_servers(config_path)?;
     ensure_servers_match_state(&servers, &state.profiles)
         .context("旧版聚合配置与管理状态不一致，无法安全迁移节点文件")?;
+    ensure_chain_proxy_matches_state(&servers, &state)?;
     let documents = profile_documents(&servers, &state.profiles)?;
     if profile_documents_are_current(Path::new(utils::PROFILES_DIR), &documents)? {
         return Ok(false);
@@ -1424,6 +1518,7 @@ pub(crate) fn prepare_managed_snapshot(directory: &Path) -> Result<bool> {
     let state = load_state_from(&state_path)?;
     let servers = load_servers(&config_path)?;
     ensure_servers_match_state(&servers, &state.profiles).context("备份内容不一致")?;
+    ensure_chain_proxy_matches_state(&servers, &state).context("备份内容不一致")?;
     let documents = profile_documents(&servers, &state.profiles)?;
     let profiles_path = directory.join("profiles");
     if profile_documents_are_current(&profiles_path, &documents)? {
@@ -1560,16 +1655,65 @@ pub fn load_state() -> Result<ManagedState> {
 fn load_state_from(path: &Path) -> Result<ManagedState> {
     let json = fs::read_to_string(path)
         .with_context(|| format!("读取管理状态 {} 失败", path.display()))?;
-    let state: ManagedState = serde_json::from_str(&json).context("管理状态 JSON 已损坏")?;
-    if state.schema_version != 1 {
+    let mut state: ManagedState = serde_json::from_str(&json).context("管理状态 JSON 已损坏")?;
+    if !matches!(state.schema_version, 1 | 2) {
         bail!("不支持的管理状态版本 {}", state.schema_version);
     }
+    state.schema_version = 2;
+    state.chain_proxy.validate().context("链式代理状态无效")?;
     Ok(state)
 }
 
 fn save_state_to(path: &Path, state: &ManagedState) -> Result<()> {
     let json = serde_json::to_vec_pretty(state).context("序列化管理状态失败")?;
     utils::atomic_write(path, &json, 0o600)
+}
+
+pub(crate) async fn update_chain_proxy_locked(
+    change: ChainProxyChange,
+    lock: utils::ExclusiveLock,
+) -> Result<ChainProxyUpdateResult> {
+    utils::require_linux_root()?;
+    utils::ensure_directory(Path::new(utils::CONFIG_DIR), 0o700)?;
+    let config_path = Path::new(utils::CONFIG_FILE);
+    let state_path = Path::new(utils::STATE_FILE);
+    let mut state = load_state_for_update()?;
+    let mut servers = if config_path.exists() {
+        load_servers(config_path)?
+    } else {
+        Vec::new()
+    };
+    ensure_servers_match_state(&servers, &state.profiles)
+        .context("配置文件与管理状态不一致，已拒绝修改链式代理")?;
+    ensure_chain_proxy_matches_state(&servers, &state)?;
+    let rollback = ManagedRollback {
+        config: read_optional(config_path)?,
+        state: read_optional(state_path)?,
+        profiles: ProfileDirectorySnapshot::capture(Path::new(utils::PROFILES_DIR))?,
+        generated_certificate: None,
+        generated_certificate_key: None,
+    };
+    let old_effective = state.chain_proxy.effective().map(|node| node.id);
+    state.chain_proxy.apply(change)?;
+    let new_effective = state.chain_proxy.effective().map(|node| node.id);
+    let configuration_changed = old_effective != new_effective;
+    if configuration_changed {
+        apply_chain_proxy_rules(&mut servers, &state);
+    }
+    let yaml = serde_yaml::to_string(&servers).context("序列化链式代理配置失败")?;
+    if !servers.is_empty() {
+        validate_yaml(&yaml)?;
+        validate_candidate_with_shoes(&yaml, Path::new(utils::CONFIG_DIR)).await?;
+    }
+    commit_managed(config_path, state_path, &servers, &state)?;
+    let profiles_count = state.profiles.len();
+    Ok(ChainProxyUpdateResult {
+        state,
+        configuration_changed,
+        profiles_count,
+        rollback: Some(rollback),
+        _lock: Some(lock),
+    })
 }
 
 pub(crate) async fn delete_profile_locked(
@@ -1587,6 +1731,7 @@ pub(crate) async fn delete_profile_locked(
     let mut servers = load_servers(config_path)?;
     ensure_servers_match_state(&servers, &state.profiles)
         .context("配置文件与管理状态不一致，已拒绝删除")?;
+    ensure_chain_proxy_matches_state(&servers, &state)?;
     let rollback = ManagedRollback {
         config: read_optional(config_path)?,
         state: read_optional(Path::new(utils::STATE_FILE))?,
@@ -1899,7 +2044,7 @@ fn generate_shadowsocks(
                 password: password.clone(),
                 udp_enabled: request.options.udp_enabled,
             },
-            rules: vec!["allow-all-direct".to_owned()],
+            rules: direct_rules(),
         },
         Credentials::Shadowsocks {
             cipher,
@@ -2204,7 +2349,7 @@ fn quic_server(
             num_endpoints,
         }),
         protocol,
-        rules: vec!["allow-all-direct".to_owned()],
+        rules: direct_rules(),
     }
 }
 
@@ -2553,6 +2698,7 @@ pub(crate) fn validate_managed_snapshot(config_path: &Path, state_path: &Path) -
     let servers = load_servers(config_path)?;
     let state = load_state_from(state_path)?;
     ensure_servers_match_state(&servers, &state.profiles).context("备份内容不一致")?;
+    ensure_chain_proxy_matches_state(&servers, &state).context("备份内容不一致")?;
     let profiles_path = config_path
         .parent()
         .context("备份配置没有父目录")?
@@ -2671,6 +2817,66 @@ mod tests {
             self_signed_certificate: false,
         };
         (server, profile)
+    }
+
+    #[test]
+    fn legacy_state_without_chain_proxy_migrates_in_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        fs::write(&path, br#"{"schema_version":1,"profiles":[]}"#).unwrap();
+        let state = load_state_from(&path).unwrap();
+        assert_eq!(state.schema_version, 2);
+        assert!(!state.chain_proxy.enabled);
+        assert!(state.chain_proxy.nodes.is_empty());
+    }
+
+    #[test]
+    fn chain_proxy_compiles_to_shoes_client_chain_for_every_server() {
+        let (first, first_profile) = reality_server_and_profile(53453);
+        let (second, second_profile) = reality_server_and_profile(53454);
+        let node = crate::chain_proxy::parse_share_uri(
+            "socks5://alice:secret@proxy.example.com:1080#exit",
+        )
+        .unwrap();
+        let id = node.id;
+        let mut state = ManagedState {
+            schema_version: 2,
+            profiles: vec![first_profile, second_profile],
+            chain_proxy: ChainProxyState::default(),
+        };
+        state
+            .chain_proxy
+            .apply(ChainProxyChange::Add(node))
+            .unwrap();
+        state
+            .chain_proxy
+            .apply(ChainProxyChange::Select(id))
+            .unwrap();
+        state
+            .chain_proxy
+            .apply(ChainProxyChange::SetEnabled(true))
+            .unwrap();
+        let mut servers = vec![first, second];
+        apply_chain_proxy_rules(&mut servers, &state);
+        ensure_chain_proxy_matches_state(&servers, &state).unwrap();
+        let yaml = serde_yaml::to_string(&servers).unwrap();
+        validate_yaml(&yaml).unwrap();
+        assert_eq!(yaml.matches("client_chain:").count(), 2);
+        assert_eq!(yaml.matches("masks: 0.0.0.0/0").count(), 2);
+        assert!(yaml.contains("type: socks"));
+        assert!(yaml.contains("username: alice"));
+        assert!(yaml.contains("password: secret"));
+
+        state
+            .chain_proxy
+            .apply(ChainProxyChange::SetEnabled(false))
+            .unwrap();
+        assert!(ensure_chain_proxy_matches_state(&servers, &state).is_err());
+        apply_chain_proxy_rules(&mut servers, &state);
+        ensure_chain_proxy_matches_state(&servers, &state).unwrap();
+        let direct_yaml = serde_yaml::to_string(&servers).unwrap();
+        assert!(!direct_yaml.contains("client_chain:"));
+        assert_eq!(direct_yaml.matches("allow-all-direct").count(), 2);
     }
 
     #[test]
@@ -2830,12 +3036,13 @@ mod tests {
         }
 
         let state = ManagedState {
-            schema_version: 1,
+            schema_version: 2,
             profiles,
+            chain_proxy: ChainProxyState::default(),
         };
         let round_trip: ManagedState =
             serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
-        assert_eq!(round_trip.schema_version, 1);
+        assert_eq!(round_trip.schema_version, 2);
         assert_eq!(round_trip.profiles.len(), 5);
     }
 
@@ -2967,6 +3174,7 @@ mod tests {
             serde_json::to_vec(&ManagedState {
                 schema_version: 1,
                 profiles: vec![profile],
+                chain_proxy: ChainProxyState::default(),
             })
             .unwrap(),
         )

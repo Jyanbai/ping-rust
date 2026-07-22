@@ -1,3 +1,4 @@
+mod chain_proxy;
 mod cli;
 mod client;
 mod config;
