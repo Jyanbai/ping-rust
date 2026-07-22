@@ -70,8 +70,23 @@ jobs:
             --user alice:anytls-test-password \
             --padding stop=8 --padding 0=30-30 --padding 1=50-100 \
             --fallback 127.0.0.1:80 >/dev/null
+          "$bin" generate vless-tls --output "$out/vless-tls.yaml" \
+            --port 6443 --server-name vless-tls.example.com >/dev/null
+          "$bin" generate vless-ws-tls --output "$out/vless-ws-tls.yaml" \
+            --port 6444 --server-name vless-ws.example.com \
+            --websocket-path /vless >/dev/null
+          "$bin" generate trojan-tls --output "$out/trojan-tls.yaml" \
+            --port 6445 --server-name trojan.example.com >/dev/null
+          "$bin" generate trojan-reality --output "$out/trojan-reality.yaml" \
+            --port 6446 --server-name www.cloudflare.com \
+            --dest www.cloudflare.com:443 >/dev/null
+          "$bin" generate vmess-ws-tls --output "$out/vmess-ws-tls.yaml" \
+            --port 6447 --server-name vmess.example.com \
+            --websocket-path /vmess >/dev/null
 
-          for config in reality hysteria2 tuic shadowsocks anytls; do
+          for config in \
+            reality hysteria2 tuic shadowsocks anytls \
+            vless-tls vless-ws-tls trojan-tls trojan-reality vmess-ws-tls; do
             shoes --dry-run "$out/$config.yaml"
           done
           cat \
@@ -79,8 +94,40 @@ jobs:
             "$out/hysteria2.yaml" \
             "$out/tuic.yaml" \
             "$out/shadowsocks.yaml" \
-            "$out/anytls.yaml" >"$out/all-five.yaml"
-          shoes --dry-run "$out/all-five.yaml"
+            "$out/anytls.yaml" \
+            "$out/vless-tls.yaml" \
+            "$out/vless-ws-tls.yaml" \
+            "$out/trojan-tls.yaml" \
+            "$out/trojan-reality.yaml" \
+            "$out/vmess-ws-tls.yaml" >"$out/all-ten.yaml"
+          shoes --dry-run "$out/all-ten.yaml"
+      - name: Start every generated listener
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$PWD/target/shoes-validation"
+          shoes "$out/all-ten.yaml" >"$out/runtime.log" 2>&1 &
+          shoes_pid="$!"
+          trap 'kill "$shoes_pid" 2>/dev/null || true' EXIT
+          for _ in {1..40}; do
+            tcp_ports="$(ss -H -lnt | awk '{print $4}')"
+            udp_ports="$(ss -H -lun | awk '{print $4}')"
+            if grep -Eq '(^|:)1443$' <<<"$tcp_ports" \
+              && grep -Eq '(^|:)4388$' <<<"$tcp_ports" \
+              && grep -Eq '(^|:)5443$' <<<"$tcp_ports" \
+              && grep -Eq '(^|:)6443$' <<<"$tcp_ports" \
+              && grep -Eq '(^|:)6444$' <<<"$tcp_ports" \
+              && grep -Eq '(^|:)6445$' <<<"$tcp_ports" \
+              && grep -Eq '(^|:)6446$' <<<"$tcp_ports" \
+              && grep -Eq '(^|:)6447$' <<<"$tcp_ports" \
+              && grep -Eq '(^|:)2443$' <<<"$udp_ports" \
+              && grep -Eq '(^|:)3443$' <<<"$udp_ports"; then
+              exit 0
+            fi
+            sleep 0.25
+          done
+          cat "$out/runtime.log" >&2
+          exit 1
       - name: Validate all Shadowsocks ciphers and Reality plus AnyTLS
         shell: bash
         run: |

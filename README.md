@@ -1,10 +1,10 @@
 # ping-rust
 
-`ping-rust` 是一个纯 Rust 编写的 [cfal/shoes](https://github.com/cfal/shoes) 安装与管理工具。它提供类似 233boy 脚本的数字菜单，在 Linux VPS 上完成 shoes 安装、VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks、AnyTLS 配置、systemd 管理和日常运维。
+`ping-rust` 是一个纯 Rust 编写的 [cfal/shoes](https://github.com/cfal/shoes) 安装与管理工具。它提供类似 233boy 脚本的数字菜单，在 Linux VPS 上完成 shoes 安装、十种经过约束的成品协议配置、systemd 管理和日常运维。
 
 核心逻辑全部位于 Rust 源码中；`scripts/install.sh` 负责下载、校验并安装官方预编译二进制，随后调用 Rust 的安全首次部署入口。
 
-> v0.1.11 开发版包含 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks 和 AnyTLS 五协议；运行一键安装脚本即可零输入部署默认 VLESS-REALITY，数字菜单与配置列表保持 233boy 风格的简洁输出。
+> 当前开发版保留原有 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks、AnyTLS，并新增 VLESS-TLS-Vision、VLESS-WS-TLS、Trojan-TLS、Trojan-Reality、VMess-WS-TLS。用户只选择完整协议，不需要理解或手动组合传输层、安全层与内层协议。
 
 ## 一键安装（推荐）
 
@@ -35,7 +35,7 @@ bash <(curl --proto '=https' --tlsv1.2 -fsSL \
 
 - 从 GitHub Release 下载 shoes，自动匹配 x86_64/aarch64 与 GNU/musl，强制校验官方 SHA-256 digest；GNU 资产不兼容时安全回退 static musl
 - 使用 cargo 从与 schema CI 相同的 cfal/shoes 固定源码提交编译安装；低于 1 GiB 内存时自动单任务并关闭 LTO，避免换页风暴
-- 生成 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks、AnyTLS 服务端配置
+- 生成十种已验证协议预设的 shoes 服务端配置；每项均是可直接部署的完整协议栈
 - `prs` 数字菜单与 `prs add/a` 快捷命令：自动端口、自动凭据、部署完成直接输出分享链接
 - 在 Rust 内生成 X25519 Reality 密钥、UUID、short ID、随机密码和自签名证书
 - Reality 未显式指定 SNI 时，从与本地 233boy 脚本一致的 Amazon、eBay、PayPal、Cloudflare 域名列表中随机选择（不含 Apple）；客户端指纹与该脚本一致固定为 `chrome`
@@ -142,9 +142,14 @@ shoes: running
 3) Shadowsocks
 4) VLESS-REALITY（推荐）
 5) AnyTLS
+6) VLESS-TLS-Vision
+7) VLESS-WS-TLS
+8) Trojan-TLS
+9) Trojan-REALITY
+10) VMess-WS-TLS
 0) 返回
 
-请选择 [0-5]: 4
+请选择 [0-10]: 4
 输入端口（直接回车自动选择随机端口）:
 
 部署成功，shoes 服务已启动。
@@ -156,7 +161,7 @@ vless://...security=reality...pbk=...&sid=...
 
 每个节点都会保存为 `/etc/shoes/profiles/` 下的真实独立 YAML 文件；查看、更改和删除时直接显示该文件名，例如 `VLESS-REALITY-53453.yaml`。只有一个配置时自动选中，多个配置时才显示数字列表。shoes 继续加载由 Rust 确定性聚合的 `/etc/shoes/config.yaml`，内部 UUID 仅用于安全定位。
 
-首次安装流程是：`install.sh → 自动安装 ping-rust/shoes → 自动随机端口部署 VLESS-REALITY → 复制 URL`，中间零输入。Reality 未指定 `--server-name` 时会从 `www.amazon.com`、`www.ebay.com`、`www.paypal.com`、`www.cloudflare.com`、`dash.cloudflare.com`、`aws.amazon.com` 中随机选择 SNI；列表不含 Apple，客户端指纹固定为本地 233boy 脚本使用的 `chrome`。后续日常流程是：`prs → 1 → 选择协议 → 输入端口/直接回车随机 → 复制 URL 到 v2rayN`；Shadowsocks 会额外选择加密方式和密码，SS 2022 密码不符合所选 cipher 的 Base64 密钥长度时会警告并自动替换。TUIC、Hysteria2、VLESS-REALITY 和 AnyTLS 自动生成各自的 UUID、密码、密钥或证书。五个协议都会输出公网地址、端口、客户端所需凭据、协议参数和分享链接。添加或查看配置成功后直接退出 `prs`；主菜单输入 `0` 退出，任意子菜单输入 `0` 返回主菜单。自动端口从 `20000..=65535` 的高位范围选择；所有协议选择固定使用连续编号 `1/2/3/4/5`。链接只会在配置通过 `shoes --dry-run`、原子写入、systemd 启动且确认为 active 后输出；失败会恢复原配置和服务状态。
+首次安装流程是：`install.sh → 自动安装 ping-rust/shoes → 自动随机端口部署 VLESS-REALITY → 复制 URL`，中间零输入。Reality 未指定 `--server-name` 时会从 `www.amazon.com`、`www.ebay.com`、`www.paypal.com`、`www.cloudflare.com`、`dash.cloudflare.com`、`aws.amazon.com` 中随机选择 SNI；列表不含 Apple，客户端指纹固定为本地 233boy 脚本使用的 `chrome`。后续日常流程是：`prs → 1 → 选择协议 → 输入端口/直接回车随机 → 复制 URL 到 v2rayN`；Shadowsocks 会额外选择加密方式和密码，SS 2022 密码不符合所选 cipher 的 Base64 密钥长度时会警告并自动替换。其余协议自动生成 UUID、密码、Reality 密钥、WebSocket 路径或证书。十个协议都会输出公网地址、端口、客户端所需凭据、协议参数和分享链接。添加或查看配置成功后直接退出 `prs`；主菜单输入 `0` 退出，任意子菜单输入 `0` 返回主菜单。自动端口从 `20000..=65535` 的高位范围选择；协议选择固定使用连续编号 `1..=10`。链接只会在配置通过 `shoes --dry-run`、原子写入、systemd 启动且确认为 active 后输出；失败会恢复原配置和服务状态。
 
 非交互方式：
 
@@ -173,6 +178,23 @@ sudo prs add reality --random-port --server-address 203.0.113.10
 ```
 
 高级用户原有的 `generate` 命令全部保留，可精细指定 cipher、证书、Reality fallback、AnyTLS 用户等参数。
+
+新增协议也可直接使用短命令，无需组合底层参数：
+
+```bash
+sudo prs add vless-tls
+sudo prs add vless-ws-tls
+sudo prs add trojan-tls
+sudo prs add trojan-reality
+sudo prs add vmess-ws-tls
+```
+
+WebSocket 路径默认安全随机生成；需要固定路径时可使用完整命令：
+
+```bash
+sudo ping-rust generate vless-ws-tls --port 443 \
+  --server-name proxy.example.com --websocket-path /vless
+```
 
 重新显示已保存链接（多个配置时使用名称或 UUID）：
 
@@ -289,7 +311,7 @@ sudo ping-rust export sing-box --profile <配置-UUID> --server proxy.example.co
 sudo ping-rust export nekobox --profile <配置-UUID> --server 203.0.113.10
 ```
 
-只有一个配置时可以省略 `--profile`。五种协议均支持 sing-box；普通 TLS AnyTLS 和 Shadowsocks 也支持 Clash Meta 与 Nekobox 标准 URI。Mihomo 明确不支持 AnyTLS+Reality，标准 AnyTLS URI也无法表达 Reality 公钥，因此这两个导出会返回中文错误，不会生成伪配置。所有 Reality 导出都只包含公钥，永远不包含服务器私钥。
+只有一个配置时可以省略 `--profile`。十种菜单协议均能生成 sing-box 配置及 v2rayN 可导入链接；新增的 VLESS、Trojan 和 VMess 预设同时支持 Clash Meta。普通 TLS AnyTLS 和 Shadowsocks 也支持 Clash Meta 与 Nekobox 标准 URI。Mihomo 明确不支持 AnyTLS+Reality，标准 AnyTLS URI也无法表达 Reality 公钥，因此这两个导出会返回中文错误，不会生成伪配置。所有 Reality 导出都只包含公钥，永远不包含服务器私钥。
 
 ## 备份与恢复
 
@@ -351,9 +373,9 @@ cargo doc --no-deps
 
 - Rust 单元测试覆盖密钥/YAML、归档解包、原子写入、systemd unit、端口检查、客户端三格式和恢复路径安全。
 - 自更新单元测试覆盖版本、架构、checksum 重复/缺失和严格单文件归档；Release job 还会真实执行一次强制自更新并复核版本。
-- `shoes-schema.yml` 固定 cfal/shoes commit `386b11532424b8665ee3e46340c6236fb3c47595`（0.2.8），对五协议单独配置、五协议联合配置、全部六种 Shadowsocks cipher 和 Reality+AnyTLS 执行真实 `shoes --dry-run`。
+- `shoes-schema.yml` 固定 cfal/shoes commit `386b11532424b8665ee3e46340c6236fb3c47595`（0.2.8），对十协议单独配置、十协议联合配置、全部六种 Shadowsocks cipher 和 Reality+AnyTLS 执行真实 `shoes --dry-run`，并启动十协议聚合配置检查 TCP/UDP 监听。
 - 通过 cargo-zigbuild + Zig 生成 x86_64/aarch64 Linux GNU release ELF，最高 GLIBC 需求为 2.34，覆盖 Rocky/Alma 9 及更新的目标发行版基线。
-- CI 覆盖 Ubuntu 22.04/24.04，并在 Debian 12、Rocky Linux 9、AlmaLinux 9 容器中执行锁定依赖测试和 release 构建；Ubuntu 24.04 acceptance 还会实际管理 root 路径、systemd 与五协议监听端口。
+- CI 覆盖 Ubuntu 22.04/24.04，并在 Debian 12、Rocky Linux 9、AlmaLinux 9 容器中执行锁定依赖测试和 release 构建；shoes schema 作业实际启动十协议聚合监听，Ubuntu 24.04 acceptance 继续覆盖 root 路径、systemd 和核心管理流程。
 - 使用 RustSec `cargo audit` 扫描锁定依赖，当前未报告安全公告。
 - 在一台干净代理环境的 Debian 12 x86_64 VPS 上完成原生安装与运行验收：Release 路径约 2 秒完成 shoes v0.2.7 musl 安装，三协议同时通过 dry-run 并由 systemd 启动，外部 Reality 客户端的代理出口与 VPS 公网 IP 一致。
 - 实机完成 9 份客户端导出解析、BBR、端口检查、日志、备份恢复、inactive 状态保持和 Release 更新；详细证据见完成度审计。

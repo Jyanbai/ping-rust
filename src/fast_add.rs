@@ -70,7 +70,10 @@ pub async fn execute(request: AddRequest) -> Result<AddResult> {
         output: utils::CONFIG_FILE.into(),
         server_address: Some(server_address.clone()),
         server_name: server_name.clone(),
-        reality_dest: is_reality_outer(request.protocol).then(|| format!("{server_name}:443")),
+        reality_dest: request
+            .protocol
+            .uses_reality(config::AnyTlsMode::Tls)
+            .then(|| format!("{server_name}:443")),
         certificate: None,
         certificate_key: None,
         options,
@@ -90,7 +93,12 @@ pub fn protocol_from_menu_number(number: usize) -> Result<Protocol> {
         3 => Ok(Protocol::Shadowsocks),
         4 => Ok(Protocol::Reality),
         5 => Ok(Protocol::AnyTls),
-        _ => bail!("协议编号无效；可选 1、2、3、4、5"),
+        6 => Ok(Protocol::VlessTlsVision),
+        7 => Ok(Protocol::VlessWsTls),
+        8 => Ok(Protocol::TrojanTls),
+        9 => Ok(Protocol::TrojanReality),
+        10 => Ok(Protocol::VmessWsTls),
+        _ => bail!("协议编号无效；可选 1..=10"),
     }
 }
 
@@ -102,6 +110,11 @@ fn menu_number(protocol: Protocol) -> usize {
         Protocol::Shadowsocks => 3,
         Protocol::Reality => 4,
         Protocol::AnyTls => 5,
+        Protocol::VlessTlsVision => 6,
+        Protocol::VlessWsTls => 7,
+        Protocol::TrojanTls => 8,
+        Protocol::TrojanReality => 9,
+        Protocol::VmessWsTls => 10,
     }
 }
 
@@ -227,14 +240,16 @@ fn ensure_port_available(
 
 fn required_sockets(protocol: Protocol) -> (bool, bool) {
     match protocol {
-        Protocol::Reality | Protocol::AnyTls => (true, false),
+        Protocol::Reality
+        | Protocol::AnyTls
+        | Protocol::VlessTlsVision
+        | Protocol::VlessWsTls
+        | Protocol::TrojanTls
+        | Protocol::TrojanReality
+        | Protocol::VmessWsTls => (true, false),
         Protocol::Hysteria2 | Protocol::Tuic => (false, true),
         Protocol::Shadowsocks => (true, true),
     }
-}
-
-fn is_reality_outer(protocol: Protocol) -> bool {
-    matches!(protocol, Protocol::Reality)
 }
 
 #[cfg(test)]
@@ -249,12 +264,17 @@ mod tests {
             (3, Protocol::Shadowsocks),
             (4, Protocol::Reality),
             (5, Protocol::AnyTls),
+            (6, Protocol::VlessTlsVision),
+            (7, Protocol::VlessWsTls),
+            (8, Protocol::TrojanTls),
+            (9, Protocol::TrojanReality),
+            (10, Protocol::VmessWsTls),
         ] {
             assert_eq!(protocol_from_menu_number(number).unwrap(), protocol);
             assert_eq!(menu_number(protocol), number);
         }
         assert!(protocol_from_menu_number(0).is_err());
-        assert!(protocol_from_menu_number(6).is_err());
+        assert!(protocol_from_menu_number(11).is_err());
     }
 
     #[test]

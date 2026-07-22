@@ -1,7 +1,10 @@
 use std::{net::IpAddr, path::Path};
 
 use anyhow::{bail, Context, Result};
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use base64::{
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+    Engine,
+};
 use clap::ValueEnum;
 use serde_json::{json, Value};
 use url::form_urlencoded::{byte_serialize, Serializer};
@@ -179,6 +182,96 @@ fn clash_meta(profile: &ManagedProfile, server: &str) -> Result<String> {
                 "skip-cert-verify": profile.self_signed_certificate
             })
         }
+        Credentials::VlessTls {
+            user_id,
+            server_name,
+            alpn_protocols,
+            vision,
+            websocket_path,
+        } => {
+            let mut proxy = json!({
+                "name": profile.name,
+                "type": "vless",
+                "server": server,
+                "port": profile.port,
+                "uuid": user_id,
+                "udp": true,
+                "tls": true,
+                "servername": server_name,
+                "alpn": alpn_protocols,
+                "client-fingerprint": config::REALITY_FINGERPRINT,
+                "skip-cert-verify": profile.self_signed_certificate,
+                "network": if websocket_path.is_some() { "ws" } else { "tcp" }
+            });
+            if *vision {
+                proxy["flow"] = json!("xtls-rprx-vision");
+            }
+            if let Some(path) = websocket_path {
+                proxy["ws-opts"] = json!({
+                    "path": path,
+                    "headers": { "Host": server_name }
+                });
+            }
+            proxy
+        }
+        Credentials::Trojan {
+            password,
+            server_name,
+            alpn_protocols,
+            security,
+        } => {
+            let mut proxy = json!({
+                "name": profile.name,
+                "type": "trojan",
+                "server": server,
+                "port": profile.port,
+                "password": password,
+                "udp": true,
+                "sni": server_name,
+                "alpn": alpn_protocols,
+                "client-fingerprint": config::REALITY_FINGERPRINT,
+                "network": "tcp"
+            });
+            match security {
+                config::TlsSecurity::Tls => {
+                    proxy["skip-cert-verify"] = json!(profile.self_signed_certificate);
+                }
+                config::TlsSecurity::Reality {
+                    public_key,
+                    short_id,
+                    ..
+                } => {
+                    proxy["reality-opts"] =
+                        json!({ "public-key": public_key, "short-id": short_id });
+                }
+            }
+            proxy
+        }
+        Credentials::VmessTls {
+            user_id,
+            server_name,
+            alpn_protocols,
+            websocket_path,
+        } => json!({
+            "name": profile.name,
+            "type": "vmess",
+            "server": server,
+            "port": profile.port,
+            "uuid": user_id,
+            "alterId": 0,
+            "cipher": "auto",
+            "udp": true,
+            "tls": true,
+            "servername": server_name,
+            "alpn": alpn_protocols,
+            "client-fingerprint": config::REALITY_FINGERPRINT,
+            "skip-cert-verify": profile.self_signed_certificate,
+            "network": "ws",
+            "ws-opts": {
+                "path": websocket_path,
+                "headers": { "Host": server_name }
+            }
+        }),
     };
     serde_yaml::to_string(&json!({ "proxies": [proxy] })).context("生成 Clash Meta YAML 失败")
 }
@@ -287,6 +380,87 @@ fn sing_box(profile: &ManagedProfile, server: &str) -> Result<String> {
                 "tls": tls
             })
         }
+        Credentials::VlessTls {
+            user_id,
+            server_name,
+            alpn_protocols,
+            vision,
+            websocket_path,
+        } => {
+            let mut outbound = json!({
+                "type": "vless",
+                "tag": profile.name,
+                "server": server,
+                "server_port": profile.port,
+                "uuid": user_id,
+                "tls": tls(server_name, profile.self_signed_certificate, alpn_protocols)
+            });
+            if *vision {
+                outbound["flow"] = json!("xtls-rprx-vision");
+            }
+            if let Some(path) = websocket_path {
+                outbound["transport"] = json!({
+                    "type": "ws",
+                    "path": path,
+                    "headers": { "Host": server_name }
+                });
+            }
+            outbound
+        }
+        Credentials::Trojan {
+            password,
+            server_name,
+            alpn_protocols,
+            security,
+        } => {
+            let tls = match security {
+                config::TlsSecurity::Tls => {
+                    tls(server_name, profile.self_signed_certificate, alpn_protocols)
+                }
+                config::TlsSecurity::Reality {
+                    public_key,
+                    short_id,
+                    ..
+                } => json!({
+                    "enabled": true,
+                    "server_name": server_name,
+                    "utls": { "enabled": true, "fingerprint": config::REALITY_FINGERPRINT },
+                    "reality": {
+                        "enabled": true,
+                        "public_key": public_key,
+                        "short_id": short_id
+                    }
+                }),
+            };
+            json!({
+                "type": "trojan",
+                "tag": profile.name,
+                "server": server,
+                "server_port": profile.port,
+                "password": password,
+                "tls": tls
+            })
+        }
+        Credentials::VmessTls {
+            user_id,
+            server_name,
+            alpn_protocols,
+            websocket_path,
+        } => json!({
+            "type": "vmess",
+            "tag": profile.name,
+            "server": server,
+            "server_port": profile.port,
+            "uuid": user_id,
+            "security": "auto",
+            "alter_id": 0,
+            "tls": tls(server_name, profile.self_signed_certificate, alpn_protocols),
+            "transport": {
+                "type": "ws",
+                "path": websocket_path,
+                "headers": { "Host": server_name }
+            }
+        }),
     };
     serde_json::to_string_pretty(&json!({ "outbounds": [outbound] }))
         .context("生成 sing-box JSON 失败")
@@ -393,6 +567,107 @@ pub fn share_uri(profile: &ManagedProfile, server: &str) -> Result<String> {
                 query.finish()
             ))
         }
+        Credentials::VlessTls {
+            user_id,
+            server_name,
+            vision,
+            websocket_path,
+            ..
+        } => {
+            let mut query = Serializer::new(String::new());
+            query.append_pair("encryption", "none");
+            if *vision {
+                query.append_pair("flow", "xtls-rprx-vision");
+            }
+            query
+                .append_pair("security", "tls")
+                .append_pair("sni", server_name)
+                .append_pair("fp", config::REALITY_FINGERPRINT);
+            if profile.self_signed_certificate {
+                query
+                    .append_pair("insecure", "1")
+                    .append_pair("allowInsecure", "1");
+            }
+            if let Some(path) = websocket_path {
+                query
+                    .append_pair("type", "ws")
+                    .append_pair("host", server_name)
+                    .append_pair("path", path);
+            } else {
+                query.append_pair("type", "tcp");
+            }
+            Ok(format!(
+                "vless://{user_id}@{host}:{}?{}#{fragment}",
+                profile.port,
+                query.finish()
+            ))
+        }
+        Credentials::Trojan {
+            password,
+            server_name,
+            security,
+            ..
+        } => {
+            let mut query = Serializer::new(String::new());
+            match security {
+                config::TlsSecurity::Tls => {
+                    query.append_pair("security", "tls");
+                    if profile.self_signed_certificate {
+                        query
+                            .append_pair("insecure", "1")
+                            .append_pair("allowInsecure", "1");
+                    }
+                }
+                config::TlsSecurity::Reality {
+                    public_key,
+                    short_id,
+                    ..
+                } => {
+                    query
+                        .append_pair("security", "reality")
+                        .append_pair("pbk", public_key)
+                        .append_pair("sid", short_id);
+                }
+            }
+            query
+                .append_pair("sni", server_name)
+                .append_pair("fp", config::REALITY_FINGERPRINT)
+                .append_pair("type", "tcp");
+            Ok(format!(
+                "trojan://{}@{host}:{}?{}#{fragment}",
+                encode(password),
+                profile.port,
+                query.finish()
+            ))
+        }
+        Credentials::VmessTls {
+            user_id,
+            server_name,
+            alpn_protocols,
+            websocket_path,
+        } => {
+            let payload = json!({
+                "v": 2,
+                "ps": profile.name,
+                "add": server,
+                "port": profile.port,
+                "id": user_id,
+                "aid": 0,
+                "scy": "auto",
+                "net": "ws",
+                "type": "none",
+                "host": server_name,
+                "path": websocket_path,
+                "tls": "tls",
+                "sni": server_name,
+                "alpn": alpn_protocols.join(","),
+                "fp": config::REALITY_FINGERPRINT,
+                "insecure": if profile.self_signed_certificate { "1" } else { "0" }
+            });
+            let encoded =
+                STANDARD.encode(serde_json::to_vec(&payload).context("序列化 VMess 分享链接失败")?);
+            Ok(format!("vmess://{encoded}"))
+        }
     }
 }
 
@@ -449,7 +724,7 @@ fn encode(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AnyTlsSecurity, AnyTlsUser, Credentials, ShadowsocksCipher};
+    use crate::config::{AnyTlsSecurity, AnyTlsUser, Credentials, ShadowsocksCipher, TlsSecurity};
 
     fn reality_profile() -> ManagedProfile {
         ManagedProfile {
@@ -503,6 +778,116 @@ mod tests {
             assert!(uri.contains(parameter), "missing {parameter}: {uri}");
         }
         assert!(!uri.contains("private"));
+    }
+
+    #[test]
+    fn exports_new_presets_to_all_client_formats() {
+        let base =
+            |name: &str, credentials: Credentials, self_signed_certificate: bool| ManagedProfile {
+                id: Uuid::new_v4(),
+                name: name.to_owned(),
+                port: 443,
+                server_address: None,
+                credentials,
+                certificate_path: None,
+                certificate_key_path: None,
+                self_signed_certificate,
+            };
+        let profiles = [
+            base(
+                "vless-tls",
+                Credentials::VlessTls {
+                    user_id: Uuid::nil(),
+                    server_name: "tls.example.com".to_owned(),
+                    alpn_protocols: vec!["h2".to_owned(), "http/1.1".to_owned()],
+                    vision: true,
+                    websocket_path: None,
+                },
+                true,
+            ),
+            base(
+                "vless-ws",
+                Credentials::VlessTls {
+                    user_id: Uuid::nil(),
+                    server_name: "ws.example.com".to_owned(),
+                    alpn_protocols: vec!["http/1.1".to_owned()],
+                    vision: false,
+                    websocket_path: Some("/vless".to_owned()),
+                },
+                true,
+            ),
+            base(
+                "trojan-tls",
+                Credentials::Trojan {
+                    password: "trojan-secret".to_owned(),
+                    server_name: "trojan.example.com".to_owned(),
+                    alpn_protocols: vec!["h2".to_owned(), "http/1.1".to_owned()],
+                    security: TlsSecurity::Tls,
+                },
+                true,
+            ),
+            base(
+                "trojan-reality",
+                Credentials::Trojan {
+                    password: "trojan-reality-secret".to_owned(),
+                    server_name: "www.cloudflare.com".to_owned(),
+                    alpn_protocols: Vec::new(),
+                    security: TlsSecurity::Reality {
+                        private_key: "must-not-export".to_owned(),
+                        public_key: "public-key".to_owned(),
+                        short_id: "0123456789abcdef".to_owned(),
+                    },
+                },
+                false,
+            ),
+            base(
+                "vmess-ws",
+                Credentials::VmessTls {
+                    user_id: Uuid::nil(),
+                    server_name: "vmess.example.com".to_owned(),
+                    alpn_protocols: vec!["http/1.1".to_owned()],
+                    websocket_path: "/vmess".to_owned(),
+                },
+                true,
+            ),
+        ];
+
+        for profile in &profiles {
+            for format in [
+                ClientFormat::ClashMeta,
+                ClientFormat::SingBox,
+                ClientFormat::Nekobox,
+            ] {
+                let output = render(profile, format, "203.0.113.10").unwrap();
+                assert!(!output.contains("must-not-export"));
+                assert!(!output.is_empty());
+            }
+        }
+
+        let vless_ws = share_uri(&profiles[1], "203.0.113.10").unwrap();
+        for marker in [
+            "security=tls",
+            "type=ws",
+            "path=%2Fvless",
+            "allowInsecure=1",
+        ] {
+            assert!(vless_ws.contains(marker), "missing {marker}: {vless_ws}");
+        }
+        let trojan_reality = share_uri(&profiles[3], "203.0.113.10").unwrap();
+        for marker in ["security=reality", "pbk=public-key", "sid=0123456789abcdef"] {
+            assert!(
+                trojan_reality.contains(marker),
+                "missing {marker}: {trojan_reality}"
+            );
+        }
+        let vmess = share_uri(&profiles[4], "203.0.113.10").unwrap();
+        let payload = STANDARD
+            .decode(vmess.trim_start_matches("vmess://"))
+            .unwrap();
+        let payload: Value = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(payload["net"], "ws");
+        assert_eq!(payload["path"], "/vmess");
+        assert_eq!(payload["insecure"], "1");
     }
 
     #[test]

@@ -174,7 +174,7 @@ pub struct GenerateArgs {
     port: u16,
     #[arg(long)]
     output: Option<PathBuf>,
-    /// Reality SNI 或 QUIC/TLS 证书域名；Reality 未指定时随机选择非 Apple 大厂域名
+    /// Reality 系列 SNI 或 QUIC/TLS 证书域名；Reality 未指定时随机选择非 Apple 大厂域名
     #[arg(long)]
     server_name: Option<String>,
     /// Reality fallback，格式为 host:port
@@ -213,10 +213,13 @@ pub struct GenerateArgs {
     /// AnyTLS 认证失败 fallback，格式为 host:port
     #[arg(long)]
     fallback: Option<String>,
-    /// Hysteria2/TUIC/AnyTLS TLS PEM 证书；不指定时生成自签名证书
+    /// VLESS-WS-TLS/VMess-WS-TLS 的 WebSocket 路径；不指定时安全随机生成
+    #[arg(long)]
+    websocket_path: Option<String>,
+    /// 使用 TLS 的协议预设所需 PEM 证书；不指定时生成自签名证书
     #[arg(long, requires = "key")]
     cert: Option<PathBuf>,
-    /// Hysteria2/TUIC/AnyTLS TLS PEM 私钥
+    /// 与 --cert 配套的 PEM 私钥
     #[arg(long, requires = "cert")]
     key: Option<PathBuf>,
 }
@@ -265,6 +268,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 mut anytls_users,
                 anytls_padding,
                 fallback,
+                websocket_path,
                 cert,
                 key,
             } = *args;
@@ -296,6 +300,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                     anytls_users,
                     anytls_padding_scheme: (!anytls_padding.is_empty()).then_some(anytls_padding),
                     anytls_fallback: fallback,
+                    websocket_path,
                 },
             };
             let result = if managed {
@@ -622,6 +627,89 @@ fn profile_details_text(profile: &config::ManagedProfile, share_uri: Option<&str
                 }
             }
         }
+        config::Credentials::VlessTls {
+            user_id,
+            server_name,
+            alpn_protocols,
+            vision,
+            websocket_path,
+        } => {
+            lines.push("协议 (protocol)         = vless".to_owned());
+            lines.push(format!("地址 (address)          = {address}"));
+            lines.push(format!("端口 (port)             = {}", profile.port));
+            lines.push(format!("用户ID (id)             = {user_id}"));
+            lines.push(format!(
+                "流控 (flow)             = {}",
+                if *vision { "xtls-rprx-vision" } else { "none" }
+            ));
+            lines.push(format!(
+                "传输协议 (network)      = {}",
+                if websocket_path.is_some() {
+                    "ws"
+                } else {
+                    "tcp"
+                }
+            ));
+            if let Some(path) = websocket_path {
+                lines.push(format!("WebSocket 路径 (path)  = {path}"));
+            }
+            lines.push("传输层安全 (TLS)        = tls".to_owned());
+            lines.push(format!("SNI (serverName)        = {server_name}"));
+            lines.push(format!(
+                "应用层协议协商 (Alpn)   = {}",
+                alpn_protocols.join(",")
+            ));
+        }
+        config::Credentials::Trojan {
+            password,
+            server_name,
+            alpn_protocols,
+            security,
+        } => {
+            lines.push("协议 (protocol)         = trojan".to_owned());
+            lines.push(format!("地址 (address)          = {address}"));
+            lines.push(format!("端口 (port)             = {}", profile.port));
+            lines.push(format!("密码 (password)         = {password}"));
+            lines.push(format!("SNI (serverName)        = {server_name}"));
+            match security {
+                config::TlsSecurity::Tls => {
+                    lines.push("传输层安全 (TLS)        = tls".to_owned());
+                    lines.push(format!(
+                        "应用层协议协商 (Alpn)   = {}",
+                        alpn_protocols.join(",")
+                    ));
+                }
+                config::TlsSecurity::Reality {
+                    public_key,
+                    short_id,
+                    ..
+                } => {
+                    lines.push("传输层安全 (TLS)        = reality".to_owned());
+                    lines.push(format!("公钥 (Public key)       = {public_key}"));
+                    lines.push(format!("短 ID (shortId)         = {short_id}"));
+                }
+            }
+        }
+        config::Credentials::VmessTls {
+            user_id,
+            server_name,
+            alpn_protocols,
+            websocket_path,
+        } => {
+            lines.push("协议 (protocol)         = vmess".to_owned());
+            lines.push(format!("地址 (address)          = {address}"));
+            lines.push(format!("端口 (port)             = {}", profile.port));
+            lines.push(format!("用户ID (id)             = {user_id}"));
+            lines.push("加密方式 (security)     = auto".to_owned());
+            lines.push("传输协议 (network)      = ws".to_owned());
+            lines.push(format!("WebSocket 路径 (path)  = {websocket_path}"));
+            lines.push("传输层安全 (TLS)        = tls".to_owned());
+            lines.push(format!("SNI (serverName)        = {server_name}"));
+            lines.push(format!(
+                "应用层协议协商 (Alpn)   = {}",
+                alpn_protocols.join(",")
+            ));
+        }
     }
     if let Some(uri) = share_uri {
         lines.push("------------- 链接 (URL) -------------".to_owned());
@@ -872,6 +960,67 @@ pub fn print_credentials(result: &config::GenerationResult) {
                 }
             }
         }
+        config::Credentials::VlessTls {
+            user_id,
+            server_name,
+            alpn_protocols,
+            vision,
+            websocket_path,
+        } => {
+            println!(
+                "协议：{}",
+                if websocket_path.is_some() {
+                    "VLESS-WS-TLS"
+                } else if *vision {
+                    "VLESS-TLS-Vision"
+                } else {
+                    "VLESS-TLS"
+                }
+            );
+            println!("UUID：{user_id}");
+            println!("服务器名称：{server_name}");
+            println!("ALPN：{}", alpn_protocols.join(", "));
+            if let Some(path) = websocket_path {
+                println!("WebSocket 路径：{path}");
+            }
+            print_certificate_notice(result);
+        }
+        config::Credentials::Trojan {
+            password,
+            server_name,
+            security,
+            ..
+        } => {
+            println!("协议：{}", result.profile.protocol_name());
+            println!("密码：{password}");
+            println!("服务器名称：{server_name}");
+            match security {
+                config::TlsSecurity::Tls => print_certificate_notice(result),
+                config::TlsSecurity::Reality {
+                    private_key,
+                    public_key,
+                    short_id,
+                } => {
+                    println!("Short ID：{short_id}");
+                    println!("Reality 私钥：{private_key}");
+                    println!("Reality 公钥：{public_key}");
+                    println!("{}", "安全提示：Reality 私钥不得导出或分享。".yellow());
+                }
+            }
+        }
+        config::Credentials::VmessTls {
+            user_id,
+            server_name,
+            alpn_protocols,
+            websocket_path,
+        } => {
+            println!("协议：VMess-WS-TLS");
+            println!("UUID：{user_id}");
+            println!("服务器名称：{server_name}");
+            println!("ALPN：{}", alpn_protocols.join(", "));
+            println!("WebSocket 路径：{websocket_path}");
+            print_certificate_notice(result);
+        }
     }
 }
 
@@ -951,6 +1100,24 @@ mod tests {
         };
         assert_eq!(args.protocol, Protocol::AnyTls);
         assert_eq!(args.anytls_mode, AnyTlsMode::Reality);
+
+        let websocket = Cli::try_parse_from([
+            "ping-rust",
+            "generate",
+            "vless-ws-tls",
+            "--websocket-path",
+            "/vless",
+        ])
+        .unwrap();
+        let Some(Command::Generate(args)) = websocket.command else {
+            panic!("expected generate command");
+        };
+        assert_eq!(args.protocol, Protocol::VlessWsTls);
+        assert_eq!(args.websocket_path.as_deref(), Some("/vless"));
+
+        for protocol in ["vless-tls", "trojan-tls", "trojan-reality", "vmess-ws-tls"] {
+            assert!(Cli::try_parse_from(["prs", "add", protocol]).is_ok());
+        }
     }
 
     #[test]

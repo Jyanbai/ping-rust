@@ -48,6 +48,39 @@ pub enum Protocol {
     Shadowsocks,
     #[value(name = "anytls")]
     AnyTls,
+    #[value(name = "vless-tls", alias = "vless-tls-vision")]
+    VlessTlsVision,
+    #[value(name = "vless-ws-tls", alias = "vless-wss")]
+    VlessWsTls,
+    #[value(name = "trojan-tls")]
+    TrojanTls,
+    #[value(name = "trojan-reality")]
+    TrojanReality,
+    #[value(name = "vmess-ws-tls", alias = "vmess-wss")]
+    VmessWsTls,
+}
+
+impl Protocol {
+    pub fn uses_reality(self, anytls_mode: AnyTlsMode) -> bool {
+        matches!(self, Self::Reality | Self::TrojanReality)
+            || (matches!(self, Self::AnyTls) && anytls_mode == AnyTlsMode::Reality)
+    }
+
+    pub fn requires_certificate(self, anytls_mode: AnyTlsMode) -> bool {
+        matches!(
+            self,
+            Self::Hysteria2
+                | Self::Tuic
+                | Self::VlessTlsVision
+                | Self::VlessWsTls
+                | Self::TrojanTls
+                | Self::VmessWsTls
+        ) || (matches!(self, Self::AnyTls) && anytls_mode == AnyTlsMode::Tls)
+    }
+
+    pub fn uses_websocket(self) -> bool {
+        matches!(self, Self::VlessWsTls | Self::VmessWsTls)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
@@ -116,9 +149,7 @@ pub fn resolve_server_name(
     anytls_mode: AnyTlsMode,
 ) -> String {
     explicit.unwrap_or_else(|| {
-        if matches!(protocol, Protocol::Reality)
-            || (matches!(protocol, Protocol::AnyTls) && anytls_mode == AnyTlsMode::Reality)
-        {
+        if protocol.uses_reality(anytls_mode) {
             random_reality_server_name().to_owned()
         } else {
             DEFAULT_SNI.to_owned()
@@ -174,6 +205,7 @@ pub struct GenerationOptions {
     pub anytls_users: Vec<AnyTlsUser>,
     pub anytls_padding_scheme: Option<Vec<String>>,
     pub anytls_fallback: Option<String>,
+    pub websocket_path: Option<String>,
 }
 
 impl Default for GenerationOptions {
@@ -190,6 +222,7 @@ impl Default for GenerationOptions {
             anytls_users: Vec::new(),
             anytls_padding_scheme: None,
             anytls_fallback: None,
+            websocket_path: None,
         }
     }
 }
@@ -437,6 +470,26 @@ pub enum Credentials {
         udp_enabled: bool,
         security: AnyTlsSecurity,
     },
+    VlessTls {
+        user_id: Uuid,
+        server_name: String,
+        alpn_protocols: Vec<String>,
+        vision: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        websocket_path: Option<String>,
+    },
+    Trojan {
+        password: String,
+        server_name: String,
+        alpn_protocols: Vec<String>,
+        security: TlsSecurity,
+    },
+    VmessTls {
+        user_id: Uuid,
+        server_name: String,
+        alpn_protocols: Vec<String>,
+        websocket_path: String,
+    },
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -449,8 +502,22 @@ pub enum AnyTlsSecurity {
     },
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+pub enum TlsSecurity {
+    Tls,
+    Reality {
+        private_key: String,
+        public_key: String,
+        short_id: String,
+    },
+}
+
 fn default_h3_alpn() -> Vec<String> {
     vec!["h3".to_owned()]
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -489,6 +556,11 @@ impl ManagedProfile {
             Protocol::Tuic => "TUIC",
             Protocol::Shadowsocks => "SHADOWSOCKS",
             Protocol::AnyTls => "ANYTLS",
+            Protocol::VlessTlsVision => "VLESS-TLS-VISION",
+            Protocol::VlessWsTls => "VLESS-WS-TLS",
+            Protocol::TrojanTls => "TROJAN-TLS",
+            Protocol::TrojanReality => "TROJAN-REALITY",
+            Protocol::VmessWsTls => "VMESS-WS-TLS",
         };
         format!("{protocol}-{}", self.port)
     }
@@ -504,6 +576,23 @@ impl ManagedProfile {
             Credentials::Tuic { .. } => Protocol::Tuic,
             Credentials::Shadowsocks { .. } => Protocol::Shadowsocks,
             Credentials::AnyTls { .. } => Protocol::AnyTls,
+            Credentials::VlessTls {
+                websocket_path: None,
+                ..
+            } => Protocol::VlessTlsVision,
+            Credentials::VlessTls {
+                websocket_path: Some(_),
+                ..
+            } => Protocol::VlessWsTls,
+            Credentials::Trojan {
+                security: TlsSecurity::Tls,
+                ..
+            } => Protocol::TrojanTls,
+            Credentials::Trojan {
+                security: TlsSecurity::Reality { .. },
+                ..
+            } => Protocol::TrojanReality,
+            Credentials::VmessTls { .. } => Protocol::VmessWsTls,
         }
     }
 
@@ -514,6 +603,21 @@ impl ManagedProfile {
             Credentials::Tuic { .. } => "TUIC v5",
             Credentials::Shadowsocks { .. } => "Shadowsocks",
             Credentials::AnyTls { .. } => "AnyTLS",
+            Credentials::VlessTls {
+                websocket_path: Some(_),
+                ..
+            } => "VLESS-WS-TLS",
+            Credentials::VlessTls { vision: true, .. } => "VLESS-TLS-Vision",
+            Credentials::VlessTls { .. } => "VLESS-TLS",
+            Credentials::Trojan {
+                security: TlsSecurity::Tls,
+                ..
+            } => "Trojan-TLS",
+            Credentials::Trojan {
+                security: TlsSecurity::Reality { .. },
+                ..
+            } => "Trojan-Reality",
+            Credentials::VmessTls { .. } => "VMess-WS-TLS",
         }
     }
 
@@ -523,6 +627,9 @@ impl ManagedProfile {
             | Credentials::Hysteria2 { server_name, .. }
             | Credentials::Tuic { server_name, .. }
             | Credentials::AnyTls { server_name, .. } => server_name,
+            Credentials::VlessTls { server_name, .. }
+            | Credentials::Trojan { server_name, .. }
+            | Credentials::VmessTls { server_name, .. } => server_name,
             Credentials::Shadowsocks { .. } => "-",
         }
     }
@@ -581,6 +688,8 @@ struct TlsTarget {
     key: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     alpn_protocols: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    vision: bool,
     protocol: InnerProtocol,
 }
 
@@ -610,6 +719,24 @@ enum InnerProtocol {
         #[serde(skip_serializing_if = "Option::is_none")]
         fallback: Option<String>,
     },
+    Trojan {
+        password: String,
+    },
+    Vmess {
+        cipher: String,
+        user_id: Uuid,
+        udp_enabled: bool,
+    },
+    #[serde(rename = "websocket")]
+    Websocket {
+        targets: Vec<WebsocketTarget>,
+    },
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct WebsocketTarget {
+    matching_path: String,
+    protocol: InnerProtocol,
 }
 
 pub async fn generate(request: GenerationRequest) -> Result<GenerationResult> {
@@ -676,9 +803,9 @@ async fn generate_inner_with_lock(
         .clone()
         .unwrap_or_else(|| default_profile_name(request.protocol, profile_id));
     validate_profile_name(&profile_name, &state.profiles, None)?;
-    let needs_certificate = matches!(request.protocol, Protocol::Hysteria2 | Protocol::Tuic)
-        || (matches!(request.protocol, Protocol::AnyTls)
-            && request.options.anytls_mode == AnyTlsMode::Tls);
+    let needs_certificate = request
+        .protocol
+        .requires_certificate(request.options.anytls_mode);
     let self_signed = request.certificate.is_none() && needs_certificate;
 
     let (server, credentials, certificate_path, certificate_key_path) = match request.protocol {
@@ -736,6 +863,11 @@ async fn generate_inner_with_lock(
         }
         Protocol::Shadowsocks => generate_shadowsocks(&request),
         Protocol::AnyTls => generate_anytls(&request, parent, profile_id)?,
+        Protocol::VlessTlsVision
+        | Protocol::VlessWsTls
+        | Protocol::TrojanTls
+        | Protocol::VmessWsTls => generate_tls_preset(&request, parent, profile_id)?,
+        Protocol::TrojanReality => generate_trojan_reality(&request),
     };
 
     let profile = ManagedProfile {
@@ -1092,8 +1224,104 @@ fn regenerate_profile_credentials(
             }
             *anytls_users_mut(server)? = users.clone();
         }
+        Credentials::VlessTls { user_id, .. } => {
+            let generated = Uuid::new_v4();
+            *vless_user_id_mut(only_tls_inner_mut(server)?)? = generated;
+            *user_id = generated;
+        }
+        Credentials::Trojan {
+            password, security, ..
+        } => {
+            let generated = generated_password();
+            match security {
+                TlsSecurity::Tls => {
+                    *trojan_password_mut(only_tls_inner_mut(server)?)? = generated.clone();
+                }
+                TlsSecurity::Reality {
+                    private_key,
+                    public_key,
+                    short_id,
+                } => {
+                    let target = only_reality_target_mut(server)?;
+                    *trojan_password_mut(&mut target.protocol)? = generated.clone();
+                    let keypair = generate_reality_keypair();
+                    let generated_short_id = random_hex(8);
+                    target.private_key = keypair.private_key.clone();
+                    target.short_ids = vec![generated_short_id.clone()];
+                    *private_key = keypair.private_key;
+                    *public_key = keypair.public_key;
+                    *short_id = generated_short_id;
+                }
+            }
+            *password = generated;
+        }
+        Credentials::VmessTls { user_id, .. } => {
+            let generated = Uuid::new_v4();
+            *vmess_user_id_mut(only_tls_inner_mut(server)?)? = generated;
+            *user_id = generated;
+        }
     }
     Ok(())
+}
+
+fn only_tls_inner_mut(server: &mut ServerConfig) -> Result<&mut InnerProtocol> {
+    let ServerProtocol::Tls { tls_targets, .. } = &mut server.protocol else {
+        bail!("TLS 配置与管理状态不一致");
+    };
+    if tls_targets.len() != 1 {
+        bail!("TLS 配置必须恰好包含一个目标");
+    }
+    Ok(&mut tls_targets
+        .values_mut()
+        .next()
+        .context("TLS 配置中缺少目标")?
+        .protocol)
+}
+
+fn only_reality_target_mut(server: &mut ServerConfig) -> Result<&mut RealityTarget> {
+    let ServerProtocol::Tls {
+        reality_targets, ..
+    } = &mut server.protocol
+    else {
+        bail!("Reality 配置与管理状态不一致");
+    };
+    if reality_targets.len() != 1 {
+        bail!("Reality 配置必须恰好包含一个目标");
+    }
+    reality_targets
+        .values_mut()
+        .next()
+        .context("Reality 配置中缺少目标")
+}
+
+fn vless_user_id_mut(protocol: &mut InnerProtocol) -> Result<&mut Uuid> {
+    match protocol {
+        InnerProtocol::Vless { user_id, .. } => Ok(user_id),
+        InnerProtocol::Websocket { targets } if targets.len() == 1 => {
+            vless_user_id_mut(&mut targets[0].protocol)
+        }
+        _ => bail!("TLS 目标内层协议不是 VLESS"),
+    }
+}
+
+fn trojan_password_mut(protocol: &mut InnerProtocol) -> Result<&mut String> {
+    match protocol {
+        InnerProtocol::Trojan { password } => Ok(password),
+        InnerProtocol::Websocket { targets } if targets.len() == 1 => {
+            trojan_password_mut(&mut targets[0].protocol)
+        }
+        _ => bail!("TLS/Reality 目标内层协议不是 Trojan"),
+    }
+}
+
+fn vmess_user_id_mut(protocol: &mut InnerProtocol) -> Result<&mut Uuid> {
+    match protocol {
+        InnerProtocol::Vmess { user_id, .. } => Ok(user_id),
+        InnerProtocol::Websocket { targets } if targets.len() == 1 => {
+            vmess_user_id_mut(&mut targets[0].protocol)
+        }
+        _ => bail!("TLS 目标内层协议不是 VMess"),
+    }
 }
 
 fn anytls_users_mut(server: &mut ServerConfig) -> Result<&mut Vec<AnyTlsUser>> {
@@ -1147,6 +1375,11 @@ fn default_profile_name(protocol: Protocol, id: Uuid) -> String {
         Protocol::Tuic => "tuic",
         Protocol::Shadowsocks => "shadowsocks",
         Protocol::AnyTls => "anytls",
+        Protocol::VlessTlsVision => "vless-tls-vision",
+        Protocol::VlessWsTls => "vless-ws-tls",
+        Protocol::TrojanTls => "trojan-tls",
+        Protocol::TrojanReality => "trojan-reality",
+        Protocol::VmessWsTls => "vmess-ws-tls",
     };
     format!("{protocol}-{}", &id.simple().to_string()[..8])
 }
@@ -1255,6 +1488,28 @@ fn ensure_servers_match_state(servers: &[ServerConfig], profiles: &[ManagedProfi
                         .values()
                         .any(|target| matches!(target.protocol, InnerProtocol::AnyTls { .. }))
             }
+            (ServerProtocol::Tls { tls_targets, .. }, Protocol::VlessTlsVision) => {
+                tls_targets.values().any(|target| {
+                    target.vision && matches!(target.protocol, InnerProtocol::Vless { .. })
+                })
+            }
+            (ServerProtocol::Tls { tls_targets, .. }, Protocol::VlessWsTls) => tls_targets
+                .values()
+                .any(|target| !target.vision && inner_is_websocket_vless(&target.protocol)),
+            (ServerProtocol::Tls { tls_targets, .. }, Protocol::TrojanTls) => tls_targets
+                .values()
+                .any(|target| matches!(target.protocol, InnerProtocol::Trojan { .. })),
+            (
+                ServerProtocol::Tls {
+                    reality_targets, ..
+                },
+                Protocol::TrojanReality,
+            ) => reality_targets.values().any(|target| {
+                !target.vision && matches!(target.protocol, InnerProtocol::Trojan { .. })
+            }),
+            (ServerProtocol::Tls { tls_targets, .. }, Protocol::VmessWsTls) => tls_targets
+                .values()
+                .any(|target| inner_is_websocket_vmess(&target.protocol)),
             _ => false,
         };
         if !protocol_matches {
@@ -1262,6 +1517,24 @@ fn ensure_servers_match_state(servers: &[ServerConfig], profiles: &[ManagedProfi
         }
     }
     Ok(())
+}
+
+fn inner_is_websocket_vless(protocol: &InnerProtocol) -> bool {
+    matches!(
+        protocol,
+        InnerProtocol::Websocket { targets }
+            if targets.len() == 1
+                && matches!(targets[0].protocol, InnerProtocol::Vless { .. })
+    )
+}
+
+fn inner_is_websocket_vmess(protocol: &InnerProtocol) -> bool {
+    matches!(
+        protocol,
+        InnerProtocol::Websocket { targets }
+            if targets.len() == 1
+                && matches!(targets[0].protocol, InnerProtocol::Vmess { .. })
+    )
 }
 
 fn load_state_for_update() -> Result<ManagedState> {
@@ -1477,6 +1750,11 @@ fn is_managed_profile_file_name(name: &str) -> bool {
         "TUIC-",
         "SHADOWSOCKS-",
         "ANYTLS-",
+        "VLESS-TLS-VISION-",
+        "VLESS-WS-TLS-",
+        "TROJAN-TLS-",
+        "TROJAN-REALITY-",
+        "VMESS-WS-TLS-",
     ];
     prefixes.iter().any(|prefix| {
         stem.strip_prefix(prefix).is_some_and(|value| {
@@ -1656,6 +1934,7 @@ fn generate_anytls(
                     cert: cert.to_string_lossy().into_owned(),
                     key: key.to_string_lossy().into_owned(),
                     alpn_protocols: vec!["h2".to_owned(), "http/1.1".to_owned()],
+                    vision: false,
                     protocol: inner,
                 },
             );
@@ -1715,6 +1994,197 @@ fn generate_anytls(
         cert,
         key,
     ))
+}
+
+fn generate_tls_preset(
+    request: &GenerationRequest,
+    parent: &Path,
+    profile_id: Uuid,
+) -> Result<(ServerConfig, Credentials, Option<PathBuf>, Option<PathBuf>)> {
+    let (cert, key) = resolve_certificate(request, parent, profile_id)?;
+    let alpn_protocols = if request.protocol.uses_websocket() {
+        vec!["http/1.1".to_owned()]
+    } else {
+        vec!["h2".to_owned(), "http/1.1".to_owned()]
+    };
+    let user_id = Uuid::new_v4();
+    let websocket_path = request.protocol.uses_websocket().then(|| {
+        request
+            .options
+            .websocket_path
+            .clone()
+            .unwrap_or_else(generated_websocket_path)
+    });
+
+    let (inner, credentials, vision) = match request.protocol {
+        Protocol::VlessTlsVision => (
+            InnerProtocol::Vless {
+                user_id,
+                udp_enabled: request.options.udp_enabled,
+            },
+            Credentials::VlessTls {
+                user_id,
+                server_name: request.server_name.clone(),
+                alpn_protocols: alpn_protocols.clone(),
+                vision: true,
+                websocket_path: None,
+            },
+            true,
+        ),
+        Protocol::VlessWsTls => {
+            let path = websocket_path
+                .clone()
+                .context("VLESS-WS-TLS 缺少 WebSocket 路径")?;
+            (
+                websocket_protocol(
+                    path.clone(),
+                    InnerProtocol::Vless {
+                        user_id,
+                        udp_enabled: request.options.udp_enabled,
+                    },
+                ),
+                Credentials::VlessTls {
+                    user_id,
+                    server_name: request.server_name.clone(),
+                    alpn_protocols: alpn_protocols.clone(),
+                    vision: false,
+                    websocket_path: Some(path),
+                },
+                false,
+            )
+        }
+        Protocol::TrojanTls => {
+            let password = generated_password();
+            (
+                InnerProtocol::Trojan {
+                    password: password.clone(),
+                },
+                Credentials::Trojan {
+                    password,
+                    server_name: request.server_name.clone(),
+                    alpn_protocols: alpn_protocols.clone(),
+                    security: TlsSecurity::Tls,
+                },
+                false,
+            )
+        }
+        Protocol::VmessWsTls => {
+            let path = websocket_path
+                .clone()
+                .context("VMess-WS-TLS 缺少 WebSocket 路径")?;
+            (
+                websocket_protocol(
+                    path.clone(),
+                    InnerProtocol::Vmess {
+                        cipher: "any".to_owned(),
+                        user_id,
+                        udp_enabled: request.options.udp_enabled,
+                    },
+                ),
+                Credentials::VmessTls {
+                    user_id,
+                    server_name: request.server_name.clone(),
+                    alpn_protocols: alpn_protocols.clone(),
+                    websocket_path: path,
+                },
+                false,
+            )
+        }
+        _ => bail!("内部错误：协议不是 TLS 预设"),
+    };
+
+    let mut tls_targets = BTreeMap::new();
+    tls_targets.insert(
+        request.server_name.clone(),
+        TlsTarget {
+            cert: cert.to_string_lossy().into_owned(),
+            key: key.to_string_lossy().into_owned(),
+            alpn_protocols,
+            vision,
+            protocol: inner,
+        },
+    );
+    Ok((
+        ServerConfig {
+            address: format!("0.0.0.0:{}", request.port),
+            transport: None,
+            quic_settings: None,
+            protocol: ServerProtocol::Tls {
+                tls_targets,
+                reality_targets: BTreeMap::new(),
+            },
+            rules: Vec::new(),
+        },
+        credentials,
+        Some(cert),
+        Some(key),
+    ))
+}
+
+fn generate_trojan_reality(
+    request: &GenerationRequest,
+) -> (ServerConfig, Credentials, Option<PathBuf>, Option<PathBuf>) {
+    let keypair = generate_reality_keypair();
+    let short_id = request
+        .options
+        .reality_short_id
+        .clone()
+        .unwrap_or_else(|| random_hex(8));
+    let password = generated_password();
+    let mut targets = BTreeMap::new();
+    targets.insert(
+        request.server_name.clone(),
+        RealityTarget {
+            private_key: keypair.private_key.clone(),
+            short_ids: vec![short_id.clone()],
+            dest: request
+                .reality_dest
+                .clone()
+                .unwrap_or_else(|| format!("{}:443", request.server_name)),
+            max_time_diff: request.options.reality_max_time_diff,
+            vision: false,
+            protocol: InnerProtocol::Trojan {
+                password: password.clone(),
+            },
+        },
+    );
+    (
+        ServerConfig {
+            address: format!("0.0.0.0:{}", request.port),
+            transport: None,
+            quic_settings: None,
+            protocol: ServerProtocol::Tls {
+                tls_targets: BTreeMap::new(),
+                reality_targets: targets,
+            },
+            rules: Vec::new(),
+        },
+        Credentials::Trojan {
+            password,
+            server_name: request.server_name.clone(),
+            alpn_protocols: Vec::new(),
+            security: TlsSecurity::Reality {
+                private_key: keypair.private_key,
+                public_key: keypair.public_key,
+                short_id,
+            },
+        },
+        None,
+        None,
+    )
+}
+
+fn websocket_protocol(path: String, protocol: InnerProtocol) -> InnerProtocol {
+    InnerProtocol::Websocket {
+        targets: vec![WebsocketTarget {
+            matching_path: path,
+            protocol,
+        }],
+    }
+}
+
+pub fn generated_websocket_path() -> String {
+    format!("/{}", random_hex(8))
 }
 
 fn quic_server(
@@ -1849,12 +2319,10 @@ fn validate_request(request: &GenerationRequest) -> Result<()> {
         bail!("--anytls-mode 仅适用于 AnyTLS");
     }
 
-    let reality_outer = matches!(request.protocol, Protocol::Reality)
-        || (matches!(request.protocol, Protocol::AnyTls)
-            && request.options.anytls_mode == AnyTlsMode::Reality);
-    let certificate_protocol = matches!(request.protocol, Protocol::Hysteria2 | Protocol::Tuic)
-        || (matches!(request.protocol, Protocol::AnyTls)
-            && request.options.anytls_mode == AnyTlsMode::Tls);
+    let reality_outer = request.protocol.uses_reality(request.options.anytls_mode);
+    let certificate_protocol = request
+        .protocol
+        .requires_certificate(request.options.anytls_mode);
 
     match (&request.certificate, &request.certificate_key) {
         (Some(_), None) | (None, Some(_)) => bail!("--cert 和 --key 必须同时提供"),
@@ -1864,10 +2332,16 @@ fn validate_request(request: &GenerationRequest) -> Result<()> {
         _ => {}
     }
     if request.reality_dest.is_some() && !reality_outer {
-        bail!("--dest 仅适用于 Reality 或 Reality+AnyTLS");
+        bail!("--dest 仅适用于使用 Reality 的协议预设");
     }
     if request.options.reality_short_id.is_some() && !reality_outer {
-        bail!("--short-id 仅适用于 Reality 或 Reality+AnyTLS");
+        bail!("--short-id 仅适用于使用 Reality 的协议预设");
+    }
+    if let Some(path) = &request.options.websocket_path {
+        if !request.protocol.uses_websocket() {
+            bail!("--websocket-path 仅适用于 VLESS-WS-TLS/VMess-WS-TLS");
+        }
+        validate_websocket_path(path)?;
     }
 
     if matches!(request.protocol, Protocol::Shadowsocks) {
@@ -1891,6 +2365,17 @@ fn validate_request(request: &GenerationRequest) -> Result<()> {
         || request.options.anytls_fallback.is_some()
     {
         bail!("--user/--padding/--fallback 仅适用于 AnyTLS");
+    }
+    Ok(())
+}
+
+fn validate_websocket_path(path: &str) -> Result<()> {
+    if !path.starts_with('/')
+        || path.len() > 256
+        || path.contains(['?', '#'])
+        || path.chars().any(char::is_control)
+    {
+        bail!("WebSocket 路径必须以 / 开头、长度不超过 256，且不能包含 ?、# 或控制字符");
     }
     Ok(())
 }
@@ -2147,6 +2632,8 @@ mod tests {
         }
         let anytls_reality = resolve_server_name(None, Protocol::AnyTls, AnyTlsMode::Reality);
         assert!(REALITY_SERVER_NAMES.contains(&anytls_reality.as_str()));
+        let trojan_reality = resolve_server_name(None, Protocol::TrojanReality, AnyTlsMode::Tls);
+        assert!(REALITY_SERVER_NAMES.contains(&trojan_reality.as_str()));
     }
 
     #[test]
@@ -2283,6 +2770,89 @@ mod tests {
         assert!(reality_yaml.contains("type: anytls"));
         assert!(reality_yaml.contains("vision: false"));
         assert!(reality.certificate_path.is_none());
+    }
+
+    #[tokio::test]
+    async fn new_tls_and_reality_presets_match_shoes_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let cases = [
+            (
+                Protocol::VlessTlsVision,
+                "vless-tls.yaml",
+                vec!["tls_targets:", "vision: true", "type: vless"],
+            ),
+            (
+                Protocol::VlessWsTls,
+                "vless-ws.yaml",
+                vec!["tls_targets:", "type: websocket", "type: vless"],
+            ),
+            (
+                Protocol::TrojanTls,
+                "trojan-tls.yaml",
+                vec!["tls_targets:", "type: trojan", "password:"],
+            ),
+            (
+                Protocol::TrojanReality,
+                "trojan-reality.yaml",
+                vec!["reality_targets:", "type: trojan", "vision: false"],
+            ),
+            (
+                Protocol::VmessWsTls,
+                "vmess-ws.yaml",
+                vec!["tls_targets:", "type: websocket", "type: vmess"],
+            ),
+        ];
+        let mut profiles = Vec::new();
+
+        for (protocol, file_name, markers) in cases {
+            let mut request = request(protocol, dir.path().join(file_name));
+            if protocol.uses_websocket() {
+                request.options.websocket_path = Some("/verified-path".to_owned());
+            }
+            let result = generate_inner(request, false).await.unwrap();
+            let yaml = fs::read_to_string(&result.config_path).unwrap();
+            for marker in markers {
+                assert!(
+                    yaml.contains(marker),
+                    "{protocol:?} missing {marker}:\n{yaml}"
+                );
+            }
+            assert!(
+                result.profile.self_signed_certificate
+                    == protocol.requires_certificate(AnyTlsMode::Tls)
+            );
+            ensure_servers_match_state(
+                &load_servers(&result.config_path).unwrap(),
+                std::slice::from_ref(&result.profile),
+            )
+            .unwrap();
+            profiles.push(result.profile);
+        }
+
+        let state = ManagedState {
+            schema_version: 1,
+            profiles,
+        };
+        let round_trip: ManagedState =
+            serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+        assert_eq!(round_trip.schema_version, 1);
+        assert_eq!(round_trip.profiles.len(), 5);
+    }
+
+    #[test]
+    fn rejects_invalid_or_misplaced_websocket_paths() {
+        for path in ["missing-leading-slash", "/bad?query", "/bad#fragment"] {
+            let mut request = request(Protocol::VlessWsTls, PathBuf::from("unused.yaml"));
+            request.options.websocket_path = Some(path.to_owned());
+            assert!(validate_request(&request).is_err(), "accepted {path}");
+        }
+
+        let mut request = request(Protocol::Reality, PathBuf::from("unused.yaml"));
+        request.options.websocket_path = Some("/not-applicable".to_owned());
+        assert!(validate_request(&request)
+            .unwrap_err()
+            .to_string()
+            .contains("仅适用于"));
     }
 
     #[test]
@@ -2444,6 +3014,15 @@ mod tests {
             b"do not overwrite"
         );
         assert!(is_managed_profile_file_name("VLESS-REALITY-65535.yaml"));
+        for name in [
+            "VLESS-TLS-VISION-443.yaml",
+            "VLESS-WS-TLS-8443.yaml",
+            "TROJAN-TLS-9443.yaml",
+            "TROJAN-REALITY-10443.yaml",
+            "VMESS-WS-TLS-11443.yaml",
+        ] {
+            assert!(is_managed_profile_file_name(name), "rejected {name}");
+        }
         assert!(!is_managed_profile_file_name("VLESS-REALITY-053453.yaml"));
         assert!(!is_managed_profile_file_name("VLESS-REALITY-0.yaml"));
     }

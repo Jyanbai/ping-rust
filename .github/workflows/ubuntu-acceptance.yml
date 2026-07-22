@@ -278,7 +278,7 @@ jobs:
           printf 'TUIC_PROFILE=%s\n' "$tuic_profile" >> "$GITHUB_ENV"
           sudo rm -f "$tuic_output"
 
-      - name: Add Shadowsocks and AnyTLS and confirm five-protocol runtime
+      - name: Add Shadowsocks and AnyTLS and confirm core protocol runtime
         shell: bash
         run: |
           set -euo pipefail
@@ -336,7 +336,7 @@ jobs:
             sudo test -s "/etc/shoes/profiles/$profile_file"
           done
 
-      - name: Verify prs numeric PTY flow for Reality and Shadowsocks
+      - name: Verify prs numeric PTY flow for all protocol presets
         shell: bash
         run: |
           set -euo pipefail
@@ -383,7 +383,7 @@ jobs:
           spawn $env(PRS_COMMAND)
           wait_for {请选择 \[0-10\]} main-menu
           send "1\r"
-          wait_for {请选择 \[0-5\]} protocol-menu
+          wait_for {请选择 \[0-10\]} protocol-menu
           send "$env(PROTOCOL_NUMBER)\r"
           wait_for {输入端口} port-prompt
           send "$env(MENU_PORT)\r"
@@ -400,6 +400,11 @@ jobs:
 
           run_menu_add 4 25448 vless
           run_menu_add 3 25449 ss
+          run_menu_add 6 25451 vless
+          run_menu_add 7 25452 vless
+          run_menu_add 8 25453 trojan
+          run_menu_add 9 25454 trojan
+          run_menu_add 10 25455 vmess
           sudo systemctl is-active --quiet shoes.service
           wait_listener() {
             local kind="$1"
@@ -415,6 +420,37 @@ jobs:
           }
           wait_listener t 25448
           wait_listener t 25449
+          wait_listener t 25451
+          wait_listener t 25452
+          wait_listener t 25453
+          wait_listener t 25454
+          wait_listener t 25455
+
+          profile_id_for_port() {
+            local port="$1"
+            sudo python3 - "$port" <<'PY'
+          import json
+          import sys
+
+          with open('/etc/shoes/ping-rust-state.json', encoding='utf-8') as stream:
+              profiles = json.load(stream)['profiles']
+          print(next(profile['id'] for profile in profiles if profile['port'] == int(sys.argv[1])))
+          PY
+          }
+          printf 'VLESS_TLS_PROFILE=%s\n' "$(profile_id_for_port 25451)" >> "$GITHUB_ENV"
+          printf 'VLESS_WS_TLS_PROFILE=%s\n' "$(profile_id_for_port 25452)" >> "$GITHUB_ENV"
+          printf 'TROJAN_TLS_PROFILE=%s\n' "$(profile_id_for_port 25453)" >> "$GITHUB_ENV"
+          printf 'TROJAN_REALITY_PROFILE=%s\n' "$(profile_id_for_port 25454)" >> "$GITHUB_ENV"
+          printf 'VMESS_WS_TLS_PROFILE=%s\n' "$(profile_id_for_port 25455)" >> "$GITHUB_ENV"
+
+          for profile_file in \
+            VLESS-TLS-VISION-25451.yaml \
+            VLESS-WS-TLS-25452.yaml \
+            TROJAN-TLS-25453.yaml \
+            TROJAN-REALITY-25454.yaml \
+            VMESS-WS-TLS-25455.yaml; do
+            sudo test -s "/etc/shoes/profiles/$profile_file"
+          done
 
           profile_number="$(sudo python3 - <<'PY'
           import json
@@ -585,7 +621,12 @@ jobs:
             "hysteria2:$HYSTERIA_PROFILE" \
             "tuic:$TUIC_PROFILE" \
             "shadowsocks:$SHADOWSOCKS_PROFILE" \
-            "anytls:$ANYTLS_PROFILE"; do
+            "anytls:$ANYTLS_PROFILE" \
+            "vless-tls:$VLESS_TLS_PROFILE" \
+            "vless-ws-tls:$VLESS_WS_TLS_PROFILE" \
+            "trojan-tls:$TROJAN_TLS_PROFILE" \
+            "trojan-reality:$TROJAN_REALITY_PROFILE" \
+            "vmess-ws-tls:$VMESS_WS_TLS_PROFILE"; do
             name="${entry%%:*}"
             profile="${entry#*:}"
             sudo "$PING_RUST" export clash-meta \
@@ -626,6 +667,9 @@ jobs:
           sudo ss -H -lun | awk '{print $4}' | grep -Eq '(^|:)24445$'
           sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)24446$'
           sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)24447$'
+          for port in 25451 25452 25453 25454 25455; do
+            sudo ss -H -lnt | awk '{print $4}' | grep -Eq "(^|:)${port}$"
+          done
 
       - name: Record acceptance summary
         shell: bash
@@ -636,8 +680,8 @@ jobs:
             echo "- Public crates.io version: $PUBLIC_VERSION"
             echo "- Reality deployment: ${{ steps.reality.outputs.elapsed }} seconds"
             echo '- systemd: enabled, active, restart verified'
-            echo '- Protocol listeners: Reality, Hysteria2, TUIC, Shadowsocks, AnyTLS'
-            echo '- Client exports: five protocols to Clash Meta, sing-box, Nekobox'
+            echo '- Protocol listeners: all ten menu presets'
+            echo '- Client exports: all ten menu presets to Clash Meta, sing-box, Nekobox'
             echo '- Operations: logs, backup, restore, update, restart, info'
           } >> "$GITHUB_STEP_SUMMARY"
 

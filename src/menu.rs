@@ -37,6 +37,11 @@ const PROTOCOL_MENU_ITEMS: &[(usize, &str)] = &[
     (3, "Shadowsocks"),
     (4, "VLESS-REALITY（推荐）"),
     (5, "AnyTLS"),
+    (6, "VLESS-TLS-Vision"),
+    (7, "VLESS-WS-TLS"),
+    (8, "Trojan-TLS"),
+    (9, "Trojan-REALITY"),
+    (10, "VMess-WS-TLS"),
     (0, "返回"),
 ];
 
@@ -264,6 +269,11 @@ async fn change_config_menu() -> Result<()> {
         Protocol::AnyTls => {
             actions.push((ChangeAction::AnyTlsUserPassword, "更改用户密码"));
         }
+        Protocol::VlessTlsVision
+        | Protocol::VlessWsTls
+        | Protocol::TrojanTls
+        | Protocol::TrojanReality
+        | Protocol::VmessWsTls => {}
     }
     let action_labels = actions.iter().map(|(_, label)| *label).collect::<Vec<_>>();
     let Some(action_index) = select_numbered("选择更改项目", &action_labels)? else {
@@ -687,6 +697,11 @@ async fn advanced_add_config_menu() -> Result<()> {
         "Shadowsocks 2022",
         "VLESS-Reality-Vision（推荐）",
         "AnyTLS",
+        "VLESS-TLS-Vision",
+        "VLESS-WS-TLS",
+        "Trojan-TLS",
+        "Trojan-REALITY",
+        "VMess-WS-TLS",
     ];
     let Some(selected) = select_numbered("选择协议", &choices)? else {
         return Ok(());
@@ -697,6 +712,11 @@ async fn advanced_add_config_menu() -> Result<()> {
         2 => Protocol::Shadowsocks,
         3 => Protocol::Reality,
         4 => Protocol::AnyTls,
+        5 => Protocol::VlessTlsVision,
+        6 => Protocol::VlessWsTls,
+        7 => Protocol::TrojanTls,
+        8 => Protocol::TrojanReality,
+        9 => Protocol::VmessWsTls,
         _ => unreachable!("协议菜单编号已验证"),
     };
     let name = Input::<String>::with_theme(&ColorfulTheme::default())
@@ -707,6 +727,11 @@ async fn advanced_add_config_menu() -> Result<()> {
             Protocol::Tuic => "tuic".to_owned(),
             Protocol::Shadowsocks => "shadowsocks".to_owned(),
             Protocol::AnyTls => "anytls".to_owned(),
+            Protocol::VlessTlsVision => "vless-tls-vision".to_owned(),
+            Protocol::VlessWsTls => "vless-ws-tls".to_owned(),
+            Protocol::TrojanTls => "trojan-tls".to_owned(),
+            Protocol::TrojanReality => "trojan-reality".to_owned(),
+            Protocol::VmessWsTls => "vmess-ws-tls".to_owned(),
         })
         .interact_text()?;
     let port = Input::<u16>::with_theme(&ColorfulTheme::default())
@@ -806,8 +831,7 @@ async fn advanced_add_config_menu() -> Result<()> {
             );
         }
     }
-    let reality_outer = matches!(protocol, Protocol::Reality)
-        || (matches!(protocol, Protocol::AnyTls) && options.anytls_mode == AnyTlsMode::Reality);
+    let reality_outer = protocol.uses_reality(options.anytls_mode);
     let server_name = if matches!(protocol, Protocol::Shadowsocks) {
         config::DEFAULT_SNI.to_owned()
     } else {
@@ -831,8 +855,7 @@ async fn advanced_add_config_menu() -> Result<()> {
     } else {
         None
     };
-    let needs_certificate = matches!(protocol, Protocol::Hysteria2 | Protocol::Tuic)
-        || (matches!(protocol, Protocol::AnyTls) && options.anytls_mode == AnyTlsMode::Tls);
+    let needs_certificate = protocol.requires_certificate(options.anytls_mode);
     let (certificate, certificate_key) = if needs_certificate
         && Confirm::with_theme(&ColorfulTheme::default())
             .with_prompt("使用已有 PEM 证书和私钥？（否则自动生成自签名证书）")
@@ -942,6 +965,11 @@ mod tests {
             (3, Protocol::Shadowsocks),
             (4, Protocol::Reality),
             (5, Protocol::AnyTls),
+            (6, Protocol::VlessTlsVision),
+            (7, Protocol::VlessWsTls),
+            (8, Protocol::TrojanTls),
+            (9, Protocol::TrojanReality),
+            (10, Protocol::VmessWsTls),
         ] {
             assert!(PROTOCOL_MENU_ITEMS.iter().any(|item| item.0 == number));
             assert_eq!(
