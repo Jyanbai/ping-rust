@@ -120,7 +120,7 @@ vless://...security=reality...pbk=...&sid=...
 ```text
 $ sudo prs
 
-------------- ping-rust v0.1.12 -------------
+------------- ping-rust v0.1.14 -------------
 shoes: running
 项目: https://github.com/Jyanbai/ping-rust
 
@@ -162,7 +162,7 @@ vless://...security=reality...pbk=...&sid=...
 
 菜单 `2. 更改配置` 会先选择现有配置，再按协议提供端口、名称、公网地址、凭据、Reality SNI、Shadowsocks cipher 或 AnyTLS 用户密码等修改项。新配置必须通过真实 `shoes --dry-run` 才会原子提交；服务重启失败时自动恢复修改前的配置与 systemd 状态，成功后直接输出新的分享链接。
 
-每个节点都会保存为 `/etc/shoes/profiles/` 下的真实独立 YAML 文件；查看、更改和删除时直接显示该文件名，例如 `VLESS-REALITY-53453.yaml`。只有一个配置时自动选中，多个配置时才显示数字列表。shoes 继续加载由 Rust 确定性聚合的 `/etc/shoes/config.yaml`，内部 UUID 仅用于安全定位。
+每个节点都会保存为 `/etc/shoes/profiles/` 下的真实独立 YAML 文件；查看、更改和删除时直接显示该文件名，例如 `VLESS-REALITY-53453.yaml`。分享 URI 的 `#` 后也使用同一个文件基名，例如 `#VLESS-REALITY-53453`，复制或扫码导入 v2rayN 后即可看到协议与端口。只有一个配置时自动选中，多个配置时才显示数字列表。`3) 查看配置` 会在 URL 后直接显示对应的终端二维码并退出菜单。shoes 继续加载由 Rust 确定性聚合的 `/etc/shoes/config.yaml`，内部 UUID 仅用于安全定位。
 
 ### 链式代理
 
@@ -234,7 +234,7 @@ sudo prs url reality-main
 sudo prs qr reality-main
 ```
 
-`qr` 使用本机 `qrencode` 在终端生成二维码，不会把含凭据的 URL 发送给第三方网站；未安装 `qrencode` 时会退化为原样输出 URL。
+`qr` 与菜单中的 `3) 查看配置` 使用内置 Rust 编码器在终端生成二维码，不依赖 `qrencode`，也不会把含凭据的 URL 发送给第三方网站。`url` 始终只输出一行链接，适合脚本调用。
 
 ## Hysteria2 与 TUIC
 

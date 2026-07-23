@@ -469,7 +469,7 @@ fn sing_box(profile: &ManagedProfile, server: &str) -> Result<String> {
 pub fn share_uri(profile: &ManagedProfile, server: &str) -> Result<String> {
     let server = normalize_server_address(server)?;
     let host = authority_host(&server);
-    let fragment = encode(&profile.name);
+    let fragment = encode(&profile.display_name());
     match &profile.credentials {
         Credentials::Reality {
             user_id,
@@ -762,9 +762,10 @@ mod tests {
     #[test]
     fn stored_reality_uri_contains_all_v2rayn_reality_parameters() {
         let mut profile = reality_profile();
+        profile.port = 28101;
         profile.server_address = Some("203.0.113.8".to_owned());
         let uri = stored_share_uri(&profile, None).unwrap();
-        assert!(uri.starts_with("vless://00000000-0000-0000-0000-000000000000@203.0.113.8:443?"));
+        assert!(uri.starts_with("vless://00000000-0000-0000-0000-000000000000@203.0.113.8:28101?"));
         for parameter in [
             "encryption=none",
             "flow=xtls-rprx-vision",
@@ -777,6 +778,10 @@ mod tests {
         ] {
             assert!(uri.contains(parameter), "missing {parameter}: {uri}");
         }
+        assert!(
+            uri.ends_with("#VLESS-REALITY-28101"),
+            "unexpected profile label: {uri}"
+        );
         assert!(!uri.contains("private"));
     }
 

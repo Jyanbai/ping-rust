@@ -1,14 +1,13 @@
 use std::{
-    io::Write,
     io::{self, IsTerminal},
     path::{Path, PathBuf},
-    process::{Command as ProcessCommand, Stdio},
 };
 
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use colored::Colorize;
 use dialoguer::{theme::ColorfulTheme, Confirm};
+use qrcode::{render::unicode, QrCode};
 use uuid::Uuid;
 
 use crate::{
@@ -500,7 +499,20 @@ pub(crate) fn print_profile_details(profile: &config::ManagedProfile, share_uri:
     println!("{}", profile_details_text(profile, share_uri));
 }
 
-fn profile_details_text(profile: &config::ManagedProfile, share_uri: Option<&str>) -> String {
+pub(crate) fn print_profile_details_with_qr(
+    profile: &config::ManagedProfile,
+    share_uri: Option<&str>,
+) {
+    match profile_details_with_qr_text(profile, share_uri) {
+        Ok(text) => println!("{text}"),
+        Err(error) => {
+            println!("{}", profile_details_text(profile, share_uri));
+            eprintln!("二维码生成失败：{error:#}；URL 已保留，可直接复制。");
+        }
+    }
+}
+
+fn profile_details_lines(profile: &config::ManagedProfile, share_uri: Option<&str>) -> Vec<String> {
     let mut lines = vec![format!(
         "\n-------------- {} -------------",
         profile.config_file_name()
@@ -718,8 +730,31 @@ fn profile_details_text(profile: &config::ManagedProfile, share_uri: Option<&str
     if profile.self_signed_certificate {
         lines.push("警告! 客户端需启用跳过证书验证 (allowInsecure)，或换用受信任证书。".to_owned());
     }
+    lines
+}
+
+fn profile_details_text(profile: &config::ManagedProfile, share_uri: Option<&str>) -> String {
+    let mut lines = profile_details_lines(profile, share_uri);
     lines.push("------------- END -------------".to_owned());
     lines.join("\n")
+}
+
+fn profile_details_with_qr_text(
+    profile: &config::ManagedProfile,
+    share_uri: Option<&str>,
+) -> Result<String> {
+    let mut lines = profile_details_lines(profile, share_uri);
+    if let Some(uri) = share_uri {
+        lines.push("------------- 二维码 (QR) -------------".to_owned());
+        lines.push(terminal_qr_text(uri)?);
+    }
+    lines.push("------------- END -------------".to_owned());
+    Ok(lines.join("\n"))
+}
+
+fn terminal_qr_text(value: &str) -> Result<String> {
+    let code = QrCode::new(value.as_bytes()).context("二维码内容过长，无法编码")?;
+    Ok(code.render::<unicode::Dense1x2>().quiet_zone(true).build())
 }
 
 pub(crate) async fn ensure_shoes_for_add(yes: bool) -> Result<()> {
@@ -820,26 +855,7 @@ fn print_saved_qr(selector: Option<&str>, server_address: Option<&str>) -> Resul
     let state = config::load_state()?;
     let profile = client::select_profile(&state.profiles, selector)?;
     let uri = client::stored_share_uri(profile, server_address)?;
-    if !crate::utils::command_exists("qrencode") {
-        println!("{uri}");
-        eprintln!("未安装 qrencode；请安装后重新运行 qr，URL 已输出供复制。");
-        return Ok(());
-    }
-    let mut child = ProcessCommand::new("qrencode")
-        .args(["-t", "ANSIUTF8"])
-        .stdin(Stdio::piped())
-        .spawn()
-        .context("无法启动 qrencode")?;
-    child
-        .stdin
-        .take()
-        .context("无法打开 qrencode 标准输入")?
-        .write_all(uri.as_bytes())
-        .context("写入二维码内容失败")?;
-    let status = child.wait().context("等待 qrencode 失败")?;
-    if !status.success() {
-        bail!("qrencode 执行失败（退出码：{status}）");
-    }
+    println!("{}", terminal_qr_text(&uri)?);
     Ok(())
 }
 
@@ -1221,6 +1237,21 @@ mod tests {
                 "missing {expected:?} in {output}"
             );
         }
+
+        let qr_output = profile_details_with_qr_text(&profile, Some("ss://import-link")).unwrap();
+        let url_position = qr_output.find("ss://import-link").unwrap();
+        let qr_position = qr_output
+            .find("------------- 二维码 (QR) -------------")
+            .unwrap();
+        let end_position = qr_output.find("------------- END -------------").unwrap();
+        assert!(url_position < qr_position);
+        assert!(qr_position < end_position);
+        assert!(qr_output
+            .chars()
+            .any(|value| matches!(value, '▀' | '▄' | '█')));
+
+        let without_url = profile_details_with_qr_text(&profile, None).unwrap();
+        assert!(!without_url.contains("二维码 (QR)"));
     }
 
     #[test]

@@ -113,8 +113,6 @@ jobs:
           esac
           test "$reality_fingerprint" = chrome \
             || { echo "unexpected Reality fingerprint: $reality_fingerprint" >&2; exit 1; }
-          test "$(sudo "$PING_RUST" qr 2>/dev/null)" = "$reality_uri" \
-            || { echo 'QR fallback URI mismatch' >&2; exit 1; }
           info_output="$(sudo "$PING_RUST" info)"
           printf '%s' "$info_output" | grep -q '客户端地址：' \
             || { echo 'client address missing from info' >&2; exit 1; }
@@ -135,6 +133,15 @@ jobs:
           test "$reality_port" -ge 20000 \
             || { echo 'Reality port outside random range' >&2; exit 1; }
           printf 'REALITY_PORT=%s\n' "$reality_port" >> "$GITHUB_ENV"
+          case "$reality_uri" in
+            *"#VLESS-REALITY-${reality_port}") ;;
+            *) echo 'Reality URI profile label mismatch' >&2; exit 1 ;;
+          esac
+          qr_output="$RUNNER_TEMP/reality-qr.txt"
+          sudo "$PING_RUST" qr > "$qr_output"
+          grep -Eq '[▀▄█]' "$qr_output" \
+            || { echo 'built-in terminal QR output missing' >&2; exit 1; }
+          sudo rm -f "$qr_output"
 
           elapsed="$(( $(date +%s) - started_at ))"
           test "$elapsed" -le 180 \
@@ -199,6 +206,39 @@ jobs:
             timeout {
               puts stderr "timeout waiting for the only profile URI"
               exit 45
+            }
+          }
+          expect {
+            -re {#VLESS-REALITY-[0-9]+} {}
+            eof {
+              puts stderr "view exited before rendering the profile label"
+              exit 47
+            }
+            timeout {
+              puts stderr "timeout waiting for the profile label"
+              exit 48
+            }
+          }
+          expect {
+            -re {二维码 \(QR\)} {}
+            eof {
+              puts stderr "view exited before rendering the QR heading"
+              exit 49
+            }
+            timeout {
+              puts stderr "timeout waiting for the QR heading"
+              exit 50
+            }
+          }
+          expect {
+            -re {▀|▄|█} {}
+            eof {
+              puts stderr "view exited before rendering QR blocks"
+              exit 51
+            }
+            timeout {
+              puts stderr "timeout waiting for QR blocks"
+              exit 52
             }
           }
           expect {
@@ -521,6 +561,9 @@ jobs:
           send "$env(PROFILE_NUMBER)\r"
           wait_for {协议 \(protocol\)[^\r\n]*= vless} view-info
           wait_for {vless://} view-uri
+          wait_for {#VLESS-REALITY-25450} view-profile-label
+          wait_for {二维码 \(QR\)} view-qr-heading
+          wait_for {▀|▄|█} view-qr-blocks
           expect { eof {} timeout { puts stderr "timeout waiting for view exit"; exit 36 } }
 
           spawn $env(PRS_COMMAND)

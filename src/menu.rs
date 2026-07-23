@@ -454,7 +454,7 @@ fn view_config_menu() -> Result<MenuControl> {
         .as_deref()
         .map(|server| client::share_uri(profile, server))
         .transpose()?;
-    cli::print_profile_details(profile, share_uri.as_deref());
+    cli::print_profile_details_with_qr(profile, share_uri.as_deref());
     Ok(control_after_success(3))
 }
 
