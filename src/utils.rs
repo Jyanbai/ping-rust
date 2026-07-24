@@ -72,14 +72,21 @@ pub fn require_linux() -> Result<()> {
 
 pub fn require_linux_root() -> Result<()> {
     require_linux()?;
+    if !is_root()? {
+        bail!("该操作需要 root 权限，请使用 sudo ping-rust ...")
+    }
+    Ok(())
+}
+
+pub fn is_root() -> Result<bool> {
     let output = Command::new("id")
         .arg("-u")
         .output()
         .context("无法检查当前用户权限")?;
-    if !output.status.success() || String::from_utf8_lossy(&output.stdout).trim() != "0" {
-        bail!("该操作需要 root 权限，请使用 sudo ping-rust ...")
+    if !output.status.success() {
+        bail!("检查当前用户权限失败：{}", output.status);
     }
-    Ok(())
+    Ok(String::from_utf8_lossy(&output.stdout).trim() == "0")
 }
 
 pub fn command_exists(name: &str) -> bool {

@@ -16,7 +16,7 @@ use crate::{
         self, AnyTlsMode, AnyTlsUser, GenerationOptions, GenerationRequest, Protocol,
         ShadowsocksCipher,
     },
-    deployment, fast_add,
+    deployment, fast_add, install_self,
     installer::{self, InstallMethod},
     menu, operations, self_update,
     service::{self, ServiceAction},
@@ -37,6 +37,16 @@ pub enum Command {
     /// 首次安装时零输入部署默认 VLESS-REALITY
     #[command(hide = true)]
     Bootstrap,
+    /// 将已校验的当前二进制原子安装到目标目录
+    #[command(hide = true)]
+    InstallSelf {
+        #[arg(long)]
+        install_dir: PathBuf,
+        #[arg(long)]
+        quiet: bool,
+        #[arg(long)]
+        no_bootstrap: bool,
+    },
     /// 安装 shoes
     Install {
         #[arg(long, value_enum, default_value_t = InstallMethod::Release)]
@@ -237,6 +247,26 @@ pub async fn run(cli: Cli) -> Result<()> {
             if !bootstrap_default_reality().await? {
                 println!("检测到已有 shoes 配置，跳过默认 VLESS-REALITY 部署。");
             }
+            Ok(())
+        }
+        Command::InstallSelf {
+            install_dir,
+            quiet,
+            no_bootstrap,
+        } => {
+            let report = install_self::install(&install_dir, quiet)?;
+            println!("安装成功：ping-rust {}", env!("CARGO_PKG_VERSION"));
+            if !no_bootstrap {
+                if !quiet {
+                    println!("正在零输入部署默认 VLESS-REALITY（随机端口）...");
+                }
+                if crate::utils::is_root()? {
+                    bootstrap_default_reality().await?;
+                } else {
+                    install_self::run_bootstrap_as_root(&report.destination)?;
+                }
+            }
+            println!("管理命令：sudo {}", report.command);
             Ok(())
         }
         Command::Install { method } => {
@@ -1232,6 +1262,27 @@ mod tests {
                 .unwrap()
                 .command,
             Some(Command::Bootstrap)
+        ));
+    }
+
+    #[test]
+    fn parses_hidden_install_self_options() {
+        assert!(matches!(
+            Cli::try_parse_from([
+                "ping-rust",
+                "install-self",
+                "--install-dir",
+                "/tmp/ping-rust-bin",
+                "--quiet",
+                "--no-bootstrap",
+            ])
+            .unwrap()
+            .command,
+            Some(Command::InstallSelf {
+                install_dir,
+                quiet: true,
+                no_bootstrap: true,
+            }) if install_dir == Path::new("/tmp/ping-rust-bin")
         ));
     }
 
