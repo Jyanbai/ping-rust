@@ -563,10 +563,9 @@ fn probe_expect_peer(harness: &Harness, client_port: u16, expected_peer: IpAddr)
         let result = request_through_socks(client_port, target, "/probe");
         if result.as_ref().is_ok_and(|response| {
             response.starts_with("HTTP/1.1 200 OK") && response.ends_with(ORIGIN_BODY)
-        }) {
-            if origin.wait_for_peer(Duration::from_secs(1))? == Some(expected_peer) {
-                return Ok(());
-            }
+        }) && origin.wait_for_peer(Duration::from_secs(1))? == Some(expected_peer)
+        {
+            return Ok(());
         }
         thread::sleep(Duration::from_millis(250));
     }
