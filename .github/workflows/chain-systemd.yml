@@ -7,6 +7,7 @@ on:
     paths:
       - .github/workflows/chain-systemd.yml
       - tests/chain_menu.exp
+      - tests/chain_systemd_e2e.rs
       - tests/chain_systemd_e2e.sh
       - src/**
       - Cargo.toml
@@ -33,9 +34,16 @@ jobs:
         run: |
           set -euo pipefail
           cargo build --locked --release
+          cargo test --locked --test chain_systemd_e2e --no-run
+          runner="$(
+            find target/debug/deps -maxdepth 1 -type f \
+              -name 'chain_systemd_e2e-*' -perm -111 -print -quit
+          )"
+          test -n "$runner"
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends expect iproute2
           sudo install -m 0755 target/release/ping-rust /usr/local/bin/ping-rust
+          sudo install -m 0755 "$runner" /usr/local/bin/chain-systemd-e2e
       - name: Install checksum-pinned shoes v0.2.7
         shell: bash
         run: |
@@ -48,9 +56,17 @@ jobs:
           mkdir -p "$directory"
           tar -xzf "$archive" -C "$directory"
           sudo install -m 0755 "$directory/shoes" /usr/local/bin/shoes
-      - name: Exercise production menu, state, network exits and systemd
+      - name: Exercise legacy Shell acceptance for migration parity
         shell: bash
         run: sudo env REPO_DIR="$PWD" bash tests/chain_systemd_e2e.sh
+      - name: Exercise Rust production menu, state, network exits and systemd
+        shell: bash
+        run: |
+          sudo env \
+            REPO_DIR="$PWD" \
+            PING_RUST_CHAIN_SYSTEMD_E2E=1 \
+            /usr/local/bin/chain-systemd-e2e \
+              --ignored --exact chain_systemd_acceptance --nocapture
 
   debian-12:
     name: Debian 12 real systemd and isolated exits
@@ -68,6 +84,14 @@ jobs:
           sudo apt-get install -y --no-install-recommends musl-tools
           rustup target add x86_64-unknown-linux-musl
           cargo build --locked --release --target x86_64-unknown-linux-musl
+          cargo test --locked --target x86_64-unknown-linux-musl \
+            --test chain_systemd_e2e --no-run
+          runner="$(
+            find target/x86_64-unknown-linux-musl/debug/deps -maxdepth 1 \
+              -type f -name 'chain_systemd_e2e-*' -perm -111 -print -quit
+          )"
+          test -n "$runner"
+          install -m 0755 "$runner" "$RUNNER_TEMP/chain-systemd-e2e"
           archive="$RUNNER_TEMP/shoes.tar.gz"
           mkdir -p "$RUNNER_TEMP/shoes"
           curl --fail --location --retry 3 --proto '=https' --tlsv1.2 \
@@ -98,7 +122,7 @@ jobs:
           done
           docker exec ping-rust-debian test -f /etc/debian_version
           docker exec ping-rust-debian systemctl --version
-      - name: Exercise production menu, state, network exits and systemd
+      - name: Exercise legacy Shell acceptance for migration parity
         shell: bash
         run: |
           set -euo pipefail
@@ -109,6 +133,20 @@ jobs:
             /usr/local/bin/ping-rust /usr/local/bin/shoes
           docker exec --env REPO_DIR=/workspace ping-rust-debian \
             bash /workspace/tests/chain_systemd_e2e.sh
+      - name: Exercise Rust production menu, state, network exits and systemd
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker cp "$RUNNER_TEMP/chain-systemd-e2e" \
+            ping-rust-debian:/usr/local/bin/chain-systemd-e2e
+          docker exec ping-rust-debian chmod 0755 \
+            /usr/local/bin/chain-systemd-e2e
+          docker exec \
+            --env REPO_DIR=/workspace \
+            --env PING_RUST_CHAIN_SYSTEMD_E2E=1 \
+            ping-rust-debian \
+            /usr/local/bin/chain-systemd-e2e \
+              --ignored --exact chain_systemd_acceptance --nocapture
       - name: Show Debian diagnostics on failure
         if: failure()
         shell: bash
