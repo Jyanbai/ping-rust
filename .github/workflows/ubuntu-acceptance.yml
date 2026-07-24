@@ -15,7 +15,7 @@ permissions:
   contents: read
 
 env:
-  PUBLIC_VERSION: 0.1.6
+  PUBLIC_VERSION: 0.1.14
 
 jobs:
   root-systemd:
