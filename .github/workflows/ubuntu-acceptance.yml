@@ -15,7 +15,7 @@ permissions:
   contents: read
 
 env:
-  PUBLIC_VERSION: 0.1.14
+  PUBLIC_VERSION: 0.1.15
   SHOES_ARCHIVE_SHA256: e60ccde92490624d9ff399dd58e69d4d6943b33c5cc4f0b0d1509b0c644fbc2a
   SHOES_URL: https://github.com/cfal/shoes/releases/download/v0.2.7/shoes-x86_64-unknown-linux-musl.tar.gz
 
@@ -64,7 +64,11 @@ jobs:
             "ping-rust $PUBLIC_VERSION"
 
           installer_root="$RUNNER_TEMP/ping-rust-public-installer"
-          bash scripts/install.sh \
+          public_installer="$RUNNER_TEMP/ping-rust-public-install.sh"
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            --output "$public_installer" \
+            "https://raw.githubusercontent.com/Jyanbai/ping-rust/v${PUBLIC_VERSION}/scripts/install.sh"
+          bash "$public_installer" \
             --version "v$PUBLIC_VERSION" \
             --install-dir "$installer_root" \
             --quiet \
@@ -85,6 +89,67 @@ jobs:
           "$ping_rust" --version
           printf 'PING_RUST=%s\n' "$ping_rust" >> "$GITHUB_ENV"
           printf 'PRS=%s\n' "$current_root/bin/prs" >> "$GITHUB_ENV"
+
+      - name: Exercise current Stage 0 and Rust install-self without a release
+        shell: bash
+        run: |
+          set -euo pipefail
+          asset_root="$RUNNER_TEMP/current-installer-assets"
+          package_root="$RUNNER_TEMP/current-installer-package"
+          install_root="$RUNNER_TEMP/current-installer-root"
+          mkdir -p "$asset_root" "$package_root"
+          cp "$PING_RUST" "$package_root/ping-rust"
+          tar -czf \
+            "$asset_root/ping-rust-x86_64-unknown-linux-musl.tar.gz" \
+            -C "$package_root" ping-rust
+          (
+            cd "$asset_root"
+            sha256sum ping-rust-x86_64-unknown-linux-musl.tar.gz \
+              > SHA256SUMS
+          )
+
+          curl() {
+            local output="" url=""
+            while [[ "$#" -gt 0 ]]; do
+              case "$1" in
+                -o | --output) output="$2"; shift 2 ;;
+                *) url="$1"; shift ;;
+              esac
+            done
+            test -n "$output"
+            cp "$asset_root/${url##*/}" "$output"
+          }
+          export -f curl
+          export asset_root
+
+          bash scripts/install.sh \
+            --version "v$(awk -F '\"' '/^version = / { print $2; exit }' Cargo.toml)" \
+            --install-dir "$install_root" \
+            --quiet \
+            --no-bootstrap
+          test "$("$install_root/ping-rust" --version)" = "$("$PING_RUST" --version)"
+          test "$(readlink "$install_root/prs")" = ping-rust
+
+          conflict_root="$RUNNER_TEMP/current-installer-conflict"
+          mkdir -p "$conflict_root"
+          printf 'owned-by-another-program\n' > "$conflict_root/prs"
+          bash scripts/install.sh \
+            --version "v$(awk -F '\"' '/^version = / { print $2; exit }' Cargo.toml)" \
+            --install-dir "$conflict_root" \
+            --quiet \
+            --no-bootstrap
+          grep -Fx 'owned-by-another-program' "$conflict_root/prs"
+
+          legacy_root="$RUNNER_TEMP/current-installer-legacy"
+          mkdir -p "$legacy_root"
+          ln -s ping-rust "$legacy_root/sb"
+          bash scripts/install.sh \
+            --version "v$(awk -F '\"' '/^version = / { print $2; exit }' Cargo.toml)" \
+            --install-dir "$legacy_root" \
+            --quiet \
+            --no-bootstrap
+          test ! -e "$legacy_root/sb"
+          test "$(readlink "$legacy_root/prs")" = ping-rust
 
       - name: Installer bootstrap deploys random-port Reality without input
         id: reality

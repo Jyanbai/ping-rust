@@ -2,9 +2,9 @@
 
 `ping-rust` 是一个纯 Rust 编写的 [cfal/shoes](https://github.com/cfal/shoes) 安装与管理工具。它提供类似 233boy 脚本的数字菜单，在 Linux VPS 上完成 shoes 安装、十种经过约束的成品协议配置、systemd 管理和日常运维。
 
-核心逻辑全部位于 Rust 源码中；`scripts/install.sh` 负责下载、校验并安装官方预编译二进制，随后调用 Rust 的安全首次部署入口。
+核心逻辑全部位于 Rust 源码中；`scripts/install.sh` 只负责执行 Rust 前的架构检测、下载、SHA-256 校验与严格解包，原子安装、快捷命令所有权判断和首次部署均由已校验的 Rust 二进制完成。
 
-> 当前已发布稳定版为 `v0.1.14`；本仓库源码为 `v0.1.15` 发布候选。两者均支持 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks、AnyTLS、VLESS-TLS-Vision、VLESS-WS-TLS、Trojan-TLS、Trojan-Reality 和 VMess-WS-TLS。用户只选择完整协议，不需要理解或手动组合传输层、安全层与内层协议。
+> 当前已发布稳定版为 `v0.1.15`；本仓库源码为 `v0.1.16` 开发候选。两者均支持 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks、AnyTLS、VLESS-TLS-Vision、VLESS-WS-TLS、Trojan-TLS、Trojan-Reality 和 VMess-WS-TLS。用户只选择完整协议，不需要理解或手动组合传输层、安全层与内层协议。
 
 完整文档：[Wiki](https://github.com/Jyanbai/ping-rust/wiki) · [快速开始](https://github.com/Jyanbai/ping-rust/wiki/Quick-Start) · [链式代理](https://github.com/Jyanbai/ping-rust/wiki/Chain-Proxy) · [故障排查](https://github.com/Jyanbai/ping-rust/wiki/Troubleshooting)
 
@@ -24,14 +24,14 @@ bash <(curl --proto '=https' --tlsv1.2 -fsSL \
 ```bash
 bash <(curl --proto '=https' --tlsv1.2 -fsSL \
   https://raw.githubusercontent.com/Jyanbai/ping-rust/main/scripts/install.sh) \
-  --version v0.1.14
+  --version v0.1.16
 
 bash <(curl --proto '=https' --tlsv1.2 -fsSL \
   https://raw.githubusercontent.com/Jyanbai/ping-rust/main/scripts/install.sh) \
   --install-dir /usr/local/bin --quiet --no-bootstrap
 ```
 
-安装器自动识别 x86_64/aarch64，从 GitHub Releases 下载对应 musl 静态包，强制验证 `SHA256SUMS` 和二进制版本后原子安装到 `/usr/local/bin/ping-rust`，并安全创建 `prs → ping-rust` 符号链接。默认调用 Rust `bootstrap` 完成首次 Reality 部署；检测到已有配置时自动跳过，`--no-bootstrap` 可用于只安装管理工具。若系统已有其它 `prs` 命令，安装器会保留它并提示改用 `ping-rust`，绝不强制覆盖；升级时只会移除确实指向 `ping-rust` 的旧 `sb` 链接，不会删除用户自己的 `sb` 程序。写入系统目录时会调用 `sudo`；令牌、密码和代理配置都不会被上传。
+Stage 0 自动识别 x86_64/aarch64，从 GitHub Releases 下载对应 musl 静态包，并在首次执行前强制验证 `SHA256SUMS`、归档结构和二进制版本。随后由隐藏的 Rust 安装入口原子写入 `/usr/local/bin/ping-rust`，安全创建 `prs → ping-rust`，并调用现有 Rust `bootstrap` 完成默认 Reality 部署。检测到已有配置时自动跳过，`--no-bootstrap` 可用于只安装管理工具。若系统已有其它 `prs` 命令，安装器会保留它并提示改用 `ping-rust`；升级时只会移除确实指向同目录 `ping-rust` 的旧 `sb` 链接。指定 `v0.1.15` 或更早版本时，应使用对应 tag 中的旧安装脚本；新的轻量 Stage 0 协议从 `v0.1.16` 开始。令牌、密码和代理配置都不会被上传。
 
 ## 功能
 
@@ -129,7 +129,7 @@ vless://...security=reality...pbk=...&sid=...#VLESS-REALITY-30060
 ```text
 $ sudo prs
 
-------------- ping-rust v0.1.15 -------------
+------------- ping-rust v0.1.16 -------------
 shoes: running
 项目: https://github.com/Jyanbai/ping-rust
 
