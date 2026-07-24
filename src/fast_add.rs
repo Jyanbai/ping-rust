@@ -63,27 +63,45 @@ pub async fn execute(request: AddRequest) -> Result<AddResult> {
         ]);
     }
 
-    let generation = deployment::generate_and_activate(GenerationRequest {
-        name: request.name,
-        protocol: request.protocol,
+    let generation = add_activation_context(
+        deployment::generate_and_activate(GenerationRequest {
+            name: request.name,
+            protocol: request.protocol,
+            port,
+            output: utils::CONFIG_FILE.into(),
+            server_address: Some(server_address.clone()),
+            server_name: server_name.clone(),
+            reality_dest: request
+                .protocol
+                .uses_reality(config::AnyTlsMode::Tls)
+                .then(|| format!("{server_name}:443")),
+            certificate: None,
+            certificate_key: None,
+            options,
+        })
+        .await,
         port,
-        output: utils::CONFIG_FILE.into(),
-        server_address: Some(server_address.clone()),
-        server_name: server_name.clone(),
-        reality_dest: request
-            .protocol
-            .uses_reality(config::AnyTlsMode::Tls)
-            .then(|| format!("{server_name}:443")),
-        certificate: None,
-        certificate_key: None,
-        options,
-    })
-    .await?;
+    )?;
     let share_uri = client::share_uri(&generation.profile, &server_address)?;
     Ok(AddResult {
         generation,
         share_uri,
     })
+}
+
+fn add_activation_context<T>(result: Result<T>, port: u16) -> Result<T> {
+    match result {
+        Err(error)
+            if error
+                .downcast_ref::<deployment::ActivationFailure>()
+                .is_some() =>
+        {
+            Err(error.context(format!(
+                "shoes 激活阶段失败；若日志显示地址被占用，说明监听端口 {port} 在预检查后被其它进程抢占，请重试"
+            )))
+        }
+        result => result,
+    }
 }
 
 pub fn protocol_from_menu_number(number: usize) -> Result<Protocol> {
@@ -227,6 +245,10 @@ fn ensure_port_available(
     {
         bail!("端口 {port} 已由 ping-rust 配置使用");
     }
+    // shoes 当前会在启动时自行创建并绑定监听套接字，未接收 systemd
+    // socket activation 的 LISTEN_FDS，因此这里的检查只能用于尽早报错。
+    // 检查结束到 shoes 绑定之间仍可能发生竞争；激活失败由 deployment
+    // 的配置与服务快照回滚兜底。
     let (tcp, udp) = required_sockets(protocol);
     let status = operations::check_port(port, tcp, udp);
     if status.tcp_available.is_some_and(|result| result.is_err()) {
@@ -255,6 +277,7 @@ fn required_sockets(protocol: Protocol) -> (bool, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::anyhow;
 
     #[test]
     fn uses_sequential_protocol_numbers() {
@@ -275,6 +298,22 @@ mod tests {
         }
         assert!(protocol_from_menu_number(0).is_err());
         assert!(protocol_from_menu_number(11).is_err());
+    }
+
+    #[test]
+    fn port_race_guidance_only_wraps_activation_failures() {
+        let ordinary = add_activation_context::<()>(Err(anyhow!("配置名称重复")), 443).unwrap_err();
+        assert!(!format!("{ordinary:#}").contains("监听端口 443"));
+
+        let activation = anyhow::Error::new(deployment::ActivationFailure::new(
+            "shoes 激活失败，配置和服务状态已回滚",
+            anyhow!("systemctl restart 失败"),
+        ));
+        let activation = add_activation_context::<()>(Err(activation), 443).unwrap_err();
+        let message = format!("{activation:#}");
+        assert!(message.contains("监听端口 443"));
+        assert!(message.contains("配置和服务状态已回滚"));
+        assert!(message.contains("systemctl restart 失败"));
     }
 
     #[test]

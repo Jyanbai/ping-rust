@@ -166,6 +166,7 @@ fn clash_meta(profile: &ManagedProfile, server: &str) -> Result<String> {
             udp_enabled,
             security,
         } => {
+            let password = single_anytls_password(users)?;
             if matches!(security, config::AnyTlsSecurity::Reality { .. }) {
                 bail!("Clash Meta 不支持 AnyTLS+Reality，请改用 sing-box 导出");
             }
@@ -174,7 +175,7 @@ fn clash_meta(profile: &ManagedProfile, server: &str) -> Result<String> {
                 "type": "anytls",
                 "server": server,
                 "port": profile.port,
-                "password": first_anytls_password(users)?,
+                "password": password,
                 "client-fingerprint": config::REALITY_FINGERPRINT,
                 "udp": udp_enabled,
                 "sni": server_name,
@@ -352,6 +353,7 @@ fn sing_box(profile: &ManagedProfile, server: &str) -> Result<String> {
             security,
             ..
         } => {
+            let password = single_anytls_password(users)?;
             let tls = match security {
                 config::AnyTlsSecurity::Tls => {
                     tls(server_name, profile.self_signed_certificate, alpn_protocols)
@@ -376,7 +378,7 @@ fn sing_box(profile: &ManagedProfile, server: &str) -> Result<String> {
                 "tag": profile.name,
                 "server": server,
                 "server_port": profile.port,
-                "password": first_anytls_password(users)?,
+                "password": password,
                 "tls": tls
             })
         }
@@ -550,6 +552,7 @@ pub fn share_uri(profile: &ManagedProfile, server: &str) -> Result<String> {
             security,
             ..
         } => {
+            let password = single_anytls_password(users)?;
             if matches!(security, config::AnyTlsSecurity::Reality { .. }) {
                 bail!("Nekobox/标准 AnyTLS URI 不支持 Reality 参数，请改用 sing-box 导出");
             }
@@ -562,7 +565,7 @@ pub fn share_uri(profile: &ManagedProfile, server: &str) -> Result<String> {
             }
             Ok(format!(
                 "anytls://{}@{host}:{}/?{}#{fragment}",
-                encode(first_anytls_password(users)?),
+                encode(password),
                 profile.port,
                 query.finish()
             ))
@@ -702,11 +705,15 @@ pub fn normalize_server_address(server: &str) -> Result<String> {
     Ok(value.to_ascii_lowercase())
 }
 
-fn first_anytls_password(users: &[config::AnyTlsUser]) -> Result<&str> {
-    users
-        .first()
-        .map(|user| user.password.as_str())
-        .context("AnyTLS 配置没有可导出的用户")
+fn single_anytls_password(users: &[config::AnyTlsUser]) -> Result<&str> {
+    match users {
+        [user] => Ok(user.password.as_str()),
+        [] => bail!("AnyTLS 配置没有可导出的用户"),
+        users => bail!(
+            "AnyTLS 配置包含 {} 个用户；单节点客户端配置只能使用一个密码，拒绝静默选择用户。请为每个用户分别创建客户端节点",
+            users.len()
+        ),
+    }
 }
 
 fn authority_host(server: &str) -> String {
@@ -1114,5 +1121,31 @@ mod tests {
         serde_json::from_str::<Value>(&sing_box).unwrap();
         assert!(sing_box.contains("public-key"));
         assert!(!sing_box.contains("never-export-this-private-key"));
+    }
+
+    #[test]
+    fn rejects_multi_user_anytls_exports_without_silent_selection() {
+        let mut profile = anytls_profile(AnyTlsSecurity::Tls);
+        let Credentials::AnyTls { users, .. } = &mut profile.credentials else {
+            unreachable!("test profile is AnyTLS");
+        };
+        users.push(AnyTlsUser {
+            name: "bob".to_owned(),
+            password: "second-secret".to_owned(),
+        });
+
+        for format in [
+            ClientFormat::ClashMeta,
+            ClientFormat::SingBox,
+            ClientFormat::Nekobox,
+        ] {
+            let error = render(&profile, format, "203.0.113.5").unwrap_err();
+            let message = format!("{error:#}");
+            assert!(message.contains("2 个用户"), "{format:?}: {message}");
+            assert!(
+                message.contains("拒绝静默选择用户"),
+                "{format:?}: {message}"
+            );
+        }
     }
 }

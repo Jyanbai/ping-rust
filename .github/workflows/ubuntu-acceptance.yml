@@ -89,6 +89,10 @@ jobs:
             || { echo 'bootstrap marker missing' >&2; exit 1; }
           sudo grep -q 'vless://' "$bootstrap_output" \
             || { echo 'bootstrap URI missing' >&2; exit 1; }
+          sudo grep -q '二维码 (QR)' "$bootstrap_output" \
+            || { echo 'bootstrap QR heading missing' >&2; exit 1; }
+          sudo grep -Eq '[▀▄█]' "$bootstrap_output" \
+            || { echo 'bootstrap QR blocks missing' >&2; exit 1; }
 
           reality_uri="$(sudo "$PING_RUST" url)"
           sudo rm -f "$bootstrap_output"
@@ -249,6 +253,157 @@ jobs:
             }
           }
           EXPECT
+
+      - name: View advanced AnyTLS Reality without aborting on unsupported URI
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo env PRS_COMMAND="$PRS" expect <<'EXPECT'
+          log_user 0
+          set timeout 240
+          spawn $env(PRS_COMMAND)
+          expect -re {请选择 \[0-10\]}
+          send "9\r"
+          expect -re {运维工具}
+          send "2\r"
+          expect -re {选择协议}
+          send "5\r"
+          expect -re {配置名称}
+          send "anytls-reality-view\r"
+          expect -re {监听端口}
+          send "25447\r"
+          expect -re {AnyTLS 外层安全模式}
+          send "2\r"
+          expect -re {AnyTLS 用户名}
+          send "\r"
+          expect -re {AnyTLS 密码}
+          send "\r"
+          expect -re {继续添加 AnyTLS 用户}
+          send "n\r"
+          expect -re {使用推荐 padding_scheme}
+          send "y\r"
+          expect -re {配置认证失败 fallback}
+          send "n\r"
+          expect -re {Reality SNI}
+          send "\r"
+          expect -re {Reality fallback}
+          send "\r"
+          expect {
+            -re {请输入 VPS 公网域名或 IP} {
+              send "203.0.113.10\r"
+              exp_continue
+            }
+            -re {未生成标准分享链接} {}
+            timeout {
+              puts stderr "advanced AnyTLS Reality deployment did not finish"
+              exit 53
+            }
+          }
+          expect -re {配置验证通过，服务已启动}
+          expect -re {请选择 \[0-10\]}
+          send "3\r"
+          expect -re {请选择配置}
+          expect -re {ANYTLS-25447\.yaml}
+          send "2\r"
+          expect -re {协议 \(protocol\)[^\r\n]*= anytls}
+          expect -re {未生成标准分享链接}
+          expect -re {配置详情仍可查看}
+          expect {
+            eof {}
+            timeout {
+              puts stderr "AnyTLS Reality view did not exit normally"
+              exit 54
+            }
+          }
+          EXPECT
+
+          anytls_reality_info="$(sudo "$PING_RUST" info anytls-reality-view)"
+          anytls_reality_profile="$(
+            printf '%s\n' "$anytls_reality_info" \
+              | grep -Eo '[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}' \
+              | head -n 1
+          )"
+          test -n "$anytls_reality_profile" \
+            || { echo 'AnyTLS Reality profile UUID missing' >&2; exit 1; }
+          sudo "$PING_RUST" delete "$anytls_reality_profile" --yes >/dev/null
+          sudo test ! -e /etc/shoes/profiles/ANYTLS-25447.yaml
+          ! sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)25447$'
+          sudo systemctl is-active --quiet shoes.service
+
+      - name: Reject lossy multi-user AnyTLS client exports
+        shell: bash
+        run: |
+          set -euo pipefail
+          multi_output="$RUNNER_TEMP/anytls-multi-user.txt"
+          sudo "$PING_RUST" generate anytls \
+            --name anytls-multi-user \
+            --port 25446 \
+            --server-name localhost \
+            --user alice:alice-secret \
+            --user bob:bob-secret \
+            | sudo tee "$multi_output" >/dev/null
+          multi_profile="$(
+            grep -Eo '[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}' \
+              "$multi_output" | head -n 1
+          )"
+          test -n "$multi_profile" \
+            || { echo 'multi-user AnyTLS profile UUID missing' >&2; exit 1; }
+
+          for format in clash-meta sing-box nekobox; do
+            export_error="$RUNNER_TEMP/anytls-multi-${format}.txt"
+            set +e
+            sudo "$PING_RUST" export "$format" \
+              --profile "$multi_profile" \
+              --server 203.0.113.10 >"$export_error" 2>&1
+            export_status="$?"
+            set -e
+            test "$export_status" -ne 0 \
+              || { echo "$format silently exported one AnyTLS user" >&2; exit 1; }
+            grep -q '2 个用户' "$export_error" \
+              || { echo "$format missing multi-user count" >&2; exit 1; }
+            grep -q '拒绝静默选择用户' "$export_error" \
+              || { echo "$format missing lossless-export rejection" >&2; exit 1; }
+            rm -f "$export_error"
+          done
+
+          sudo "$PING_RUST" delete "$multi_profile" --yes >/dev/null
+          sudo rm -f "$multi_output"
+          sudo test ! -e /etc/shoes/profiles/ANYTLS-25446.yaml
+          ! sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)25446$'
+          sudo systemctl is-active --quiet shoes.service
+
+      - name: Keep successful add --plain stdout machine-readable
+        shell: bash
+        run: |
+          set -euo pipefail
+          plain_port="$(
+            python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()'
+          )"
+          plain_output="$(
+            sudo "$PING_RUST" add reality \
+              --name plain-contract \
+              --port "$plain_port" \
+              --server-address 203.0.113.11 \
+              --plain
+          )"
+          test "$(printf '%s\n' "$plain_output" | sed '/^[[:space:]]*$/d' | wc -l)" -eq 1 \
+            || { echo 'add --plain emitted more than one non-empty stdout line' >&2; exit 1; }
+          printf '%s\n' "$plain_output" | grep -q '^vless://' \
+            || { echo 'add --plain URI missing' >&2; exit 1; }
+          ! printf '%s\n' "$plain_output" | grep -Eq '部署成功|二维码|[▀▄█]' \
+            || { echo 'add --plain leaked human-readable output' >&2; exit 1; }
+
+          plain_info="$(sudo "$PING_RUST" info plain-contract)"
+          plain_profile="$(
+            printf '%s\n' "$plain_info" \
+              | grep -Eo '[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}' \
+              | head -n 1
+          )"
+          test -n "$plain_profile" \
+            || { echo 'plain-contract profile UUID missing' >&2; exit 1; }
+          sudo "$PING_RUST" delete "$plain_profile" --yes >/dev/null
+          sudo test ! -e "/etc/shoes/profiles/VLESS-REALITY-${plain_port}.yaml"
+          sudo systemctl is-active --quiet shoes.service
 
       - name: Add Hysteria2 and confirm service reload
         shell: bash
@@ -639,6 +794,10 @@ jobs:
           test "$add_status" -ne 0 \
             || { echo 'activation failure injection unexpectedly succeeded' >&2; exit 1; }
           grep -q '回滚' "$failure_log" || { echo 'missing rollback marker' >&2; exit 1; }
+          grep -q 'shoes 激活阶段失败' "$failure_log" \
+            || { echo 'missing typed activation marker' >&2; exit 1; }
+          grep -q "监听端口 ${rollback_port}" "$failure_log" \
+            || { echo 'missing conditional port-race guidance' >&2; exit 1; }
           ! grep -q 'vless://' "$failure_log" || { echo 'failure leaked share URI' >&2; exit 1; }
           test "$(sudo sha256sum /etc/shoes/config.yaml | awk '{print $1}')" = "$config_before" \
             || { echo 'config hash mismatch' >&2; exit 1; }
@@ -749,3 +908,160 @@ jobs:
           test ! -e /usr/local/bin/shoes
           test ! -e /etc/shoes
           test ! -e /etc/systemd/system/shoes.service
+
+  debian-systemd:
+    name: Debian 12 root/systemd runtime
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Build Debian 12 systemd test image
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build --tag ping-rust-debian-systemd - <<'DOCKERFILE'
+          FROM debian:12
+          ENV container=docker
+          ENV PATH=/root/.cargo/bin:${PATH}
+          RUN apt-get update \
+              && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+                build-essential ca-certificates curl dbus git gzip iproute2 pkg-config \
+                procps systemd systemd-sysv tar xz-utils \
+              && rm -rf /var/lib/apt/lists/*
+          RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --profile minimal
+          RUN systemd-machine-id-setup
+          STOPSIGNAL SIGRTMIN+3
+          CMD ["/sbin/init"]
+          DOCKERFILE
+
+      - name: Start clean Debian 12 systemd container
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --detach \
+            --name ping-rust-debian \
+            --privileged \
+            --cgroupns=host \
+            --tmpfs /run \
+            --tmpfs /run/lock \
+            --volume /sys/fs/cgroup:/sys/fs/cgroup:rw \
+            --volume "$GITHUB_WORKSPACE:/workspace:ro" \
+            ping-rust-debian-systemd
+
+          for _ in $(seq 1 30); do
+            if docker exec ping-rust-debian test -S /run/systemd/private; then
+              break
+            fi
+            sleep 1
+          done
+          docker exec ping-rust-debian test -S /run/systemd/private
+
+          docker exec ping-rust-debian bash -lc '
+            set -euo pipefail
+            . /etc/os-release
+            test "$ID" = debian
+            test "$VERSION_ID" = 12
+            test "$(uname -m)" = x86_64
+            state="$(systemctl is-system-running || true)"
+            case "$state" in
+              running|degraded) ;;
+              *) echo "unexpected systemd state: $state" >&2; exit 1 ;;
+            esac
+            test ! -e /usr/local/bin/shoes
+            test ! -e /etc/shoes
+            test ! -e /etc/systemd/system/shoes.service
+          '
+
+      - name: Build current source inside Debian 12
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker exec \
+            --env CARGO_TARGET_DIR=/tmp/ping-rust-target \
+            ping-rust-debian \
+            cargo install --path /workspace --locked --root /opt/ping-rust-current
+          docker exec ping-rust-debian \
+            ln -s /opt/ping-rust-current/bin/ping-rust /usr/local/bin/prs
+          docker exec ping-rust-debian \
+            /opt/ping-rust-current/bin/ping-rust --version
+
+      - name: Bootstrap Reality and verify Debian systemd runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker exec ping-rust-debian bash -lc '
+            set -euo pipefail
+            output=/tmp/reality-bootstrap.txt
+            /opt/ping-rust-current/bin/ping-rust bootstrap | tee "$output"
+
+            ! grep -Eq "选择协议|输入端口" "$output"
+            grep -q "首次安装：自动部署 VLESS-REALITY" "$output"
+            grep -q "vless://" "$output"
+            grep -q "二维码 (QR)" "$output"
+            grep -Eq "#VLESS-REALITY-[0-9]+$" "$output"
+
+            systemctl is-enabled --quiet shoes.service
+            systemctl is-active --quiet shoes.service
+            /usr/local/bin/shoes --dry-run /etc/shoes/config.yaml
+
+            profile="$(find /etc/shoes/profiles -maxdepth 1 -type f \
+              -name "VLESS-REALITY-*.yaml" -print -quit)"
+            test -n "$profile"
+            port="${profile##*-}"
+            port="${port%.yaml}"
+            ss -H -lnt | awk "{print \$4}" | grep -Eq "(^|:)${port}$"
+          '
+
+      - name: Add and inspect a second Debian configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker exec ping-rust-debian bash -lc '
+            set -euo pipefail
+            uri="$(/opt/ping-rust-current/bin/ping-rust add shadowsocks \
+              --server-address 203.0.113.10 --yes --plain)"
+            case "$uri" in
+              ss://*"#SHADOWSOCKS-"*) ;;
+              *) echo "unexpected Shadowsocks URI: $uri" >&2; exit 1 ;;
+            esac
+
+            systemctl is-active --quiet shoes.service
+            /usr/local/bin/shoes --dry-run /etc/shoes/config.yaml
+            test "$(find /etc/shoes/profiles -maxdepth 1 -type f | wc -l)" -eq 2
+
+            /opt/ping-rust-current/bin/ping-rust info > /tmp/info.txt
+            grep -q "配置数量：2" /tmp/info.txt
+            grep -q "VLESS-Reality-Vision" /tmp/info.txt
+            grep -q "Shadowsocks" /tmp/info.txt
+          '
+
+      - name: Record Debian acceptance summary
+        shell: bash
+        run: |
+          {
+            echo '### Debian 12 acceptance'
+            echo
+            echo '- Environment: clean Debian 12 x86_64 privileged systemd container'
+            echo '- Source: current workflow commit, built inside Debian'
+            echo '- Bootstrap: zero-input VLESS-REALITY with URI and QR'
+            echo '- Runtime: shoes dry-run, enabled/active systemd service, TCP listener'
+            echo '- Mutation: second Shadowsocks profile added and aggregate config revalidated'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Collect Debian diagnostics
+        if: failure()
+        shell: bash
+        run: |
+          set +e
+          docker exec ping-rust-debian systemctl status shoes.service --no-pager
+          docker exec ping-rust-debian journalctl -u shoes.service --no-pager -n 100
+          docker logs ping-rust-debian
+
+      - name: Remove Debian test container
+        if: always()
+        shell: bash
+        run: |
+          docker rm --force ping-rust-debian 2>/dev/null || true

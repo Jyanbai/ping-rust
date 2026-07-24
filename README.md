@@ -4,7 +4,7 @@
 
 核心逻辑全部位于 Rust 源码中；`scripts/install.sh` 负责下载、校验并安装官方预编译二进制，随后调用 Rust 的安全首次部署入口。
 
-> 当前稳定版 `v0.1.13` 支持 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks、AnyTLS、VLESS-TLS-Vision、VLESS-WS-TLS、Trojan-TLS、Trojan-Reality 和 VMess-WS-TLS。用户只选择完整协议，不需要理解或手动组合传输层、安全层与内层协议。
+> 当前已发布稳定版为 `v0.1.14`；本仓库源码为 `v0.1.15` 发布候选。两者均支持 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks、AnyTLS、VLESS-TLS-Vision、VLESS-WS-TLS、Trojan-TLS、Trojan-Reality 和 VMess-WS-TLS。用户只选择完整协议，不需要理解或手动组合传输层、安全层与内层协议。
 
 完整文档：[Wiki](https://github.com/Jyanbai/ping-rust/wiki) · [快速开始](https://github.com/Jyanbai/ping-rust/wiki/Quick-Start) · [链式代理](https://github.com/Jyanbai/ping-rust/wiki/Chain-Proxy) · [故障排查](https://github.com/Jyanbai/ping-rust/wiki/Troubleshooting)
 
@@ -24,7 +24,7 @@ bash <(curl --proto '=https' --tlsv1.2 -fsSL \
 ```bash
 bash <(curl --proto '=https' --tlsv1.2 -fsSL \
   https://raw.githubusercontent.com/Jyanbai/ping-rust/main/scripts/install.sh) \
-  --version v0.1.12
+  --version v0.1.14
 
 bash <(curl --proto '=https' --tlsv1.2 -fsSL \
   https://raw.githubusercontent.com/Jyanbai/ping-rust/main/scripts/install.sh) \
@@ -109,8 +109,16 @@ $ bash <(curl -fsSL https://raw.githubusercontent.com/Jyanbai/ping-rust/main/scr
 正在自动安装 shoes、选择随机端口并生成安全凭据……
 
 部署成功，shoes 服务已启动。
-------------- URL 链接 -------------
-vless://...security=reality...pbk=...&sid=...
+
+-------------- VLESS-REALITY-30060.yaml -------------
+协议 (protocol)         = vless
+端口 (port)             = 30060
+传输层安全 (TLS)        = reality
+------------- 链接 (URL) -------------
+vless://...security=reality...pbk=...&sid=...#VLESS-REALITY-30060
+------------- 二维码 (QR) -------------
+（终端在这里显示可直接扫描的块字符二维码）
+------------- END -------------
 ```
 
 安装脚本只在配置文件和管理状态都不存在时触发默认部署。Rust `bootstrap` 会自动下载 shoes、选择随机可用端口、生成 UUID/X25519 密钥/short ID、执行 `shoes --dry-run`、启动并确认 systemd 服务，然后输出可直接导入 v2rayN 的链接；检测到任何已有配置时绝不覆盖。通过 cargo 安装的用户第一次运行 `sudo prs` 时也会执行同一安全入口。
@@ -120,7 +128,7 @@ vless://...security=reality...pbk=...&sid=...
 ```text
 $ sudo prs
 
-------------- ping-rust v0.1.14 -------------
+------------- ping-rust v0.1.15 -------------
 shoes: running
 项目: https://github.com/Jyanbai/ping-rust
 
@@ -156,8 +164,14 @@ shoes: running
 输入端口（直接回车自动选择随机端口）:
 
 部署成功，shoes 服务已启动。
-------------- URL 链接 -------------
-vless://...security=reality...pbk=...&sid=...
+-------------- VLESS-REALITY-25448.yaml -------------
+协议 (protocol)         = vless
+端口 (port)             = 25448
+------------- 链接 (URL) -------------
+vless://...security=reality...pbk=...&sid=...#VLESS-REALITY-25448
+------------- 二维码 (QR) -------------
+（终端在这里显示可直接扫描的块字符二维码）
+------------- END -------------
 ```
 
 菜单 `2. 更改配置` 会先选择现有配置，再按协议提供端口、名称、公网地址、凭据、Reality SNI、Shadowsocks cipher 或 AnyTLS 用户密码等修改项。新配置必须通过真实 `shoes --dry-run` 才会原子提交；服务重启失败时自动恢复修改前的配置与 systemd 状态，成功后直接输出新的分享链接。
@@ -320,8 +334,8 @@ sudo ping-rust self-update
 `update` 只更新 shoes 内核；`self-update` 更新 ping-rust 本身。默认安装最新 Release，也可以指定版本；显式指定旧版本表示受控降级：
 
 ```bash
-sudo ping-rust self-update --version v0.1.12
-sudo ping-rust self-update --version v0.1.12 --force
+sudo ping-rust self-update --version v0.1.14
+sudo ping-rust self-update --version v0.1.14 --force
 ```
 
 自更新支持 Linux x86_64/aarch64，下载对应 musl 静态包，校验 GitHub API digest 与 `SHA256SUMS`，确认新二进制版本后才替换当前程序。程序位于 `/usr/local/bin` 时通常需要 `sudo`；用户目录内可写的 cargo 安装则不需要。

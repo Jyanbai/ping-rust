@@ -449,13 +449,23 @@ fn view_config_menu() -> Result<MenuControl> {
         return Ok(MenuControl::Continue);
     };
     let profile = &state.profiles[selected];
-    let share_uri = profile
-        .server_address
-        .as_deref()
-        .map(|server| client::share_uri(profile, server))
-        .transpose()?;
+    let (share_uri, share_warning) = share_uri_for_view(profile);
     cli::print_profile_details_with_qr(profile, share_uri.as_deref());
+    if let Some(warning) = share_warning {
+        println!("未生成标准分享链接：{warning}");
+        println!("配置详情仍可查看；请按上方提示选择受支持的客户端导出方式。");
+    }
     Ok(control_after_success(3))
+}
+
+fn share_uri_for_view(profile: &config::ManagedProfile) -> (Option<String>, Option<String>) {
+    let Some(server) = profile.server_address.as_deref() else {
+        return (None, None);
+    };
+    match client::share_uri(profile, server) {
+        Ok(uri) => (Some(uri), None),
+        Err(error) => (None, Some(format!("{error:#}"))),
+    }
 }
 
 async fn delete_config_menu() -> Result<()> {
@@ -888,15 +898,7 @@ async fn deploy_fast_config(
     shadowsocks_cipher: Option<ShadowsocksCipher>,
     shadowsocks_password: Option<String>,
 ) -> Result<MenuControl> {
-    let server_address = match fast_add::resolve_server_address(None).await {
-        Ok(address) => address,
-        Err(error) => {
-            eprintln!("自动检测公网地址失败：{error:#}");
-            Input::<String>::with_theme(&ColorfulTheme::default())
-                .with_prompt("请输入 VPS 公网域名或 IP")
-                .interact_text()?
-        }
-    };
+    let server_address = resolve_menu_server_address().await?;
     let result = fast_add::execute(fast_add::AddRequest {
         name: None,
         protocol,
@@ -909,6 +911,19 @@ async fn deploy_fast_config(
     .await?;
     cli::print_add_result(&result);
     Ok(control_after_success(1))
+}
+
+async fn resolve_menu_server_address() -> Result<String> {
+    match fast_add::resolve_server_address(None).await {
+        Ok(address) => Ok(address),
+        Err(error) => {
+            eprintln!("自动检测公网地址失败：{error:#}");
+            let entered = Input::<String>::with_theme(&ColorfulTheme::default())
+                .with_prompt("请输入 VPS 公网域名或 IP")
+                .interact_text()?;
+            fast_add::resolve_server_address(Some(&entered)).await
+        }
+    }
 }
 
 async fn advanced_add_config_menu() -> Result<()> {
@@ -1094,12 +1109,13 @@ async fn advanced_add_config_menu() -> Result<()> {
         (None, None)
     };
 
+    let server_address = resolve_menu_server_address().await?;
     let result = deployment::generate_and_activate(GenerationRequest {
         name: Some(name),
         protocol,
         port,
         output: crate::utils::CONFIG_FILE.into(),
-        server_address: None,
+        server_address: Some(server_address.clone()),
         server_name,
         reality_dest,
         certificate,
@@ -1108,6 +1124,13 @@ async fn advanced_add_config_menu() -> Result<()> {
     })
     .await?;
     cli::print_credentials(&result);
+    match client::share_uri(&result.profile, &server_address) {
+        Ok(share_uri) => cli::print_share_uri_with_qr(&share_uri),
+        Err(error) => {
+            println!("\n未生成标准分享链接：{error:#}");
+            println!("配置已成功部署；客户端导出请按上方提示处理。");
+        }
+    }
     println!("{}", "配置验证通过，服务已启动。".green());
     Ok(())
 }
@@ -1248,6 +1271,38 @@ mod tests {
         };
 
         assert_eq!(select_profile(&[profile]).unwrap(), Some(0));
+    }
+
+    #[test]
+    fn anytls_reality_view_keeps_details_when_standard_uri_is_unsupported() {
+        let profile = config::ManagedProfile {
+            id: uuid::Uuid::new_v4(),
+            name: "anytls-reality".to_owned(),
+            port: 443,
+            server_address: Some("203.0.113.9".to_owned()),
+            credentials: Credentials::AnyTls {
+                users: vec![AnyTlsUser {
+                    name: "default".to_owned(),
+                    password: "secret".to_owned(),
+                }],
+                server_name: config::DEFAULT_SNI.to_owned(),
+                alpn_protocols: vec!["h2".to_owned(), "http/1.1".to_owned()],
+                udp_enabled: true,
+                security: config::AnyTlsSecurity::Reality {
+                    private_key: "never-print-private".to_owned(),
+                    public_key: "public".to_owned(),
+                    short_id: "0123456789abcdef".to_owned(),
+                },
+            },
+            certificate_path: None,
+            certificate_key_path: None,
+            self_signed_certificate: false,
+        };
+
+        let (uri, warning) = share_uri_for_view(&profile);
+        assert!(uri.is_none());
+        let warning = warning.expect("unsupported standard URI should become a warning");
+        assert!(warning.contains("请改用 sing-box 导出"));
     }
 
     #[test]

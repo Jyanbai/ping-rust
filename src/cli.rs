@@ -753,6 +753,36 @@ fn terminal_qr_text(value: &str) -> Result<String> {
     Ok(code.render::<unicode::Dense1x2>().quiet_zone(true).build())
 }
 
+fn terminal_qr_or_url_text(value: &str) -> (String, Option<String>) {
+    match terminal_qr_text(value) {
+        Ok(qr) => (qr, None),
+        Err(error) => (value.to_owned(), Some(format!("{error:#}"))),
+    }
+}
+
+fn share_uri_with_qr_text(uri: &str) -> Result<String> {
+    Ok([
+        "------------- 链接 (URL) -------------".to_owned(),
+        uri.to_owned(),
+        "------------- 二维码 (QR) -------------".to_owned(),
+        terminal_qr_text(uri)?,
+        "------------- END -------------".to_owned(),
+    ]
+    .join("\n"))
+}
+
+pub(crate) fn print_share_uri_with_qr(uri: &str) {
+    match share_uri_with_qr_text(uri) {
+        Ok(text) => println!("\n{text}"),
+        Err(error) => {
+            println!(
+                "\n------------- 链接 (URL) -------------\n{uri}\n------------- END -------------"
+            );
+            eprintln!("二维码生成失败：{error:#}；URL 已保留，可直接复制。");
+        }
+    }
+}
+
 pub(crate) async fn ensure_shoes_for_add(yes: bool) -> Result<()> {
     if Path::new(crate::utils::SHOES_BIN).is_file() {
         return Ok(());
@@ -851,7 +881,11 @@ fn print_saved_qr(selector: Option<&str>, server_address: Option<&str>) -> Resul
     let state = config::load_state()?;
     let profile = client::select_profile(&state.profiles, selector)?;
     let uri = client::stored_share_uri(profile, server_address)?;
-    println!("{}", terminal_qr_text(&uri)?);
+    let (output, error) = terminal_qr_or_url_text(&uri);
+    println!("{output}");
+    if let Some(error) = error {
+        eprintln!("二维码生成失败：{error}；已改为输出原始 URL，可直接复制。");
+    }
     Ok(())
 }
 
@@ -1248,6 +1282,30 @@ mod tests {
 
         let without_url = profile_details_with_qr_text(&profile, None).unwrap();
         assert!(!without_url.contains("二维码 (QR)"));
+    }
+
+    #[test]
+    fn standalone_qr_falls_back_to_the_original_url_when_encoding_fails() {
+        let uri = format!("vless://{}", "x".repeat(10_000));
+        let (output, error) = terminal_qr_or_url_text(&uri);
+        assert_eq!(output, uri);
+        assert!(
+            error
+                .as_deref()
+                .is_some_and(|message| message.contains("二维码内容过长")),
+            "missing explicit QR fallback error: {error:?}"
+        );
+    }
+
+    #[test]
+    fn share_uri_qr_block_keeps_url_before_terminal_qr() {
+        let output = share_uri_with_qr_text("vless://import-link").unwrap();
+        let url_position = output.find("vless://import-link").unwrap();
+        let qr_position = output.find("二维码 (QR)").unwrap();
+        let end_position = output.find("------------- END -------------").unwrap();
+        assert!(url_position < qr_position);
+        assert!(qr_position < end_position);
+        assert!(output.chars().any(|value| matches!(value, '▀' | '▄' | '█')));
     }
 
     #[test]

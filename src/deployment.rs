@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{error::Error, fmt, path::Path};
 
 use anyhow::{bail, Result};
 
@@ -9,6 +9,33 @@ use crate::{
 };
 use uuid::Uuid;
 
+#[derive(Debug)]
+pub(crate) struct ActivationFailure {
+    message: String,
+    source: anyhow::Error,
+}
+
+impl ActivationFailure {
+    pub(crate) fn new(message: impl Into<String>, source: anyhow::Error) -> Self {
+        Self {
+            message: message.into(),
+            source,
+        }
+    }
+}
+
+impl fmt::Display for ActivationFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl Error for ActivationFailure {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
 pub async fn generate_and_activate(request: GenerationRequest) -> Result<GenerationResult> {
     utils::require_linux_root()?;
     let lock = utils::exclusive_lock(Path::new(utils::LOCK_FILE))?;
@@ -17,20 +44,21 @@ pub async fn generate_and_activate(request: GenerationRequest) -> Result<Generat
     if let Err(activation) = service::activate_and_verify() {
         let config_rollback = result.rollback_managed();
         let service_rollback = service::restore_snapshot(service_snapshot);
-        return match (config_rollback, service_rollback) {
-            (Ok(()), Ok(())) => {
-                Err(activation.context("shoes 激活失败，配置和服务状态已回滚"))
+        let message = match (config_rollback, service_rollback) {
+            (Ok(()), Ok(())) => "shoes 激活失败，配置和服务状态已回滚".to_owned(),
+            (Err(config), Ok(())) => {
+                format!("shoes 激活失败，服务状态已恢复，但配置回滚失败：配置={config:#}")
             }
-            (Err(config), Ok(())) => bail!(
-                "shoes 激活失败，服务状态已恢复，但配置回滚失败：激活={activation:#}；配置={config:#}"
-            ),
-            (Ok(()), Err(service)) => bail!(
-                "shoes 激活失败，配置已回滚，但服务状态恢复失败：激活={activation:#}；服务={service:#}"
-            ),
-            (Err(config), Err(service)) => bail!(
-                "shoes 激活失败，配置与服务状态回滚均失败：激活={activation:#}；配置={config:#}；服务={service:#}"
+            (Ok(()), Err(service)) => {
+                format!("shoes 激活失败，配置已回滚，但服务状态恢复失败：服务={service:#}")
+            }
+            (Err(config), Err(service)) => format!(
+                "shoes 激活失败，配置与服务状态回滚均失败：配置={config:#}；服务={service:#}"
             ),
         };
+        return Err(anyhow::Error::new(ActivationFailure::new(
+            message, activation,
+        )));
     }
     Ok(result)
 }
