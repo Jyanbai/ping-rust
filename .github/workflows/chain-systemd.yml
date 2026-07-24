@@ -8,7 +8,6 @@ on:
       - .github/workflows/chain-systemd.yml
       - tests/chain_menu.exp
       - tests/chain_systemd_e2e.rs
-      - tests/chain_systemd_e2e.sh
       - src/**
       - Cargo.toml
       - Cargo.lock
@@ -56,9 +55,6 @@ jobs:
           mkdir -p "$directory"
           tar -xzf "$archive" -C "$directory"
           sudo install -m 0755 "$directory/shoes" /usr/local/bin/shoes
-      - name: Exercise legacy Shell acceptance for migration parity
-        shell: bash
-        run: sudo env REPO_DIR="$PWD" bash tests/chain_systemd_e2e.sh
       - name: Exercise Rust production menu, state, network exits and systemd
         shell: bash
         run: |
@@ -108,7 +104,7 @@ jobs:
             --volume /sys/fs/cgroup:/sys/fs/cgroup:rw \
             --volume "$PWD:/workspace:ro" \
             debian:12 bash -lc \
-              'apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends systemd systemd-sysv ca-certificates curl expect iproute2 python3 && exec /sbin/init'
+              'apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends systemd systemd-sysv ca-certificates expect iproute2 && exec /sbin/init'
           for _ in {1..180}; do
             system_state="$(
               docker exec ping-rust-debian systemctl is-system-running 2>/dev/null || true
@@ -122,24 +118,17 @@ jobs:
           done
           docker exec ping-rust-debian test -f /etc/debian_version
           docker exec ping-rust-debian systemctl --version
-      - name: Exercise legacy Shell acceptance for migration parity
+      - name: Exercise Rust production menu, state, network exits and systemd
         shell: bash
         run: |
           set -euo pipefail
           docker cp target/x86_64-unknown-linux-musl/release/ping-rust \
             ping-rust-debian:/usr/local/bin/ping-rust
           docker cp "$RUNNER_TEMP/shoes/shoes" ping-rust-debian:/usr/local/bin/shoes
-          docker exec ping-rust-debian chmod 0755 \
-            /usr/local/bin/ping-rust /usr/local/bin/shoes
-          docker exec --env REPO_DIR=/workspace ping-rust-debian \
-            bash /workspace/tests/chain_systemd_e2e.sh
-      - name: Exercise Rust production menu, state, network exits and systemd
-        shell: bash
-        run: |
-          set -euo pipefail
           docker cp "$RUNNER_TEMP/chain-systemd-e2e" \
             ping-rust-debian:/usr/local/bin/chain-systemd-e2e
           docker exec ping-rust-debian chmod 0755 \
+            /usr/local/bin/ping-rust /usr/local/bin/shoes \
             /usr/local/bin/chain-systemd-e2e
           docker exec \
             --env REPO_DIR=/workspace \
