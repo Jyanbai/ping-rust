@@ -42,6 +42,7 @@ bash <(curl --proto '=https' --tlsv1.2 -fsSL \
 - 在 Rust 内生成 X25519 Reality 密钥、UUID、short ID、随机密码和自签名证书
 - Reality 未显式指定 SNI 时，从与本地 233boy 脚本一致的 Amazon、eBay、PayPal、Cloudflare 域名列表中随机选择（不含 Apple）；客户端指纹与该脚本一致固定为 `chrome`
 - 在同目录候选文件上调用 `shoes --dry-run`，通过后才原子提交并启用 systemd 服务
+- systemd unit 限制内核调优、内核模块、控制组、地址族、可执行内存和非原生 ABI；Ubuntu/Debian 验收会实际启动加固后的 shoes
 - 多配置添加、列表、删除、端口冲突保护
 - 全局链式代理：从分享链接导入受支持的上游节点，选择、启停、测试和删除；启用后所有受管入站经当前节点转发
 - 跨进程配置锁、配置/sidecar 精确回滚，更新与恢复保留服务原运行状态
@@ -199,7 +200,7 @@ vless://...security=reality...pbk=...&sid=...#VLESS-REALITY-25448
 
 第一版支持 SOCKS5、HTTP/HTTPS、Shadowsocks、VLESS TCP/TLS/Reality/WebSocket 和 Trojan TLS/WebSocket 分享链接。由于当前 shoes 内核没有对应客户端实现，Hysteria2、TUIC、WireGuard/WARP 不能作为链式出口；ping-rust 会返回明确错误，不会生成近似配置。HTTP、SOCKS5 和 Trojan 出口不支持 UDP-over-TCP，启用或切换时会再次警告；相关 UDP 请求会失败，不会自动回退直连。
 
-“测试节点（完整代理）”严格复用当前节点生成临时 shoes SOCKS5 入口，再通过该入口访问 `https://www.gstatic.com/generate_204`。只有地址可达、协议认证/Reality 握手和 HTTP 出口全部成功才报告节点可用；测试进程和权限为 `0600` 的临时配置随后立即删除。它不会修改当前出口或线上 systemd 服务。
+“测试节点（完整代理）”严格复用当前节点生成临时 shoes SOCKS5 入口，再通过该入口访问 `https://www.gstatic.com/generate_204`。只有地址可达、协议认证/Reality 握手、无重定向且响应精确为 `204 No Content` 才报告节点可用；普通 `200 OK` 页面也会被拒绝，避免劫持页或错误落地页造成误报。测试进程和权限为 `0600` 的临时配置随后立即删除。它不会修改当前出口或线上 systemd 服务。
 
 添加第一个节点时会自动选为当前出口，但不会自动启用。启用后，受支持的 TCP 流量使用同一个上游节点；关闭或删除正在使用的节点会恢复 `allow-all-direct`。固定 shoes 0.2.8 的 Hysteria2/TUIC UDP 服务端路径会忽略 client chain 并直接创建 UDP socket，因此只要当前存在 Hysteria2 或 TUIC 入站，ping-rust 就会拒绝启用全局链式代理，避免静默直连泄漏；链式代理已经启用时也不能新增这两类入站。节点凭据保存在权限为 `0600` 的管理状态和配置文件中，备份同样包含这些敏感信息。
 
@@ -420,7 +421,7 @@ cargo doc --no-deps
 - 自更新单元测试覆盖版本、架构、checksum 重复/缺失和严格单文件归档；Release job 还会真实执行一次强制自更新并复核版本。
 - `shoes-schema.yml` 固定 cfal/shoes commit `386b11532424b8665ee3e46340c6236fb3c47595`（0.2.8），对十协议单独配置、十协议联合配置、全部六种 Shadowsocks cipher 和 Reality+AnyTLS 执行真实 `shoes --dry-run`，并启动十协议聚合配置检查 TCP/UDP 监听。
 - 通过 cargo-zigbuild + Zig 生成 x86_64/aarch64 Linux GNU release ELF，最高 GLIBC 需求为 2.34，覆盖 Rocky/Alma 9 及更新的目标发行版基线。
-- CI 覆盖 Ubuntu 22.04/24.04，并在 Debian 12、Rocky Linux 9、AlmaLinux 9 容器中执行锁定依赖测试和 release 构建；shoes schema 作业实际启动十协议聚合监听，Ubuntu 24.04 acceptance 继续覆盖 root 路径、systemd 和核心管理流程。
+- CI 覆盖 Ubuntu 22.04/24.04，并在 Debian 12、Rocky Linux 9、AlmaLinux 9 容器中执行锁定依赖测试和 release 构建；shoes schema 作业实际启动十协议聚合监听。Ubuntu 24.04 acceptance 覆盖完整 root/systemd/PTY/回滚/导出流程，Debian 12 systemd acceptance 同时覆盖零输入部署、严格 `--plain` 输出、多用户 AnyTLS 无损导出拒绝、激活失败回滚和加固 unit 启动。
 - 独立链式代理验收在 Ubuntu 24.04 主机和 Debian 12 特权 systemd 容器中运行，使用真实 PTY 菜单、两条隔离 Shadowsocks 出口和 HTTP 源地址核验覆盖完整生命周期与无直连回退。
 - 使用 RustSec `cargo audit` 扫描锁定依赖，当前未报告安全公告。
 - 在一台干净代理环境的 Debian 12 x86_64 VPS 上完成原生安装与运行验收：Release 路径约 2 秒完成 shoes v0.2.7 musl 安装，三协议同时通过 dry-run 并由 systemd 启动，外部 Reality 客户端的代理出口与 VPS 公网 IP 一致。

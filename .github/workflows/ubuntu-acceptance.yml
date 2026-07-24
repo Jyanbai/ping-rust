@@ -61,6 +61,17 @@ jobs:
           test "$("$public_root/bin/ping-rust" --version)" = \
             "ping-rust $PUBLIC_VERSION"
 
+          installer_root="$RUNNER_TEMP/ping-rust-public-installer"
+          bash scripts/install.sh \
+            --version "v$PUBLIC_VERSION" \
+            --install-dir "$installer_root" \
+            --quiet \
+            --no-bootstrap
+          test "$("$installer_root/ping-rust" --version)" = \
+            "ping-rust $PUBLIC_VERSION"
+          test -L "$installer_root/prs"
+          test "$(readlink "$installer_root/prs")" = ping-rust
+
       - name: Install current source under test
         shell: bash
         run: |
@@ -928,7 +939,7 @@ jobs:
           RUN apt-get update \
               && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
                 build-essential ca-certificates curl dbus git gzip iproute2 pkg-config \
-                procps systemd systemd-sysv tar xz-utils \
+                procps python3 systemd systemd-sysv tar xz-utils \
               && rm -rf /var/lib/apt/lists/*
           RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
               | sh -s -- -y --profile minimal
@@ -1005,6 +1016,18 @@ jobs:
 
             systemctl is-enabled --quiet shoes.service
             systemctl is-active --quiet shoes.service
+            systemd-analyze verify /etc/systemd/system/shoes.service
+            for setting in \
+              "ProtectControlGroups=true" \
+              "ProtectKernelModules=true" \
+              "ProtectKernelTunables=true" \
+              "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6" \
+              "RestrictSUIDSGID=true" \
+              "LockPersonality=true" \
+              "MemoryDenyWriteExecute=true" \
+              "SystemCallArchitectures=native"; do
+              grep -Fx "$setting" /etc/systemd/system/shoes.service
+            done
             /usr/local/bin/shoes --dry-run /etc/shoes/config.yaml
 
             profile="$(find /etc/shoes/profiles -maxdepth 1 -type f \
@@ -1023,10 +1046,12 @@ jobs:
             set -euo pipefail
             uri="$(/opt/ping-rust-current/bin/ping-rust add shadowsocks \
               --server-address 203.0.113.10 --yes --plain)"
+            test "$(printf "%s\n" "$uri" | sed "/^[[:space:]]*$/d" | wc -l)" -eq 1
             case "$uri" in
               ss://*"#SHADOWSOCKS-"*) ;;
               *) echo "unexpected Shadowsocks URI: $uri" >&2; exit 1 ;;
             esac
+            ! printf "%s\n" "$uri" | grep -Eq "部署成功|二维码|[▀▄█]"
 
             systemctl is-active --quiet shoes.service
             /usr/local/bin/shoes --dry-run /etc/shoes/config.yaml
@@ -1038,6 +1063,112 @@ jobs:
             grep -q "Shadowsocks" /tmp/info.txt
           '
 
+      - name: Reject lossy AnyTLS exports on Debian 12
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker exec ping-rust-debian bash -lc '
+            set -euo pipefail
+            multi_port="$(
+              python3 -c "import socket; s=socket.socket(); s.bind((\"127.0.0.1\", 0)); print(s.getsockname()[1]); s.close()"
+            )"
+            output=/tmp/anytls-multi-user.txt
+            /opt/ping-rust-current/bin/ping-rust generate anytls \
+              --name anytls-multi-user \
+              --port "$multi_port" \
+              --server-name localhost \
+              --user alice:alice-secret \
+              --user bob:bob-secret >"$output"
+            profile="$(
+              grep -Eo "[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}" \
+                "$output" | head -n 1
+            )"
+            test -n "$profile"
+
+            for format in clash-meta sing-box nekobox; do
+              error="/tmp/anytls-multi-${format}.txt"
+              set +e
+              /opt/ping-rust-current/bin/ping-rust export "$format" \
+                --profile "$profile" \
+                --server 203.0.113.10 >"$error" 2>&1
+              status="$?"
+              set -e
+              test "$status" -ne 0
+              grep -q "2 个用户" "$error"
+              grep -q "拒绝静默选择用户" "$error"
+            done
+
+            /opt/ping-rust-current/bin/ping-rust delete "$profile" --yes >/dev/null
+            test ! -e "/etc/shoes/profiles/ANYTLS-${multi_port}.yaml"
+            systemctl is-active --quiet shoes.service
+          '
+
+      - name: Roll back activation failure on Debian 12
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker exec ping-rust-debian bash -lc '
+            set -euo pipefail
+            config_before="$(sha256sum /etc/shoes/config.yaml | awk "{print \$1}")"
+            state_before="$(sha256sum /etc/shoes/ping-rust-state.json | awk "{print \$1}")"
+            profiles_before="$(
+              find /etc/shoes/profiles -maxdepth 1 -type f -print0 \
+                | sort -z | xargs -0 -r sha256sum | sha256sum | awk "{print \$1}"
+            )"
+            unit_before="$(sha256sum /etc/systemd/system/shoes.service | awk "{print \$1}")"
+
+            printf "%s\n" \
+              "#!/usr/bin/env bash" \
+              "marker=/dev/shm/ping-rust-debian-activation-fault" \
+              "if [ ! -e \"\$marker\" ]; then" \
+              "  touch \"\$marker\"" \
+              "  exit 42" \
+              "fi" \
+              "exit 0" >/run/ping-rust-fail-once.sh
+            chmod 0755 /run/ping-rust-fail-once.sh
+            mkdir -p /etc/systemd/system/shoes.service.d
+            printf "%s\n" \
+              "[Service]" \
+              "ExecStartPre=/run/ping-rust-fail-once.sh" \
+              >/etc/systemd/system/shoes.service.d/activation-fault.conf
+            systemctl daemon-reload
+
+            rollback_port="$(
+              python3 -c "import socket; s=socket.socket(); s.bind((\"127.0.0.1\", 0)); print(s.getsockname()[1]); s.close()"
+            )"
+            failure=/tmp/debian-activation-failure.txt
+            set +e
+            /opt/ping-rust-current/bin/ping-rust add reality \
+              --name must-rollback \
+              --port "$rollback_port" \
+              --server-address 203.0.113.10 \
+              --plain >"$failure" 2>&1
+            status="$?"
+            set -e
+
+            test -e /dev/shm/ping-rust-debian-activation-fault
+            rm -f /etc/systemd/system/shoes.service.d/activation-fault.conf \
+              /run/ping-rust-fail-once.sh /dev/shm/ping-rust-debian-activation-fault
+            rmdir /etc/systemd/system/shoes.service.d
+            systemctl daemon-reload
+
+            test "$status" -ne 0
+            grep -q "回滚" "$failure"
+            grep -q "shoes 激活阶段失败" "$failure"
+            grep -q "监听端口 ${rollback_port}" "$failure"
+            ! grep -q "vless://" "$failure"
+            test "$(sha256sum /etc/shoes/config.yaml | awk "{print \$1}")" = "$config_before"
+            test "$(sha256sum /etc/shoes/ping-rust-state.json | awk "{print \$1}")" = "$state_before"
+            test "$(
+              find /etc/shoes/profiles -maxdepth 1 -type f -print0 \
+                | sort -z | xargs -0 -r sha256sum | sha256sum | awk "{print \$1}"
+            )" = "$profiles_before"
+            test "$(sha256sum /etc/systemd/system/shoes.service | awk "{print \$1}")" = "$unit_before"
+            systemctl is-enabled --quiet shoes.service
+            systemctl is-active --quiet shoes.service
+            ! ss -H -lnt | awk "{print \$4}" | grep -Eq "(^|:)${rollback_port}$"
+          '
+
       - name: Record Debian acceptance summary
         shell: bash
         run: |
@@ -1047,8 +1178,10 @@ jobs:
             echo '- Environment: clean Debian 12 x86_64 privileged systemd container'
             echo '- Source: current workflow commit, built inside Debian'
             echo '- Bootstrap: zero-input VLESS-REALITY with URI and QR'
-            echo '- Runtime: shoes dry-run, enabled/active systemd service, TCP listener'
-            echo '- Mutation: second Shadowsocks profile added and aggregate config revalidated'
+            echo '- Runtime: hardened unit verified, shoes dry-run, enabled/active systemd service, TCP listener'
+            echo '- Output: add --plain stayed a single machine-readable URI'
+            echo '- Export: multi-user AnyTLS rejected for all three lossy single-node formats'
+            echo '- Rollback: injected activation failure restored exact config/state/profiles/unit'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Collect Debian diagnostics

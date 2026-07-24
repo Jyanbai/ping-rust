@@ -48,7 +48,15 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
 ReadOnlyPaths={}
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 
@@ -278,9 +286,21 @@ mod tests {
     #[test]
     fn unit_uses_expected_paths_and_hardening() {
         let unit = unit_contents();
+        assert_eq!(
+            unit,
+            include_str!("../systemd/ping-rust.service").replace("\r\n", "\n")
+        );
         assert!(unit.contains("ExecStart=/usr/local/bin/shoes /etc/shoes/config.yaml"));
         assert!(unit.contains("Restart=on-failure"));
         assert!(unit.contains("NoNewPrivileges=true"));
+        assert!(unit.contains("ProtectControlGroups=true"));
+        assert!(unit.contains("ProtectKernelModules=true"));
+        assert!(unit.contains("ProtectKernelTunables=true"));
+        assert!(unit.contains("RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6"));
+        assert!(unit.contains("RestrictSUIDSGID=true"));
+        assert!(unit.contains("LockPersonality=true"));
+        assert!(unit.contains("MemoryDenyWriteExecute=true"));
+        assert!(unit.contains("SystemCallArchitectures=native"));
         assert!(unit.contains("WantedBy=multi-user.target"));
     }
 

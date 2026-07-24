@@ -112,6 +112,11 @@ peer_log = pathlib.Path(sys.argv[2])
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         peer_log.write_text(self.client_address[0] + "\n", encoding="utf-8")
+        if self.path == "/generate_204":
+            self.send_response(204)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         body = b"ping-rust-production-chain"
         self.send_response(200)
         self.send_header("Content-Length", str(len(body)))
@@ -191,8 +196,16 @@ current_stage="adding first Shadowsocks chain node"
 expect "$REPO_DIR/tests/chain_menu.exp" "$PING_RUST_BIN" add "$uri_one"
 current_stage="testing first node with full protocol handshake"
 rm -f "$work_dir/peer.log"
-PING_RUST_CHAIN_TEST_URL="http://10.231.1.1:${origin_port}/probe" \
+PING_RUST_CHAIN_TEST_URL="http://10.231.1.1:${origin_port}/generate_204" \
     expect "$REPO_DIR/tests/chain_menu.exp" "$PING_RUST_BIN" test 1
+[[ "$(tr -d '\r\n' <"$work_dir/peer.log")" == "10.231.1.2" ]]
+current_stage="rejecting a reachable HTTP 200 page as a successful connectivity probe"
+rm -f "$work_dir/peer.log"
+if PING_RUST_CHAIN_TEST_URL="http://10.231.1.1:${origin_port}/probe" \
+    expect "$REPO_DIR/tests/chain_menu.exp" "$PING_RUST_BIN" test 1; then
+    echo "full proxy test accepted HTTP 200 instead of requiring HTTP 204" >&2
+    exit 1
+fi
 [[ "$(tr -d '\r\n' <"$work_dir/peer.log")" == "10.231.1.2" ]]
 current_stage="adding second Shadowsocks chain node"
 expect "$REPO_DIR/tests/chain_menu.exp" "$PING_RUST_BIN" add "$uri_two"
@@ -298,7 +311,7 @@ current_stage="deleting final chain node"
 expect "$REPO_DIR/tests/chain_menu.exp" "$PING_RUST_BIN" delete 1
 current_stage="rejecting reachable node with invalid protocol credentials"
 expect "$REPO_DIR/tests/chain_menu.exp" "$PING_RUST_BIN" add "$uri_invalid"
-if PING_RUST_CHAIN_TEST_URL="http://10.231.1.1:${origin_port}/probe" \
+if PING_RUST_CHAIN_TEST_URL="http://10.231.1.1:${origin_port}/generate_204" \
     expect "$REPO_DIR/tests/chain_menu.exp" "$PING_RUST_BIN" test 1; then
     echo "full proxy test accepted a node with invalid credentials" >&2
     exit 1

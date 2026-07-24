@@ -311,6 +311,7 @@ enum ProxyKind {
 fn parse_url_proxy(input: &str, kind: ProxyKind) -> Result<ChainNode> {
     let url = Url::parse(input).context("代理分享链接格式无效")?;
     url_address(&url)?;
+    let default_sni = url_host(&url)?.to_owned();
     let username = optional_decoded(url.username())?;
     let password = url.password().map(decode_component).transpose()?;
     let base = match kind {
@@ -320,8 +321,7 @@ fn parse_url_proxy(input: &str, kind: ProxyKind) -> Result<ChainNode> {
     let protocol = if matches!(kind, ProxyKind::Https) {
         ShoesClientProtocol::Tls {
             verify: !query_flag(&url, &["insecure", "allowinsecure"]),
-            sni_hostname: query_value(&url, "sni")
-                .unwrap_or_else(|| url.host_str().unwrap().into()),
+            sni_hostname: query_value(&url, "sni").unwrap_or(default_sni),
             vision: false,
             protocol: Box::new(base),
         }
@@ -405,7 +405,7 @@ fn parse_vless(input: &str) -> Result<ChainNode> {
             }
             ShoesClientProtocol::Tls {
                 verify: !query_flag_map(&query, &["insecure", "allowinsecure"]),
-                sni_hostname: required_sni(&url, &query),
+                sni_hostname: required_sni(&url, &query)?,
                 vision,
                 protocol: Box::new(protocol),
             }
@@ -425,7 +425,7 @@ fn parse_vless(input: &str) -> Result<ChainNode> {
             ShoesClientProtocol::Reality {
                 public_key,
                 short_id,
-                sni_hostname: required_sni(&url, &query),
+                sni_hostname: required_sni(&url, &query)?,
                 vision,
                 protocol: Box::new(protocol),
             }
@@ -458,7 +458,7 @@ fn parse_trojan(input: &str) -> Result<ChainNode> {
     let protocol = wrap_transport(ShoesClientProtocol::Trojan { password }, transport, &query)?;
     let protocol = ShoesClientProtocol::Tls {
         verify: !query_flag_map(&query, &["insecure", "allowinsecure"]),
-        sni_hostname: required_sni(&url, &query),
+        sni_hostname: required_sni(&url, &query)?,
         vision: false,
         protocol: Box::new(protocol),
     };
@@ -517,7 +517,7 @@ fn build_node(url: &Url, protocol: ShoesClientProtocol) -> Result<ChainNode> {
 }
 
 fn url_address(url: &Url) -> Result<String> {
-    let host = url.host_str().context("分享链接缺少服务器地址")?;
+    let host = url_host(url)?;
     let port = url
         .port_or_known_default()
         .context("分享链接缺少服务器端口")?;
@@ -529,6 +529,10 @@ fn url_address(url: &Url) -> Result<String> {
     } else {
         format!("{host}:{port}")
     })
+}
+
+fn url_host(url: &Url) -> Result<&str> {
+    url.host_str().context("分享链接缺少服务器地址")
 }
 
 fn query_map(url: &Url) -> BTreeMap<String, String> {
@@ -555,13 +559,15 @@ fn query_flag_map(query: &BTreeMap<String, String>, keys: &[&str]) -> bool {
     })
 }
 
-fn required_sni(url: &Url, query: &BTreeMap<String, String>) -> String {
-    query
+fn required_sni(url: &Url, query: &BTreeMap<String, String>) -> Result<String> {
+    if let Some(server_name) = query
         .get("sni")
         .or_else(|| query.get("servername"))
         .filter(|value| !value.is_empty())
-        .cloned()
-        .unwrap_or_else(|| url.host_str().unwrap().to_owned())
+    {
+        return Ok(server_name.clone());
+    }
+    url_host(url).map(ToOwned::to_owned)
 }
 
 fn validate_reality_public_key(public_key: &str) -> Result<()> {
@@ -680,6 +686,13 @@ fn wait_for_loopback_port(port: u16, timeout: Duration) -> Result<()> {
     bail!("临时 shoes 测试入口未能在限定时间内启动")
 }
 
+fn validate_probe_status(status: reqwest::StatusCode, node_name: &str) -> Result<()> {
+    if status != reqwest::StatusCode::NO_CONTENT {
+        bail!("完整代理请求返回 HTTP {status}，期望 204 No Content；节点 {node_name} 不可用");
+    }
+    Ok(())
+}
+
 pub async fn test_proxy_handshake(node: &ChainNode, timeout: Duration) -> Result<Duration> {
     utils::require_linux_root()?;
     if !std::path::Path::new(utils::SHOES_BIN).is_file() {
@@ -733,13 +746,7 @@ pub async fn test_proxy_handshake(node: &ChainNode, timeout: Duration) -> Result
             .send()
             .await
             .with_context(|| format!("完整代理请求失败，节点 {} 未通过协议握手", node.name))?;
-        if !response.status().is_success() {
-            bail!(
-                "完整代理请求返回 HTTP {}，节点 {} 不可用",
-                response.status(),
-                node.name
-            );
-        }
+        validate_probe_status(response.status(), &node.name)?;
         Ok(started.elapsed())
     }
     .await;
@@ -772,6 +779,24 @@ mod tests {
             https.client.protocol,
             ShoesClientProtocol::Tls { .. }
         ));
+    }
+
+    #[test]
+    fn rejects_proxy_urls_without_a_server_address_without_panicking() {
+        let error = parse_share_uri("socks5:///missing-host")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("服务器地址"), "{error}");
+    }
+
+    #[test]
+    fn proxy_probe_requires_exactly_http_204() {
+        validate_probe_status(reqwest::StatusCode::NO_CONTENT, "edge").unwrap();
+        let error = validate_probe_status(reqwest::StatusCode::OK, "edge")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("HTTP 200"), "{error}");
+        assert!(error.contains("204 No Content"), "{error}");
     }
 
     #[test]

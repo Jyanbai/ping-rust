@@ -651,7 +651,7 @@ pub fn share_uri(profile: &ManagedProfile, server: &str) -> Result<String> {
         } => {
             let payload = json!({
                 "v": 2,
-                "ps": profile.name,
+                "ps": profile.display_name(),
                 "add": server,
                 "port": profile.port,
                 "id": user_id,
@@ -897,6 +897,7 @@ mod tests {
             .decode(vmess.trim_start_matches("vmess://"))
             .unwrap();
         let payload: Value = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(payload["ps"], profiles[4].display_name());
         assert_eq!(payload["net"], "ws");
         assert_eq!(payload["path"], "/vmess");
         assert_eq!(payload["insecure"], "1");

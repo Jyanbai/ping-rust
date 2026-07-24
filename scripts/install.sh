@@ -13,6 +13,7 @@ BOOTSTRAP=1
 TEMP_DIR=""
 STAGED_PATH=""
 USE_SUDO=0
+DOWNLOADED_VERSION=""
 
 usage() {
   cat <<'EOF'
@@ -102,6 +103,27 @@ normalize_version() {
   printf '%s' "${VERSION}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([.+-][0-9A-Za-z.-]+)?$' \
     || die "版本格式无效：${VERSION}（示例：v0.1.0）"
   VERSION="v${VERSION}"
+}
+
+validate_binary_version() {
+  local label="$1"
+  local actual="$2"
+  local expected=""
+
+  case "${actual}" in
+    *$'\n'* | *$'\r'*) die "${label}版本输出必须只有一行。" ;;
+  esac
+
+  if [ "${VERSION}" = "latest" ]; then
+    printf '%s\n' "${actual}" \
+      | grep -Eq '^ping-rust [0-9]+\.[0-9]+\.[0-9]+([.+-][0-9A-Za-z.-]+)?$' \
+      || die "${label}版本输出无效：${actual}"
+    return
+  fi
+
+  expected="ping-rust ${VERSION#v}"
+  [ "${actual}" = "${expected}" ] \
+    || die "${label}版本不匹配：期望 ${expected}，实际 ${actual}"
 }
 
 detect_target() {
@@ -209,8 +231,9 @@ mkdir -p "${TEMP_DIR}/unpacked"
 tar -xzf "${TEMP_DIR}/${ASSET}" -C "${TEMP_DIR}/unpacked"
 [ -f "${TEMP_DIR}/unpacked/${PROGRAM}" ] || die "发布归档中缺少 ${PROGRAM}。"
 chmod 0755 "${TEMP_DIR}/unpacked/${PROGRAM}"
-"${TEMP_DIR}/unpacked/${PROGRAM}" --version >/dev/null \
+DOWNLOADED_VERSION="$("${TEMP_DIR}/unpacked/${PROGRAM}" --version)" \
   || die "下载的二进制无法在当前系统运行。"
+validate_binary_version "下载的二进制" "${DOWNLOADED_VERSION}"
 
 prepare_install_dir
 STAGED_PATH="$(privileged mktemp "${INSTALL_DIR}/.${PROGRAM}.install.XXXXXX")"
@@ -262,6 +285,9 @@ remove_owned_legacy_short_command
 
 INSTALLED_VERSION="$("${INSTALL_DIR}/${PROGRAM}" --version)" \
   || die "安装后的版本验证失败。"
+validate_binary_version "安装后的二进制" "${INSTALLED_VERSION}"
+[ "${INSTALLED_VERSION}" = "${DOWNLOADED_VERSION}" ] \
+  || die "安装后的版本与已校验下载不一致：下载 ${DOWNLOADED_VERSION}，安装 ${INSTALLED_VERSION}"
 printf '安装成功：%s\n' "${INSTALLED_VERSION}"
 if [ "${BOOTSTRAP}" -eq 1 ]; then
   log "正在零输入部署默认 VLESS-REALITY（随机端口）..."
