@@ -31,6 +31,9 @@ impl BinarySnapshot {
                 mode: 0o755,
             });
         }
+        if !path.is_file() {
+            bail!("现有程序路径不是普通文件：{}", path.display());
+        }
         let bytes =
             fs::read(path).with_context(|| format!("备份现有程序 {} 失败", path.display()))?;
         Ok(Self {
@@ -176,8 +179,18 @@ fn ensure_short_alias(install_dir: &Path) -> Result<bool> {
         );
         return Ok(false);
     }
-    symlink(PROGRAM, &alias).with_context(|| format!("创建快捷命令 {} 失败", alias.display()))?;
-    Ok(true)
+    match symlink(PROGRAM, &alias) {
+        Ok(()) => Ok(true),
+        Err(error) => {
+            eprintln!(
+                "警告：无法创建快捷命令 {}：{}；请使用 {}。",
+                alias.display(),
+                error,
+                PROGRAM
+            );
+            Ok(false)
+        }
+    }
 }
 
 #[cfg(not(unix))]
@@ -250,6 +263,16 @@ mod tests {
             directory
         ));
         assert!(!owned_alias_target(Path::new("other"), directory));
+    }
+
+    #[test]
+    fn snapshot_rejects_non_file_destination() {
+        let directory = tempfile::tempdir().unwrap();
+        assert!(BinarySnapshot::capture(directory.path()).is_err());
+        assert!(BinarySnapshot::capture(&directory.path().join("missing"))
+            .unwrap()
+            .bytes
+            .is_none());
     }
 
     #[cfg(unix)]
