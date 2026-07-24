@@ -1,6 +1,6 @@
 [package]
 name = "ping-rust"
-version = "0.1.14"
+version = "0.1.15"
 edition = "2021"
 description = "Menu-driven installer and manager for the shoes proxy server"
 license = "MIT"

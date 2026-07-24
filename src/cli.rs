@@ -490,13 +490,9 @@ fn bootstrap_required(config: &Path, state: &Path) -> bool {
 pub(crate) fn print_add_result(result: &fast_add::AddResult) {
     let profile = &result.generation.profile;
     println!("{}", "部署成功，shoes 服务已启动。".green().bold());
-    print_profile_details(profile, Some(&result.share_uri));
+    print_profile_details_with_qr(profile, Some(&result.share_uri));
     println!("\n复制上方链接即可导入客户端。");
     println!("{}", "安全提示：分享链接包含访问凭据，请勿公开。".yellow());
-}
-
-pub(crate) fn print_profile_details(profile: &config::ManagedProfile, share_uri: Option<&str>) {
-    println!("{}", profile_details_text(profile, share_uri));
 }
 
 pub(crate) fn print_profile_details_with_qr(

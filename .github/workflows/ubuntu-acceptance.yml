@@ -434,6 +434,8 @@ jobs:
             send "\r"
           }
           wait_for "$env(SHARE_SCHEME)://" share-uri
+          wait_for {二维码 \(QR\)} add-qr-heading
+          wait_for {▀|▄|█} add-qr-blocks
           expect { eof {} timeout { puts stderr "timeout waiting for add exit"; exit 23 } }
           EXPECT
           }
