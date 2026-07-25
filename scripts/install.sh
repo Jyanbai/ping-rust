@@ -3,6 +3,12 @@ set -Eeuo pipefail
 
 readonly REPOSITORY="Jyanbai/ping-rust"
 readonly PROGRAM="ping-rust"
+# 与 src/self_update.rs 的 MAX_CHECKSUM_SIZE / MAX_ARCHIVE_SIZE 保持一致。
+readonly MAX_CHECKSUM_SIZE=65536
+readonly MAX_ARCHIVE_SIZE=67108864
+# 新版 Stage-0 依赖二进制 install-self；公开 latest 至少需达到该协议版本。
+# CI 从本常量解析，勿在 workflow 中硬编码副本。
+readonly MIN_INSTALL_SELF_VERSION=0.1.16
 VERSION="latest"
 INSTALL_DIR="${PING_RUST_INSTALL_DIR:-/usr/local/bin}"
 QUIET=0
@@ -44,6 +50,62 @@ cleanup() {
 
 need() {
   command -v "$1" >/dev/null 2>&1 || die "缺少必需命令：$1"
+}
+
+# 按完整 path component 拒绝 ".."，不误伤 "..name"，也不 canonicalize。
+validate_install_dir() {
+  local path="$1"
+  local rest component
+  case "$path" in
+    /*) ;;
+    *) die "安装目录必须是绝对路径：$path" ;;
+  esac
+  [ "$path" != / ] || die "安装目录不能是根目录 /"
+  rest="${path#/}"
+  while [ -n "$rest" ]; do
+    component="${rest%%/*}"
+    [ "$component" != .. ] || die "安装目录不能包含父目录组件 ..：$path"
+    if [ "$rest" = "$component" ]; then
+      break
+    fi
+    rest="${rest#*/}"
+  done
+}
+
+# 有界下载：
+# - 保留 --max-filesize：Content-Length 已知或 curl >= 8.4 时可早拒绝（exit 63）。
+# - curl < 8.4 且缺少 Content-Length 时 --max-filesize 对进行中下载无效；
+#   因此 curl 写 stdout，经 GNU head -c $((max_size+1)) 再落盘，硬限制目标最多
+#   max_size+1 字节，避免 /tmp 被未知长度响应写满。
+# - 落盘后 stat 复核；exit 63 或 actual > max_size 均报“超过大小上限”。
+download_bounded() {
+  local url="$1"
+  local dest="$2"
+  local max_size="$3"
+  local label="$4"
+  local actual curl_status head_status
+  local -a pipe_status
+
+  # 临时关闭 errexit 以捕获 PIPESTATUS；pipefail 保持开启。
+  set +e
+  curl "${CURL_OPTIONS[@]}" --max-filesize "$max_size" \
+    "$url" | head -c "$((max_size + 1))" >"$dest"
+  pipe_status=("${PIPESTATUS[@]}")
+  set -e
+  curl_status="${pipe_status[0]:-1}"
+  head_status="${pipe_status[1]:-1}"
+
+  actual="$(stat -c%s -- "$dest" 2>/dev/null)" \
+    || die "无法读取已下载${label}的大小：${dest}"
+
+  # curl 63：--max-filesize 早拒绝；actual > max_size：head 截断后的硬限制复核。
+  # 超限时 curl 可能因 SIGPIPE 得到 141，仍以大小为准，不得误报成网络错误。
+  if [ "$curl_status" -eq 63 ] || [ "$actual" -gt "$max_size" ]; then
+    die "${label}超过大小上限（${max_size} 字节）：实际 ${actual} 字节"
+  fi
+  if [ "$curl_status" -ne 0 ] || [ "$head_status" -ne 0 ]; then
+    die "下载${label}失败：${url}"
+  fi
 }
 
 privileged() {
@@ -106,9 +168,11 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-case "$INSTALL_DIR" in /*) ;; *) die "安装目录必须是绝对路径：$INSTALL_DIR" ;; esac
-[ "$INSTALL_DIR" != / ] || die "安装目录不能是根目录 /"
-for command in chmod curl grep mkdir mktemp rm sha256sum tar uname; do need "$command"; done
+validate_install_dir "$INSTALL_DIR"
+# head：GNU coreutils（Ubuntu/Debian/Rocky/Alma 均提供 head -c）。
+for command in chmod curl grep head mkdir mktemp rm sha256sum stat tar uname; do
+  need "$command"
+done
 normalize_version
 
 TARGET="$(detect_target)"
@@ -126,10 +190,16 @@ CURL_OPTIONS=(
 )
 
 log "正在下载 ${PROGRAM} ${VERSION} (${TARGET})..."
-curl "${CURL_OPTIONS[@]}" "${DOWNLOAD_BASE}/${ASSET}" -o "${TEMP_DIR}/${ASSET}" \
-  || die "下载二进制失败：${DOWNLOAD_BASE}/${ASSET}"
-curl "${CURL_OPTIONS[@]}" "${DOWNLOAD_BASE}/SHA256SUMS" -o "${TEMP_DIR}/SHA256SUMS" \
-  || die "下载 SHA256SUMS 失败。"
+download_bounded \
+  "${DOWNLOAD_BASE}/${ASSET}" \
+  "${TEMP_DIR}/${ASSET}" \
+  "$MAX_ARCHIVE_SIZE" \
+  "发布归档"
+download_bounded \
+  "${DOWNLOAD_BASE}/SHA256SUMS" \
+  "${TEMP_DIR}/SHA256SUMS" \
+  "$MAX_CHECKSUM_SIZE" \
+  "SHA256SUMS"
 (
   cd "$TEMP_DIR"
   checksum_line="$(grep -E "^[0-9a-fA-F]{64}  ${ASSET}$" SHA256SUMS || true)"
@@ -157,6 +227,6 @@ install_args=(install-self --install-dir "$INSTALL_DIR")
 [ "$QUIET" -eq 0 ] || install_args+=(--quiet)
 [ "$BOOTSTRAP" -eq 1 ] || install_args+=(--no-bootstrap)
 "$DOWNLOADED" install-self --help >/dev/null 2>&1 \
-  || die "该版本不支持新版安装协议；请使用对应 tag 内的 install.sh。"
+  || die "下载的二进制不支持 install-self（需要 >= ${MIN_INSTALL_SELF_VERSION}）；请使用对应 tag 内的 install.sh（v0.1.15 及更早版本见该 tag 的旧脚本）。"
 privileged "$DOWNLOADED" "${install_args[@]}" \
   || die "Rust 安装阶段失败；已校验文件未能完成安装。"

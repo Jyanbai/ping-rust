@@ -1,6 +1,6 @@
 use std::{
     fs,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     process::{Command, Stdio},
 };
 
@@ -114,6 +114,12 @@ fn validate_install_dir(path: &Path) -> Result<()> {
     }
     if path == Path::new("/") {
         bail!("安装目录不能是根目录 /");
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        bail!("安装目录不能包含父目录组件 ..：{}", path.display());
     }
     Ok(())
 }
@@ -246,8 +252,12 @@ mod tests {
     #[test]
     fn validates_absolute_non_root_install_directory() {
         assert!(validate_install_dir(Path::new("/opt/ping-rust/bin")).is_ok());
+        assert!(validate_install_dir(Path::new("/opt/ping-rust/bin/")).is_ok());
+        assert!(validate_install_dir(Path::new("/opt/..name")).is_ok());
         assert!(validate_install_dir(Path::new("relative")).is_err());
         assert!(validate_install_dir(Path::new("/")).is_err());
+        assert!(validate_install_dir(Path::new("/opt/../tmp")).is_err());
+        assert!(validate_install_dir(Path::new("/usr/local/bin/foo/..")).is_err());
     }
 
     #[test]

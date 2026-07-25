@@ -113,11 +113,17 @@ jobs:
             while [[ "$#" -gt 0 ]]; do
               case "$1" in
                 -o | --output) output="$2"; shift 2 ;;
+                --max-filesize) shift 2 ;;
                 *) url="$1"; shift ;;
               esac
             done
-            test -n "$output"
-            cp "$asset_root/${url##*/}" "$output"
+            test -n "$url"
+            # install.sh 现经 stdout|head 落盘；兼容旧 -o 调用。
+            if [[ -n "$output" ]]; then
+              cp "$asset_root/${url##*/}" "$output"
+            else
+              cat "$asset_root/${url##*/}"
+            fi
           }
           export -f curl
           export asset_root

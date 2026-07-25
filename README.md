@@ -31,7 +31,18 @@ bash <(curl --proto '=https' --tlsv1.2 -fsSL \
   --install-dir /usr/local/bin --quiet --no-bootstrap
 ```
 
-Stage 0 自动识别 x86_64/aarch64，从 GitHub Releases 下载对应 musl 静态包，并在首次执行前强制验证 `SHA256SUMS`、归档结构和二进制版本。随后由隐藏的 Rust 安装入口原子写入 `/usr/local/bin/ping-rust`，安全创建 `prs → ping-rust`，并调用现有 Rust `bootstrap` 完成默认 Reality 部署。检测到已有配置时自动跳过，`--no-bootstrap` 可用于只安装管理工具。若系统已有其它 `prs` 命令，安装器会保留它并提示改用 `ping-rust`；升级时只会移除确实指向同目录 `ping-rust` 的旧 `sb` 链接。指定 `v0.1.15` 或更早版本时，应使用对应 tag 中的旧安装脚本；新的轻量 Stage 0 协议从 `v0.1.16` 开始。令牌、密码和代理配置都不会被上传。
+Stage 0 自动识别 x86_64/aarch64，从 GitHub Releases 下载对应 musl 静态包，并在首次执行前强制验证 `SHA256SUMS`、归档结构和二进制版本。随后由隐藏的 Rust 安装入口原子写入 `/usr/local/bin/ping-rust`，安全创建 `prs → ping-rust`，并调用现有 Rust `bootstrap` 完成默认 Reality 部署。检测到已有配置时自动跳过，`--no-bootstrap` 可用于只安装管理工具。若系统已有其它 `prs` 命令，安装器会保留它并提示改用 `ping-rust`；升级时只会移除确实指向同目录 `ping-rust` 的旧 `sb` 链接。指定 `v0.1.15` 或更早版本时，应使用对应 tag 中的旧安装脚本；新的轻量 Stage 0 协议从 `v0.1.16` 开始（开发候选，须先发布对应 GitHub Release 后，main 一键入口才可合并宣传）。令牌、密码和代理配置都不会被上传。
+
+### 发布顺序
+
+`main` 上的一键安装脚本依赖 Release 二进制的 `install-self` 协议。公开 `latest` 若仍是 `v0.1.15` 或更早，会在校验通过后安全失败。正确顺序：
+
+1. 在候选分支完成提交后，创建 **annotated tag**（例如 `v0.1.16`，须与 `Cargo.toml` 版本一致）。
+2. 等待 **Release** workflow 全绿：静态二进制打包、`install-self --help`、同 tag 一键安装与自更新 E2E 通过。
+3. 再合并候选分支到 `main`，更新 README 一键入口所宣传的协议/版本说明。
+4. 如已授权，再发布 crates.io。
+
+安装 `v0.1.15` 及更早版本时，必须使用**该 tag 树内**的旧 `scripts/install.sh`，不要用 `main` 上依赖 `install-self` 的新脚本去装旧资产。
 
 ## 功能
 

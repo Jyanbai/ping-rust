@@ -63,8 +63,10 @@ jobs:
 
           if [ "${TARGET}" = "aarch64-unknown-linux-musl" ]; then
             version_output="$(qemu-aarch64-static "${binary}" --version)"
+            qemu-aarch64-static "${binary}" install-self --help >/dev/null
           else
             version_output="$("${binary}" --version)"
+            "${binary}" install-self --help >/dev/null
           fi
           printf '%s\n' "${version_output}"
           printf '%s\n' "${version_output}" \

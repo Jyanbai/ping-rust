@@ -27,6 +27,22 @@ jobs:
           set -euo pipefail
           bash -n scripts/install.sh
           bash scripts/install.sh --help >/dev/null
+
+          # 最低 install-self 协议版本：单一来源常量，解析结果必须唯一非空。
+          mapfile -t min_lines < <(
+            grep -E '^readonly MIN_INSTALL_SELF_VERSION=[0-9]+\.[0-9]+\.[0-9]+$' \
+              scripts/install.sh || true
+          )
+          test "${#min_lines[@]}" -eq 1 \
+            || { echo "error: MIN_INSTALL_SELF_VERSION must appear exactly once" >&2; exit 1; }
+          min_install_self_version="${min_lines[0]#readonly MIN_INSTALL_SELF_VERSION=}"
+          test -n "${min_install_self_version}"
+          printf 'MIN_INSTALL_SELF_VERSION=%s\n' "${min_install_self_version}"
+          grep -Fq "不支持 install-self" scripts/install.sh \
+            || { echo "error: missing install-self protocol error path" >&2; exit 1; }
+          grep -Fq "\${MIN_INSTALL_SELF_VERSION}" scripts/install.sh \
+            || { echo "error: protocol error must reference MIN_INSTALL_SELF_VERSION" >&2; exit 1; }
+
           if bash scripts/install.sh --version invalid >/dev/null 2>&1; then
             echo "error: installer accepted an invalid version" >&2
             exit 1
@@ -35,6 +51,204 @@ jobs:
             echo "error: installer accepted a relative install directory" >&2
             exit 1
           fi
+          if bash scripts/install.sh --install-dir / >/dev/null 2>&1; then
+            echo "error: installer accepted root install directory" >&2
+            exit 1
+          fi
+          if bash scripts/install.sh --install-dir /opt/../tmp >/dev/null 2>&1; then
+            echo "error: installer accepted ParentDir install directory" >&2
+            exit 1
+          fi
+          if bash scripts/install.sh --install-dir /usr/local/bin/foo/.. >/dev/null 2>&1; then
+            echo "error: installer accepted trailing ParentDir install directory" >&2
+            exit 1
+          fi
+
+          # Stage-0 有界下载：本地 mock curl（与 acceptance 夹具同构）。
+          # mock 故意不强制 --max-filesize，专门覆盖“缺 Content-Length 仍写盘”
+          # 时的落盘后复核；超限 fail-closed，且不得执行未校验二进制。
+          asset_root="$(mktemp -d)"
+          install_root="$(mktemp -d)"
+          executed_marker="${asset_root}/executed"
+          target="$(uname -m)"
+          case "$target" in
+            x86_64 | amd64) asset="ping-rust-x86_64-unknown-linux-musl.tar.gz" ;;
+            aarch64 | arm64) asset="ping-rust-aarch64-unknown-linux-musl.tar.gz" ;;
+            *) echo "error: unsupported CI arch: $target" >&2; exit 1 ;;
+          esac
+          {
+            printf '%s\n' '#!/bin/sh'
+            printf 'printf executed > %q\n' "$executed_marker"
+            printf '%s\n' \
+              'if [ "${1:-}" = --version ]; then' \
+              '  printf "ping-rust 0.0.0\n"' \
+              '  exit 0' \
+              'fi' \
+              'if [ "${1:-}" = install-self ] && [ "${2:-}" = --help ]; then' \
+              '  exit 0' \
+              'fi' \
+              'exit 42'
+          } > "${asset_root}/fake-bin"
+          chmod 0755 "${asset_root}/fake-bin"
+          tar -czf "${asset_root}/${asset}" -C "$asset_root" \
+            --transform 's/^fake-bin$/ping-rust/' fake-bin
+          (
+            cd "$asset_root"
+            sha256sum "$asset" > SHA256SUMS
+          )
+          # mock 故意忽略 --max-filesize（模拟旧 curl / 无 Content-Length），
+          # 把 fixture 写 stdout，由 install.sh 的 head -c + 落盘复核拦截。
+          curl() {
+            local output="" url=""
+            while [[ "$#" -gt 0 ]]; do
+              case "$1" in
+                -o | --output) output="$2"; shift 2 ;;
+                --max-filesize | --retry | --retry-delay | --proto) shift 2 ;;
+                --tlsv1.2 | --fail | --location | --silent | --show-error) shift ;;
+                *) url="$1"; shift ;;
+              esac
+            done
+            test -n "$url"
+            if [[ -n "$output" ]]; then
+              cp "$asset_root/${url##*/}" "$output"
+            else
+              cat "$asset_root/${url##*/}"
+            fi
+          }
+          export -f curl
+          export asset_root
+
+          # 正例：正常体积通过大小门禁与 checksum；执行仅发生在 checksum 之后。
+          # install-self 本体由假二进制拒绝，但不得报体积错误。
+          if err="$(bash scripts/install.sh \
+            --version v0.0.0 \
+            --install-dir "$install_root" \
+            --quiet \
+            --no-bootstrap 2>&1)"; then
+            echo "error: installer unexpectedly succeeded with fake binary" >&2
+            exit 1
+          fi
+          printf '%s\n' "$err" | grep -Fq '超过大小上限' \
+            && { printf 'error: false size rejection:\n%s\n' "$err" >&2; exit 1; }
+          printf '%s\n' "$err" | grep -Fq 'Rust 安装阶段失败' \
+            || { printf 'error: expected install-self failure:\n%s\n' "$err" >&2; exit 1; }
+          test -e "$executed_marker"
+          rm -f -- "$executed_marker"
+          test ! -e "${install_root}/ping-rust"
+
+          # 负例 0：二进制缺少 install-self --help 时，须报协议错误并提示旧 tag 脚本。
+          {
+            printf '%s\n' '#!/bin/sh'
+            printf 'printf executed > %q\n' "$executed_marker"
+            printf '%s\n' \
+              'if [ "${1:-}" = --version ]; then' \
+              '  printf "ping-rust 0.0.0\n"' \
+              '  exit 0' \
+              'fi' \
+              'exit 42'
+          } > "${asset_root}/fake-bin"
+          chmod 0755 "${asset_root}/fake-bin"
+          tar -czf "${asset_root}/${asset}" -C "$asset_root" \
+            --transform 's/^fake-bin$/ping-rust/' fake-bin
+          (
+            cd "$asset_root"
+            sha256sum "$asset" > SHA256SUMS
+          )
+          rm -f -- "$executed_marker"
+          if err="$(bash scripts/install.sh \
+            --version v0.0.0 \
+            --install-dir "$install_root" \
+            --quiet \
+            --no-bootstrap 2>&1)"; then
+            echo "error: installer accepted binary without install-self" >&2
+            exit 1
+          fi
+          printf '%s\n' "$err" | grep -Fq '不支持 install-self' \
+            || { printf 'error: missing install-self protocol error:\n%s\n' "$err" >&2; exit 1; }
+          printf '%s\n' "$err" | grep -Fq "${min_install_self_version}" \
+            || { printf 'error: protocol error missing min version:\n%s\n' "$err" >&2; exit 1; }
+          printf '%s\n' "$err" | grep -Fq '对应 tag' \
+            || { printf 'error: protocol error missing tag script hint:\n%s\n' "$err" >&2; exit 1; }
+          test -e "$executed_marker"
+          rm -f -- "$executed_marker"
+          test ! -e "${install_root}/ping-rust"
+
+          # 恢复支持 install-self 的假二进制，继续体积负例。
+          {
+            printf '%s\n' '#!/bin/sh'
+            printf 'printf executed > %q\n' "$executed_marker"
+            printf '%s\n' \
+              'if [ "${1:-}" = --version ]; then' \
+              '  printf "ping-rust 0.0.0\n"' \
+              '  exit 0' \
+              'fi' \
+              'if [ "${1:-}" = install-self ] && [ "${2:-}" = --help ]; then' \
+              '  exit 0' \
+              'fi' \
+              'exit 42'
+          } > "${asset_root}/fake-bin"
+          chmod 0755 "${asset_root}/fake-bin"
+          tar -czf "${asset_root}/${asset}" -C "$asset_root" \
+            --transform 's/^fake-bin$/ping-rust/' fake-bin
+          (
+            cd "$asset_root"
+            sha256sum "$asset" > SHA256SUMS
+          )
+
+          # 负例 1：SHA256SUMS 超 64 KiB，必须在 checksum/执行前失败。
+          dd if=/dev/zero of="${asset_root}/SHA256SUMS" bs=65537 count=1 status=none
+          if err="$(bash scripts/install.sh \
+            --version v0.0.0 \
+            --install-dir "$install_root" \
+            --quiet \
+            --no-bootstrap 2>&1)"; then
+            echo "error: installer accepted oversized SHA256SUMS" >&2
+            exit 1
+          fi
+          printf '%s\n' "$err" | grep -Fq 'SHA256SUMS超过大小上限' \
+            || { printf 'error: missing SHA256SUMS size error:\n%s\n' "$err" >&2; exit 1; }
+          test ! -e "$executed_marker"
+          test ! -e "${install_root}/ping-rust"
+          # 安装目标不得越过限制（不得留下可执行产物）。
+          if find "$install_root" -type f 2>/dev/null | grep -q .; then
+            echo "error: install_root not empty after oversized SHA256SUMS" >&2
+            exit 1
+          fi
+
+          # 负例 2：归档超 64 MiB；mock 忽略 --max-filesize，由 head 硬限制 + 复核拦截。
+          # 不把 65MiB fixture 内容打印到 Actions 日志。
+          (
+            cd "$asset_root"
+            sha256sum "$asset" > SHA256SUMS
+          )
+          dd if=/dev/zero of="${asset_root}/${asset}" bs=1M count=65 status=none
+          # 同步确认 head 硬上限：stdout 路径最多落 max+1 字节。
+          hard_cap_probe="$(mktemp)"
+          head -c $((67108864 + 1)) <"${asset_root}/${asset}" >"$hard_cap_probe"
+          hard_cap_size="$(stat -c%s -- "$hard_cap_probe")"
+          rm -f -- "$hard_cap_probe"
+          test "$hard_cap_size" -eq $((67108864 + 1)) \
+            || { echo "error: head hard-cap probe size=$hard_cap_size" >&2; exit 1; }
+          if err="$(bash scripts/install.sh \
+            --version v0.0.0 \
+            --install-dir "$install_root" \
+            --quiet \
+            --no-bootstrap 2>&1)"; then
+            echo "error: installer accepted oversized archive" >&2
+            exit 1
+          fi
+          printf '%s\n' "$err" | grep -Fq '发布归档超过大小上限' \
+            || { printf 'error: missing archive size error:\n%s\n' "$err" >&2; exit 1; }
+          test ! -e "$executed_marker"
+          test ! -e "${install_root}/ping-rust"
+          if find "$install_root" -type f 2>/dev/null | grep -q .; then
+            echo "error: install_root not empty after oversized archive" >&2
+            exit 1
+          fi
+          # 不得把大二进制写进日志：仅核对错误文案长度。
+          test "${#err}" -lt 4096 \
+            || { echo "error: failure output unexpectedly large (${#err} bytes)" >&2; exit 1; }
+          rm -rf -- "$asset_root" "$install_root"
       - run: cargo fmt --all -- --check
       - run: cargo test --locked
       - name: Install stable shoes for chain traffic acceptance
@@ -60,6 +274,114 @@ jobs:
         run: cargo test --locked --test chain_proxy_e2e -- --nocapture
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo build --locked --release
+      - name: Prove current tree install-self protocol
+        if: matrix.os == 'ubuntu-24.04'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x target/release/ping-rust
+          target/release/ping-rust install-self --help >/dev/null
+          target/release/ping-rust install-self --help \
+            | grep -Eq 'install-self|安装|install'
+      - name: Gate public latest against install-self protocol
+        # 仅 PR→main 或 push main：防止 main 一键入口先于 Release 宣传新协议。
+        # 普通 feature branch push 不跑网络门禁，便于从候选分支先 tag/release。
+        if: >
+          matrix.os == 'ubuntu-24.04' &&
+          (
+            (github.event_name == 'pull_request' && github.base_ref == 'main') ||
+            (github.event_name == 'push' && github.ref == 'refs/heads/main')
+          )
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t min_lines < <(
+            grep -E '^readonly MIN_INSTALL_SELF_VERSION=[0-9]+\.[0-9]+\.[0-9]+$' \
+              scripts/install.sh || true
+          )
+          test "${#min_lines[@]}" -eq 1 \
+            || { echo "error: MIN_INSTALL_SELF_VERSION must appear exactly once" >&2; exit 1; }
+          min_version="${min_lines[0]#readonly MIN_INSTALL_SELF_VERSION=}"
+          test -n "${min_version}"
+          printf 'min_install_self_version=%s\n' "${min_version}"
+
+          # fail-closed：API/HTTP/字段异常或无 release 均不得当成功。
+          set +e
+          latest_tag="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              "repos/${{ github.repository }}/releases/latest" \
+              --jq .tag_name
+          )"
+          api_status=$?
+          set -e
+          if [ "${api_status}" -ne 0 ]; then
+            echo "error: failed to query public latest release (fail-closed, exit=${api_status})" >&2
+            exit 1
+          fi
+          if [ -z "${latest_tag}" ] || [ "${latest_tag}" = "null" ]; then
+            echo "error: latest release missing tag_name (fail-closed)" >&2
+            exit 1
+          fi
+          # 拒绝意外空白/多行。
+          if [ "$(printf '%s' "${latest_tag}" | wc -l)" -ne 0 ] \
+            || ! printf '%s' "${latest_tag}" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "error: latest tag is not strict three-part semver: ${latest_tag}" >&2
+            exit 1
+          fi
+          printf 'public_latest_tag=%s\n' "${latest_tag}"
+          latest_version="${latest_tag#v}"
+          if ! printf '%s\n' "${min_version}" \
+            | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "error: min version is not strict three-part semver: ${min_version}" >&2
+            exit 1
+          fi
+
+          # 严格三段数字比较；不得把格式异常当成功。
+          IFS=. read -r min_maj min_min min_pat <<<"${min_version}"
+          IFS=. read -r lat_maj lat_min lat_pat <<<"${latest_version}"
+          for part in "${min_maj}" "${min_min}" "${min_pat}" \
+            "${lat_maj}" "${lat_min}" "${lat_pat}"; do
+            printf '%s\n' "${part}" | grep -Eq '^[0-9]+$' \
+              || { echo "error: non-numeric semver component: ${part}" >&2; exit 1; }
+          done
+          cmp="eq"
+          if [ "${lat_maj}" -lt "${min_maj}" ] \
+            || { [ "${lat_maj}" -eq "${min_maj}" ] && [ "${lat_min}" -lt "${min_min}" ]; } \
+            || {
+              [ "${lat_maj}" -eq "${min_maj}" ] \
+                && [ "${lat_min}" -eq "${min_min}" ] \
+                && [ "${lat_pat}" -lt "${min_pat}" ]
+            }; then
+            cmp="lt"
+          elif [ "${lat_maj}" -gt "${min_maj}" ] \
+            || { [ "${lat_maj}" -eq "${min_maj}" ] && [ "${lat_min}" -gt "${min_min}" ]; } \
+            || {
+              [ "${lat_maj}" -eq "${min_maj}" ] \
+                && [ "${lat_min}" -eq "${min_min}" ] \
+                && [ "${lat_pat}" -gt "${min_pat}" ]
+            }; then
+            cmp="gt"
+          fi
+          case "${cmp}" in
+            lt)
+              cat >&2 <<EOF
+          error: 公开 latest Release (${latest_tag}) 低于 install.sh 要求的最低 install-self 协议版本 (v${min_version})。
+          禁止先合并/更新 main 一键入口。请先在候选分支创建 annotated tag 并让 Release workflow 全绿，再合并 main。
+          EOF
+              exit 1
+              ;;
+            eq | gt)
+              printf 'ok: public latest %s satisfies min install-self v%s\n' \
+                "${latest_tag}" "${min_version}"
+              ;;
+            *)
+              echo "error: unexpected semver comparison result: ${cmp}" >&2
+              exit 1
+              ;;
+          esac
 
   distro-build:
     name: ${{ matrix.name }}
