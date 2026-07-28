@@ -35,20 +35,6 @@ const MAIN_MENU_ITEMS: &[(usize, &str)] = &[
     (0, "退出"),
 ];
 
-const PROTOCOL_MENU_ITEMS: &[(usize, &str)] = &[
-    (1, "TUIC"),
-    (2, "Hysteria2"),
-    (3, "Shadowsocks"),
-    (4, "VLESS-REALITY（推荐）"),
-    (5, "AnyTLS"),
-    (6, "VLESS-TLS-Vision"),
-    (7, "VLESS-WS-TLS"),
-    (8, "Trojan-TLS"),
-    (9, "Trojan-REALITY"),
-    (10, "VMess-WS-TLS"),
-    (0, "返回"),
-];
-
 const OPERATIONS_MENU_ITEMS: [&str; 9] = [
     "链式代理",
     "高级添加配置",
@@ -91,6 +77,13 @@ fn control_after_success(main_menu_choice: usize) -> MenuControl {
         1 | 3 => MenuControl::Exit,
         _ => MenuControl::Continue,
     }
+}
+
+fn protocol_menu_items() -> Vec<(usize, &'static str)> {
+    Protocol::all()
+        .map(|protocol| (protocol.menu_number(), protocol.menu_label()))
+        .chain(std::iter::once((0, "返回")))
+        .collect()
 }
 
 fn parse_numbered_choice(value: &str, count: usize) -> Option<Option<usize>> {
@@ -793,11 +786,13 @@ fn export_menu() -> Result<()> {
 }
 
 async fn fast_add_config_menu() -> Result<MenuControl> {
-    let protocol_number = select_keyed("选择协议", PROTOCOL_MENU_ITEMS)?;
+    let protocol_items = protocol_menu_items();
+    let protocol_number = select_keyed("选择协议", &protocol_items)?;
     if protocol_number == 0 {
         return Ok(MenuControl::Continue);
     }
-    let protocol = fast_add::protocol_from_menu_number(protocol_number)?;
+    let protocol = Protocol::from_menu_number(protocol_number)
+        .with_context(|| format!("协议编号无效：{protocol_number}"))?;
     let port = loop {
         print!("\n请输入端口（直接回车随机，输入 0 返回）: ");
         io::stdout().flush().context("输出端口提示失败")?;
@@ -927,48 +922,17 @@ async fn resolve_menu_server_address() -> Result<String> {
 }
 
 async fn advanced_add_config_menu() -> Result<()> {
-    let choices = [
-        "TUIC v5",
-        "Hysteria2",
-        "Shadowsocks 2022",
-        "VLESS-Reality-Vision（推荐）",
-        "AnyTLS",
-        "VLESS-TLS-Vision",
-        "VLESS-WS-TLS",
-        "Trojan-TLS",
-        "Trojan-REALITY",
-        "VMess-WS-TLS",
-    ];
+    let choices = Protocol::all()
+        .map(Protocol::advanced_label)
+        .collect::<Vec<_>>();
     let Some(selected) = select_numbered("选择协议", &choices)? else {
         return Ok(());
     };
-    let protocol = match selected {
-        0 => Protocol::Tuic,
-        1 => Protocol::Hysteria2,
-        2 => Protocol::Shadowsocks,
-        3 => Protocol::Reality,
-        4 => Protocol::AnyTls,
-        5 => Protocol::VlessTlsVision,
-        6 => Protocol::VlessWsTls,
-        7 => Protocol::TrojanTls,
-        8 => Protocol::TrojanReality,
-        9 => Protocol::VmessWsTls,
-        _ => unreachable!("协议菜单编号已验证"),
-    };
+    let protocol =
+        Protocol::from_menu_number(selected + 1).context("协议菜单与中央注册表不一致")?;
     let name = Input::<String>::with_theme(&ColorfulTheme::default())
         .with_prompt("配置名称")
-        .default(match protocol {
-            Protocol::Reality => "reality".to_owned(),
-            Protocol::Hysteria2 => "hysteria2".to_owned(),
-            Protocol::Tuic => "tuic".to_owned(),
-            Protocol::Shadowsocks => "shadowsocks".to_owned(),
-            Protocol::AnyTls => "anytls".to_owned(),
-            Protocol::VlessTlsVision => "vless-tls-vision".to_owned(),
-            Protocol::VlessWsTls => "vless-ws-tls".to_owned(),
-            Protocol::TrojanTls => "trojan-tls".to_owned(),
-            Protocol::TrojanReality => "trojan-reality".to_owned(),
-            Protocol::VmessWsTls => "vmess-ws-tls".to_owned(),
-        })
+        .default(protocol.slug().to_owned())
         .interact_text()?;
     let port = Input::<u16>::with_theme(&ColorfulTheme::default())
         .with_prompt("监听端口")
@@ -1200,25 +1164,17 @@ mod tests {
 
     #[test]
     fn uses_zero_for_exit_and_sequential_protocol_numbers() {
+        let protocol_items = protocol_menu_items();
         assert_eq!(MAIN_MENU_ITEMS.first().unwrap().0, 1);
         assert_eq!(MAIN_MENU_ITEMS.last(), Some(&(0, "退出")));
-        assert_eq!(PROTOCOL_MENU_ITEMS.last(), Some(&(0, "返回")));
-        for (number, protocol) in [
-            (1, Protocol::Tuic),
-            (2, Protocol::Hysteria2),
-            (3, Protocol::Shadowsocks),
-            (4, Protocol::Reality),
-            (5, Protocol::AnyTls),
-            (6, Protocol::VlessTlsVision),
-            (7, Protocol::VlessWsTls),
-            (8, Protocol::TrojanTls),
-            (9, Protocol::TrojanReality),
-            (10, Protocol::VmessWsTls),
-        ] {
-            assert!(PROTOCOL_MENU_ITEMS.iter().any(|item| item.0 == number));
+        assert_eq!(protocol_items.last(), Some(&(0, "返回")));
+        for protocol in Protocol::all() {
+            assert!(protocol_items.iter().any(|item| {
+                item.0 == protocol.menu_number() && item.1 == protocol.menu_label()
+            }));
             assert_eq!(
-                fast_add::protocol_from_menu_number(number).unwrap(),
-                protocol
+                Protocol::from_menu_number(protocol.menu_number()),
+                Some(protocol)
             );
         }
     }
@@ -1235,7 +1191,7 @@ mod tests {
         assert_eq!(parse_numbered_choice("", 5), None);
         assert_eq!(parse_numbered_choice("6", 5), None);
         assert_eq!(parse_keyed_choice("0", MAIN_MENU_ITEMS), Some(0));
-        assert_eq!(parse_keyed_choice("0", PROTOCOL_MENU_ITEMS), Some(0));
+        assert_eq!(parse_keyed_choice("0", &protocol_menu_items()), Some(0));
         assert_eq!(parse_keyed_choice("", MAIN_MENU_ITEMS), None);
         assert_eq!(parse_port_choice("0"), Some(PortChoice::Back));
         assert_eq!(parse_port_choice(""), Some(PortChoice::Random));

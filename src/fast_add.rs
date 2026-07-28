@@ -104,38 +104,6 @@ fn add_activation_context<T>(result: Result<T>, port: u16) -> Result<T> {
     }
 }
 
-pub fn protocol_from_menu_number(number: usize) -> Result<Protocol> {
-    match number {
-        1 => Ok(Protocol::Tuic),
-        2 => Ok(Protocol::Hysteria2),
-        3 => Ok(Protocol::Shadowsocks),
-        4 => Ok(Protocol::Reality),
-        5 => Ok(Protocol::AnyTls),
-        6 => Ok(Protocol::VlessTlsVision),
-        7 => Ok(Protocol::VlessWsTls),
-        8 => Ok(Protocol::TrojanTls),
-        9 => Ok(Protocol::TrojanReality),
-        10 => Ok(Protocol::VmessWsTls),
-        _ => bail!("协议编号无效；可选 1..=10"),
-    }
-}
-
-#[cfg(test)]
-fn menu_number(protocol: Protocol) -> usize {
-    match protocol {
-        Protocol::Tuic => 1,
-        Protocol::Hysteria2 => 2,
-        Protocol::Shadowsocks => 3,
-        Protocol::Reality => 4,
-        Protocol::AnyTls => 5,
-        Protocol::VlessTlsVision => 6,
-        Protocol::VlessWsTls => 7,
-        Protocol::TrojanTls => 8,
-        Protocol::TrojanReality => 9,
-        Protocol::VmessWsTls => 10,
-    }
-}
-
 pub async fn resolve_server_address(explicit: Option<&str>) -> Result<String> {
     if let Some(explicit) = explicit {
         return client::normalize_server_address(explicit);
@@ -249,7 +217,7 @@ fn ensure_port_available(
     // socket activation 的 LISTEN_FDS，因此这里的检查只能用于尽早报错。
     // 检查结束到 shoes 绑定之间仍可能发生竞争；激活失败由 deployment
     // 的配置与服务快照回滚兜底。
-    let (tcp, udp) = required_sockets(protocol);
+    let (tcp, udp) = protocol.required_sockets();
     let status = operations::check_port(port, tcp, udp);
     if status.tcp_available.is_some_and(|result| result.is_err()) {
         bail!("TCP 端口 {port} 已被占用或无法绑定");
@@ -260,20 +228,6 @@ fn ensure_port_available(
     Ok(())
 }
 
-fn required_sockets(protocol: Protocol) -> (bool, bool) {
-    match protocol {
-        Protocol::Reality
-        | Protocol::AnyTls
-        | Protocol::VlessTlsVision
-        | Protocol::VlessWsTls
-        | Protocol::TrojanTls
-        | Protocol::TrojanReality
-        | Protocol::VmessWsTls => (true, false),
-        Protocol::Hysteria2 | Protocol::Tuic => (false, true),
-        Protocol::Shadowsocks => (true, true),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -281,23 +235,14 @@ mod tests {
 
     #[test]
     fn uses_sequential_protocol_numbers() {
-        for (number, protocol) in [
-            (1, Protocol::Tuic),
-            (2, Protocol::Hysteria2),
-            (3, Protocol::Shadowsocks),
-            (4, Protocol::Reality),
-            (5, Protocol::AnyTls),
-            (6, Protocol::VlessTlsVision),
-            (7, Protocol::VlessWsTls),
-            (8, Protocol::TrojanTls),
-            (9, Protocol::TrojanReality),
-            (10, Protocol::VmessWsTls),
-        ] {
-            assert_eq!(protocol_from_menu_number(number).unwrap(), protocol);
-            assert_eq!(menu_number(protocol), number);
+        for protocol in Protocol::all() {
+            assert_eq!(
+                Protocol::from_menu_number(protocol.menu_number()),
+                Some(protocol)
+            );
         }
-        assert!(protocol_from_menu_number(0).is_err());
-        assert!(protocol_from_menu_number(11).is_err());
+        assert_eq!(Protocol::from_menu_number(0), None);
+        assert_eq!(Protocol::from_menu_number(11), None);
     }
 
     #[test]

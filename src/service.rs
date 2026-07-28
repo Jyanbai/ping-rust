@@ -3,7 +3,7 @@ use std::{fs, path::Path, process::Command, thread, time::Duration};
 use anyhow::{bail, Context, Result};
 use clap::ValueEnum;
 
-use crate::utils;
+use crate::{performance, utils};
 
 pub const SERVICE_NAME: &str = "shoes.service";
 const RESET_FAILED_COMMAND: &[&str] = &["reset-failed", SERVICE_NAME];
@@ -90,6 +90,7 @@ pub fn install_unit(enable_now: bool) -> Result<()> {
 }
 
 pub fn activate_and_verify() -> Result<()> {
+    let _timer = performance::stage("systemd_activate");
     install_unit(true)?;
     verify_active_stable(systemctl_is_active, || {
         thread::sleep(Duration::from_millis(750))

@@ -1,5 +1,6 @@
+#[cfg(test)]
+use std::collections::BTreeMap;
 use std::{
-    collections::BTreeMap,
     fs,
     io::Write,
     path::{Path, PathBuf},
@@ -21,11 +22,27 @@ use x25519_dalek::{PublicKey, StaticSecret};
 
 use crate::{
     chain_proxy::{ChainProxyChange, ChainProxyState, ShoesClientConfig},
-    utils,
+    performance, utils,
 };
 
+mod commit;
+mod presets;
+mod schema;
+mod transaction;
 mod validation;
 
+#[cfg(test)]
+use commit::{
+    aggregate_profile_documents, commit_managed_with_state_writer, is_managed_profile_file_name,
+};
+use commit::{
+    commit_managed, profile_documents, profile_documents_are_current, write_profile_documents,
+};
+use schema::{
+    default_h3_alpn, ChainRule, InnerProtocol, QuicSettings, RealityTarget, ServerConfig,
+    ServerProtocol, ServerRule,
+};
+use transaction::{read_optional, CredentialCleanup, ManagedRollback, ProfileDirectorySnapshot};
 pub(crate) use validation::validate_shadowsocks_password;
 use validation::{
     validate_anytls_users, validate_host_port, validate_padding_scheme, validate_reality_short_id,
@@ -72,6 +89,39 @@ pub enum Protocol {
 }
 
 impl Protocol {
+    pub(crate) fn all() -> impl ExactSizeIterator<Item = Self> {
+        presets::all().iter().map(|preset| preset.protocol)
+    }
+
+    pub(crate) fn from_menu_number(number: usize) -> Option<Self> {
+        presets::from_menu_number(number)
+    }
+
+    pub(crate) fn menu_number(self) -> usize {
+        presets::descriptor(self).menu_number
+    }
+
+    pub(crate) fn menu_label(self) -> &'static str {
+        presets::descriptor(self).menu_label
+    }
+
+    pub(crate) fn advanced_label(self) -> &'static str {
+        presets::descriptor(self).advanced_label
+    }
+
+    pub(crate) fn slug(self) -> &'static str {
+        presets::descriptor(self).slug
+    }
+
+    pub(crate) fn display_prefix(self) -> &'static str {
+        presets::descriptor(self).display_prefix
+    }
+
+    pub(crate) fn required_sockets(self) -> (bool, bool) {
+        let preset = presets::descriptor(self);
+        (preset.tcp_required, preset.udp_required)
+    }
+
     pub fn uses_reality(self, anytls_mode: AnyTlsMode) -> bool {
         matches!(self, Self::Reality | Self::TrojanReality)
             || (matches!(self, Self::AnyTls) && anytls_mode == AnyTlsMode::Reality)
@@ -288,190 +338,6 @@ pub(crate) struct ChainProxyUpdateResult {
     _lock: Option<utils::ExclusiveLock>,
 }
 
-struct ManagedRollback {
-    config: Option<Vec<u8>>,
-    state: Option<Vec<u8>>,
-    profiles: ProfileDirectorySnapshot,
-    generated_certificate: Option<PathBuf>,
-    generated_certificate_key: Option<PathBuf>,
-}
-
-struct ProfileDirectorySnapshot {
-    existed: bool,
-    files: BTreeMap<String, Vec<u8>>,
-}
-
-impl GenerationResult {
-    pub fn rollback_managed(&mut self) -> Result<()> {
-        let rollback = self
-            .rollback
-            .take()
-            .context("该生成结果不包含可回滚的系统配置事务")?;
-        rollback.restore_to(
-            Path::new(utils::CONFIG_FILE),
-            Path::new(utils::STATE_FILE),
-            Path::new(utils::PROFILES_DIR),
-        )
-    }
-}
-
-impl DeletionResult {
-    pub fn rollback_managed(&mut self) -> Result<()> {
-        let rollback = self
-            .rollback
-            .take()
-            .context("该删除结果不包含可回滚的系统配置事务")?;
-        rollback.restore_to(
-            Path::new(utils::CONFIG_FILE),
-            Path::new(utils::STATE_FILE),
-            Path::new(utils::PROFILES_DIR),
-        )
-    }
-
-    pub fn finish(self) -> ManagedProfile {
-        self.finish_with(remove_managed_credential)
-    }
-
-    fn finish_with(
-        mut self,
-        mut remove_credential: impl FnMut(Option<&Path>) -> Result<()>,
-    ) -> ManagedProfile {
-        self.rollback.take();
-        if self.profile.self_signed_certificate {
-            for path in [
-                self.profile.certificate_path.as_deref(),
-                self.profile.certificate_key_path.as_deref(),
-            ] {
-                if let Err(error) = remove_credential(path) {
-                    eprintln!("警告：配置已删除，但清理凭据失败：{error:#}");
-                }
-            }
-        }
-        self.profile
-    }
-}
-
-impl ChainProxyUpdateResult {
-    pub fn rollback_managed(&mut self) -> Result<()> {
-        let rollback = self
-            .rollback
-            .take()
-            .context("该链式代理更新不包含可回滚的系统配置事务")?;
-        rollback.restore_to(
-            Path::new(utils::CONFIG_FILE),
-            Path::new(utils::STATE_FILE),
-            Path::new(utils::PROFILES_DIR),
-        )
-    }
-
-    pub fn finish(mut self) -> ManagedState {
-        self.rollback.take();
-        self.state
-    }
-}
-
-impl ManagedRollback {
-    fn restore_to(self, config_path: &Path, state_path: &Path, profiles_path: &Path) -> Result<()> {
-        let state_result = restore_snapshot(state_path, self.state.as_deref(), 0o600);
-        let config_result = restore_snapshot(config_path, self.config.as_deref(), 0o600);
-        let profiles_result = self.profiles.restore(profiles_path);
-        for path in [
-            self.generated_certificate.as_deref(),
-            self.generated_certificate_key.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            if path.exists() {
-                fs::remove_file(path)
-                    .with_context(|| format!("删除回滚凭据 {} 失败", path.display()))?;
-            }
-        }
-        let mut failures = Vec::new();
-        if let Err(error) = state_result {
-            failures.push(format!("状态={error:#}"));
-        }
-        if let Err(error) = config_result {
-            failures.push(format!("聚合配置={error:#}"));
-        }
-        if let Err(error) = profiles_result {
-            failures.push(format!("节点目录={error:#}"));
-        }
-        if failures.is_empty() {
-            Ok(())
-        } else {
-            bail!("恢复受管配置失败：{}", failures.join("；"))
-        }
-    }
-}
-
-impl ProfileDirectorySnapshot {
-    fn capture(path: &Path) -> Result<Self> {
-        let metadata = match fs::symlink_metadata(path) {
-            Ok(metadata) => Some(metadata),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => {
-                return Err(error).with_context(|| format!("读取节点目录 {} 失败", path.display()))
-            }
-        };
-        let Some(metadata) = metadata else {
-            return Ok(Self {
-                existed: false,
-                files: BTreeMap::new(),
-            });
-        };
-        if !metadata.is_dir() || metadata.file_type().is_symlink() {
-            bail!("节点目录不是普通目录：{}", path.display());
-        }
-        let mut files = BTreeMap::new();
-        for entry in
-            fs::read_dir(path).with_context(|| format!("读取节点目录 {} 失败", path.display()))?
-        {
-            let entry = entry?;
-            if !entry.file_type()?.is_file() {
-                bail!(
-                    "节点目录包含链接、目录或特殊文件：{}",
-                    entry.path().display()
-                );
-            }
-            let name = entry
-                .file_name()
-                .into_string()
-                .map_err(|_| anyhow::anyhow!("节点文件名不是 UTF-8：{}", entry.path().display()))?;
-            files.insert(
-                name,
-                fs::read(entry.path())
-                    .with_context(|| format!("读取节点文件 {} 失败", entry.path().display()))?,
-            );
-        }
-        Ok(Self {
-            existed: true,
-            files,
-        })
-    }
-
-    fn restore(self, path: &Path) -> Result<()> {
-        if path.exists() {
-            let metadata = fs::symlink_metadata(path)?;
-            if metadata.is_dir() && !metadata.file_type().is_symlink() {
-                fs::remove_dir_all(path)
-                    .with_context(|| format!("清理节点目录 {} 失败", path.display()))?;
-            } else {
-                fs::remove_file(path)
-                    .with_context(|| format!("清理节点路径 {} 失败", path.display()))?;
-            }
-        }
-        if !self.existed {
-            return Ok(());
-        }
-        utils::ensure_directory(path, 0o700)?;
-        for (name, contents) in self.files {
-            utils::atomic_write(&path.join(name), &contents, 0o600)?;
-        }
-        Ok(())
-    }
-}
-
 #[derive(Clone, Serialize, Deserialize)]
 pub enum Credentials {
     Reality {
@@ -550,14 +416,6 @@ pub enum TlsSecurity {
     },
 }
 
-fn default_h3_alpn() -> Vec<String> {
-    vec!["h3".to_owned()]
-}
-
-fn is_false(value: &bool) -> bool {
-    !*value
-}
-
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ManagedState {
     pub schema_version: u8,
@@ -591,19 +449,7 @@ pub struct ManagedProfile {
 
 impl ManagedProfile {
     pub fn display_name(&self) -> String {
-        let protocol = match self.protocol() {
-            Protocol::Reality => "VLESS-REALITY",
-            Protocol::Hysteria2 => "HYSTERIA2",
-            Protocol::Tuic => "TUIC",
-            Protocol::Shadowsocks => "SHADOWSOCKS",
-            Protocol::AnyTls => "ANYTLS",
-            Protocol::VlessTlsVision => "VLESS-TLS-VISION",
-            Protocol::VlessWsTls => "VLESS-WS-TLS",
-            Protocol::TrojanTls => "TROJAN-TLS",
-            Protocol::TrojanReality => "TROJAN-REALITY",
-            Protocol::VmessWsTls => "VMESS-WS-TLS",
-        };
-        format!("{protocol}-{}", self.port)
+        format!("{}-{}", self.protocol().display_prefix(), self.port)
     }
 
     pub fn config_file_name(&self) -> String {
@@ -676,33 +522,6 @@ impl ManagedProfile {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
-struct ServerConfig {
-    address: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    transport: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    quic_settings: Option<QuicSettings>,
-    protocol: ServerProtocol,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    rules: Vec<ServerRule>,
-}
-
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(untagged)]
-enum ServerRule {
-    Group(String),
-    Inline(ChainRule),
-}
-
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct ChainRule {
-    masks: String,
-    action: String,
-    #[serde(rename = "client_chains", alias = "client_chain")]
-    client_chains: ShoesClientConfig,
-}
-
 fn direct_rules() -> Vec<ServerRule> {
     vec![ServerRule::Group("allow-all-direct".to_owned())]
 }
@@ -761,98 +580,6 @@ fn ensure_chain_proxy_has_no_direct_udp_path(state: &ManagedState) -> Result<()>
         );
     }
     Ok(())
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct QuicSettings {
-    cert: String,
-    key: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    alpn_protocols: Vec<String>,
-    #[serde(default)]
-    num_endpoints: usize,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
-enum ServerProtocol {
-    Tls {
-        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-        tls_targets: BTreeMap<String, TlsTarget>,
-        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-        reality_targets: BTreeMap<String, RealityTarget>,
-    },
-    Hysteria2 {
-        password: String,
-        udp_enabled: bool,
-    },
-    Tuic {
-        uuid: Uuid,
-        password: String,
-        zero_rtt_handshake: bool,
-    },
-    Shadowsocks {
-        cipher: String,
-        password: String,
-        udp_enabled: bool,
-    },
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct TlsTarget {
-    cert: String,
-    key: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    alpn_protocols: Vec<String>,
-    #[serde(default, skip_serializing_if = "is_false")]
-    vision: bool,
-    protocol: InnerProtocol,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct RealityTarget {
-    private_key: String,
-    short_ids: Vec<String>,
-    dest: String,
-    max_time_diff: u64,
-    vision: bool,
-    protocol: InnerProtocol,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
-enum InnerProtocol {
-    Vless {
-        user_id: Uuid,
-        udp_enabled: bool,
-    },
-    #[serde(rename = "anytls")]
-    AnyTls {
-        users: Vec<AnyTlsUser>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        padding_scheme: Option<Vec<String>>,
-        udp_enabled: bool,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        fallback: Option<String>,
-    },
-    Trojan {
-        password: String,
-    },
-    Vmess {
-        cipher: String,
-        user_id: Uuid,
-        udp_enabled: bool,
-    },
-    #[serde(rename = "websocket")]
-    Websocket {
-        targets: Vec<WebsocketTarget>,
-    },
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct WebsocketTarget {
-    matching_path: String,
-    protocol: InnerProtocol,
 }
 
 pub async fn generate(request: GenerationRequest) -> Result<GenerationResult> {
@@ -924,67 +651,15 @@ async fn generate_inner_with_lock(
         .requires_certificate(request.options.anytls_mode);
     let self_signed = request.certificate.is_none() && needs_certificate;
 
-    let (server, credentials, certificate_path, certificate_key_path) = match request.protocol {
-        Protocol::Reality => generate_reality(&request),
-        Protocol::Hysteria2 | Protocol::Tuic => {
-            let (cert, key) = resolve_certificate(&request, parent, profile_id)?;
-            let cert_string = cert.to_string_lossy().into_owned();
-            let key_string = key.to_string_lossy().into_owned();
-            let password = random_secret(24);
-            if matches!(request.protocol, Protocol::Hysteria2) {
-                (
-                    quic_server(
-                        request.port,
-                        &cert_string,
-                        &key_string,
-                        ServerProtocol::Hysteria2 {
-                            password: password.clone(),
-                            udp_enabled: request.options.udp_enabled,
-                        },
-                        request.options.quic_endpoints,
-                    ),
-                    Credentials::Hysteria2 {
-                        password,
-                        server_name: request.server_name.clone(),
-                        alpn_protocols: default_h3_alpn(),
-                    },
-                    Some(cert),
-                    Some(key),
-                )
-            } else {
-                let user_id = Uuid::new_v4();
-                (
-                    quic_server(
-                        request.port,
-                        &cert_string,
-                        &key_string,
-                        ServerProtocol::Tuic {
-                            uuid: user_id,
-                            password: password.clone(),
-                            zero_rtt_handshake: request.options.tuic_zero_rtt,
-                        },
-                        request.options.quic_endpoints,
-                    ),
-                    Credentials::Tuic {
-                        user_id,
-                        password,
-                        server_name: request.server_name.clone(),
-                        alpn_protocols: default_h3_alpn(),
-                        zero_rtt_handshake: request.options.tuic_zero_rtt,
-                    },
-                    Some(cert),
-                    Some(key),
-                )
-            }
-        }
-        Protocol::Shadowsocks => generate_shadowsocks(&request),
-        Protocol::AnyTls => generate_anytls(&request, parent, profile_id)?,
-        Protocol::VlessTlsVision
-        | Protocol::VlessWsTls
-        | Protocol::TrojanTls
-        | Protocol::VmessWsTls => generate_tls_preset(&request, parent, profile_id)?,
-        Protocol::TrojanReality => generate_trojan_reality(&request),
-    };
+    let generation_timer = performance::stage("config_generate");
+    let generated = presets::generate(&request, parent, profile_id)?;
+    drop(generation_timer);
+    let presets::GeneratedPreset {
+        server,
+        credentials,
+        certificate_path,
+        certificate_key_path,
+    } = generated;
 
     let profile = ManagedProfile {
         id: profile_id,
@@ -1491,19 +1166,7 @@ fn validate_profile_name(
 }
 
 fn default_profile_name(protocol: Protocol, id: Uuid) -> String {
-    let protocol = match protocol {
-        Protocol::Reality => "reality",
-        Protocol::Hysteria2 => "hysteria2",
-        Protocol::Tuic => "tuic",
-        Protocol::Shadowsocks => "shadowsocks",
-        Protocol::AnyTls => "anytls",
-        Protocol::VlessTlsVision => "vless-tls-vision",
-        Protocol::VlessWsTls => "vless-ws-tls",
-        Protocol::TrojanTls => "trojan-tls",
-        Protocol::TrojanReality => "trojan-reality",
-        Protocol::VmessWsTls => "vmess-ws-tls",
-    };
-    format!("{protocol}-{}", &id.simple().to_string()[..8])
+    format!("{}-{}", protocol.slug(), &id.simple().to_string()[..8])
 }
 
 fn load_servers(path: &Path) -> Result<Vec<ServerConfig>> {
@@ -1556,17 +1219,6 @@ pub(crate) fn prepare_managed_snapshot(directory: &Path) -> Result<bool> {
     }
     write_profile_documents(&profiles_path, &documents)?;
     Ok(true)
-}
-
-fn profile_documents_are_current(
-    path: &Path,
-    documents: &BTreeMap<String, Vec<u8>>,
-) -> Result<bool> {
-    let snapshot = ProfileDirectorySnapshot::capture(path)?;
-    if !snapshot.existed {
-        return Ok(documents.is_empty());
-    }
-    Ok(snapshot.files == *documents)
 }
 
 fn ensure_servers_match_state(servers: &[ServerConfig], profiles: &[ManagedProfile]) -> Result<()> {
@@ -1785,578 +1437,6 @@ pub(crate) async fn delete_profile_locked(
         rollback: Some(rollback),
         _lock: Some(lock),
     })
-}
-
-fn commit_managed(
-    config_path: &Path,
-    state_path: &Path,
-    servers: &[ServerConfig],
-    state: &ManagedState,
-) -> Result<()> {
-    commit_managed_with_state_writer(
-        config_path,
-        state_path,
-        Path::new(utils::PROFILES_DIR),
-        servers,
-        state,
-        save_state_to,
-    )
-}
-
-fn commit_managed_with_state_writer<F>(
-    config_path: &Path,
-    state_path: &Path,
-    profiles_path: &Path,
-    servers: &[ServerConfig],
-    state: &ManagedState,
-    write_state: F,
-) -> Result<()>
-where
-    F: FnOnce(&Path, &ManagedState) -> Result<()>,
-{
-    let old_config = read_optional(config_path)?;
-    let old_state = read_optional(state_path)?;
-    let old_profiles = ProfileDirectorySnapshot::capture(profiles_path)?;
-    let documents = profile_documents(servers, &state.profiles)?;
-    let aggregate_yaml = aggregate_profile_documents(&documents, &state.profiles)?;
-    let commit = (|| {
-        write_profile_documents(profiles_path, &documents)?;
-        utils::atomic_write(config_path, aggregate_yaml.as_bytes(), 0o600)?;
-        write_state(state_path, state)
-    })();
-    if let Err(error) = commit {
-        let state_rollback = restore_snapshot(state_path, old_state.as_deref(), 0o600);
-        let config_rollback = restore_snapshot(config_path, old_config.as_deref(), 0o600);
-        let profiles_rollback = old_profiles.restore(profiles_path);
-        let mut rollback_failures = Vec::new();
-        if let Err(error) = state_rollback {
-            rollback_failures.push(format!("状态={error:#}"));
-        }
-        if let Err(error) = config_rollback {
-            rollback_failures.push(format!("聚合配置={error:#}"));
-        }
-        if let Err(error) = profiles_rollback {
-            rollback_failures.push(format!("节点目录={error:#}"));
-        }
-        if rollback_failures.is_empty() {
-            return Err(error.context("受管配置提交失败，聚合配置、状态和节点文件已回滚"));
-        }
-        return Err(error.context(format!(
-            "受管配置提交失败且回滚不完整：{}",
-            rollback_failures.join("；")
-        )));
-    }
-    Ok(())
-}
-
-fn profile_documents(
-    servers: &[ServerConfig],
-    profiles: &[ManagedProfile],
-) -> Result<BTreeMap<String, Vec<u8>>> {
-    ensure_servers_match_state(servers, profiles)?;
-    let mut documents = BTreeMap::new();
-    for (server, profile) in servers.iter().zip(profiles) {
-        let name = profile.config_file_name();
-        let yaml =
-            serde_yaml::to_string(server).with_context(|| format!("序列化节点文件 {name} 失败"))?;
-        if documents.insert(name.clone(), yaml.into_bytes()).is_some() {
-            bail!("节点文件名冲突：{name}");
-        }
-    }
-    Ok(documents)
-}
-
-fn aggregate_profile_documents(
-    documents: &BTreeMap<String, Vec<u8>>,
-    profiles: &[ManagedProfile],
-) -> Result<String> {
-    let mut servers = Vec::with_capacity(profiles.len());
-    for profile in profiles {
-        let name = profile.config_file_name();
-        let contents = documents
-            .get(&name)
-            .with_context(|| format!("缺少节点文件 {name}"))?;
-        let server: ServerConfig = serde_yaml::from_slice(contents)
-            .with_context(|| format!("解析节点文件 {name} 失败"))?;
-        servers.push(server);
-    }
-    ensure_servers_match_state(&servers, profiles)?;
-    serde_yaml::to_string(&servers).context("聚合节点配置失败")
-}
-
-fn write_profile_documents(path: &Path, documents: &BTreeMap<String, Vec<u8>>) -> Result<()> {
-    utils::ensure_directory(path, 0o700)?;
-    let mut existing = Vec::new();
-    for entry in fs::read_dir(path)? {
-        let entry = entry?;
-        if !entry.file_type()?.is_file() {
-            bail!(
-                "节点目录包含链接、目录或特殊文件：{}",
-                entry.path().display()
-            );
-        }
-        let name = entry
-            .file_name()
-            .into_string()
-            .map_err(|_| anyhow::anyhow!("节点文件名不是 UTF-8：{}", entry.path().display()))?;
-        if !is_managed_profile_file_name(&name) {
-            bail!("节点目录包含非 ping-rust 文件 {name}，已拒绝覆盖");
-        }
-        existing.push(name);
-    }
-    for (name, contents) in documents {
-        utils::atomic_write(&path.join(name), contents, 0o600)?;
-    }
-    for name in existing {
-        if !documents.contains_key(&name) {
-            fs::remove_file(path.join(&name))
-                .with_context(|| format!("删除旧节点文件 {name} 失败"))?;
-        }
-    }
-    Ok(())
-}
-
-fn is_managed_profile_file_name(name: &str) -> bool {
-    let Some(stem) = name.strip_suffix(".yaml") else {
-        return false;
-    };
-    let prefixes = [
-        "VLESS-REALITY-",
-        "HYSTERIA2-",
-        "TUIC-",
-        "SHADOWSOCKS-",
-        "ANYTLS-",
-        "VLESS-TLS-VISION-",
-        "VLESS-WS-TLS-",
-        "TROJAN-TLS-",
-        "TROJAN-REALITY-",
-        "VMESS-WS-TLS-",
-    ];
-    prefixes.iter().any(|prefix| {
-        stem.strip_prefix(prefix).is_some_and(|value| {
-            value
-                .parse::<u16>()
-                .is_ok_and(|port| port > 0 && port.to_string() == value)
-        })
-    })
-}
-
-fn read_optional(path: &Path) -> Result<Option<Vec<u8>>> {
-    match fs::read(path) {
-        Ok(bytes) => Ok(Some(bytes)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error).with_context(|| format!("读取 {} 失败", path.display())),
-    }
-}
-
-fn restore_snapshot(path: &Path, contents: Option<&[u8]>, mode: u32) -> Result<()> {
-    if let Some(contents) = contents {
-        utils::atomic_write(path, contents, mode)
-    } else if path.exists() {
-        fs::remove_file(path).with_context(|| format!("删除回滚目标 {} 失败", path.display()))
-    } else {
-        Ok(())
-    }
-}
-
-struct CredentialCleanup {
-    paths: Vec<PathBuf>,
-    armed: bool,
-}
-
-impl CredentialCleanup {
-    fn new(self_signed: bool, cert: Option<&Path>, key: Option<&Path>) -> Self {
-        let paths = if self_signed {
-            [cert, key]
-                .into_iter()
-                .flatten()
-                .map(Path::to_path_buf)
-                .collect()
-        } else {
-            Vec::new()
-        };
-        Self { paths, armed: true }
-    }
-
-    fn disarm(&mut self) {
-        self.armed = false;
-    }
-}
-
-impl Drop for CredentialCleanup {
-    fn drop(&mut self) {
-        if self.armed {
-            for path in &self.paths {
-                let _ = fs::remove_file(path);
-            }
-        }
-    }
-}
-
-fn remove_managed_credential(path: Option<&Path>) -> Result<()> {
-    let Some(path) = path else { return Ok(()) };
-    if !path.starts_with(Path::new(utils::CONFIG_DIR)) {
-        bail!("拒绝删除配置目录之外的凭据文件 {}", path.display());
-    }
-    if path.is_file() {
-        std::fs::remove_file(path)
-            .with_context(|| format!("删除凭据文件 {} 失败", path.display()))?;
-    }
-    Ok(())
-}
-
-fn generate_reality(
-    request: &GenerationRequest,
-) -> (ServerConfig, Credentials, Option<PathBuf>, Option<PathBuf>) {
-    let keypair = generate_reality_keypair();
-    let short_id = request
-        .options
-        .reality_short_id
-        .clone()
-        .unwrap_or_else(|| random_hex(8));
-    let user_id = Uuid::new_v4();
-    let destination = request
-        .reality_dest
-        .clone()
-        .unwrap_or_else(|| format!("{}:443", request.server_name));
-    let target = RealityTarget {
-        private_key: keypair.private_key.clone(),
-        short_ids: vec![short_id.clone()],
-        dest: destination,
-        max_time_diff: request.options.reality_max_time_diff,
-        vision: true,
-        protocol: InnerProtocol::Vless {
-            user_id,
-            udp_enabled: request.options.udp_enabled,
-        },
-    };
-    let mut targets = BTreeMap::new();
-    targets.insert(request.server_name.clone(), target);
-
-    (
-        ServerConfig {
-            address: format!("0.0.0.0:{}", request.port),
-            transport: None,
-            quic_settings: None,
-            protocol: ServerProtocol::Tls {
-                tls_targets: BTreeMap::new(),
-                reality_targets: targets,
-            },
-            rules: Vec::new(),
-        },
-        Credentials::Reality {
-            user_id,
-            private_key: keypair.private_key,
-            public_key: keypair.public_key,
-            short_id,
-            server_name: request.server_name.clone(),
-        },
-        None,
-        None,
-    )
-}
-
-fn generate_shadowsocks(
-    request: &GenerationRequest,
-) -> (ServerConfig, Credentials, Option<PathBuf>, Option<PathBuf>) {
-    let cipher = request.options.shadowsocks_cipher;
-    let password = request
-        .options
-        .shadowsocks_password
-        .clone()
-        .unwrap_or_else(|| generate_shadowsocks_password(cipher));
-    (
-        ServerConfig {
-            address: format!("0.0.0.0:{}", request.port),
-            transport: None,
-            quic_settings: None,
-            protocol: ServerProtocol::Shadowsocks {
-                cipher: cipher.as_str().to_owned(),
-                password: password.clone(),
-                udp_enabled: request.options.udp_enabled,
-            },
-            rules: direct_rules(),
-        },
-        Credentials::Shadowsocks {
-            cipher,
-            password,
-            udp_enabled: request.options.udp_enabled,
-        },
-        None,
-        None,
-    )
-}
-
-fn generate_anytls(
-    request: &GenerationRequest,
-    parent: &Path,
-    profile_id: Uuid,
-) -> Result<(ServerConfig, Credentials, Option<PathBuf>, Option<PathBuf>)> {
-    let inner = InnerProtocol::AnyTls {
-        users: request.options.anytls_users.clone(),
-        padding_scheme: request.options.anytls_padding_scheme.clone(),
-        udp_enabled: request.options.udp_enabled,
-        fallback: request.options.anytls_fallback.clone(),
-    };
-    let mut tls_targets = BTreeMap::new();
-    let mut reality_targets = BTreeMap::new();
-
-    let (security, cert, key) = match request.options.anytls_mode {
-        AnyTlsMode::Tls => {
-            let (cert, key) = resolve_certificate(request, parent, profile_id)?;
-            tls_targets.insert(
-                request.server_name.clone(),
-                TlsTarget {
-                    cert: cert.to_string_lossy().into_owned(),
-                    key: key.to_string_lossy().into_owned(),
-                    alpn_protocols: vec!["h2".to_owned(), "http/1.1".to_owned()],
-                    vision: false,
-                    protocol: inner,
-                },
-            );
-            (AnyTlsSecurity::Tls, Some(cert), Some(key))
-        }
-        AnyTlsMode::Reality => {
-            let keypair = generate_reality_keypair();
-            let short_id = request
-                .options
-                .reality_short_id
-                .clone()
-                .unwrap_or_else(|| random_hex(8));
-            reality_targets.insert(
-                request.server_name.clone(),
-                RealityTarget {
-                    private_key: keypair.private_key.clone(),
-                    short_ids: vec![short_id.clone()],
-                    dest: request
-                        .reality_dest
-                        .clone()
-                        .unwrap_or_else(|| format!("{}:443", request.server_name)),
-                    max_time_diff: request.options.reality_max_time_diff,
-                    vision: false,
-                    protocol: inner,
-                },
-            );
-            (
-                AnyTlsSecurity::Reality {
-                    private_key: keypair.private_key,
-                    public_key: keypair.public_key,
-                    short_id,
-                },
-                None,
-                None,
-            )
-        }
-    };
-
-    Ok((
-        ServerConfig {
-            address: format!("0.0.0.0:{}", request.port),
-            transport: None,
-            quic_settings: None,
-            protocol: ServerProtocol::Tls {
-                tls_targets,
-                reality_targets,
-            },
-            rules: Vec::new(),
-        },
-        Credentials::AnyTls {
-            users: request.options.anytls_users.clone(),
-            server_name: request.server_name.clone(),
-            alpn_protocols: vec!["h2".to_owned(), "http/1.1".to_owned()],
-            udp_enabled: request.options.udp_enabled,
-            security,
-        },
-        cert,
-        key,
-    ))
-}
-
-fn generate_tls_preset(
-    request: &GenerationRequest,
-    parent: &Path,
-    profile_id: Uuid,
-) -> Result<(ServerConfig, Credentials, Option<PathBuf>, Option<PathBuf>)> {
-    let (cert, key) = resolve_certificate(request, parent, profile_id)?;
-    let alpn_protocols = if request.protocol.uses_websocket() {
-        vec!["http/1.1".to_owned()]
-    } else {
-        vec!["h2".to_owned(), "http/1.1".to_owned()]
-    };
-    let user_id = Uuid::new_v4();
-    let websocket_path = request.protocol.uses_websocket().then(|| {
-        request
-            .options
-            .websocket_path
-            .clone()
-            .unwrap_or_else(generated_websocket_path)
-    });
-
-    let (inner, credentials, vision) = match request.protocol {
-        Protocol::VlessTlsVision => (
-            InnerProtocol::Vless {
-                user_id,
-                udp_enabled: request.options.udp_enabled,
-            },
-            Credentials::VlessTls {
-                user_id,
-                server_name: request.server_name.clone(),
-                alpn_protocols: alpn_protocols.clone(),
-                vision: true,
-                websocket_path: None,
-            },
-            true,
-        ),
-        Protocol::VlessWsTls => {
-            let path = websocket_path
-                .clone()
-                .context("VLESS-WS-TLS 缺少 WebSocket 路径")?;
-            (
-                websocket_protocol(
-                    path.clone(),
-                    InnerProtocol::Vless {
-                        user_id,
-                        udp_enabled: request.options.udp_enabled,
-                    },
-                ),
-                Credentials::VlessTls {
-                    user_id,
-                    server_name: request.server_name.clone(),
-                    alpn_protocols: alpn_protocols.clone(),
-                    vision: false,
-                    websocket_path: Some(path),
-                },
-                false,
-            )
-        }
-        Protocol::TrojanTls => {
-            let password = generated_password();
-            (
-                InnerProtocol::Trojan {
-                    password: password.clone(),
-                },
-                Credentials::Trojan {
-                    password,
-                    server_name: request.server_name.clone(),
-                    alpn_protocols: alpn_protocols.clone(),
-                    security: TlsSecurity::Tls,
-                },
-                false,
-            )
-        }
-        Protocol::VmessWsTls => {
-            let path = websocket_path
-                .clone()
-                .context("VMess-WS-TLS 缺少 WebSocket 路径")?;
-            (
-                websocket_protocol(
-                    path.clone(),
-                    InnerProtocol::Vmess {
-                        cipher: "any".to_owned(),
-                        user_id,
-                        udp_enabled: request.options.udp_enabled,
-                    },
-                ),
-                Credentials::VmessTls {
-                    user_id,
-                    server_name: request.server_name.clone(),
-                    alpn_protocols: alpn_protocols.clone(),
-                    websocket_path: path,
-                },
-                false,
-            )
-        }
-        _ => bail!("内部错误：协议不是 TLS 预设"),
-    };
-
-    let mut tls_targets = BTreeMap::new();
-    tls_targets.insert(
-        request.server_name.clone(),
-        TlsTarget {
-            cert: cert.to_string_lossy().into_owned(),
-            key: key.to_string_lossy().into_owned(),
-            alpn_protocols,
-            vision,
-            protocol: inner,
-        },
-    );
-    Ok((
-        ServerConfig {
-            address: format!("0.0.0.0:{}", request.port),
-            transport: None,
-            quic_settings: None,
-            protocol: ServerProtocol::Tls {
-                tls_targets,
-                reality_targets: BTreeMap::new(),
-            },
-            rules: Vec::new(),
-        },
-        credentials,
-        Some(cert),
-        Some(key),
-    ))
-}
-
-fn generate_trojan_reality(
-    request: &GenerationRequest,
-) -> (ServerConfig, Credentials, Option<PathBuf>, Option<PathBuf>) {
-    let keypair = generate_reality_keypair();
-    let short_id = request
-        .options
-        .reality_short_id
-        .clone()
-        .unwrap_or_else(|| random_hex(8));
-    let password = generated_password();
-    let mut targets = BTreeMap::new();
-    targets.insert(
-        request.server_name.clone(),
-        RealityTarget {
-            private_key: keypair.private_key.clone(),
-            short_ids: vec![short_id.clone()],
-            dest: request
-                .reality_dest
-                .clone()
-                .unwrap_or_else(|| format!("{}:443", request.server_name)),
-            max_time_diff: request.options.reality_max_time_diff,
-            vision: false,
-            protocol: InnerProtocol::Trojan {
-                password: password.clone(),
-            },
-        },
-    );
-    (
-        ServerConfig {
-            address: format!("0.0.0.0:{}", request.port),
-            transport: None,
-            quic_settings: None,
-            protocol: ServerProtocol::Tls {
-                tls_targets: BTreeMap::new(),
-                reality_targets: targets,
-            },
-            rules: Vec::new(),
-        },
-        Credentials::Trojan {
-            password,
-            server_name: request.server_name.clone(),
-            alpn_protocols: Vec::new(),
-            security: TlsSecurity::Reality {
-                private_key: keypair.private_key,
-                public_key: keypair.public_key,
-                short_id,
-            },
-        },
-        None,
-        None,
-    )
-}
-
-fn websocket_protocol(path: String, protocol: InnerProtocol) -> InnerProtocol {
-    InnerProtocol::Websocket {
-        targets: vec![WebsocketTarget {
-            matching_path: path,
-            protocol,
-        }],
-    }
 }
 
 pub fn generated_websocket_path() -> String {
@@ -2597,6 +1677,7 @@ pub async fn validate_with_shoes(config_path: &Path) -> Result<()> {
 }
 
 pub(crate) async fn validate_with_binary(binary: &Path, config_path: &Path) -> Result<()> {
+    let _timer = performance::stage("shoes_dry_run");
     if !binary.is_file() {
         bail!("shoes 尚未安装，无法执行 --dry-run 验证");
     }
@@ -2632,6 +1713,40 @@ mod tests {
             certificate_key: None,
             options: GenerationOptions::default(),
         }
+    }
+
+    fn generate_parts(
+        request: &GenerationRequest,
+        parent: &Path,
+        profile_id: Uuid,
+    ) -> Result<(ServerConfig, Credentials, Option<PathBuf>, Option<PathBuf>)> {
+        let generated = presets::generate(request, parent, profile_id)?;
+        Ok((
+            generated.server,
+            generated.credentials,
+            generated.certificate_path,
+            generated.certificate_key_path,
+        ))
+    }
+
+    fn generate_reality(
+        request: &GenerationRequest,
+    ) -> (ServerConfig, Credentials, Option<PathBuf>, Option<PathBuf>) {
+        generate_parts(request, Path::new("."), Uuid::nil()).unwrap()
+    }
+
+    fn generate_shadowsocks(
+        request: &GenerationRequest,
+    ) -> (ServerConfig, Credentials, Option<PathBuf>, Option<PathBuf>) {
+        generate_parts(request, Path::new("."), Uuid::nil()).unwrap()
+    }
+
+    fn generate_anytls(
+        request: &GenerationRequest,
+        parent: &Path,
+        profile_id: Uuid,
+    ) -> Result<(ServerConfig, Credentials, Option<PathBuf>, Option<PathBuf>)> {
+        generate_parts(request, parent, profile_id)
     }
 
     #[test]
@@ -3025,6 +2140,62 @@ mod tests {
             serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
         assert_eq!(round_trip.schema_version, 2);
         assert_eq!(round_trip.profiles.len(), 5);
+    }
+
+    #[test]
+    fn every_registered_protocol_supports_base_changes_and_credential_regeneration() {
+        let directory = tempfile::tempdir().unwrap();
+
+        for protocol in Protocol::all() {
+            let profile_id = Uuid::new_v4();
+            let mut request = request(protocol, directory.path().join("unused.yaml"));
+            if protocol == Protocol::AnyTls {
+                request.options.anytls_users = vec![generated_anytls_user("default")];
+            }
+            let generated = presets::generate(&request, directory.path(), profile_id).unwrap();
+            let mut server = generated.server;
+            let mut profile = ManagedProfile {
+                id: profile_id,
+                name: format!("{}-test", protocol.slug()),
+                port: request.port,
+                server_address: None,
+                credentials: generated.credentials,
+                certificate_path: generated.certificate_path,
+                certificate_key_path: generated.certificate_key_path,
+                self_signed_certificate: protocol.requires_certificate(request.options.anytls_mode),
+            };
+            let credentials_before = serde_json::to_vec(&profile.credentials).unwrap();
+
+            apply_profile_change(
+                &mut server,
+                &mut profile,
+                ProfileChange::RegenerateCredentials,
+            )
+            .unwrap();
+            apply_profile_change(&mut server, &mut profile, ProfileChange::Port(1443)).unwrap();
+            apply_profile_change(
+                &mut server,
+                &mut profile,
+                ProfileChange::Name("changed-name".to_owned()),
+            )
+            .unwrap();
+            apply_profile_change(
+                &mut server,
+                &mut profile,
+                ProfileChange::ServerAddress(Some("203.0.113.20".to_owned())),
+            )
+            .unwrap();
+
+            assert_ne!(
+                serde_json::to_vec(&profile.credentials).unwrap(),
+                credentials_before,
+                "{protocol:?} credentials were not regenerated"
+            );
+            assert_eq!(profile.port, 1443);
+            assert_eq!(profile.name, "changed-name");
+            assert_eq!(profile.server_address.as_deref(), Some("203.0.113.20"));
+            ensure_servers_match_state(&[server], &[profile]).unwrap();
+        }
     }
 
     #[test]

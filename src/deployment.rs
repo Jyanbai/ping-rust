@@ -5,7 +5,7 @@ use anyhow::{bail, Result};
 use crate::{
     chain_proxy::ChainProxyChange,
     config::{self, GenerationRequest, GenerationResult, ProfileChange},
-    service, utils,
+    performance, service, utils,
 };
 use uuid::Uuid;
 
@@ -42,6 +42,7 @@ pub async fn generate_and_activate(request: GenerationRequest) -> Result<Generat
     let service_snapshot = service::capture_snapshot()?;
     let mut result = config::generate_locked(request, lock).await?;
     if let Err(activation) = service::activate_and_verify() {
+        let _rollback_timer = performance::stage("rollback_restore");
         let config_rollback = result.rollback_managed();
         let service_rollback = service::restore_snapshot(service_snapshot);
         let message = match (config_rollback, service_rollback) {
@@ -69,6 +70,7 @@ pub async fn update_and_activate(id: Uuid, change: ProfileChange) -> Result<Gene
     let service_snapshot = service::capture_snapshot()?;
     let mut result = config::update_profile_locked(id, change, lock).await?;
     if let Err(activation) = service::activate_and_verify() {
+        let _rollback_timer = performance::stage("rollback_restore");
         let config_rollback = result.rollback_managed();
         let service_rollback = service::restore_snapshot(service_snapshot);
         return match (config_rollback, service_rollback) {
@@ -103,6 +105,7 @@ pub async fn delete_and_activate(id: Uuid) -> Result<config::ManagedProfile> {
         service::activate_and_verify()
     };
     if let Err(activation) = activation {
+        let _rollback_timer = performance::stage("rollback_restore");
         let config_rollback = result.rollback_managed();
         let service_rollback = service::restore_snapshot(service_snapshot);
         return match (config_rollback, service_rollback) {
@@ -130,6 +133,7 @@ pub async fn update_chain_proxy(change: ChainProxyChange) -> Result<config::Mana
     let mut result = config::update_chain_proxy_locked(change, lock).await?;
     if result.configuration_changed && result.profiles_count > 0 {
         if let Err(activation) = service::activate_and_verify() {
+            let _rollback_timer = performance::stage("rollback_restore");
             let config_rollback = result.rollback_managed();
             let service_rollback = service::restore_snapshot(service_snapshot);
             return match (config_rollback, service_rollback) {

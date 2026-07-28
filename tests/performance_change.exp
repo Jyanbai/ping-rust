@@ -1,0 +1,51 @@
+#!/usr/bin/expect -f
+
+set timeout 60
+log_user 0
+
+if {$argc != 3} {
+    puts stderr "usage: performance_change.exp <ping-rust> <stage-report> <resource-report>"
+    exit 2
+}
+
+set binary [lindex $argv 0]
+set stage_report [lindex $argv 1]
+set resource_report [lindex $argv 2]
+
+proc expect_or_fail {pattern stage} {
+    expect {
+        -re $pattern { return }
+        eof {
+            puts stderr "performance change ended during $stage"
+            exit 1
+        }
+        timeout {
+            puts stderr "performance change timed out during $stage"
+            exit 1
+        }
+    }
+}
+
+proc send_choice {value} {
+    send -- "$value\r"
+}
+
+spawn env \
+    PING_RUST_PERFORMANCE_REPORT=$stage_report \
+    PING_RUST_PERFORMANCE_SCENARIO=config_update \
+    /usr/bin/time \
+    -f {scenario=config_update elapsed_seconds=%e max_rss_kib=%M exit_status=%x} \
+    -a -o $resource_report \
+    $binary
+
+expect_or_fail {请选择 \[0-10\]} "main menu"
+send_choice 2
+expect_or_fail {选择更改项目} "change menu"
+send_choice 1
+expect_or_fail {输入新端口} "port prompt"
+send_choice ""
+expect_or_fail {配置更改成功} "change result"
+expect_or_fail {请选择 \[0-10\]} "return to main menu"
+send_choice 0
+expect_or_fail {已退出} "program exit"
+expect eof

@@ -424,8 +424,8 @@ sudo /usr/local/bin/shoes --dry-run /etc/shoes/config.yaml
 
 ```bash
 cargo fmt --all -- --check
-cargo test
-cargo clippy --all-targets -- -D warnings
+cargo test --locked --all-targets
+cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo build --release
 cargo doc --no-deps
 ```
@@ -438,7 +438,15 @@ cargo doc --no-deps
 - 通过 cargo-zigbuild + Zig 生成 x86_64/aarch64 Linux GNU release ELF，最高 GLIBC 需求为 2.34，覆盖 Rocky/Alma 9 及更新的目标发行版基线。
 - CI 覆盖 Ubuntu 22.04/24.04，并在 Debian 12、Rocky Linux 9、AlmaLinux 9 容器中执行锁定依赖测试和 release 构建；shoes schema 作业实际启动十协议聚合监听。Ubuntu 24.04 acceptance 覆盖完整 root/systemd/PTY/回滚/导出流程，Debian 12 systemd acceptance 同时覆盖零输入部署、严格 `--plain` 输出、多用户 AnyTLS 无损导出拒绝、激活失败回滚和加固 unit 启动。
 - 独立链式代理验收在 Ubuntu 24.04 主机和 Debian 12 特权 systemd 容器中运行，使用真实 PTY 菜单、两条隔离 Shadowsocks 出口和 HTTP 源地址核验覆盖完整生命周期与无直连回退。
-- 使用 RustSec `cargo audit` 扫描锁定依赖，当前未报告安全公告。
+- 独立 `security-audit.yml` 固定 `cargo-audit 0.22.2`，每周、手动以及
+  `Cargo.toml`/`Cargo.lock` 变更时扫描提交的锁定依赖，并对漏洞、unmaintained、unsound
+  或 yanked warning fail-closed。当前本地扫描未报告安全公告。
+- 独立、非发布阻塞的 `performance-baseline.yml` 每周或手动在 Ubuntu 24.04 主机与
+  Debian 12 特权 systemd 容器中测量 Stage-0 安装、冷安装、配置修改、热添加和激活失败
+  回滚，记录总耗时、峰值 RSS、受管文件磁盘占用及下载、生成、真实
+  `shoes --dry-run`、提交、systemd 激活等分阶段耗时。报告只包含环境与数值，不记录公网
+  地址、UUID、密码、私钥或分享链接。共享 runner 与网络抖动较大，因此当前只建立可比较
+  基线，不宣称任意 VPS 都能满足固定五秒 SLA，也不会为加速而跳过生产 dry-run。
 - 在一台干净代理环境的 Debian 12 x86_64 VPS 上完成原生安装与运行验收：Release 路径约 2 秒完成 shoes v0.2.7 musl 安装，三协议同时通过 dry-run 并由 systemd 启动，外部 Reality 客户端的代理出口与 VPS 公网 IP 一致。
 - 实机完成 9 份客户端导出解析、BBR、端口检查、日志、备份恢复、inactive 状态保持和 Release 更新；详细证据见完成度审计。
 - 在 Ubuntu 24.04.3 x86_64 VPS 上从干净基线完成 crates.io、Git 固定提交与一键 Release 三种安装入口；Reality 从 shoes 安装到 systemd active/listening 用时约 2 秒，三协议、9 份客户端导出、备份恢复、更新、数字菜单、逐配置删除和卸载均通过。
@@ -479,6 +487,14 @@ ping-rust/
 │   ├── menu.rs
 │   ├── installer.rs
 │   ├── config.rs
+│   ├── config/
+│   │   ├── presets.rs
+│   │   ├── presets/       # 十种成品协议各自的服务端与凭据生成
+│   │   ├── schema.rs      # shoes YAML schema
+│   │   ├── validation.rs
+│   │   ├── transaction.rs # 配置、状态、节点与凭据回滚
+│   │   └── commit.rs      # 节点聚合与原子提交
+│   ├── performance.rs     # opt-in 无敏感信息阶段计时
 │   ├── service.rs
 │   ├── client.rs
 │   ├── operations.rs

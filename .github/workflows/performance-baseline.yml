@@ -1,0 +1,347 @@
+name: Linux performance and reliability baseline
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 5 * * 0"
+  push:
+    paths:
+      - .github/workflows/performance-baseline.yml
+      - src/config.rs
+      - src/config/**
+      - src/deployment.rs
+      - src/installer.rs
+      - src/performance.rs
+      - src/service.rs
+      - tests/performance_baseline.rs
+      - tests/performance_change.exp
+
+permissions:
+  contents: read
+
+concurrency:
+  group: performance-baseline-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  ubuntu-24-04:
+    name: Ubuntu 24.04 baseline
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Install measurement dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends expect time
+
+      - name: Build current binary and Rust baseline runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --release
+          cargo test --locked --test performance_baseline --no-run
+          runner="$(
+            find target/debug/deps -maxdepth 1 -type f \
+              -name 'performance_baseline-*' -perm -111 -print -quit
+          )"
+          test -n "$runner"
+          {
+            printf 'PERFORMANCE_RUNNER=%s\n' "$(realpath "$runner")"
+            printf 'PING_RUST_BIN=%s\n' "$(realpath target/release/ping-rust)"
+            printf 'PERFORMANCE_OUTPUT=%s\n' "$RUNNER_TEMP/performance-ubuntu"
+          } >> "$GITHUB_ENV"
+
+      - name: Measure cold install, update, warm add and rollback
+        shell: bash
+        run: |
+          set -euo pipefail
+          test ! -e /usr/local/bin/shoes
+          test ! -e /etc/shoes
+          test ! -e /etc/systemd/system/shoes.service
+          sudo env \
+            PING_RUST_PERFORMANCE_E2E=1 \
+            PING_RUST_PERFORMANCE_BIN="$PING_RUST_BIN" \
+            PING_RUST_PERFORMANCE_EXPECT="$GITHUB_WORKSPACE/tests/performance_change.exp" \
+            PING_RUST_PERFORMANCE_OUTPUT="$PERFORMANCE_OUTPUT" \
+            "$PERFORMANCE_RUNNER" \
+            --ignored --nocapture --exact performance_and_reliability_baseline
+
+      - name: Measure verified Stage-0 manager installation
+        shell: bash
+        run: |
+          set -euo pipefail
+          asset_root="$RUNNER_TEMP/performance-stage0-assets"
+          package_root="$RUNNER_TEMP/performance-stage0-package"
+          install_root="$RUNNER_TEMP/performance-stage0-install"
+          mkdir -p "$asset_root" "$package_root"
+          cp "$PING_RUST_BIN" "$package_root/ping-rust"
+          tar -czf \
+            "$asset_root/ping-rust-x86_64-unknown-linux-musl.tar.gz" \
+            -C "$package_root" ping-rust
+          (
+            cd "$asset_root"
+            sha256sum ping-rust-x86_64-unknown-linux-musl.tar.gz > SHA256SUMS
+          )
+          curl() {
+            local url=""
+            while [[ "$#" -gt 0 ]]; do
+              case "$1" in
+                --max-filesize | --retry | --retry-delay | --proto) shift 2 ;;
+                --tlsv1.2 | --fail | --location | --silent | --show-error) shift ;;
+                *) url="$1"; shift ;;
+              esac
+            done
+            test -n "$url"
+            cat "$asset_root/${url##*/}"
+          }
+          export -f curl
+          export asset_root
+          stage0_report="$RUNNER_TEMP/performance-stage0.txt"
+          /usr/bin/time \
+            -f 'scenario=manager_install elapsed_seconds=%e max_rss_kib=%M exit_status=%x' \
+            -o "$stage0_report" \
+            bash scripts/install.sh \
+              --version "v$(awk -F '\"' '/^version = / { print $2; exit }' Cargo.toml)" \
+              --install-dir "$install_root" \
+              --quiet \
+              --no-bootstrap
+          test "$("$install_root/ping-rust" --version)" = "$("$PING_RUST_BIN" --version)"
+          printf 'scenario=manager_install installed_bytes=%s\n' \
+            "$(stat -c%s "$install_root/ping-rust")" >> "$stage0_report"
+          cat "$stage0_report" \
+            | sudo tee -a "$PERFORMANCE_OUTPUT/resources.txt" >/dev/null
+          sudo chown -R "$(id -u):$(id -g)" "$PERFORMANCE_OUTPUT"
+
+      - name: Validate and summarize report
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          output = Path(os.environ["PERFORMANCE_OUTPUT"])
+          environment = json.loads((output / "environment.json").read_text())
+          stages = [
+              json.loads(line)
+              for line in (output / "stages.jsonl").read_text().splitlines()
+              if line.strip()
+          ]
+          resources = (output / "resources.txt").read_text()
+          assert environment["distro_id"] == "ubuntu"
+          assert environment["distro_version"] == "24.04"
+          assert stages
+          for scenario in ("manager_install", "cold_install", "config_update", "warm_add", "rollback"):
+              assert f"scenario={scenario} " in resources
+          forbidden = ("vless://", "ss://", "private_key", "password", "user_id")
+          combined = json.dumps(stages) + resources
+          assert not any(value in combined for value in forbidden)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write("### Ubuntu 24.04 performance baseline\n\n")
+              summary.write(f"- Stage records: {len(stages)}\n")
+              summary.write("- Scenarios: manager install, cold install, config update, warm add, rollback\n")
+              summary.write("- Result: reliability assertions passed; metrics uploaded without credentials\n")
+          PY
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: performance-ubuntu-24.04
+          path: ${{ env.PERFORMANCE_OUTPUT }}
+          if-no-files-found: error
+          retention-days: 30
+
+  debian-12:
+    name: Debian 12 baseline
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Build and start clean Debian 12 systemd container
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build --tag ping-rust-performance-debian - <<'DOCKERFILE'
+          FROM debian:12
+          ENV container=docker
+          ENV PATH=/root/.cargo/bin:${PATH}
+          RUN apt-get update \
+              && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+                build-essential ca-certificates curl dbus expect git gzip iproute2 \
+                pkg-config procps systemd systemd-sysv tar time xz-utils \
+              && rm -rf /var/lib/apt/lists/*
+          RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --profile minimal
+          RUN systemd-machine-id-setup
+          STOPSIGNAL SIGRTMIN+3
+          CMD ["/sbin/init"]
+          DOCKERFILE
+          docker run --detach \
+            --name ping-rust-performance-debian \
+            --privileged \
+            --cgroupns=host \
+            --tmpfs /run \
+            --tmpfs /run/lock \
+            --volume /sys/fs/cgroup:/sys/fs/cgroup:rw \
+            --volume "$GITHUB_WORKSPACE:/workspace:ro" \
+            ping-rust-performance-debian
+          for _ in $(seq 1 30); do
+            docker exec ping-rust-performance-debian test -S /run/systemd/private && break
+            sleep 1
+          done
+          docker exec ping-rust-performance-debian test -S /run/systemd/private
+
+      - name: Build current binary and baseline runner in Debian
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker exec \
+            --env CARGO_TARGET_DIR=/tmp/ping-rust-target \
+            ping-rust-performance-debian \
+            cargo install --path /workspace --locked --root /opt/ping-rust-current
+          docker exec \
+            --env CARGO_TARGET_DIR=/tmp/ping-rust-target \
+            ping-rust-performance-debian \
+            cargo test --manifest-path /workspace/Cargo.toml \
+              --locked --test performance_baseline --no-run
+          docker exec ping-rust-performance-debian bash -lc '
+            set -euo pipefail
+            runner="$(
+              find /tmp/ping-rust-target/debug/deps -maxdepth 1 -type f \
+                -name "performance_baseline-*" -perm -111 -print -quit
+            )"
+            test -n "$runner"
+            printf "%s\n" "$runner" >/tmp/performance-runner-path
+          '
+
+      - name: Measure Debian cold install, update, warm add and rollback
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker exec ping-rust-performance-debian bash -lc '
+            set -euo pipefail
+            runner="$(cat /tmp/performance-runner-path)"
+            test ! -e /usr/local/bin/shoes
+            test ! -e /etc/shoes
+            test ! -e /etc/systemd/system/shoes.service
+            env \
+              PING_RUST_PERFORMANCE_E2E=1 \
+              PING_RUST_PERFORMANCE_BIN=/opt/ping-rust-current/bin/ping-rust \
+              PING_RUST_PERFORMANCE_EXPECT=/workspace/tests/performance_change.exp \
+              PING_RUST_PERFORMANCE_OUTPUT=/tmp/performance-debian \
+              "$runner" \
+              --ignored --nocapture --exact performance_and_reliability_baseline
+          '
+
+      - name: Measure Debian verified Stage-0 manager installation
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker exec ping-rust-performance-debian bash -lc '
+            set -euo pipefail
+            asset_root=/tmp/performance-stage0-assets
+            package_root=/tmp/performance-stage0-package
+            install_root=/opt/performance-stage0-install
+            mkdir -p "$asset_root" "$package_root"
+            cp /opt/ping-rust-current/bin/ping-rust "$package_root/ping-rust"
+            tar -czf \
+              "$asset_root/ping-rust-x86_64-unknown-linux-musl.tar.gz" \
+              -C "$package_root" ping-rust
+            (
+              cd "$asset_root"
+              sha256sum ping-rust-x86_64-unknown-linux-musl.tar.gz > SHA256SUMS
+            )
+            curl() {
+              local url=""
+              while [[ "$#" -gt 0 ]]; do
+                case "$1" in
+                  --max-filesize | --retry | --retry-delay | --proto) shift 2 ;;
+                  --tlsv1.2 | --fail | --location | --silent | --show-error) shift ;;
+                  *) url="$1"; shift ;;
+                esac
+              done
+              test -n "$url"
+              cat "$asset_root/${url##*/}"
+            }
+            export -f curl
+            export asset_root
+            /usr/bin/time \
+              -f "scenario=manager_install elapsed_seconds=%e max_rss_kib=%M exit_status=%x" \
+              -o /tmp/performance-stage0.txt \
+              bash /workspace/scripts/install.sh \
+                --version "v$(awk -F "\"" "/^version = / { print \$2; exit }" /workspace/Cargo.toml)" \
+                --install-dir "$install_root" \
+                --quiet \
+                --no-bootstrap
+            test "$("$install_root/ping-rust" --version)" \
+              = "$(/opt/ping-rust-current/bin/ping-rust --version)"
+            printf "scenario=manager_install installed_bytes=%s\n" \
+              "$(stat -c%s "$install_root/ping-rust")" >> /tmp/performance-stage0.txt
+            cat /tmp/performance-stage0.txt >> /tmp/performance-debian/resources.txt
+          '
+
+      - name: Copy, validate and summarize Debian report
+        shell: bash
+        run: |
+          set -euo pipefail
+          output="$RUNNER_TEMP/performance-debian"
+          docker cp ping-rust-performance-debian:/tmp/performance-debian "$output"
+          sudo chown -R "$(id -u):$(id -g)" "$output"
+          python3 - "$output" <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import sys
+
+          output = Path(sys.argv[1])
+          environment = json.loads((output / "environment.json").read_text())
+          stages = [
+              json.loads(line)
+              for line in (output / "stages.jsonl").read_text().splitlines()
+              if line.strip()
+          ]
+          resources = (output / "resources.txt").read_text()
+          assert environment["distro_id"] == "debian"
+          assert environment["distro_version"] == "12"
+          assert stages
+          for scenario in ("manager_install", "cold_install", "config_update", "warm_add", "rollback"):
+              assert f"scenario={scenario} " in resources
+          forbidden = ("vless://", "ss://", "private_key", "password", "user_id")
+          combined = json.dumps(stages) + resources
+          assert not any(value in combined for value in forbidden)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write("### Debian 12 performance baseline\n\n")
+              summary.write(f"- Stage records: {len(stages)}\n")
+              summary.write("- Scenarios: manager install, cold install, config update, warm add, rollback\n")
+              summary.write("- Result: reliability assertions passed; metrics uploaded without credentials\n")
+          PY
+          printf 'DEBIAN_PERFORMANCE_OUTPUT=%s\n' "$output" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: performance-debian-12
+          path: ${{ env.DEBIAN_PERFORMANCE_OUTPUT }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Collect Debian diagnostics
+        if: failure()
+        shell: bash
+        run: |
+          docker exec ping-rust-performance-debian systemctl status shoes.service --no-pager || true
+          docker exec ping-rust-performance-debian journalctl -u shoes.service --no-pager -n 100 || true
+          docker logs ping-rust-performance-debian || true
+
+      - name: Remove Debian test container
+        if: always()
+        shell: bash
+        run: docker rm --force ping-rust-performance-debian 2>/dev/null || true

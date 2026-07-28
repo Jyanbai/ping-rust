@@ -1,0 +1,53 @@
+name: Rust dependency security audit
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "29 4 * * 1"
+  push:
+    paths:
+      - Cargo.lock
+      - Cargo.toml
+      - .github/workflows/security-audit.yml
+  pull_request:
+    paths:
+      - Cargo.lock
+      - Cargo.toml
+      - .github/workflows/security-audit.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-audit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rustsec:
+    name: Cargo.lock / RustSec
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+
+      - name: Install pinned cargo-audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo install cargo-audit \
+            --version 0.22.2 \
+            --locked \
+            --root "$RUNNER_TEMP/cargo-audit"
+          "$RUNNER_TEMP/cargo-audit/bin/cargo-audit" --version \
+            | grep -Fx 'cargo-audit 0.22.2'
+
+      - name: Audit the committed lockfile
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/cargo-audit/bin/cargo-audit" audit \
+            --file Cargo.lock \
+            --deny warnings
+          git diff --exit-code -- Cargo.lock

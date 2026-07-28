@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 use tar::Archive;
 use tokio::process::Command;
 
-use crate::{config, utils};
+use crate::{config, performance, utils};
 
 const LATEST_RELEASE_API: &str = "https://api.github.com/repos/cfal/shoes/releases/latest";
 const SHOES_GIT_REPOSITORY: &str = "https://github.com/cfal/shoes";
@@ -107,6 +107,7 @@ struct ReleaseAsset {
 }
 
 pub async fn install(method: InstallMethod, force: bool) -> Result<InstallReport> {
+    let _timer = performance::stage("shoes_install_total");
     utils::require_linux_root()?;
     let lock = utils::exclusive_lock(Path::new(utils::LOCK_FILE))?;
     install_locked(method, force, lock).await
@@ -164,16 +165,19 @@ async fn install_release(destination: &Path) -> Result<InstallReport> {
         .build()
         .context("创建 HTTP 客户端失败")?;
 
-    let release = client
-        .get(LATEST_RELEASE_API)
-        .send()
-        .await
-        .context("请求 shoes 最新 Release 失败")?
-        .error_for_status()
-        .context("GitHub Release API 返回错误")?
-        .json::<GithubRelease>()
-        .await
-        .context("解析 GitHub Release 信息失败")?;
+    let release = {
+        let _timer = performance::stage("shoes_release_metadata");
+        client
+            .get(LATEST_RELEASE_API)
+            .send()
+            .await
+            .context("请求 shoes 最新 Release 失败")?
+            .error_for_status()
+            .context("GitHub Release API 返回错误")?
+            .json::<GithubRelease>()
+            .await
+            .context("解析 GitHub Release 信息失败")?
+    };
 
     let mut failures = Vec::new();
     for target in release_targets()? {
@@ -223,6 +227,7 @@ async fn install_release_asset(
     if !actual_digest.eq_ignore_ascii_case(expected_digest) {
         bail!("SHA-256 校验失败：期望 {expected_digest}，实际 {actual_digest}；文件未安装");
     }
+    let _timer = performance::stage("shoes_verify_install");
     let extracted = extract_shoes(&archive_path, work.path())?;
     set_executable(&extracted)?;
     binary_health(&extracted).await?;
@@ -297,6 +302,7 @@ fn mem_total_below_threshold(meminfo: &str) -> bool {
 }
 
 async fn download(client: &Client, asset: &ReleaseAsset, destination: &Path) -> Result<String> {
+    let _timer = performance::stage("shoes_download");
     validate_release_asset(asset)?;
     let response = client
         .get(&asset.browser_download_url)

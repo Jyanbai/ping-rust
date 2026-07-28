@@ -8,6 +8,7 @@ mod install_self;
 mod installer;
 mod menu;
 mod operations;
+mod performance;
 mod self_update;
 mod service;
 mod utils;
