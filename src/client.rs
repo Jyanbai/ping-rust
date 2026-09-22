@@ -1252,4 +1252,34 @@ mod tests {
         assert!(!clash.contains("username:"));
         assert!(!clash.contains("password:"));
     }
+
+    #[test]
+    fn generated_socks5_username_flows_through_uri_and_client_exports() {
+        let username = config::generated_socks5_username();
+        let profile = ManagedProfile {
+            id: Uuid::nil(),
+            name: "generated-socks".to_owned(),
+            port: 1080,
+            server_address: None,
+            credentials: Credentials::Socks5 {
+                username: Some(username.clone()),
+                password: Some("generated-secret".to_owned()),
+                udp_enabled: true,
+            },
+            certificate_path: None,
+            certificate_key_path: None,
+            self_signed_certificate: false,
+        };
+
+        let uri = share_uri(&profile, "203.0.113.8").unwrap();
+        assert!(uri.starts_with(&format!("socks5://{username}:generated-secret@")));
+
+        let clash = render(&profile, ClientFormat::ClashMeta, "203.0.113.8").unwrap();
+        let clash: serde_yaml::Value = serde_yaml::from_str(&clash).unwrap();
+        assert_eq!(clash["proxies"][0]["username"], username);
+
+        let sing = render(&profile, ClientFormat::SingBox, "203.0.113.8").unwrap();
+        let sing: Value = serde_json::from_str(&sing).unwrap();
+        assert_eq!(sing["outbounds"][0]["username"], username);
+    }
 }

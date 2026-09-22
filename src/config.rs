@@ -255,6 +255,10 @@ pub fn generated_password() -> String {
     random_secret(24)
 }
 
+pub(crate) fn generated_socks5_username() -> String {
+    random_secret(9)
+}
+
 #[derive(Clone, Debug)]
 pub struct GenerationOptions {
     pub reality_short_id: Option<String>,
@@ -987,7 +991,7 @@ fn apply_profile_change(
                     if enabled {
                         let username = state_username
                             .clone()
-                            .unwrap_or_else(|| "default".to_owned());
+                            .unwrap_or_else(generated_socks5_username);
                         let password = state_password.clone().unwrap_or_else(generated_password);
                         *server_username = Some(username.clone());
                         *server_password = Some(password.clone());
@@ -1138,12 +1142,12 @@ fn regenerate_profile_credentials(
             else {
                 bail!("SOCKS5 配置与管理状态不一致");
             };
-            let generated = generated_password();
-            let current_username = username.clone().unwrap_or_else(|| "default".to_owned());
-            *server_username = Some(current_username.clone());
-            *server_password = Some(generated.clone());
-            *username = Some(current_username);
-            *password = Some(generated);
+            let generated_username = generated_socks5_username();
+            let generated_password = generated_password();
+            *server_username = Some(generated_username.clone());
+            *server_password = Some(generated_password.clone());
+            *username = Some(generated_username);
+            *password = Some(generated_password);
         }
         Credentials::AnyTls { users, .. } => {
             for user in users.iter_mut() {
@@ -1747,12 +1751,9 @@ fn validate_request(request: &GenerationRequest) -> Result<()> {
                 bail!("--no-auth 不能与 SOCKS5 用户名或密码同时使用");
             }
         } else {
-            let username = request
-                .options
-                .socks5_username
-                .as_deref()
-                .unwrap_or("default");
-            validate_socks5_component("用户名", username)?;
+            if let Some(username) = request.options.socks5_username.as_deref() {
+                validate_socks5_component("用户名", username)?;
+            }
             if let Some(password) = request.options.socks5_password.as_deref() {
                 validate_socks5_component("密码", password)?;
             }
@@ -1862,6 +1863,21 @@ pub(crate) async fn validate_with_binary(binary: &Path, config_path: &Path) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn is_generated_socks5_username(value: &str) -> bool {
+        value.len() == 12
+            && value != "default"
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    }
+
+    #[test]
+    fn generated_socks5_username_is_url_safe_and_fixed_length() {
+        for _ in 0..64 {
+            assert!(is_generated_socks5_username(&generated_socks5_username()));
+        }
+    }
 
     fn request(protocol: Protocol, output: PathBuf) -> GenerationRequest {
         GenerationRequest {
@@ -2939,7 +2955,9 @@ mod tests {
         else {
             unreachable!()
         };
-        assert_eq!(username.as_deref(), Some("default"));
+        assert!(username
+            .as_deref()
+            .is_some_and(is_generated_socks5_username));
         assert!(password.as_ref().is_some_and(|value| value.len() >= 24));
         assert!(*udp_enabled);
         ensure_servers_match_state(&[server], &[profile.clone()]).unwrap();
@@ -2965,11 +2983,13 @@ mod tests {
         else {
             unreachable!()
         };
-        assert_eq!(username.as_deref(), Some("default"));
+        assert!(username
+            .as_deref()
+            .is_some_and(is_generated_socks5_username));
         assert!(password.is_some());
         assert!(udp_enabled);
         let authenticated = serde_yaml::to_string(&vec![authenticated]).unwrap();
-        assert!(authenticated.contains("username: default"));
+        assert!(!authenticated.contains("username: default"));
         assert!(authenticated.contains("udp_enabled: true"));
 
         let mut request = request(Protocol::Socks5, PathBuf::from("unused.yaml"));
@@ -2987,5 +3007,73 @@ mod tests {
         let anonymous = serde_yaml::to_string(&vec![anonymous]).unwrap();
         assert!(!anonymous.contains("username:"));
         assert!(!anonymous.contains("password:"));
+    }
+
+    #[test]
+    fn socks5_regenerate_rotates_username_and_password() {
+        let mut request = request(Protocol::Socks5, PathBuf::from("unused.yaml"));
+        request.options.socks5_username = Some("legacy-user".to_owned());
+        request.options.socks5_password = Some("legacy-password".to_owned());
+        let (mut server, credentials, _, _) =
+            generate_parts(&request, Path::new("."), Uuid::nil()).unwrap();
+        let mut profile = ManagedProfile {
+            id: Uuid::new_v4(),
+            name: "socks-main".to_owned(),
+            port: request.port,
+            server_address: Some("203.0.113.20".to_owned()),
+            credentials,
+            certificate_path: None,
+            certificate_key_path: None,
+            self_signed_certificate: false,
+        };
+
+        apply_profile_change(
+            &mut server,
+            &mut profile,
+            ProfileChange::RegenerateCredentials,
+        )
+        .unwrap();
+
+        let Credentials::Socks5 {
+            username, password, ..
+        } = &profile.credentials
+        else {
+            unreachable!()
+        };
+        assert!(username
+            .as_deref()
+            .is_some_and(is_generated_socks5_username));
+        assert_ne!(username.as_deref(), Some("legacy-user"));
+        assert!(password
+            .as_deref()
+            .is_some_and(|value| value != "legacy-password"));
+        ensure_servers_match_state(&[server], &[profile]).unwrap();
+    }
+
+    #[test]
+    fn existing_default_username_is_not_migrated_by_unrelated_edits() {
+        let mut request = request(Protocol::Socks5, PathBuf::from("unused.yaml"));
+        request.options.socks5_username = Some("default".to_owned());
+        request.options.socks5_password = Some("existing-secret".to_owned());
+        let (mut server, credentials, _, _) =
+            generate_parts(&request, Path::new("."), Uuid::nil()).unwrap();
+        let mut profile = ManagedProfile {
+            id: Uuid::new_v4(),
+            name: "legacy-socks".to_owned(),
+            port: request.port,
+            server_address: None,
+            credentials,
+            certificate_path: None,
+            certificate_key_path: None,
+            self_signed_certificate: false,
+        };
+
+        apply_profile_change(&mut server, &mut profile, ProfileChange::Port(10_880)).unwrap();
+
+        let Credentials::Socks5 { username, .. } = &profile.credentials else {
+            unreachable!()
+        };
+        assert_eq!(username.as_deref(), Some("default"));
+        ensure_servers_match_state(&[server], &[profile]).unwrap();
     }
 }

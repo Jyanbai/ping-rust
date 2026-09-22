@@ -4,7 +4,10 @@ use anyhow::Result;
 use uuid::Uuid;
 
 use super::{
-    super::{direct_rules, generated_password, Credentials, ServerConfig, ServerProtocol},
+    super::{
+        direct_rules, generated_password, generated_socks5_username, Credentials, ServerConfig,
+        ServerProtocol,
+    },
     GeneratedPreset, GenerationRequest,
 };
 
@@ -22,7 +25,7 @@ pub(super) fn generate(
                     .options
                     .socks5_username
                     .clone()
-                    .unwrap_or_else(|| "default".to_owned()),
+                    .unwrap_or_else(generated_socks5_username),
             ),
             Some(
                 request

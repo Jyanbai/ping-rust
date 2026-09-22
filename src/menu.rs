@@ -1020,12 +1020,11 @@ async fn advanced_add_config_menu() -> Result<()> {
             return Ok(());
         };
         if authentication == 0 {
-            options.socks5_username = Some(
-                Input::<String>::with_theme(&ColorfulTheme::default())
-                    .with_prompt("SOCKS5 用户名")
-                    .default("default".to_owned())
-                    .interact_text()?,
-            );
+            let username = Input::<String>::with_theme(&ColorfulTheme::default())
+                .with_prompt("SOCKS5 用户名（留空则安全随机生成）")
+                .allow_empty(true)
+                .interact_text()?;
+            options.socks5_username = (!username.is_empty()).then_some(username);
             let password = Password::with_theme(&ColorfulTheme::default())
                 .with_prompt("SOCKS5 密码（留空则安全随机生成）")
                 .allow_empty_password(true)

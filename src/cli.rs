@@ -213,7 +213,7 @@ pub struct GenerateArgs {
     /// Shadowsocks 或 SOCKS5 密码；省略时安全随机生成
     #[arg(long)]
     password: Option<String>,
-    /// SOCKS5 用户名；省略时使用 default
+    /// SOCKS5 用户名；省略时安全随机生成
     #[arg(long)]
     username: Option<String>,
     /// 显式创建无认证 SOCKS5（不推荐用于公网监听）
