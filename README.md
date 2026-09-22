@@ -9,7 +9,7 @@
 
 核心逻辑全部位于 Rust 源码中；`scripts/install.sh` 只负责执行 Rust 前的架构检测、下载、SHA-256 校验与严格解包，原子安装、快捷命令所有权判断和首次部署均由已校验的 Rust 二进制完成。
 
-> 当前稳定版为 [`v0.1.18`](https://github.com/Jyanbai/ping-rust/releases/tag/v0.1.18)，并已发布至 [crates.io](https://crates.io/crates/ping-rust/0.1.18)。支持 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks、AnyTLS、VLESS-TLS-Vision、VLESS-WS-TLS、Trojan-TLS、Trojan-Reality、VMess-WS-TLS 和 SOCKS5 十一种受管协议。用户只选择完整协议，不需要理解或手动组合传输层、安全层与内层协议。
+> 当前稳定版为 [`v0.1.18`](https://github.com/Jyanbai/ping-rust/releases/tag/v0.1.18)，并已发布至 [crates.io](https://crates.io/crates/ping-rust/0.1.18)。当前源码支持 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks、AnyTLS、VLESS-TLS-Vision、VLESS-WS-TLS、Trojan-TLS、Trojan-REALITY、VMess-WS-TLS、SOCKS5 和 Snell v3 十二种受管协议。用户只选择完整协议，不需要理解或手动组合传输层、安全层与内层协议。
 
 完整文档：[Wiki](https://github.com/Jyanbai/ping-rust/wiki) · [快速开始](https://github.com/Jyanbai/ping-rust/wiki/Quick-Start) · [链式代理](https://github.com/Jyanbai/ping-rust/wiki/Chain-Proxy) · [故障排查](https://github.com/Jyanbai/ping-rust/wiki/Troubleshooting)
 
@@ -53,7 +53,7 @@ bash <(curl --proto '=https' --tlsv1.2 -fsSL \
 - 从 GitHub Release 下载 shoes，自动匹配 x86_64/aarch64 与 GNU/musl，强制校验官方 SHA-256 digest；GNU 资产不兼容时安全回退 static musl
 - 使用 cargo 从与 schema CI 相同的 cfal/shoes 固定源码提交编译安装；低于 1 GiB 内存时自动单任务并关闭 LTO，避免换页风暴
 - 生成经过固定 shoes schema 验证的协议预设；每项均是可直接部署的完整协议栈
-- `prs` 数字菜单与 `prs add/a` 快捷命令：自动端口、自动凭据、部署完成直接输出分享链接
+- `prs` 数字菜单与 `prs add/a` 快捷命令：自动端口、自动凭据，部署完成后输出分享链接或完整手动连接参数
 - 在 Rust 内生成 X25519 Reality 密钥、UUID、short ID、随机密码和自签名证书
 - Reality 未显式指定 SNI 时，从与本地 233boy 脚本一致的 Amazon、eBay、PayPal、Cloudflare 域名列表中随机选择（不含 Apple）；客户端指纹与该脚本一致固定为 `chrome`
 - 在同目录候选文件上调用 `shoes --dry-run`，通过后才原子提交并启用 systemd 服务
@@ -175,9 +175,10 @@ shoes: running
 9) Trojan-REALITY
 10) VMess-WS-TLS
 11) SOCKS5
+12) Snell v3
 0) 返回
 
-请选择 [0-11]: 4
+请选择 [0-12]: 4
 输入端口（直接回车自动选择随机端口）:
 
 部署成功，shoes 服务已启动。
@@ -191,9 +192,9 @@ vless://...security=reality...pbk=...&sid=...#VLESS-REALITY-25448
 ------------- END -------------
 ```
 
-菜单 `2. 更改配置` 会先选择现有配置，再按协议提供端口、名称、公网地址、凭据、Reality SNI、Shadowsocks cipher 或 AnyTLS 用户密码等修改项。新配置必须通过真实 `shoes --dry-run` 才会原子提交；服务重启失败时自动恢复修改前的配置与 systemd 状态，成功后直接输出新的分享链接。
+菜单 `2. 更改配置` 会先选择现有配置，再按协议提供端口、名称、公网地址、凭据、Reality SNI、Shadowsocks/Snell cipher、Snell/SOCKS5 UDP 开关或 AnyTLS 用户密码等修改项。新配置必须通过真实 `shoes --dry-run` 才会原子提交；服务重启失败时自动恢复修改前的配置与 systemd 状态。Snell v3 没有统一标准分享 URI，因此成功后显示完整手动连接参数，不生成伪 URI 或二维码。
 
-每个节点都会保存为 `/etc/shoes/profiles/` 下的真实独立 YAML 文件；查看、更改和删除时直接显示该文件名，例如 `VLESS-REALITY-53453.yaml`。分享 URI 的 `#` 后也使用同一个文件基名，例如 `#VLESS-REALITY-53453`，复制或扫码导入 v2rayN 后即可看到协议与端口。添加配置成功和 `3) 查看配置` 都会在 URL 后直接显示对应的终端二维码并退出菜单；只有一个配置时自动选中，多个配置时才显示数字列表。shoes 继续加载由 Rust 确定性聚合的 `/etc/shoes/config.yaml`，内部 UUID 仅用于安全定位。
+每个节点都会保存为 `/etc/shoes/profiles/` 下的真实独立 YAML 文件；查看、更改和删除时直接显示该文件名，例如 `VLESS-REALITY-53453.yaml` 或 `SNELL-8389.yaml`。支持分享 URI 的协议会以相同文件基名作为 URI 标签，并在添加或查看时显示终端二维码；Snell v3 只显示手动连接参数。只有一个配置时自动选中，多个配置时才显示数字列表。shoes 继续加载由 Rust 确定性聚合的 `/etc/shoes/config.yaml`，内部 UUID 仅用于安全定位。
 
 ### 链式代理
 
@@ -222,7 +223,7 @@ vless://...security=reality...pbk=...&sid=...#VLESS-REALITY-25448
 
 CI 在 Debian 12 与 Ubuntu 24.04 的真实 systemd 环境中，从 PTY 菜单完成添加、完整协议测试、选择、启用、切换、关闭和删除。两个隔离网络命名空间提供可区分的 Shadowsocks 出口；测试会核对 HTTP 服务观察到的源地址，并验证 systemd 重启后仍使用所选出口、上游离线时请求失败且不会静默直连。该测试覆盖稳定 TCP 路径，不代表 shoes 已支持 UDP 链式转发。
 
-首次安装流程是：`install.sh → 自动安装 ping-rust/shoes → 自动随机端口部署 VLESS-REALITY → 复制 URL`，中间零输入。Reality 未指定 SNI 时会从 `www.amazon.com`、`www.ebay.com`、`www.paypal.com`、`www.cloudflare.com`、`dash.cloudflare.com`、`aws.amazon.com` 中随机选择；列表不含 Apple，客户端指纹固定为本地 233boy 脚本使用的 `chrome`。后续日常流程是：`prs → 1 → 选择协议 → 输入端口/直接回车随机`；Shadowsocks 会额外选择加密方式和密码，SS 2022 密码不符合所选 cipher 的 Base64 密钥长度时会警告并自动替换。其余协议自动生成 UUID、密码、Reality 密钥、WebSocket 路径或证书。SOCKS5 快速添加默认生成安全随机用户名和密码并启用 UDP ASSOCIATE。添加或查看配置成功后直接退出 `prs`；主菜单输入 `0` 退出，任意子菜单输入 `0` 返回主菜单。自动端口从 `20000..=65535` 的高位范围选择；菜单协议选择固定使用连续编号 `1..=11`。信息只会在配置通过 `shoes --dry-run`、原子写入、systemd 启动且确认为 active 后输出；失败会恢复原配置和服务状态。
+首次安装流程是：`install.sh → 自动安装 ping-rust/shoes → 自动随机端口部署 VLESS-REALITY → 复制 URL`，中间零输入。Reality 未指定 SNI 时会从 `www.amazon.com`、`www.ebay.com`、`www.paypal.com`、`www.cloudflare.com`、`dash.cloudflare.com`、`aws.amazon.com` 中随机选择；列表不含 Apple，客户端指纹固定为本地 233boy 脚本使用的 `chrome`。后续日常流程是：`prs → 1 → 选择协议 → 输入端口/直接回车随机`；Shadowsocks 会额外选择加密方式和密码，SS 2022 密码不符合所选 cipher 的 Base64 密钥长度时会警告并自动替换。其余协议自动生成 UUID、密码、Reality 密钥、WebSocket 路径或证书。SOCKS5 快速添加默认生成安全随机用户名和密码并启用 UDP ASSOCIATE；Snell v3 快速添加默认生成随机密码并启用 UDP-over-TCP。添加或查看配置成功后直接退出 `prs`；主菜单输入 `0` 退出，任意子菜单输入 `0` 返回主菜单。自动端口从 `20000..=65535` 的高位范围选择；菜单协议选择固定使用连续编号 `1..=12`。信息只会在配置通过 `shoes --dry-run`、原子写入、systemd 启动且确认为 active 后输出；失败会恢复原配置和服务状态。
 
 非交互方式：
 
@@ -249,9 +250,10 @@ sudo prs add trojan-tls
 sudo prs add trojan-reality
 sudo prs add vmess-ws-tls
 sudo prs add socks5
+sudo prs add snell
 ```
 
-SOCKS5 支持 TCP CONNECT 与 UDP ASSOCIATE，默认启用用户名/密码认证。SOCKS5 本身不提供传输加密，更适合作为工具型代理、内网代理或链式出口。高级添加可关闭 UDP，或在明确警告后主动选择无认证模式。
+SOCKS5 支持 TCP CONNECT 与 UDP ASSOCIATE，默认启用用户名/密码认证。SOCKS5 本身不提供传输加密，更适合作为工具型代理、内网代理或链式出口。高级添加可关闭 UDP，或在明确警告后主动选择无认证模式。Snell v3 高级添加可选择 cipher、密码和 UDP-over-TCP 开关。
 
 WebSocket 路径默认安全随机生成；需要固定路径时可使用完整命令：
 
@@ -375,7 +377,9 @@ sudo ping-rust export sing-box --profile <配置-UUID> --server proxy.example.co
 sudo ping-rust export nekobox --profile <配置-UUID> --server 203.0.113.10
 ```
 
-只有一个配置时可以省略 `--profile`。SOCKS5 可导出 percent-encoded `socks5://` URI、终端 QR、sing-box `type: socks` 和 Clash Meta/Mihomo `type: socks5`；IPv6 地址会使用方括号。NekoBox 没有在本项目核实到稳定、明确的专用 SOCKS5 导入 schema，因此 `export nekobox` 会明确拒绝，不把普通 URI 冒充已验证的 NekoBox 格式。Mihomo 同样不支持 AnyTLS+Reality，标准 AnyTLS URI也无法表达 Reality 公钥；所有不兼容情况都会返回中文错误。所有 Reality 导出只包含公钥，永远不包含服务器私钥。
+只有一个配置时可以省略 `--profile`。SOCKS5 可导出 percent-encoded `socks5://` URI、终端 QR、sing-box `type: socks` 和 Clash Meta/Mihomo `type: socks5`；IPv6 地址会使用方括号。NekoBox 没有在本项目核实到稳定、明确的专用 SOCKS5 导入 schema，因此 `export nekobox` 会明确拒绝，不把普通 URI 冒充已验证的 NekoBox 格式。
+
+Snell v3 使用 shoes 原生服务端，支持三个固定 shoes cipher 和 UDP-over-TCP。Mihomo/Clash Meta 可导出 `type: snell`、`version: 3`、`psk` 和 `udp`；为避免不兼容，当前只对 Mihomo v3 明确支持的 `aes-128-gcm` 配置开放无损导出。当前 sing-box Snell 只支持 v4/v6，NekoBox 也没有已核实的 v3 导入能力，因此两者明确拒绝。Snell v3 没有统一、跨客户端的标准 URI，`url`、`qr` 和 `--plain` 不会生成伪 `snell://`。链式代理 outbound 尚未实现 Snell。Mihomo 同样不支持 AnyTLS+Reality，标准 AnyTLS URI也无法表达 Reality 公钥；所有不兼容情况都会返回中文错误。所有 Reality 导出只包含公钥，永远不包含服务器私钥。
 
 ## 备份与恢复
 
@@ -438,9 +442,9 @@ cargo doc --no-deps
 
 - Rust 单元测试覆盖密钥/YAML、归档解包、原子写入、systemd unit、端口检查、客户端三格式和恢复路径安全。
 - 自更新单元测试覆盖版本、架构、checksum 重复/缺失和严格单文件归档；Release job 还会真实执行一次强制自更新并复核版本。
-- `shoes-schema.yml` 固定 cfal/shoes commit `386b11532424b8665ee3e46340c6236fb3c47595`（0.2.8），对全部预设联合配置、全部六种 Shadowsocks cipher、SOCKS5 auth/no-auth 与 UDP 开关、Reality+AnyTLS 执行真实 `shoes --dry-run`，并启动聚合配置检查监听和 SOCKS5 TCP CONNECT。
+- `shoes-schema.yml` 固定 cfal/shoes commit `386b11532424b8665ee3e46340c6236fb3c47595`（0.2.8），对全部预设联合配置、全部六种 Shadowsocks cipher、Snell v3 三种 cipher 与 UDP 开关、SOCKS5 auth/no-auth 与 UDP 开关、Reality+AnyTLS 执行真实 `shoes --dry-run`，并启动聚合配置检查监听和 SOCKS5 TCP CONNECT。
 - 通过 cargo-zigbuild + Zig 生成 x86_64/aarch64 Linux GNU release ELF，最高 GLIBC 需求为 2.34，覆盖 Rocky/Alma 9 及更新的目标发行版基线。
-- CI 覆盖 Ubuntu 22.04/24.04，并在 Debian 12、Rocky Linux 9、AlmaLinux 9 容器中执行锁定依赖测试和 release 构建；shoes schema 作业实际启动聚合监听。Ubuntu 24.04 acceptance 覆盖完整 root/systemd/PTY/回滚/导出流程，并通过第 11 项菜单部署 SOCKS5；Debian 12 systemd acceptance 同时覆盖零输入部署、严格 `--plain` 输出、多用户 AnyTLS 无损导出拒绝、激活失败回滚和加固 unit 启动。
+- CI 覆盖 Ubuntu 22.04/24.04，并在 Debian 12、Rocky Linux 9、AlmaLinux 9 容器中执行锁定依赖测试和 release 构建；shoes schema 作业实际启动聚合监听。Ubuntu 24.04 acceptance 覆盖完整 root/systemd/PTY/回滚/导出流程，并通过第 11、12 项菜单分别部署 SOCKS5 与 Snell v3；Debian 12 systemd acceptance 同时覆盖零输入部署、严格 `--plain` 输出、多用户 AnyTLS 无损导出拒绝、激活失败回滚和加固 unit 启动。
 - 独立链式代理验收在 Ubuntu 24.04 主机和 Debian 12 特权 systemd 容器中运行，使用真实 PTY 菜单、两条隔离 Shadowsocks 出口和 HTTP 源地址核验覆盖完整生命周期与无直连回退。
 - 独立 `security-audit.yml` 固定 `cargo-audit 0.22.2`，每周、手动以及
   `Cargo.toml`/`Cargo.lock` 变更时扫描提交的锁定依赖，并对漏洞、unmaintained、unsound

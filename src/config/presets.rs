@@ -9,6 +9,7 @@ mod anytls;
 mod hysteria2;
 mod reality;
 mod shadowsocks;
+mod snell;
 mod socks5;
 mod tls;
 mod trojan_reality;
@@ -161,6 +162,17 @@ const PRESETS: &[PresetDescriptor] = &[
         udp_required: false,
         generator: socks5::generate,
     },
+    PresetDescriptor {
+        protocol: Protocol::Snell,
+        menu_number: 12,
+        menu_label: "Snell v3",
+        advanced_label: "Snell v3",
+        slug: "snell",
+        display_prefix: "SNELL",
+        tcp_required: true,
+        udp_required: false,
+        generator: snell::generate,
+    },
 ];
 
 pub(super) fn all() -> &'static [PresetDescriptor] {
@@ -207,6 +219,7 @@ mod tests {
             Protocol::TrojanReality,
             Protocol::VmessWsTls,
             Protocol::Socks5,
+            Protocol::Snell,
         ];
         assert_eq!(PRESETS.len(), expected.len());
         for (index, (preset, protocol)) in PRESETS.iter().zip(expected).enumerate() {

@@ -13,7 +13,7 @@ use crate::{
     client::{self, ClientFormat},
     config::{
         self, AnyTlsMode, AnyTlsUser, Credentials, GenerationOptions, GenerationRequest,
-        ProfileChange, Protocol, ShadowsocksCipher,
+        ProfileChange, Protocol, ShadowsocksCipher, SnellCipher,
     },
     deployment, fast_add,
     installer::{self, InstallMethod},
@@ -56,6 +56,7 @@ enum ChangeAction {
     Password,
     RealityServerName,
     ShadowsocksCipher,
+    SnellCipher,
     Socks5Username,
     Socks5Authentication,
     UdpEnabled,
@@ -278,6 +279,11 @@ async fn change_config_menu() -> Result<()> {
             actions.push((ChangeAction::Password, "更改密码"));
             actions.push((ChangeAction::ShadowsocksCipher, "更改加密方式"));
         }
+        Protocol::Snell => {
+            actions.push((ChangeAction::Password, "更改密码"));
+            actions.push((ChangeAction::SnellCipher, "更改加密方式"));
+            actions.push((ChangeAction::UdpEnabled, "更改 UDP-over-TCP"));
+        }
         Protocol::Socks5 => {
             actions.push((ChangeAction::Socks5Username, "更改用户名"));
             actions.push((ChangeAction::Password, "更改密码"));
@@ -361,7 +367,7 @@ async fn change_config_menu() -> Result<()> {
                 .allow_empty_password(true)
                 .interact()?;
             if password.is_empty() {
-                if matches!(profile.protocol(), Protocol::Shadowsocks) {
+                if matches!(profile.protocol(), Protocol::Shadowsocks | Protocol::Snell) {
                     ProfileChange::RegenerateCredentials
                 } else {
                     ProfileChange::Password(config::generated_password())
@@ -395,6 +401,12 @@ async fn change_config_menu() -> Result<()> {
             };
             ProfileChange::ShadowsocksCipher(ciphers[selected])
         }
+        ChangeAction::SnellCipher => {
+            let Some(cipher) = select_snell_cipher("选择新加密方式")? else {
+                return Ok(());
+            };
+            ProfileChange::SnellCipher(cipher)
+        }
         ChangeAction::Socks5Username => {
             let Credentials::Socks5 { username, .. } = &profile.credentials else {
                 anyhow::bail!("配置协议与管理状态不一致");
@@ -422,12 +434,16 @@ async fn change_config_menu() -> Result<()> {
             ProfileChange::Socks5Authentication(enabled)
         }
         ChangeAction::UdpEnabled => {
-            let Credentials::Socks5 { udp_enabled, .. } = &profile.credentials else {
-                anyhow::bail!("配置协议与管理状态不一致");
+            let (udp_enabled, prompt) = match &profile.credentials {
+                Credentials::Socks5 { udp_enabled, .. } => (udp_enabled, "启用 UDP ASSOCIATE？"),
+                Credentials::Snell { udp_enabled, .. } => {
+                    (udp_enabled, "启用 Snell UDP-over-TCP？")
+                }
+                _ => anyhow::bail!("配置协议与管理状态不一致"),
             };
             ProfileChange::UdpEnabled(
                 Confirm::with_theme(&ColorfulTheme::default())
-                    .with_prompt("启用 UDP ASSOCIATE？")
+                    .with_prompt(prompt)
                     .default(*udp_enabled)
                     .interact()?,
             )
@@ -917,6 +933,22 @@ fn select_shadowsocks_cipher() -> Result<Option<ShadowsocksCipher>> {
     }
 }
 
+fn select_snell_cipher(prompt: &str) -> Result<Option<SnellCipher>> {
+    let ciphers = [
+        SnellCipher::Aes128Gcm,
+        SnellCipher::Aes256Gcm,
+        SnellCipher::Chacha20IetfPoly1305,
+    ];
+    let labels = ciphers
+        .iter()
+        .map(|cipher| cipher.as_str())
+        .collect::<Vec<_>>();
+    let Some(selected) = select_numbered(prompt, &labels)? else {
+        return Ok(None);
+    };
+    Ok(Some(ciphers[selected]))
+}
+
 fn prepare_shadowsocks_password(
     cipher: ShadowsocksCipher,
     entered_password: String,
@@ -1013,6 +1045,21 @@ async fn advanced_add_config_menu() -> Result<()> {
             _ => ShadowsocksCipher::Chacha20IetfPoly1305,
         };
     }
+    if matches!(protocol, Protocol::Snell) {
+        let Some(cipher) = select_snell_cipher("选择 Snell v3 加密方式")? else {
+            return Ok(());
+        };
+        options.snell_cipher = cipher;
+        let password = Password::with_theme(&ColorfulTheme::default())
+            .with_prompt("Snell v3 密码（留空则安全随机生成）")
+            .allow_empty_password(true)
+            .interact()?;
+        options.snell_password = (!password.is_empty()).then_some(password);
+        options.udp_enabled = Confirm::with_theme(&ColorfulTheme::default())
+            .with_prompt("启用 Snell UDP-over-TCP？")
+            .default(true)
+            .interact()?;
+    }
     if matches!(protocol, Protocol::Socks5) {
         let Some(authentication) =
             select_numbered("认证", &["用户名 + 密码（推荐）", "无认证（不推荐）"])?
@@ -1104,7 +1151,10 @@ async fn advanced_add_config_menu() -> Result<()> {
         }
     }
     let reality_outer = protocol.uses_reality(options.anytls_mode);
-    let server_name = if matches!(protocol, Protocol::Shadowsocks | Protocol::Socks5) {
+    let server_name = if matches!(
+        protocol,
+        Protocol::Shadowsocks | Protocol::Snell | Protocol::Socks5
+    ) {
         config::DEFAULT_SNI.to_owned()
     } else {
         let default_server_name = config::resolve_server_name(None, protocol, options.anytls_mode);
@@ -1252,6 +1302,7 @@ mod tests {
         assert_eq!(Protocol::from_menu_number(10), Some(Protocol::VmessWsTls));
         assert_eq!(Protocol::from_menu_number(11), Some(Protocol::Socks5));
         assert_eq!(protocol_items[10], (11, "SOCKS5"));
+        assert_eq!(protocol_items[11], (12, "Snell v3"));
     }
 
     #[test]

@@ -231,8 +231,10 @@
 
 公开稳定版 v0.1.18 已发布。v0.1.18 在保持原 1–10 菜单编号不变的前提下，将 SOCKS5 作为第 11
 项受管协议；当前 main 为新建配置默认生成安全随机用户名、随机密码和 UDP ASSOCIATE，只有高级/CLI
-明确选择时才允许 no-auth，并显示公网滥用警告。服务端 schema 严格对应固定 shoes 0.2.8 的
-`type: socks`、可选 `username/password` 与 `udp_enabled`。配置继续使用统一的候选 dry-run、原子提交、
-profile/state、服务激活、健康检查和回滚路径；查看、编辑、删除、备份恢复、URI/QR、sing-box、Mihomo
-及原生 shoes SOCKS chain outbound 已接通；NekoBox 因无已核实的稳定专用格式而明确拒绝。固定 shoes workflow 覆盖 auth/no-auth、UDP true/false 与
-TCP CONNECT。
+明确选择时才允许 no-auth，并显示公网滥用警告。第 12 项为 Snell v3，默认 chacha20-ietf-poly1305、
+随机密码和 UDP-over-TCP，支持 shoes 固定的三个 v3 cipher；Snell 配置继续使用统一的候选 dry-run、
+原子提交、profile/state、服务激活、健康检查和回滚路径，支持查看、编辑、删除、备份恢复与 managed
+filename。Mihomo/Clash Meta 仅对 AES-128-GCM 提供无损 v3 导出；sing-box v3、NekoBox、标准 URI、QR
+和 Snell chain outbound 明确 NOT_SUPPORTED/NOT_IMPLEMENTED，不生成伪格式。固定 shoes workflow 覆盖
+Snell 三种 cipher、UDP true/false、聚合 dry-run 和 Ubuntu 第 12 项菜单验收；SOCKS5 第 11 项及随机用户名
+行为保持不变。

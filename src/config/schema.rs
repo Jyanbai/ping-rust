@@ -80,6 +80,11 @@ pub(super) enum ServerProtocol {
         password: Option<String>,
         udp_enabled: bool,
     },
+    Snell {
+        cipher: String,
+        password: String,
+        udp_enabled: bool,
+    },
 }
 
 #[derive(Clone, Serialize, Deserialize)]

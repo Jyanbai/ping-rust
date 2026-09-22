@@ -662,7 +662,7 @@ jobs:
           spawn $env(PRS_COMMAND)
           wait_for {请选择 \[0-10\]} main-menu
           send "1\r"
-          wait_for {请选择 \[0-11\]} protocol-menu
+          wait_for {请选择 \[0-12\]} protocol-menu
           send "$env(PROTOCOL_NUMBER)\r"
           wait_for {输入端口} port-prompt
           send "$env(MENU_PORT)\r"
@@ -672,9 +672,14 @@ jobs:
             wait_for {请设置密码} shadowsocks-password-prompt
             send "\r"
           }
-          wait_for "$env(SHARE_SCHEME)://" share-uri
-          wait_for {二维码 \(QR\)} add-qr-heading
-          wait_for {▀|▄|█} add-qr-blocks
+          if {$env(PROTOCOL_NUMBER) == "12"} {
+            wait_for {协议 \(protocol\)[^\r\n]*= snell} snell-details
+            wait_for {没有通用标准分享 URI} snell-uri-guidance
+          } else {
+            wait_for "$env(SHARE_SCHEME)://" share-uri
+            wait_for {二维码 \(QR\)} add-qr-heading
+            wait_for {▀|▄|█} add-qr-blocks
+          }
           expect { eof {} timeout { puts stderr "timeout waiting for add exit"; exit 23 } }
           EXPECT
           }
@@ -687,6 +692,16 @@ jobs:
           run_menu_add 9 25454 trojan
           run_menu_add 10 25455 vmess
           run_menu_add 11 25456 socks5
+          run_menu_add 12 25457 snell
+          snell_add_output="$(
+            sudo "$PRS" add snell 25458 --server-address 203.0.113.10 --yes
+          )"
+          grep -F "协议 (protocol)         = snell" <<<"$snell_add_output" >/dev/null
+          grep -F "没有通用标准分享 URI" <<<"$snell_add_output" >/dev/null
+          snell_alias_output="$(
+            sudo "$PRS" a snell 25461 --server-address 203.0.113.10 --yes
+          )"
+          grep -F "协议 (protocol)         = snell" <<<"$snell_alias_output" >/dev/null
           socks_add_output="$(
             sudo "$PRS" add socks5 25459 --server-address 203.0.113.10 --yes
           )"
@@ -700,6 +715,19 @@ jobs:
             sudo "$PRS" a socks5 25460 --server-address 203.0.113.10 --yes
           )"
           grep -F "协议 (protocol)         = socks5" <<<"$socks_alias_output" >/dev/null
+          snell_count_before="$(
+            sudo python3 -c 'import json; print(len(json.load(open("/etc/shoes/ping-rust-state.json"))["profiles"]))'
+          )"
+          if sudo "$PRS" add snell --plain --server-address 203.0.113.10 \
+            >"$RUNNER_TEMP/snell-plain.log" 2>&1; then
+            echo "Snell unexpectedly emitted a standard --plain URI" >&2
+            exit 1
+          fi
+          grep -F "Snell v3 没有可互操作的标准分享 URI" \
+            "$RUNNER_TEMP/snell-plain.log" >/dev/null
+          test "$snell_count_before" = "$(
+            sudo python3 -c 'import json; print(len(json.load(open("/etc/shoes/ping-rust-state.json"))["profiles"]))'
+          )"
           sudo systemctl is-active --quiet shoes.service
           wait_listener() {
             local kind="$1"
@@ -721,8 +749,11 @@ jobs:
           wait_listener t 25454
           wait_listener t 25455
           wait_listener t 25456
+          wait_listener t 25457
+          wait_listener t 25458
           wait_listener t 25459
           wait_listener t 25460
+          wait_listener t 25461
 
           profile_id_for_port() {
             local port="$1"
@@ -735,6 +766,11 @@ jobs:
           print(next(profile['id'] for profile in profiles if profile['port'] == int(sys.argv[1])))
           PY
           }
+          snell_info="$(sudo "$PRS" info "$(profile_id_for_port 25457)")"
+          grep -F "Snell 版本：3" <<<"$snell_info" >/dev/null
+          grep -F "加密方式：chacha20-ietf-poly1305" <<<"$snell_info" >/dev/null
+          grep -F "密码：" <<<"$snell_info" >/dev/null
+          grep -F "UDP-over-TCP：启用" <<<"$snell_info" >/dev/null
           printf 'VLESS_TLS_PROFILE=%s\n' "$(profile_id_for_port 25451)" >> "$GITHUB_ENV"
           printf 'VLESS_WS_TLS_PROFILE=%s\n' "$(profile_id_for_port 25452)" >> "$GITHUB_ENV"
           printf 'TROJAN_TLS_PROFILE=%s\n' "$(profile_id_for_port 25453)" >> "$GITHUB_ENV"
@@ -748,6 +784,9 @@ jobs:
             TROJAN-REALITY-25454.yaml \
             VMESS-WS-TLS-25455.yaml \
             SOCKS5-25456.yaml \
+            SNELL-25457.yaml \
+            SNELL-25458.yaml \
+            SNELL-25461.yaml \
             SOCKS5-25459.yaml \
             SOCKS5-25460.yaml; do
             sudo test -s "/etc/shoes/profiles/$profile_file"

@@ -170,6 +170,7 @@ pub(super) fn is_managed_profile_file_name(name: &str) -> bool {
         "TROJAN-REALITY-",
         "VMESS-WS-TLS-",
         "SOCKS5-",
+        "SNELL-",
     ];
     prefixes.iter().any(|prefix| {
         stem.strip_prefix(prefix).is_some_and(|value| {

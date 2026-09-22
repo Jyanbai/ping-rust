@@ -180,6 +180,27 @@ fn clash_meta(profile: &ManagedProfile, server: &str) -> Result<String> {
             }
             proxy
         }
+        Credentials::Snell {
+            cipher,
+            password,
+            udp_enabled,
+        } => {
+            if !matches!(cipher, config::SnellCipher::Aes128Gcm) {
+                bail!(
+                    "Clash Meta/Mihomo 的 Snell v3 固定使用 AES-128-GCM，无法无损导出当前加密方式 {}；请将该配置改为 aes-128-gcm",
+                    cipher.as_str()
+                );
+            }
+            json!({
+                "name": profile.name,
+                "type": "snell",
+                "server": server,
+                "port": profile.port,
+                "psk": password,
+                "version": 3,
+                "udp": udp_enabled
+            })
+        }
         Credentials::AnyTls {
             users,
             server_name,
@@ -381,6 +402,9 @@ fn sing_box(profile: &ManagedProfile, server: &str) -> Result<String> {
                 outbound["password"] = json!(password);
             }
             outbound
+        }
+        Credentials::Snell { .. } => {
+            bail!("当前 sing-box 客户端仅支持 Snell v4/v6，不能无损导出 shoes Snell v3")
         }
         Credentials::AnyTls {
             users,
@@ -597,6 +621,9 @@ pub fn share_uri(profile: &ManagedProfile, server: &str) -> Result<String> {
                 profile.port
             ))
         }
+        Credentials::Snell { .. } => {
+            bail!("Snell v3 没有可互操作的标准分享 URI；请使用支持 Snell v3 的客户端手动填写参数")
+        }
         Credentials::AnyTls {
             users,
             server_name,
@@ -782,7 +809,9 @@ fn encode(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AnyTlsSecurity, AnyTlsUser, Credentials, ShadowsocksCipher, TlsSecurity};
+    use crate::config::{
+        AnyTlsSecurity, AnyTlsUser, Credentials, ShadowsocksCipher, SnellCipher, TlsSecurity,
+    };
 
     fn reality_profile() -> ManagedProfile {
         ManagedProfile {
@@ -1125,6 +1154,46 @@ mod tests {
         assert!(clash.contains("2022-blake3-chacha20-poly1305"));
         assert!(sing_box.contains("2022-blake3-chacha20-poly1305"));
         assert!(uri.starts_with("ss://"));
+    }
+
+    #[test]
+    fn snell_v3_exports_only_lossless_clash_meta_and_never_fakes_a_uri() {
+        let profile = |cipher| ManagedProfile {
+            id: Uuid::nil(),
+            name: "snell-main".to_owned(),
+            port: 8389,
+            server_address: Some("203.0.113.8".to_owned()),
+            credentials: Credentials::Snell {
+                cipher,
+                password: "snell-secret".to_owned(),
+                udp_enabled: true,
+            },
+            certificate_path: None,
+            certificate_key_path: None,
+            self_signed_certificate: false,
+        };
+
+        let compatible = profile(SnellCipher::Aes128Gcm);
+        let clash = render(&compatible, ClientFormat::ClashMeta, "203.0.113.8").unwrap();
+        assert!(clash.contains("type: snell"));
+        assert!(clash.contains("psk: snell-secret"));
+        assert!(clash.contains("version: 3"));
+        assert!(clash.contains("udp: true"));
+        assert!(!clash.contains("cipher:"));
+
+        let incompatible = profile(SnellCipher::Chacha20IetfPoly1305);
+        let clash_error = render(&incompatible, ClientFormat::ClashMeta, "203.0.113.8")
+            .unwrap_err()
+            .to_string();
+        assert!(clash_error.contains("固定使用 AES-128-GCM"));
+        let sing_box_error = render(&compatible, ClientFormat::SingBox, "203.0.113.8")
+            .unwrap_err()
+            .to_string();
+        assert!(sing_box_error.contains("仅支持 Snell v4/v6"));
+        let uri_error = share_uri(&compatible, "203.0.113.8")
+            .unwrap_err()
+            .to_string();
+        assert!(uri_error.contains("没有可互操作的标准分享 URI"));
     }
 
     fn anytls_profile(security: AnyTlsSecurity) -> ManagedProfile {

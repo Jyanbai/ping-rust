@@ -63,6 +63,7 @@ jobs:
           shoes --dry-run examples/socks5.yaml
           shoes --dry-run examples/socks5-no-udp.yaml
           shoes --dry-run examples/socks5-no-auth.yaml
+          shoes --dry-run examples/snell.yaml
           cargo test --locked --test chain_proxy_e2e -- --nocapture
       - name: Generate and validate every protocol
         shell: bash
@@ -99,12 +100,14 @@ jobs:
           "$bin" generate vmess-ws-tls --output "$out/vmess-ws-tls.yaml" \
             --port 6447 --server-name vmess.example.com \
             --websocket-path /vmess >/dev/null
+          "$bin" generate snell --output "$out/snell.yaml" \
+            --port 6448 --password snell-test-password >/dev/null
           "$bin" generate socks5 --output "$out/socks5.yaml" \
             --port 6449 --username default --password socks5-test-password >/dev/null
 
           for config in \
             reality hysteria2 tuic shadowsocks anytls \
-            vless-tls vless-ws-tls trojan-tls trojan-reality vmess-ws-tls socks5; do
+            vless-tls vless-ws-tls trojan-tls trojan-reality vmess-ws-tls snell socks5; do
             shoes --dry-run "$out/$config.yaml"
           done
           cat \
@@ -118,14 +121,15 @@ jobs:
             "$out/trojan-tls.yaml" \
             "$out/trojan-reality.yaml" \
             "$out/vmess-ws-tls.yaml" \
-            "$out/socks5.yaml" >"$out/all-eleven.yaml"
-          shoes --dry-run "$out/all-eleven.yaml"
+            "$out/snell.yaml" \
+            "$out/socks5.yaml" >"$out/all-twelve.yaml"
+          shoes --dry-run "$out/all-twelve.yaml"
       - name: Start every generated listener
         shell: bash
         run: |
           set -euo pipefail
           out="$PWD/target/shoes-validation"
-          shoes "$out/all-eleven.yaml" >"$out/runtime.log" 2>&1 &
+          shoes "$out/all-twelve.yaml" >"$out/runtime.log" 2>&1 &
           shoes_pid="$!"
           python3 -m http.server 18080 --bind 127.0.0.1 \
             >"$out/socks-origin.log" 2>&1 &
@@ -142,6 +146,7 @@ jobs:
               && grep -Eq '(^|:)6445$' <<<"$tcp_ports" \
               && grep -Eq '(^|:)6446$' <<<"$tcp_ports" \
               && grep -Eq '(^|:)6447$' <<<"$tcp_ports" \
+              && grep -Eq '(^|:)6448$' <<<"$tcp_ports" \
               && grep -Eq '(^|:)6449$' <<<"$tcp_ports" \
               && grep -Eq '(^|:)2443$' <<<"$udp_ports" \
               && grep -Eq '(^|:)3443$' <<<"$udp_ports"; then
@@ -185,6 +190,27 @@ jobs:
               --password "${passwords[$index]}" >/dev/null
             shoes --dry-run "$config"
           done
+
+          snell_ciphers=(aes-128-gcm aes-256-gcm chacha20-ietf-poly1305)
+          for index in "${!snell_ciphers[@]}"; do
+            config="$out/snell-$index.yaml"
+            "$bin" generate snell --output "$config" \
+              --port "$((6100 + index))" \
+              --cipher "${snell_ciphers[$index]}" \
+              --password "snell-password-$index" >/dev/null
+            shoes --dry-run "$config"
+          done
+          "$bin" generate snell --output "$out/snell-no-udp.yaml" \
+            --port 6103 --cipher chacha20-ietf-poly1305 \
+            --password snell-no-udp-password --no-udp >/dev/null
+          shoes --dry-run "$out/snell-no-udp.yaml"
+          grep -F "udp_enabled: false" "$out/snell-no-udp.yaml"
+          if "$bin" generate snell --output "$out/snell-invalid.yaml" \
+            --port 6110 --cipher 2022-blake3-aes-256-gcm >"$out/snell-invalid.log" 2>&1; then
+            echo "Snell unexpectedly accepted a 2022 cipher" >&2
+            exit 1
+          fi
+          grep -F "Snell v3 不支持加密方式" "$out/snell-invalid.log"
 
           "$bin" generate socks5 --output "$out/socks5-auth-udp.yaml" \
             --port 6120 --username alice --password socks-secret --udp >/dev/null

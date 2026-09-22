@@ -1,0 +1,8 @@
+- address: 0.0.0.0:8389
+  protocol:
+    type: snell
+    cipher: chacha20-ietf-poly1305
+    password: replace-with-a-random-password
+    udp_enabled: true
+  rules:
+    - allow-all-direct

@@ -31,7 +31,7 @@ pub struct AddRequest {
 
 pub struct AddResult {
     pub generation: config::GenerationResult,
-    pub share_uri: String,
+    pub share_uri: Option<String>,
 }
 
 pub async fn execute(request: AddRequest) -> Result<AddResult> {
@@ -82,7 +82,11 @@ pub async fn execute(request: AddRequest) -> Result<AddResult> {
         .await,
         port,
     )?;
-    let share_uri = client::share_uri(&generation.profile, &server_address)?;
+    let share_uri = if matches!(request.protocol, Protocol::Snell) {
+        None
+    } else {
+        Some(client::share_uri(&generation.profile, &server_address)?)
+    };
     Ok(AddResult {
         generation,
         share_uri,
@@ -243,6 +247,7 @@ mod tests {
         }
         assert_eq!(Protocol::from_menu_number(0), None);
         assert_eq!(Protocol::from_menu_number(11), Some(Protocol::Socks5));
+        assert_eq!(Protocol::from_menu_number(12), Some(Protocol::Snell));
     }
 
     #[test]

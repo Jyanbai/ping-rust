@@ -14,7 +14,7 @@ use crate::{
     client::{self, ClientFormat},
     config::{
         self, AnyTlsMode, AnyTlsUser, GenerationOptions, GenerationRequest, Protocol,
-        ShadowsocksCipher,
+        ShadowsocksCipher, SnellCipher,
     },
     deployment, fast_add, install_self,
     installer::{self, InstallMethod},
@@ -167,7 +167,7 @@ pub struct AddArgs {
     /// shoes 未安装时自动确认安装
     #[arg(long)]
     pub yes: bool,
-    /// stdout 只输出一行分享 URI
+    /// stdout 只输出一行分享 URI（Snell v3 无标准 URI，不支持）
     #[arg(long)]
     pub plain: bool,
 }
@@ -207,10 +207,10 @@ pub struct GenerateArgs {
     /// 为 TUIC v5 启用 0-RTT
     #[arg(long)]
     zero_rtt: bool,
-    /// Shadowsocks 加密方式（默认推荐 2022 AES-256-GCM）
-    #[arg(long, value_enum, default_value_t = ShadowsocksCipher::default())]
-    cipher: ShadowsocksCipher,
-    /// Shadowsocks 或 SOCKS5 密码；省略时安全随机生成
+    /// Shadowsocks/Snell 加密方式；省略时按协议使用安全默认值
+    #[arg(long, value_enum)]
+    cipher: Option<ShadowsocksCipher>,
+    /// Shadowsocks、Snell 或 SOCKS5 密码；省略时安全随机生成
     #[arg(long)]
     password: Option<String>,
     /// SOCKS5 用户名；省略时安全随机生成
@@ -313,9 +313,23 @@ pub async fn run(cli: Cli) -> Result<()> {
                 cert,
                 key,
             } = *args;
-            if password.is_some() && !matches!(protocol, Protocol::Shadowsocks | Protocol::Socks5) {
-                bail!("--password 仅适用于 Shadowsocks 或 SOCKS5");
+            if password.is_some()
+                && !matches!(
+                    protocol,
+                    Protocol::Shadowsocks | Protocol::Snell | Protocol::Socks5
+                )
+            {
+                bail!("--password 仅适用于 Shadowsocks、Snell v3 或 SOCKS5");
             }
+            let shadowsocks_cipher = cipher.unwrap_or_default();
+            let snell_cipher = if matches!(protocol, Protocol::Snell) {
+                cipher
+                    .map(SnellCipher::from_shadowsocks)
+                    .transpose()?
+                    .unwrap_or_default()
+            } else {
+                SnellCipher::default()
+            };
             if matches!(protocol, Protocol::AnyTls) && anytls_users.is_empty() {
                 anytls_users.push(config::generated_anytls_user("default"));
             }
@@ -338,8 +352,14 @@ pub async fn run(cli: Cli) -> Result<()> {
                     udp_enabled: udp || !disable_udp,
                     quic_endpoints,
                     tuic_zero_rtt: zero_rtt,
-                    shadowsocks_cipher: cipher,
+                    shadowsocks_cipher,
                     shadowsocks_password: if matches!(protocol, Protocol::Shadowsocks) {
+                        password.clone()
+                    } else {
+                        None
+                    },
+                    snell_cipher,
+                    snell_password: if matches!(protocol, Protocol::Snell) {
                         password.clone()
                     } else {
                         None
@@ -494,6 +514,9 @@ pub(crate) async fn update_shoes(method: InstallMethod) -> Result<installer::Ins
 }
 
 async fn run_add(args: AddArgs) -> Result<()> {
+    if args.plain && matches!(args.protocol, Protocol::Snell) {
+        bail!("Snell v3 没有可互操作的标准分享 URI，不能使用 --plain；请直接运行 prs add snell 查看连接参数");
+    }
     ensure_shoes_for_add(args.yes).await?;
     let result = fast_add::execute(fast_add::AddRequest {
         name: args.name,
@@ -506,7 +529,13 @@ async fn run_add(args: AddArgs) -> Result<()> {
     })
     .await?;
     if args.plain {
-        println!("{}", result.share_uri);
+        println!(
+            "{}",
+            result
+                .share_uri
+                .as_deref()
+                .context("该协议没有标准分享 URI")?
+        );
         return Ok(());
     }
     print_add_result(&result);
@@ -549,9 +578,13 @@ fn bootstrap_required(config: &Path, state: &Path) -> bool {
 pub(crate) fn print_add_result(result: &fast_add::AddResult) {
     let profile = &result.generation.profile;
     println!("{}", "部署成功，shoes 服务已启动。".green().bold());
-    print_profile_details_with_qr(profile, Some(&result.share_uri));
-    println!("\n复制上方链接即可导入客户端。");
-    println!("{}", "安全提示：分享链接包含访问凭据，请勿公开。".yellow());
+    print_profile_details_with_qr(profile, result.share_uri.as_deref());
+    if result.share_uri.is_some() {
+        println!("\n复制上方链接即可导入客户端。");
+        println!("{}", "安全提示：分享链接包含访问凭据，请勿公开。".yellow());
+    } else {
+        println!("\nSnell v3 没有通用标准分享 URI；配置已成功部署，请按客户端支持情况手动填写或导出 Clash Meta（仅 AES-128-GCM）。");
+    }
 }
 
 pub(crate) fn print_profile_details_with_qr(
@@ -649,6 +682,19 @@ fn profile_details_lines(profile: &config::ManagedProfile, share_uri: Option<&st
             lines.push(format!("端口 (port)             = {}", profile.port));
             lines.push(format!("密码 (password)         = {password}"));
             lines.push(format!("加密方式 (encryption)   = {}", cipher.as_str()));
+        }
+        config::Credentials::Snell {
+            cipher,
+            password,
+            udp_enabled,
+        } => {
+            lines.push("协议 (protocol)         = snell".to_owned());
+            lines.push("版本 (version)          = 3".to_owned());
+            lines.push(format!("地址 (address)          = {address}"));
+            lines.push(format!("端口 (port)             = {}", profile.port));
+            lines.push(format!("密码 (password)         = {password}"));
+            lines.push(format!("加密方式 (cipher)       = {}", cipher.as_str()));
+            lines.push(format!("UDP-over-TCP            = {udp_enabled}"));
         }
         config::Credentials::Socks5 {
             username,
@@ -937,6 +983,20 @@ pub async fn show_info(selector: Option<&str>) -> Result<()> {
                     profile.protocol_name(),
                     profile.server_name()
                 );
+                if let config::Credentials::Snell {
+                    cipher,
+                    password,
+                    udp_enabled,
+                } = &profile.credentials
+                {
+                    println!("  Snell 版本：3");
+                    println!("  加密方式：{}", cipher.as_str());
+                    println!("  密码：{password}");
+                    println!(
+                        "  UDP-over-TCP：{}",
+                        if *udp_enabled { "启用" } else { "关闭" }
+                    );
+                }
                 if let config::Credentials::Socks5 {
                     username,
                     password,
@@ -1038,6 +1098,19 @@ pub fn print_credentials(result: &config::GenerationResult) {
             println!("密码：{password}");
             println!("ALPN：{}", alpn_protocols.join(", "));
             print_certificate_notice(result);
+        }
+        config::Credentials::Snell {
+            cipher,
+            password,
+            udp_enabled,
+        } => {
+            println!("协议：Snell v3");
+            println!("加密：{}", cipher.as_str());
+            println!("密码：{password}");
+            println!(
+                "UDP-over-TCP：{}",
+                if *udp_enabled { "启用" } else { "关闭" }
+            );
         }
         config::Credentials::Socks5 {
             username,
@@ -1242,7 +1315,7 @@ mod tests {
             panic!("expected generate command");
         };
         assert_eq!(args.protocol, Protocol::Shadowsocks);
-        assert_eq!(args.cipher, ShadowsocksCipher::Aes128Gcm2022);
+        assert_eq!(args.cipher, Some(ShadowsocksCipher::Aes128Gcm2022));
 
         let anytls = Cli::try_parse_from([
             "ping-rust",
@@ -1279,6 +1352,26 @@ mod tests {
         for protocol in ["vless-tls", "trojan-tls", "trojan-reality", "vmess-ws-tls"] {
             assert!(Cli::try_parse_from(["prs", "add", protocol]).is_ok());
         }
+
+        let snell = Cli::try_parse_from([
+            "ping-rust",
+            "generate",
+            "snell",
+            "--port",
+            "8389",
+            "--cipher",
+            "aes-128-gcm",
+            "--password",
+            "secret",
+        ])
+        .unwrap();
+        let Some(Command::Generate(args)) = snell.command else {
+            panic!("expected Snell generate command");
+        };
+        assert_eq!(args.protocol, Protocol::Snell);
+        assert_eq!(args.port, 8389);
+        assert_eq!(args.cipher, Some(ShadowsocksCipher::Aes128Gcm));
+        assert_eq!(args.password.as_deref(), Some("secret"));
 
         let socks5 = Cli::try_parse_from([
             "ping-rust",
@@ -1342,6 +1435,13 @@ mod tests {
         assert_eq!(args.protocol, Protocol::Shadowsocks);
         assert!(args.random_port);
 
+        for command in [["prs", "add", "snell"], ["prs", "a", "snell"]] {
+            let cli = Cli::try_parse_from(command).unwrap();
+            let Some(Command::Add(args)) = cli.command else {
+                panic!("expected Snell add command");
+            };
+            assert_eq!(args.protocol, Protocol::Snell);
+        }
         for command in [["prs", "add", "socks5"], ["prs", "a", "socks5"]] {
             let cli = Cli::try_parse_from(command).unwrap();
             let Some(Command::Add(args)) = cli.command else {
@@ -1459,6 +1559,42 @@ mod tests {
 
         let without_url = profile_details_with_qr_text(&profile, None).unwrap();
         assert!(!without_url.contains("二维码 (QR)"));
+    }
+
+    #[test]
+    fn snell_details_show_every_manual_client_field_without_fake_url() {
+        let profile = config::ManagedProfile {
+            id: Uuid::nil(),
+            name: "snell-main".to_owned(),
+            port: 8389,
+            server_address: Some("203.0.113.8".to_owned()),
+            credentials: config::Credentials::Snell {
+                cipher: SnellCipher::Chacha20IetfPoly1305,
+                password: "snell-secret".to_owned(),
+                udp_enabled: true,
+            },
+            certificate_path: None,
+            certificate_key_path: None,
+            self_signed_certificate: false,
+        };
+        let output = profile_details_text(&profile, None);
+        for expected in [
+            "SNELL-8389.yaml",
+            "协议 (protocol)         = snell",
+            "版本 (version)          = 3",
+            "地址 (address)          = 203.0.113.8",
+            "端口 (port)             = 8389",
+            "密码 (password)         = snell-secret",
+            "加密方式 (cipher)       = chacha20-ietf-poly1305",
+            "UDP-over-TCP            = true",
+        ] {
+            assert!(
+                output.contains(expected),
+                "missing {expected:?} in {output}"
+            );
+        }
+        assert!(!output.contains("链接 (URL)"));
+        assert!(!output.contains("二维码 (QR)"));
     }
 
     #[test]

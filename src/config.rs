@@ -88,6 +88,7 @@ pub enum Protocol {
     VmessWsTls,
     #[value(name = "socks5", alias = "socks", alias = "s5")]
     Socks5,
+    Snell,
 }
 
 impl Protocol {
@@ -199,6 +200,43 @@ impl ShadowsocksCipher {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum SnellCipher {
+    #[value(name = "aes-128-gcm")]
+    #[serde(rename = "aes-128-gcm")]
+    Aes128Gcm,
+    #[value(name = "aes-256-gcm")]
+    #[serde(rename = "aes-256-gcm")]
+    Aes256Gcm,
+    #[default]
+    #[value(name = "chacha20-ietf-poly1305")]
+    #[serde(rename = "chacha20-ietf-poly1305")]
+    Chacha20IetfPoly1305,
+}
+
+impl SnellCipher {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Aes128Gcm => "aes-128-gcm",
+            Self::Aes256Gcm => "aes-256-gcm",
+            Self::Chacha20IetfPoly1305 => "chacha20-ietf-poly1305",
+        }
+    }
+
+    pub(crate) fn from_shadowsocks(cipher: ShadowsocksCipher) -> Result<Self> {
+        match cipher {
+            ShadowsocksCipher::Aes128Gcm => Ok(Self::Aes128Gcm),
+            ShadowsocksCipher::Aes256Gcm => Ok(Self::Aes256Gcm),
+            ShadowsocksCipher::Chacha20IetfPoly1305 => Ok(Self::Chacha20IetfPoly1305),
+            _ => bail!(
+                "Snell v3 不支持加密方式 {}；只允许 aes-128-gcm、aes-256-gcm、chacha20-ietf-poly1305",
+                cipher.as_str()
+            ),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum AnyTlsMode {
     #[default]
@@ -268,6 +306,8 @@ pub struct GenerationOptions {
     pub tuic_zero_rtt: bool,
     pub shadowsocks_cipher: ShadowsocksCipher,
     pub shadowsocks_password: Option<String>,
+    pub snell_cipher: SnellCipher,
+    pub snell_password: Option<String>,
     pub socks5_username: Option<String>,
     pub socks5_password: Option<String>,
     pub socks5_no_auth: bool,
@@ -288,6 +328,8 @@ impl Default for GenerationOptions {
             tuic_zero_rtt: false,
             shadowsocks_cipher: ShadowsocksCipher::default(),
             shadowsocks_password: None,
+            snell_cipher: SnellCipher::default(),
+            snell_password: None,
             socks5_username: None,
             socks5_password: None,
             socks5_no_auth: false,
@@ -321,6 +363,7 @@ pub enum ProfileChange {
     Password(String),
     RealityServerName(String),
     ShadowsocksCipher(ShadowsocksCipher),
+    SnellCipher(SnellCipher),
     Socks5Username(String),
     Socks5Authentication(bool),
     UdpEnabled(bool),
@@ -379,6 +422,11 @@ pub enum Credentials {
     },
     Shadowsocks {
         cipher: ShadowsocksCipher,
+        password: String,
+        udp_enabled: bool,
+    },
+    Snell {
+        cipher: SnellCipher,
         password: String,
         udp_enabled: bool,
     },
@@ -502,6 +550,7 @@ impl ManagedProfile {
                 ..
             } => Protocol::TrojanReality,
             Credentials::VmessTls { .. } => Protocol::VmessWsTls,
+            Credentials::Snell { .. } => Protocol::Snell,
             Credentials::Socks5 { .. } => Protocol::Socks5,
         }
     }
@@ -528,6 +577,7 @@ impl ManagedProfile {
                 ..
             } => "Trojan-Reality",
             Credentials::VmessTls { .. } => "VMess-WS-TLS",
+            Credentials::Snell { .. } => "Snell v3",
             Credentials::Socks5 { .. } => "SOCKS5",
         }
     }
@@ -541,7 +591,9 @@ impl ManagedProfile {
             Credentials::VlessTls { server_name, .. }
             | Credentials::Trojan { server_name, .. }
             | Credentials::VmessTls { server_name, .. } => server_name,
-            Credentials::Shadowsocks { .. } | Credentials::Socks5 { .. } => "-",
+            Credentials::Shadowsocks { .. }
+            | Credentials::Snell { .. }
+            | Credentials::Socks5 { .. } => "-",
         }
     }
 }
@@ -885,6 +937,19 @@ fn apply_profile_change(
                     *state_password = password;
                 }
                 (
+                    ServerProtocol::Snell {
+                        password: server_password,
+                        ..
+                    },
+                    Credentials::Snell {
+                        password: state_password,
+                        ..
+                    },
+                ) => {
+                    *server_password = password.clone();
+                    *state_password = password;
+                }
+                (
                     ServerProtocol::Socks {
                         password: server_password,
                         ..
@@ -948,6 +1013,24 @@ fn apply_profile_change(
                     *state_password = password;
                 }
                 _ => bail!("只有 Shadowsocks 配置支持更改加密方式"),
+            }
+        }
+        ProfileChange::SnellCipher(cipher) => {
+            match (&mut server.protocol, &mut profile.credentials) {
+                (
+                    ServerProtocol::Snell {
+                        cipher: server_cipher,
+                        ..
+                    },
+                    Credentials::Snell {
+                        cipher: state_cipher,
+                        ..
+                    },
+                ) => {
+                    *server_cipher = cipher.as_str().to_owned();
+                    *state_cipher = cipher;
+                }
+                _ => bail!("只有 Snell v3 配置支持更改加密方式"),
             }
         }
         ProfileChange::Socks5Username(username) => {
@@ -1022,7 +1105,20 @@ fn apply_profile_change(
                     *server_udp = enabled;
                     *state_udp = enabled;
                 }
-                _ => bail!("只有 SOCKS5 配置支持更改 UDP ASSOCIATE"),
+                (
+                    ServerProtocol::Snell {
+                        udp_enabled: server_udp,
+                        ..
+                    },
+                    Credentials::Snell {
+                        udp_enabled: state_udp,
+                        ..
+                    },
+                ) => {
+                    *server_udp = enabled;
+                    *state_udp = enabled;
+                }
+                _ => bail!("只有 SOCKS5 或 Snell v3 配置支持更改 UDP"),
             }
         }
         ProfileChange::AnyTlsUserPassword { index, password } => {
@@ -1127,6 +1223,22 @@ fn regenerate_profile_credentials(
                 bail!("Shadowsocks 配置与管理状态不一致");
             };
             let generated = generate_shadowsocks_password(*cipher);
+            *server_cipher = cipher.as_str().to_owned();
+            *server_password = generated.clone();
+            *password = generated;
+        }
+        Credentials::Snell {
+            cipher, password, ..
+        } => {
+            let ServerProtocol::Snell {
+                cipher: server_cipher,
+                password: server_password,
+                ..
+            } = &mut server.protocol
+            else {
+                bail!("Snell v3 配置与管理状态不一致");
+            };
+            let generated = generated_password();
             *server_cipher = cipher.as_str().to_owned();
             *server_password = generated.clone();
             *password = generated;
@@ -1377,6 +1489,7 @@ fn ensure_servers_match_state(servers: &[ServerConfig], profiles: &[ManagedProfi
             (ServerProtocol::Hysteria2 { .. }, Protocol::Hysteria2)
             | (ServerProtocol::Tuic { .. }, Protocol::Tuic)
             | (ServerProtocol::Shadowsocks { .. }, Protocol::Shadowsocks)
+            | (ServerProtocol::Snell { .. }, Protocol::Snell)
             | (ServerProtocol::Socks { .. }, Protocol::Socks5) => true,
             (
                 ServerProtocol::Tls {
@@ -1681,7 +1794,10 @@ fn validate_request(request: &GenerationRequest) -> Result<()> {
             bail!("配置名称必须为 1..=64 个非控制字符");
         }
     }
-    if !matches!(request.protocol, Protocol::Shadowsocks | Protocol::Socks5) {
+    if !matches!(
+        request.protocol,
+        Protocol::Shadowsocks | Protocol::Snell | Protocol::Socks5
+    ) {
         validate_server_name(&request.server_name)?;
     }
     if let Some(destination) = &request.reality_dest {
@@ -1741,6 +1857,16 @@ fn validate_request(request: &GenerationRequest) -> Result<()> {
         }
     } else if request.options.shadowsocks_password.is_some() {
         bail!("--password 仅适用于 Shadowsocks");
+    }
+
+    if matches!(request.protocol, Protocol::Snell) {
+        if let Some(password) = &request.options.snell_password {
+            if password.is_empty() || password.chars().any(char::is_control) {
+                bail!("Snell v3 密码不能为空或包含控制字符");
+            }
+        }
+    } else if request.options.snell_password.is_some() {
+        bail!("Snell 密码仅适用于 Snell v3");
     }
 
     if matches!(request.protocol, Protocol::Socks5) {
@@ -2223,6 +2349,114 @@ mod tests {
             panic!("expected Shadowsocks credentials");
         };
         assert_eq!(STANDARD.decode(password).unwrap().len(), 32);
+    }
+
+    #[tokio::test]
+    async fn snell_v3_yaml_matches_fixed_shoes_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut request = request(Protocol::Snell, dir.path().join("snell.yaml"));
+        request.port = 23_456;
+        let result = generate_inner(request, false).await.unwrap();
+        let yaml = fs::read_to_string(result.config_path).unwrap();
+        assert!(yaml.contains("address: 0.0.0.0:23456"));
+        assert!(yaml.contains("type: snell"));
+        assert!(yaml.contains("cipher: chacha20-ietf-poly1305"));
+        assert!(yaml.contains("password:"));
+        assert!(yaml.contains("udp_enabled: true"));
+        assert!(!yaml.contains("udp_num_sockets"));
+        let Credentials::Snell {
+            cipher,
+            password,
+            udp_enabled,
+        } = result.credentials
+        else {
+            panic!("expected Snell credentials");
+        };
+        assert_eq!(cipher, SnellCipher::Chacha20IetfPoly1305);
+        assert!(!password.is_empty());
+        assert!(udp_enabled);
+
+        let state = ManagedState {
+            schema_version: 2,
+            profiles: vec![result.profile],
+            chain_proxy: ChainProxyState::default(),
+        };
+        let restored: ManagedState = serde_json::from_slice(&serde_json::to_vec(&state).unwrap())
+            .expect("Snell managed state should round-trip");
+        let restored = &restored.profiles[0];
+        assert_eq!(restored.protocol(), Protocol::Snell);
+        assert_eq!(restored.port, 23_456);
+        let Credentials::Snell {
+            cipher,
+            password,
+            udp_enabled,
+        } = &restored.credentials
+        else {
+            panic!("expected restored Snell credentials");
+        };
+        assert_eq!(*cipher, SnellCipher::Chacha20IetfPoly1305);
+        assert!(!password.is_empty());
+        assert!(*udp_enabled);
+    }
+
+    #[test]
+    fn snell_v3_accepts_only_the_three_product_ciphers() {
+        for (input, expected) in [
+            (ShadowsocksCipher::Aes128Gcm, SnellCipher::Aes128Gcm),
+            (ShadowsocksCipher::Aes256Gcm, SnellCipher::Aes256Gcm),
+            (
+                ShadowsocksCipher::Chacha20IetfPoly1305,
+                SnellCipher::Chacha20IetfPoly1305,
+            ),
+        ] {
+            assert_eq!(SnellCipher::from_shadowsocks(input).unwrap(), expected);
+        }
+        let error = SnellCipher::from_shadowsocks(ShadowsocksCipher::Aes256Gcm2022)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Snell v3 不支持加密方式"));
+        assert!(error.contains("只允许 aes-128-gcm、aes-256-gcm、chacha20-ietf-poly1305"));
+    }
+
+    #[test]
+    fn snell_v3_preserves_each_explicit_cipher_and_password() {
+        for (index, cipher) in [
+            SnellCipher::Aes128Gcm,
+            SnellCipher::Aes256Gcm,
+            SnellCipher::Chacha20IetfPoly1305,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut request = request(Protocol::Snell, PathBuf::from("unused.yaml"));
+            request.port = 31_000 + index as u16;
+            request.options.snell_cipher = cipher;
+            request.options.snell_password = Some("chosen-snell-password".to_owned());
+            let (server, credentials, _, _) =
+                generate_parts(&request, Path::new("."), Uuid::nil()).unwrap();
+            let ServerProtocol::Snell {
+                cipher: server_cipher,
+                password: server_password,
+                udp_enabled,
+            } = server.protocol
+            else {
+                panic!("expected Snell server");
+            };
+            assert_eq!(server.address, format!("0.0.0.0:{}", request.port));
+            assert_eq!(server_cipher, cipher.as_str());
+            assert_eq!(server_password, "chosen-snell-password");
+            assert!(udp_enabled);
+            let Credentials::Snell {
+                cipher: state_cipher,
+                password: state_password,
+                ..
+            } = credentials
+            else {
+                panic!("expected Snell credentials");
+            };
+            assert_eq!(state_cipher, cipher);
+            assert_eq!(state_password, "chosen-snell-password");
+        }
     }
 
     #[tokio::test]
@@ -2818,6 +3052,80 @@ mod tests {
         };
         assert_eq!(server_cipher, cipher.as_str());
         assert_eq!(server_password, password);
+    }
+
+    #[test]
+    fn snell_password_cipher_and_regeneration_keep_server_and_state_aligned() {
+        let request = request(Protocol::Snell, PathBuf::from("unused.yaml"));
+        let (mut server, credentials, _, _) =
+            generate_parts(&request, Path::new("."), Uuid::nil()).unwrap();
+        let mut profile = ManagedProfile {
+            id: Uuid::new_v4(),
+            name: "snell-main".to_owned(),
+            port: request.port,
+            server_address: None,
+            credentials,
+            certificate_path: None,
+            certificate_key_path: None,
+            self_signed_certificate: false,
+        };
+
+        apply_profile_change(
+            &mut server,
+            &mut profile,
+            ProfileChange::SnellCipher(SnellCipher::Aes128Gcm),
+        )
+        .unwrap();
+        apply_profile_change(
+            &mut server,
+            &mut profile,
+            ProfileChange::Password("chosen-secret".to_owned()),
+        )
+        .unwrap();
+        apply_profile_change(&mut server, &mut profile, ProfileChange::UdpEnabled(false)).unwrap();
+        let before_regenerate = match &profile.credentials {
+            Credentials::Snell {
+                cipher, password, ..
+            } => {
+                assert_eq!(*cipher, SnellCipher::Aes128Gcm);
+                assert_eq!(password, "chosen-secret");
+                password.clone()
+            }
+            _ => unreachable!(),
+        };
+        apply_profile_change(
+            &mut server,
+            &mut profile,
+            ProfileChange::RegenerateCredentials,
+        )
+        .unwrap();
+        let Credentials::Snell {
+            cipher,
+            password,
+            udp_enabled,
+        } = &profile.credentials
+        else {
+            unreachable!()
+        };
+        assert_eq!(*cipher, SnellCipher::Aes128Gcm);
+        assert_ne!(password, &before_regenerate);
+        assert!(!*udp_enabled);
+        let ServerProtocol::Snell {
+            cipher: server_cipher,
+            password: server_password,
+            udp_enabled: server_udp,
+        } = &server.protocol
+        else {
+            unreachable!()
+        };
+        assert_eq!(server_cipher, cipher.as_str());
+        assert_eq!(server_password, password);
+        assert_eq!(server_udp, udp_enabled);
+        ensure_servers_match_state(
+            std::slice::from_ref(&server),
+            std::slice::from_ref(&profile),
+        )
+        .unwrap();
     }
 
     #[test]
