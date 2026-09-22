@@ -691,7 +691,9 @@ jobs:
             sudo "$PRS" add socks5 25459 --server-address 203.0.113.10 --yes
           )"
           grep -F "协议 (protocol)         = socks5" <<<"$socks_add_output" >/dev/null
-          grep -F "用户名 (username)       = default" <<<"$socks_add_output" >/dev/null
+          grep -Eq '^用户名 \(username\)[[:space:]]*= [A-Za-z0-9_-]{12}$' \
+            <<<"$socks_add_output"
+          ! grep -F "用户名 (username)       = default" <<<"$socks_add_output" >/dev/null
           grep -F "UDP ASSOCIATE           = enabled" <<<"$socks_add_output" >/dev/null
           grep -F "socks5://" <<<"$socks_add_output" >/dev/null
           socks_alias_output="$(
