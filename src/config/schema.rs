@@ -73,6 +73,13 @@ pub(super) enum ServerProtocol {
         password: String,
         udp_enabled: bool,
     },
+    Socks {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        username: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        password: Option<String>,
+        udp_enabled: bool,
+    },
 }
 
 #[derive(Clone, Serialize, Deserialize)]

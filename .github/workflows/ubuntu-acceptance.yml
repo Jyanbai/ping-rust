@@ -662,7 +662,7 @@ jobs:
           spawn $env(PRS_COMMAND)
           wait_for {请选择 \[0-10\]} main-menu
           send "1\r"
-          wait_for {请选择 \[0-10\]} protocol-menu
+          wait_for {请选择 \[0-11\]} protocol-menu
           send "$env(PROTOCOL_NUMBER)\r"
           wait_for {输入端口} port-prompt
           send "$env(MENU_PORT)\r"
@@ -686,6 +686,18 @@ jobs:
           run_menu_add 8 25453 trojan
           run_menu_add 9 25454 trojan
           run_menu_add 10 25455 vmess
+          run_menu_add 11 25456 socks5
+          socks_add_output="$(
+            sudo "$PRS" add socks5 25459 --server-address 203.0.113.10 --yes
+          )"
+          grep -F "协议 (protocol)         = socks5" <<<"$socks_add_output" >/dev/null
+          grep -F "用户名 (username)       = default" <<<"$socks_add_output" >/dev/null
+          grep -F "UDP ASSOCIATE           = enabled" <<<"$socks_add_output" >/dev/null
+          grep -F "socks5://" <<<"$socks_add_output" >/dev/null
+          socks_alias_output="$(
+            sudo "$PRS" a socks5 25460 --server-address 203.0.113.10 --yes
+          )"
+          grep -F "协议 (protocol)         = socks5" <<<"$socks_alias_output" >/dev/null
           sudo systemctl is-active --quiet shoes.service
           wait_listener() {
             local kind="$1"
@@ -706,6 +718,9 @@ jobs:
           wait_listener t 25453
           wait_listener t 25454
           wait_listener t 25455
+          wait_listener t 25456
+          wait_listener t 25459
+          wait_listener t 25460
 
           profile_id_for_port() {
             local port="$1"
@@ -729,7 +744,10 @@ jobs:
             VLESS-WS-TLS-25452.yaml \
             TROJAN-TLS-25453.yaml \
             TROJAN-REALITY-25454.yaml \
-            VMESS-WS-TLS-25455.yaml; do
+            VMESS-WS-TLS-25455.yaml \
+            SOCKS5-25456.yaml \
+            SOCKS5-25459.yaml \
+            SOCKS5-25460.yaml; do
             sudo test -s "/etc/shoes/profiles/$profile_file"
           done
 

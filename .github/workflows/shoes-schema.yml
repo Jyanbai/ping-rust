@@ -60,6 +60,9 @@ jobs:
           shoes --dry-run examples/chain-e2e-upstream.yaml
           shoes --dry-run examples/chain-e2e-downstream.yaml
           shoes --dry-run examples/chain-e2e-client.yaml
+          shoes --dry-run examples/socks5.yaml
+          shoes --dry-run examples/socks5-no-udp.yaml
+          shoes --dry-run examples/socks5-no-auth.yaml
           cargo test --locked --test chain_proxy_e2e -- --nocapture
       - name: Generate and validate every protocol
         shell: bash
@@ -96,10 +99,12 @@ jobs:
           "$bin" generate vmess-ws-tls --output "$out/vmess-ws-tls.yaml" \
             --port 6447 --server-name vmess.example.com \
             --websocket-path /vmess >/dev/null
+          "$bin" generate socks5 --output "$out/socks5.yaml" \
+            --port 6449 --username default --password socks5-test-password >/dev/null
 
           for config in \
             reality hysteria2 tuic shadowsocks anytls \
-            vless-tls vless-ws-tls trojan-tls trojan-reality vmess-ws-tls; do
+            vless-tls vless-ws-tls trojan-tls trojan-reality vmess-ws-tls socks5; do
             shoes --dry-run "$out/$config.yaml"
           done
           cat \
@@ -112,16 +117,20 @@ jobs:
             "$out/vless-ws-tls.yaml" \
             "$out/trojan-tls.yaml" \
             "$out/trojan-reality.yaml" \
-            "$out/vmess-ws-tls.yaml" >"$out/all-ten.yaml"
-          shoes --dry-run "$out/all-ten.yaml"
+            "$out/vmess-ws-tls.yaml" \
+            "$out/socks5.yaml" >"$out/all-eleven.yaml"
+          shoes --dry-run "$out/all-eleven.yaml"
       - name: Start every generated listener
         shell: bash
         run: |
           set -euo pipefail
           out="$PWD/target/shoes-validation"
-          shoes "$out/all-ten.yaml" >"$out/runtime.log" 2>&1 &
+          shoes "$out/all-eleven.yaml" >"$out/runtime.log" 2>&1 &
           shoes_pid="$!"
-          trap 'kill "$shoes_pid" 2>/dev/null || true' EXIT
+          python3 -m http.server 18080 --bind 127.0.0.1 \
+            >"$out/socks-origin.log" 2>&1 &
+          origin_pid="$!"
+          trap 'kill "$shoes_pid" "$origin_pid" 2>/dev/null || true' EXIT
           for _ in {1..40}; do
             tcp_ports="$(ss -H -lnt | awk '{print $4}')"
             udp_ports="$(ss -H -lun | awk '{print $4}')"
@@ -133,8 +142,13 @@ jobs:
               && grep -Eq '(^|:)6445$' <<<"$tcp_ports" \
               && grep -Eq '(^|:)6446$' <<<"$tcp_ports" \
               && grep -Eq '(^|:)6447$' <<<"$tcp_ports" \
+              && grep -Eq '(^|:)6449$' <<<"$tcp_ports" \
               && grep -Eq '(^|:)2443$' <<<"$udp_ports" \
               && grep -Eq '(^|:)3443$' <<<"$udp_ports"; then
+              curl --fail --silent --show-error \
+                --socks5-hostname 127.0.0.1:6449 \
+                --proxy-user default:socks5-test-password \
+                http://127.0.0.1:18080/ >/dev/null
               exit 0
             fi
             sleep 0.25
@@ -171,6 +185,19 @@ jobs:
               --password "${passwords[$index]}" >/dev/null
             shoes --dry-run "$config"
           done
+
+          "$bin" generate socks5 --output "$out/socks5-auth-udp.yaml" \
+            --port 6120 --username alice --password socks-secret --udp >/dev/null
+          "$bin" generate socks5 --output "$out/socks5-auth-tcp.yaml" \
+            --port 6121 --username alice --password socks-secret --no-udp >/dev/null
+          "$bin" generate socks5 --output "$out/socks5-no-auth.yaml" \
+            --port 6122 --no-auth >/dev/null
+          for config in "$out"/socks5-{auth-udp,auth-tcp,no-auth}.yaml; do
+            shoes --dry-run "$config"
+          done
+          grep -F "udp_enabled: true" "$out/socks5-auth-udp.yaml"
+          grep -F "udp_enabled: false" "$out/socks5-auth-tcp.yaml"
+          ! grep -Eq 'username:|password:' "$out/socks5-no-auth.yaml"
 
           "$bin" generate anytls --output "$out/anytls-reality.yaml" \
             --port 7443 --anytls-mode reality \

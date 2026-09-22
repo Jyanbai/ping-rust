@@ -86,6 +86,9 @@ pub fn render(profile: &ManagedProfile, format: ClientFormat, server: &str) -> R
     match format {
         ClientFormat::ClashMeta => clash_meta(profile, &server),
         ClientFormat::SingBox => sing_box(profile, &server),
+        ClientFormat::Nekobox if matches!(profile.credentials, Credentials::Socks5 { .. }) => {
+            bail!("该导出目标暂不支持 SOCKS5；请使用标准 URI/QR、sing-box 或 Clash Meta 导出")
+        }
         ClientFormat::Nekobox => share_uri(profile, &server),
     }
 }
@@ -159,6 +162,24 @@ fn clash_meta(profile: &ManagedProfile, server: &str) -> Result<String> {
             "password": password,
             "udp": udp_enabled
         }),
+        Credentials::Socks5 {
+            username,
+            password,
+            udp_enabled,
+        } => {
+            let mut proxy = json!({
+                "name": profile.name,
+                "type": "socks5",
+                "server": server,
+                "port": profile.port,
+                "udp": udp_enabled
+            });
+            if let (Some(username), Some(password)) = (username, password) {
+                proxy["username"] = json!(username);
+                proxy["password"] = json!(password);
+            }
+            proxy
+        }
         Credentials::AnyTls {
             users,
             server_name,
@@ -346,6 +367,21 @@ fn sing_box(profile: &ManagedProfile, server: &str) -> Result<String> {
             "method": cipher.client_name(),
             "password": password
         }),
+        Credentials::Socks5 {
+            username, password, ..
+        } => {
+            let mut outbound = json!({
+                "type": "socks",
+                "tag": profile.name,
+                "server": server,
+                "server_port": profile.port
+            });
+            if let (Some(username), Some(password)) = (username, password) {
+                outbound["username"] = json!(username);
+                outbound["password"] = json!(password);
+            }
+            outbound
+        }
         Credentials::AnyTls {
             users,
             server_name,
@@ -545,6 +581,21 @@ pub fn share_uri(profile: &ManagedProfile, server: &str) -> Result<String> {
         } => {
             let auth = URL_SAFE_NO_PAD.encode(format!("{}:{password}", cipher.client_name()));
             Ok(format!("ss://{auth}@{host}:{}#{fragment}", profile.port))
+        }
+        Credentials::Socks5 {
+            username, password, ..
+        } => {
+            let authentication = match (username, password) {
+                (Some(username), Some(password)) => {
+                    format!("{}:{}@", encode(username), encode(password))
+                }
+                (None, None) => String::new(),
+                _ => bail!("SOCKS5 管理状态中的用户名和密码不完整"),
+            };
+            Ok(format!(
+                "socks5://{authentication}{host}:{}#{fragment}",
+                profile.port
+            ))
         }
         Credentials::AnyTls {
             users,
@@ -1148,5 +1199,57 @@ mod tests {
                 "{format:?}: {message}"
             );
         }
+    }
+
+    #[test]
+    fn socks5_uri_and_client_exports_preserve_auth_udp_ipv6_and_encoding() {
+        let profile = ManagedProfile {
+            id: Uuid::nil(),
+            name: "SOCKS #测试".to_owned(),
+            port: 1080,
+            server_address: None,
+            credentials: Credentials::Socks5 {
+                username: Some("用@户:%".to_owned()),
+                password: Some("密:码@#%".to_owned()),
+                udp_enabled: false,
+            },
+            certificate_path: None,
+            certificate_key_path: None,
+            self_signed_certificate: false,
+        };
+        let uri = share_uri(&profile, "2001:db8::1").unwrap();
+        assert!(uri.starts_with("socks5://"));
+        assert!(uri.contains("%40"));
+        assert!(uri.contains("%3A"));
+        assert!(uri.contains("%23"));
+        assert!(uri.contains("%25"));
+        assert!(uri.contains("@[2001:db8::1]:1080#"));
+        let parsed = url::Url::parse(&uri).unwrap();
+        assert_eq!(parsed.host_str(), Some("[2001:db8::1]"));
+        assert!(render(&profile, ClientFormat::Nekobox, "203.0.113.8").is_err());
+
+        let clash = render(&profile, ClientFormat::ClashMeta, "203.0.113.8").unwrap();
+        let clash: serde_yaml::Value = serde_yaml::from_str(&clash).unwrap();
+        assert_eq!(clash["proxies"][0]["type"], "socks5");
+        assert_eq!(clash["proxies"][0]["udp"], false);
+        assert_eq!(clash["proxies"][0]["username"], "用@户:%");
+
+        let sing = render(&profile, ClientFormat::SingBox, "203.0.113.8").unwrap();
+        let sing: Value = serde_json::from_str(&sing).unwrap();
+        assert_eq!(sing["outbounds"][0]["type"], "socks");
+        assert_eq!(sing["outbounds"][0]["server_port"], 1080);
+        assert_eq!(sing["outbounds"][0]["password"], "密:码@#%");
+
+        let mut anonymous = profile;
+        anonymous.credentials = Credentials::Socks5 {
+            username: None,
+            password: None,
+            udp_enabled: true,
+        };
+        let uri = share_uri(&anonymous, "198.51.100.8").unwrap();
+        assert!(!uri.contains('@'));
+        let clash = render(&anonymous, ClientFormat::ClashMeta, "198.51.100.8").unwrap();
+        assert!(!clash.contains("username:"));
+        assert!(!clash.contains("password:"));
     }
 }

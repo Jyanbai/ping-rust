@@ -56,6 +56,9 @@ enum ChangeAction {
     Password,
     RealityServerName,
     ShadowsocksCipher,
+    Socks5Username,
+    Socks5Authentication,
+    UdpEnabled,
     AnyTlsUserPassword,
 }
 
@@ -275,6 +278,12 @@ async fn change_config_menu() -> Result<()> {
             actions.push((ChangeAction::Password, "更改密码"));
             actions.push((ChangeAction::ShadowsocksCipher, "更改加密方式"));
         }
+        Protocol::Socks5 => {
+            actions.push((ChangeAction::Socks5Username, "更改用户名"));
+            actions.push((ChangeAction::Password, "更改密码"));
+            actions.push((ChangeAction::UdpEnabled, "更改 UDP ASSOCIATE"));
+            actions.push((ChangeAction::Socks5Authentication, "更改认证模式"));
+        }
         Protocol::AnyTls => {
             actions.push((ChangeAction::AnyTlsUserPassword, "更改用户密码"));
         }
@@ -385,6 +394,43 @@ async fn change_config_menu() -> Result<()> {
                 return Ok(());
             };
             ProfileChange::ShadowsocksCipher(ciphers[selected])
+        }
+        ChangeAction::Socks5Username => {
+            let Credentials::Socks5 { username, .. } = &profile.credentials else {
+                anyhow::bail!("配置协议与管理状态不一致");
+            };
+            let Some(current) = username else {
+                anyhow::bail!("无认证 SOCKS5 请先切换为用户名密码认证");
+            };
+            let username = Input::<String>::with_theme(&ColorfulTheme::default())
+                .with_prompt("SOCKS5 用户名")
+                .default(current.clone())
+                .interact_text()?;
+            ProfileChange::Socks5Username(username)
+        }
+        ChangeAction::Socks5Authentication => {
+            let Credentials::Socks5 { username, .. } = &profile.credentials else {
+                anyhow::bail!("配置协议与管理状态不一致");
+            };
+            let enabled = Confirm::with_theme(&ColorfulTheme::default())
+                .with_prompt("启用用户名 + 密码认证？")
+                .default(username.is_some())
+                .interact()?;
+            if !enabled {
+                println!("警告：SOCKS5 无认证且无传输加密，公开到公网可能被第三方滥用。");
+            }
+            ProfileChange::Socks5Authentication(enabled)
+        }
+        ChangeAction::UdpEnabled => {
+            let Credentials::Socks5 { udp_enabled, .. } = &profile.credentials else {
+                anyhow::bail!("配置协议与管理状态不一致");
+            };
+            ProfileChange::UdpEnabled(
+                Confirm::with_theme(&ColorfulTheme::default())
+                    .with_prompt("启用 UDP ASSOCIATE？")
+                    .default(*udp_enabled)
+                    .interact()?,
+            )
         }
         ChangeAction::AnyTlsUserPassword => {
             let Credentials::AnyTls { users, .. } = &profile.credentials else {
@@ -967,6 +1013,33 @@ async fn advanced_add_config_menu() -> Result<()> {
             _ => ShadowsocksCipher::Chacha20IetfPoly1305,
         };
     }
+    if matches!(protocol, Protocol::Socks5) {
+        let Some(authentication) =
+            select_numbered("认证", &["用户名 + 密码（推荐）", "无认证（不推荐）"])?
+        else {
+            return Ok(());
+        };
+        if authentication == 0 {
+            options.socks5_username = Some(
+                Input::<String>::with_theme(&ColorfulTheme::default())
+                    .with_prompt("SOCKS5 用户名")
+                    .default("default".to_owned())
+                    .interact_text()?,
+            );
+            let password = Password::with_theme(&ColorfulTheme::default())
+                .with_prompt("SOCKS5 密码（留空则安全随机生成）")
+                .allow_empty_password(true)
+                .interact()?;
+            options.socks5_password = (!password.is_empty()).then_some(password);
+        } else {
+            options.socks5_no_auth = true;
+            println!("警告：SOCKS5 无认证且无传输加密，公开到公网可能被第三方滥用。");
+        }
+        options.udp_enabled = Confirm::with_theme(&ColorfulTheme::default())
+            .with_prompt("启用 UDP ASSOCIATE？")
+            .default(true)
+            .interact()?;
+    }
     if matches!(protocol, Protocol::AnyTls) {
         let Some(mode) =
             select_numbered("AnyTLS 外层安全模式", &["TLS（推荐）", "Reality（高级）"])?
@@ -1032,7 +1105,7 @@ async fn advanced_add_config_menu() -> Result<()> {
         }
     }
     let reality_outer = protocol.uses_reality(options.anytls_mode);
-    let server_name = if matches!(protocol, Protocol::Shadowsocks) {
+    let server_name = if matches!(protocol, Protocol::Shadowsocks | Protocol::Socks5) {
         config::DEFAULT_SNI.to_owned()
     } else {
         let default_server_name = config::resolve_server_name(None, protocol, options.anytls_mode);
@@ -1177,6 +1250,9 @@ mod tests {
                 Some(protocol)
             );
         }
+        assert_eq!(Protocol::from_menu_number(10), Some(Protocol::VmessWsTls));
+        assert_eq!(Protocol::from_menu_number(11), Some(Protocol::Socks5));
+        assert_eq!(protocol_items[10], (11, "SOCKS5"));
     }
 
     #[test]

@@ -5,11 +5,11 @@
 [![CI](https://github.com/Jyanbai/ping-rust/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Jyanbai/ping-rust/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-`ping-rust` 是一个纯 Rust 编写的 [cfal/shoes](https://github.com/cfal/shoes) 安装与管理工具。它提供类似 233boy 脚本的数字菜单，在 Linux VPS 上完成 shoes 安装、十种经过约束的成品协议配置、systemd 管理和日常运维。
+`ping-rust` 是一个纯 Rust 编写的 [cfal/shoes](https://github.com/cfal/shoes) 安装与管理工具。它提供类似 233boy 脚本的数字菜单，在 Linux VPS 上完成 shoes 安装、受管协议配置、systemd 管理和日常运维。
 
 核心逻辑全部位于 Rust 源码中；`scripts/install.sh` 只负责执行 Rust 前的架构检测、下载、SHA-256 校验与严格解包，原子安装、快捷命令所有权判断和首次部署均由已校验的 Rust 二进制完成。
 
-> 当前稳定版与本仓库源码均为 [`v0.1.17`](https://github.com/Jyanbai/ping-rust/releases/tag/v0.1.17)，并已发布至 [crates.io](https://crates.io/crates/ping-rust/0.1.17)。支持 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks、AnyTLS、VLESS-TLS-Vision、VLESS-WS-TLS、Trojan-TLS、Trojan-Reality 和 VMess-WS-TLS。用户只选择完整协议，不需要理解或手动组合传输层、安全层与内层协议。
+> 当前公开稳定版为 [`v0.1.17`](https://github.com/Jyanbai/ping-rust/releases/tag/v0.1.17)，并已发布至 [crates.io](https://crates.io/crates/ping-rust/0.1.17)。本文同时描述当前源码新增、尚未单独发布的 SOCKS5；其余十种稳定协议为 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks、AnyTLS、VLESS-TLS-Vision、VLESS-WS-TLS、Trojan-TLS、Trojan-Reality 和 VMess-WS-TLS。用户只选择完整协议，不需要理解或手动组合传输层、安全层与内层协议。
 
 完整文档：[Wiki](https://github.com/Jyanbai/ping-rust/wiki) · [快速开始](https://github.com/Jyanbai/ping-rust/wiki/Quick-Start) · [链式代理](https://github.com/Jyanbai/ping-rust/wiki/Chain-Proxy) · [故障排查](https://github.com/Jyanbai/ping-rust/wiki/Troubleshooting)
 
@@ -52,7 +52,7 @@ bash <(curl --proto '=https' --tlsv1.2 -fsSL \
 
 - 从 GitHub Release 下载 shoes，自动匹配 x86_64/aarch64 与 GNU/musl，强制校验官方 SHA-256 digest；GNU 资产不兼容时安全回退 static musl
 - 使用 cargo 从与 schema CI 相同的 cfal/shoes 固定源码提交编译安装；低于 1 GiB 内存时自动单任务并关闭 LTO，避免换页风暴
-- 生成十种已验证协议预设的 shoes 服务端配置；每项均是可直接部署的完整协议栈
+- 生成经过固定 shoes schema 验证的协议预设；每项均是可直接部署的完整协议栈
 - `prs` 数字菜单与 `prs add/a` 快捷命令：自动端口、自动凭据、部署完成直接输出分享链接
 - 在 Rust 内生成 X25519 Reality 密钥、UUID、short ID、随机密码和自签名证书
 - Reality 未显式指定 SNI 时，从与本地 233boy 脚本一致的 Amazon、eBay、PayPal、Cloudflare 域名列表中随机选择（不含 Apple）；客户端指纹与该脚本一致固定为 `chrome`
@@ -174,9 +174,10 @@ shoes: running
 8) Trojan-TLS
 9) Trojan-REALITY
 10) VMess-WS-TLS
+11) SOCKS5
 0) 返回
 
-请选择 [0-10]: 4
+请选择 [0-11]: 4
 输入端口（直接回车自动选择随机端口）:
 
 部署成功，shoes 服务已启动。
@@ -213,7 +214,7 @@ vless://...security=reality...pbk=...&sid=...#VLESS-REALITY-25448
 0) 返回
 ```
 
-第一版支持 SOCKS5、HTTP/HTTPS、Shadowsocks、VLESS TCP/TLS/Reality/WebSocket 和 Trojan TLS/WebSocket 分享链接。由于当前 shoes 内核没有对应客户端实现，Hysteria2、TUIC、WireGuard/WARP 不能作为链式出口；ping-rust 会返回明确错误，不会生成近似配置。HTTP、SOCKS5 和 Trojan 出口不支持 UDP-over-TCP，启用或切换时会再次警告；相关 UDP 请求会失败，不会自动回退直连。
+第一版支持 SOCKS5、HTTP/HTTPS、Shadowsocks、VLESS TCP/TLS/Reality/WebSocket 和 Trojan TLS/WebSocket 分享链接。由于当前 shoes 内核没有对应客户端实现，Hysteria2、TUIC、WireGuard/WARP 不能作为链式出口；ping-rust 会返回明确错误，不生成近似配置。HTTP、SOCKS5 和 Trojan 出口不支持 UDP-over-TCP，启用或切换时会再次警告；相关 UDP 请求会失败，不会自动回退直连。
 
 “测试节点（完整代理）”严格复用当前节点生成临时 shoes SOCKS5 入口，再通过该入口访问 `https://www.gstatic.com/generate_204`。只有地址可达、协议认证/Reality 握手、无重定向且响应精确为 `204 No Content` 才报告节点可用；普通 `200 OK` 页面也会被拒绝，避免劫持页或错误落地页造成误报。测试进程和权限为 `0600` 的临时配置随后立即删除。它不会修改当前出口或线上 systemd 服务。
 
@@ -221,7 +222,7 @@ vless://...security=reality...pbk=...&sid=...#VLESS-REALITY-25448
 
 CI 在 Debian 12 与 Ubuntu 24.04 的真实 systemd 环境中，从 PTY 菜单完成添加、完整协议测试、选择、启用、切换、关闭和删除。两个隔离网络命名空间提供可区分的 Shadowsocks 出口；测试会核对 HTTP 服务观察到的源地址，并验证 systemd 重启后仍使用所选出口、上游离线时请求失败且不会静默直连。该测试覆盖稳定 TCP 路径，不代表 shoes 已支持 UDP 链式转发。
 
-首次安装流程是：`install.sh → 自动安装 ping-rust/shoes → 自动随机端口部署 VLESS-REALITY → 复制 URL`，中间零输入。Reality 未指定 `--server-name` 时会从 `www.amazon.com`、`www.ebay.com`、`www.paypal.com`、`www.cloudflare.com`、`dash.cloudflare.com`、`aws.amazon.com` 中随机选择 SNI；列表不含 Apple，客户端指纹固定为本地 233boy 脚本使用的 `chrome`。后续日常流程是：`prs → 1 → 选择协议 → 输入端口/直接回车随机 → 复制 URL 到 v2rayN`；Shadowsocks 会额外选择加密方式和密码，SS 2022 密码不符合所选 cipher 的 Base64 密钥长度时会警告并自动替换。其余协议自动生成 UUID、密码、Reality 密钥、WebSocket 路径或证书。十个协议都会输出公网地址、端口、客户端所需凭据、协议参数和分享链接。添加或查看配置成功后直接退出 `prs`；主菜单输入 `0` 退出，任意子菜单输入 `0` 返回主菜单。自动端口从 `20000..=65535` 的高位范围选择；协议选择固定使用连续编号 `1..=10`。链接只会在配置通过 `shoes --dry-run`、原子写入、systemd 启动且确认为 active 后输出；失败会恢复原配置和服务状态。
+首次安装流程是：`install.sh → 自动安装 ping-rust/shoes → 自动随机端口部署 VLESS-REALITY → 复制 URL`，中间零输入。Reality 未指定 SNI 时会从 `www.amazon.com`、`www.ebay.com`、`www.paypal.com`、`www.cloudflare.com`、`dash.cloudflare.com`、`aws.amazon.com` 中随机选择；列表不含 Apple，客户端指纹固定为本地 233boy 脚本使用的 `chrome`。后续日常流程是：`prs → 1 → 选择协议 → 输入端口/直接回车随机`；Shadowsocks 会额外选择加密方式和密码，SS 2022 密码不符合所选 cipher 的 Base64 密钥长度时会警告并自动替换。其余协议自动生成 UUID、密码、Reality 密钥、WebSocket 路径或证书。SOCKS5 快速添加默认生成 `default` 用户、安全随机密码并启用 UDP ASSOCIATE。添加或查看配置成功后直接退出 `prs`；主菜单输入 `0` 退出，任意子菜单输入 `0` 返回主菜单。自动端口从 `20000..=65535` 的高位范围选择；菜单协议选择固定使用连续编号 `1..=11`。信息只会在配置通过 `shoes --dry-run`、原子写入、systemd 启动且确认为 active 后输出；失败会恢复原配置和服务状态。
 
 非交互方式：
 
@@ -247,7 +248,10 @@ sudo prs add vless-ws-tls
 sudo prs add trojan-tls
 sudo prs add trojan-reality
 sudo prs add vmess-ws-tls
+sudo prs add socks5
 ```
+
+SOCKS5 支持 TCP CONNECT 与 UDP ASSOCIATE，默认启用用户名/密码认证。SOCKS5 本身不提供传输加密，更适合作为工具型代理、内网代理或链式出口。高级添加可关闭 UDP，或在明确警告后主动选择无认证模式。
 
 WebSocket 路径默认安全随机生成；需要固定路径时可使用完整命令：
 
@@ -371,7 +375,7 @@ sudo ping-rust export sing-box --profile <配置-UUID> --server proxy.example.co
 sudo ping-rust export nekobox --profile <配置-UUID> --server 203.0.113.10
 ```
 
-只有一个配置时可以省略 `--profile`。十种菜单协议均能生成 sing-box 配置及 v2rayN 可导入链接；新增的 VLESS、Trojan 和 VMess 预设同时支持 Clash Meta。普通 TLS AnyTLS 和 Shadowsocks 也支持 Clash Meta 与 Nekobox 标准 URI。Mihomo 明确不支持 AnyTLS+Reality，标准 AnyTLS URI也无法表达 Reality 公钥，因此这两个导出会返回中文错误，不会生成伪配置。所有 Reality 导出都只包含公钥，永远不包含服务器私钥。
+只有一个配置时可以省略 `--profile`。SOCKS5 可导出 percent-encoded `socks5://` URI、终端 QR、sing-box `type: socks` 和 Clash Meta/Mihomo `type: socks5`；IPv6 地址会使用方括号。NekoBox 没有在本项目核实到稳定、明确的专用 SOCKS5 导入 schema，因此 `export nekobox` 会明确拒绝，不把普通 URI 冒充已验证的 NekoBox 格式。Mihomo 同样不支持 AnyTLS+Reality，标准 AnyTLS URI也无法表达 Reality 公钥；所有不兼容情况都会返回中文错误。所有 Reality 导出只包含公钥，永远不包含服务器私钥。
 
 ## 备份与恢复
 
@@ -434,9 +438,9 @@ cargo doc --no-deps
 
 - Rust 单元测试覆盖密钥/YAML、归档解包、原子写入、systemd unit、端口检查、客户端三格式和恢复路径安全。
 - 自更新单元测试覆盖版本、架构、checksum 重复/缺失和严格单文件归档；Release job 还会真实执行一次强制自更新并复核版本。
-- `shoes-schema.yml` 固定 cfal/shoes commit `386b11532424b8665ee3e46340c6236fb3c47595`（0.2.8），对十协议单独配置、十协议联合配置、全部六种 Shadowsocks cipher 和 Reality+AnyTLS 执行真实 `shoes --dry-run`，并启动十协议聚合配置检查 TCP/UDP 监听。
+- `shoes-schema.yml` 固定 cfal/shoes commit `386b11532424b8665ee3e46340c6236fb3c47595`（0.2.8），对全部预设联合配置、全部六种 Shadowsocks cipher、SOCKS5 auth/no-auth 与 UDP 开关、Reality+AnyTLS 执行真实 `shoes --dry-run`，并启动聚合配置检查监听和 SOCKS5 TCP CONNECT。
 - 通过 cargo-zigbuild + Zig 生成 x86_64/aarch64 Linux GNU release ELF，最高 GLIBC 需求为 2.34，覆盖 Rocky/Alma 9 及更新的目标发行版基线。
-- CI 覆盖 Ubuntu 22.04/24.04，并在 Debian 12、Rocky Linux 9、AlmaLinux 9 容器中执行锁定依赖测试和 release 构建；shoes schema 作业实际启动十协议聚合监听。Ubuntu 24.04 acceptance 覆盖完整 root/systemd/PTY/回滚/导出流程，Debian 12 systemd acceptance 同时覆盖零输入部署、严格 `--plain` 输出、多用户 AnyTLS 无损导出拒绝、激活失败回滚和加固 unit 启动。
+- CI 覆盖 Ubuntu 22.04/24.04，并在 Debian 12、Rocky Linux 9、AlmaLinux 9 容器中执行锁定依赖测试和 release 构建；shoes schema 作业实际启动聚合监听。Ubuntu 24.04 acceptance 覆盖完整 root/systemd/PTY/回滚/导出流程，并通过第 11 项菜单部署 SOCKS5；Debian 12 systemd acceptance 同时覆盖零输入部署、严格 `--plain` 输出、多用户 AnyTLS 无损导出拒绝、激活失败回滚和加固 unit 启动。
 - 独立链式代理验收在 Ubuntu 24.04 主机和 Debian 12 特权 systemd 容器中运行，使用真实 PTY 菜单、两条隔离 Shadowsocks 出口和 HTTP 源地址核验覆盖完整生命周期与无直连回退。
 - 独立 `security-audit.yml` 固定 `cargo-audit 0.22.2`，每周、手动以及
   `Cargo.toml`/`Cargo.lock` 变更时扫描提交的锁定依赖，并对漏洞、unmaintained、unsound
@@ -489,7 +493,7 @@ ping-rust/
 │   ├── config.rs
 │   ├── config/
 │   │   ├── presets.rs
-│   │   ├── presets/       # 十种成品协议各自的服务端与凭据生成
+│   │   ├── presets/       # 各受管协议的服务端与凭据生成
 │   │   ├── schema.rs      # shoes YAML schema
 │   │   ├── validation.rs
 │   │   ├── transaction.rs # 配置、状态、节点与凭据回滚

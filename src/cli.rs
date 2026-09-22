@@ -196,8 +196,11 @@ pub struct GenerateArgs {
     #[arg(long, default_value_t = 60_000)]
     reality_max_time_diff: u64,
     /// 禁用协议 UDP 支持
-    #[arg(long)]
+    #[arg(long = "no-udp", alias = "disable-udp", conflicts_with = "udp")]
     disable_udp: bool,
+    /// 显式启用协议 UDP 支持（默认已启用）
+    #[arg(long, conflicts_with = "disable_udp")]
+    udp: bool,
     /// Hysteria2/TUIC 的 QUIC endpoint 数；0 表示跟随 shoes 线程数
     #[arg(long, default_value_t = 0)]
     quic_endpoints: usize,
@@ -207,9 +210,15 @@ pub struct GenerateArgs {
     /// Shadowsocks 加密方式（默认推荐 2022 AES-256-GCM）
     #[arg(long, value_enum, default_value_t = ShadowsocksCipher::default())]
     cipher: ShadowsocksCipher,
-    /// Shadowsocks 密码；2022 cipher 必须为正确长度的标准 Base64
+    /// Shadowsocks 或 SOCKS5 密码；省略时安全随机生成
     #[arg(long)]
     password: Option<String>,
+    /// SOCKS5 用户名；省略时使用 default
+    #[arg(long)]
+    username: Option<String>,
+    /// 显式创建无认证 SOCKS5（不推荐用于公网监听）
+    #[arg(long, conflicts_with_all = ["username", "password"])]
+    no_auth: bool,
     /// AnyTLS 外层安全模式
     #[arg(long, value_enum, default_value_t = AnyTlsMode::default())]
     anytls_mode: AnyTlsMode,
@@ -289,10 +298,13 @@ pub async fn run(cli: Cli) -> Result<()> {
                 short_id,
                 reality_max_time_diff,
                 disable_udp,
+                udp,
                 quic_endpoints,
                 zero_rtt,
                 cipher,
                 password,
+                username,
+                no_auth,
                 anytls_mode,
                 mut anytls_users,
                 anytls_padding,
@@ -301,6 +313,9 @@ pub async fn run(cli: Cli) -> Result<()> {
                 cert,
                 key,
             } = *args;
+            if password.is_some() && !matches!(protocol, Protocol::Shadowsocks | Protocol::Socks5) {
+                bail!("--password 仅适用于 Shadowsocks 或 SOCKS5");
+            }
             if matches!(protocol, Protocol::AnyTls) && anytls_users.is_empty() {
                 anytls_users.push(config::generated_anytls_user("default"));
             }
@@ -320,11 +335,22 @@ pub async fn run(cli: Cli) -> Result<()> {
                 options: GenerationOptions {
                     reality_short_id: short_id,
                     reality_max_time_diff,
-                    udp_enabled: !disable_udp,
+                    udp_enabled: udp || !disable_udp,
                     quic_endpoints,
                     tuic_zero_rtt: zero_rtt,
                     shadowsocks_cipher: cipher,
-                    shadowsocks_password: password,
+                    shadowsocks_password: if matches!(protocol, Protocol::Shadowsocks) {
+                        password.clone()
+                    } else {
+                        None
+                    },
+                    socks5_username: username,
+                    socks5_password: if matches!(protocol, Protocol::Socks5) {
+                        password
+                    } else {
+                        None
+                    },
+                    socks5_no_auth: no_auth,
                     anytls_mode,
                     anytls_users,
                     anytls_padding_scheme: (!anytls_padding.is_empty()).then_some(anytls_padding),
@@ -338,6 +364,9 @@ pub async fn run(cli: Cli) -> Result<()> {
                 config::generate(request).await?
             };
             print_credentials(&result);
+            if matches!(protocol, Protocol::Socks5) && no_auth {
+                println!("警告：SOCKS5 无认证且无传输加密，公开到公网可能被第三方滥用。");
+            }
             if managed {
                 println!("{}", "配置验证通过，shoes 已启用并启动。".green());
             }
@@ -621,6 +650,29 @@ fn profile_details_lines(profile: &config::ManagedProfile, share_uri: Option<&st
             lines.push(format!("密码 (password)         = {password}"));
             lines.push(format!("加密方式 (encryption)   = {}", cipher.as_str()));
         }
+        config::Credentials::Socks5 {
+            username,
+            password,
+            udp_enabled,
+        } => {
+            lines.push("协议 (protocol)         = socks5".to_owned());
+            lines.push(format!("地址 (address)          = {address}"));
+            lines.push(format!("端口 (port)             = {}", profile.port));
+            if let (Some(username), Some(password)) = (username, password) {
+                lines.push(format!("用户名 (username)       = {username}"));
+                lines.push(format!("密码 (password)         = {password}"));
+            } else {
+                lines.push("认证 (authentication)   = none".to_owned());
+            }
+            lines.push(format!(
+                "UDP ASSOCIATE           = {}",
+                if *udp_enabled { "enabled" } else { "disabled" }
+            ));
+            lines.push("传输加密               = none".to_owned());
+            lines.push(
+                "注意：SOCKS5 本身不提供传输加密，请勿将其误认为 TLS/Reality 代理。".to_owned(),
+            );
+        }
         config::Credentials::AnyTls {
             users,
             server_name,
@@ -885,6 +937,22 @@ pub async fn show_info(selector: Option<&str>) -> Result<()> {
                     profile.protocol_name(),
                     profile.server_name()
                 );
+                if let config::Credentials::Socks5 {
+                    username,
+                    password,
+                    udp_enabled,
+                } = &profile.credentials
+                {
+                    println!("  用户名：{}", username.as_deref().unwrap_or("无认证"));
+                    if let Some(password) = password {
+                        println!("  密码：{password}");
+                    }
+                    println!(
+                        "  UDP ASSOCIATE：{}",
+                        if *udp_enabled { "启用" } else { "关闭" }
+                    );
+                    println!("  传输加密：无");
+                }
                 if let Some(server) = profile.server_address.as_deref() {
                     println!("  客户端地址：{server}");
                     match client::share_uri(profile, server) {
@@ -970,6 +1038,23 @@ pub fn print_credentials(result: &config::GenerationResult) {
             println!("密码：{password}");
             println!("ALPN：{}", alpn_protocols.join(", "));
             print_certificate_notice(result);
+        }
+        config::Credentials::Socks5 {
+            username,
+            password,
+            udp_enabled,
+        } => {
+            println!("协议：SOCKS5");
+            println!("用户名：{}", username.as_deref().unwrap_or("无认证"));
+            if let Some(password) = password {
+                println!("密码：{password}");
+            }
+            println!(
+                "UDP ASSOCIATE：{}",
+                if *udp_enabled { "启用" } else { "关闭" }
+            );
+            println!("传输加密：无");
+            println!("注意：SOCKS5 本身不提供传输加密，请勿将其误认为 TLS/Reality 代理。");
         }
         config::Credentials::Tuic {
             user_id,
@@ -1194,6 +1279,39 @@ mod tests {
         for protocol in ["vless-tls", "trojan-tls", "trojan-reality", "vmess-ws-tls"] {
             assert!(Cli::try_parse_from(["prs", "add", protocol]).is_ok());
         }
+
+        let socks5 = Cli::try_parse_from([
+            "ping-rust",
+            "generate",
+            "socks5",
+            "--name",
+            "tools",
+            "--port",
+            "1080",
+            "--username",
+            "alice",
+            "--password",
+            "socks-secret",
+            "--no-udp",
+        ])
+        .unwrap();
+        let Some(Command::Generate(args)) = socks5.command else {
+            panic!("expected SOCKS5 generate command");
+        };
+        assert_eq!(args.protocol, Protocol::Socks5);
+        assert_eq!(args.username.as_deref(), Some("alice"));
+        assert_eq!(args.password.as_deref(), Some("socks-secret"));
+        assert!(args.disable_udp);
+        assert!(!args.no_auth);
+
+        let anonymous =
+            Cli::try_parse_from(["ping-rust", "generate", "socks", "--no-auth", "--udp"]).unwrap();
+        let Some(Command::Generate(args)) = anonymous.command else {
+            panic!("expected SOCKS5 generate command");
+        };
+        assert_eq!(args.protocol, Protocol::Socks5);
+        assert!(args.no_auth);
+        assert!(args.udp);
     }
 
     #[test]
@@ -1223,6 +1341,14 @@ mod tests {
         };
         assert_eq!(args.protocol, Protocol::Shadowsocks);
         assert!(args.random_port);
+
+        for command in [["prs", "add", "socks5"], ["prs", "a", "socks5"]] {
+            let cli = Cli::try_parse_from(command).unwrap();
+            let Some(Command::Add(args)) = cli.command else {
+                panic!("expected SOCKS5 add command");
+            };
+            assert_eq!(args.protocol, Protocol::Socks5);
+        }
     }
 
     #[test]
@@ -1333,6 +1459,48 @@ mod tests {
 
         let without_url = profile_details_with_qr_text(&profile, None).unwrap();
         assert!(!without_url.contains("二维码 (QR)"));
+    }
+
+    #[test]
+    fn socks5_details_show_auth_udp_encryption_and_share_uri() {
+        let profile = config::ManagedProfile {
+            id: Uuid::nil(),
+            name: "socks-main".to_owned(),
+            port: 1080,
+            server_address: Some("203.0.113.8".to_owned()),
+            credentials: config::Credentials::Socks5 {
+                username: Some("default".to_owned()),
+                password: Some("socks-secret".to_owned()),
+                udp_enabled: true,
+            },
+            certificate_path: None,
+            certificate_key_path: None,
+            self_signed_certificate: false,
+        };
+        let output = profile_details_with_qr_text(
+            &profile,
+            Some("socks5://default:socks-secret@203.0.113.8:1080#socks-main"),
+        )
+        .unwrap();
+        for expected in [
+            "SOCKS5-1080.yaml",
+            "协议 (protocol)         = socks5",
+            "地址 (address)          = 203.0.113.8",
+            "端口 (port)             = 1080",
+            "用户名 (username)       = default",
+            "密码 (password)         = socks-secret",
+            "UDP ASSOCIATE           = enabled",
+            "传输加密               = none",
+            "SOCKS5 本身不提供传输加密",
+            "------------- 链接 (URL) -------------",
+            "socks5://default:socks-secret@203.0.113.8:1080#socks-main",
+            "------------- 二维码 (QR) -------------",
+        ] {
+            assert!(
+                output.contains(expected),
+                "missing {expected:?} in {output}"
+            );
+        }
     }
 
     #[test]

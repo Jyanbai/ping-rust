@@ -86,6 +86,8 @@ pub enum Protocol {
     TrojanReality,
     #[value(name = "vmess-ws-tls", alias = "vmess-wss")]
     VmessWsTls,
+    #[value(name = "socks5", alias = "socks", alias = "s5")]
+    Socks5,
 }
 
 impl Protocol {
@@ -262,6 +264,9 @@ pub struct GenerationOptions {
     pub tuic_zero_rtt: bool,
     pub shadowsocks_cipher: ShadowsocksCipher,
     pub shadowsocks_password: Option<String>,
+    pub socks5_username: Option<String>,
+    pub socks5_password: Option<String>,
+    pub socks5_no_auth: bool,
     pub anytls_mode: AnyTlsMode,
     pub anytls_users: Vec<AnyTlsUser>,
     pub anytls_padding_scheme: Option<Vec<String>>,
@@ -279,6 +284,9 @@ impl Default for GenerationOptions {
             tuic_zero_rtt: false,
             shadowsocks_cipher: ShadowsocksCipher::default(),
             shadowsocks_password: None,
+            socks5_username: None,
+            socks5_password: None,
+            socks5_no_auth: false,
             anytls_mode: AnyTlsMode::default(),
             anytls_users: Vec::new(),
             anytls_padding_scheme: None,
@@ -309,6 +317,9 @@ pub enum ProfileChange {
     Password(String),
     RealityServerName(String),
     ShadowsocksCipher(ShadowsocksCipher),
+    Socks5Username(String),
+    Socks5Authentication(bool),
+    UdpEnabled(bool),
     AnyTlsUserPassword { index: usize, password: String },
 }
 
@@ -365,6 +376,13 @@ pub enum Credentials {
     Shadowsocks {
         cipher: ShadowsocksCipher,
         password: String,
+        udp_enabled: bool,
+    },
+    Socks5 {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        username: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        password: Option<String>,
         udp_enabled: bool,
     },
     AnyTls {
@@ -480,6 +498,7 @@ impl ManagedProfile {
                 ..
             } => Protocol::TrojanReality,
             Credentials::VmessTls { .. } => Protocol::VmessWsTls,
+            Credentials::Socks5 { .. } => Protocol::Socks5,
         }
     }
 
@@ -505,6 +524,7 @@ impl ManagedProfile {
                 ..
             } => "Trojan-Reality",
             Credentials::VmessTls { .. } => "VMess-WS-TLS",
+            Credentials::Socks5 { .. } => "SOCKS5",
         }
     }
 
@@ -517,7 +537,7 @@ impl ManagedProfile {
             Credentials::VlessTls { server_name, .. }
             | Credentials::Trojan { server_name, .. }
             | Credentials::VmessTls { server_name, .. } => server_name,
-            Credentials::Shadowsocks { .. } => "-",
+            Credentials::Shadowsocks { .. } | Credentials::Socks5 { .. } => "-",
         }
     }
 }
@@ -860,6 +880,23 @@ fn apply_profile_change(
                     *server_password = password.clone();
                     *state_password = password;
                 }
+                (
+                    ServerProtocol::Socks {
+                        password: server_password,
+                        ..
+                    },
+                    Credentials::Socks5 {
+                        password: state_password,
+                        ..
+                    },
+                ) if server_password.is_some() && state_password.is_some() => {
+                    validate_socks5_component("密码", &password)?;
+                    *server_password = Some(password.clone());
+                    *state_password = Some(password);
+                }
+                (ServerProtocol::Socks { .. }, Credentials::Socks5 { .. }) => {
+                    bail!("无认证 SOCKS5 请先切换为用户名密码认证")
+                }
                 _ => bail!("该协议不支持直接更改单一密码；请选择重新生成凭据"),
             }
         }
@@ -907,6 +944,81 @@ fn apply_profile_change(
                     *state_password = password;
                 }
                 _ => bail!("只有 Shadowsocks 配置支持更改加密方式"),
+            }
+        }
+        ProfileChange::Socks5Username(username) => {
+            validate_socks5_component("用户名", &username)?;
+            match (&mut server.protocol, &mut profile.credentials) {
+                (
+                    ServerProtocol::Socks {
+                        username: server_username,
+                        password: server_password,
+                        ..
+                    },
+                    Credentials::Socks5 {
+                        username: state_username,
+                        password: state_password,
+                        ..
+                    },
+                ) if server_password.is_some() && state_password.is_some() => {
+                    *server_username = Some(username.clone());
+                    *state_username = Some(username);
+                }
+                (ServerProtocol::Socks { .. }, Credentials::Socks5 { .. }) => {
+                    bail!("无认证 SOCKS5 请先切换为用户名密码认证")
+                }
+                _ => bail!("只有 SOCKS5 配置支持更改用户名"),
+            }
+        }
+        ProfileChange::Socks5Authentication(enabled) => {
+            match (&mut server.protocol, &mut profile.credentials) {
+                (
+                    ServerProtocol::Socks {
+                        username: server_username,
+                        password: server_password,
+                        ..
+                    },
+                    Credentials::Socks5 {
+                        username: state_username,
+                        password: state_password,
+                        ..
+                    },
+                ) => {
+                    if enabled {
+                        let username = state_username
+                            .clone()
+                            .unwrap_or_else(|| "default".to_owned());
+                        let password = state_password.clone().unwrap_or_else(generated_password);
+                        *server_username = Some(username.clone());
+                        *server_password = Some(password.clone());
+                        *state_username = Some(username);
+                        *state_password = Some(password);
+                    } else {
+                        *server_username = None;
+                        *server_password = None;
+                        *state_username = None;
+                        *state_password = None;
+                    }
+                }
+                _ => bail!("只有 SOCKS5 配置支持更改认证模式"),
+            }
+        }
+        ProfileChange::UdpEnabled(enabled) => {
+            match (&mut server.protocol, &mut profile.credentials) {
+                (
+                    ServerProtocol::Socks {
+                        udp_enabled: server_udp,
+                        ..
+                    },
+                    Credentials::Socks5 {
+                        udp_enabled: state_udp,
+                        ..
+                    },
+                ) => {
+                    *server_udp = enabled;
+                    *state_udp = enabled;
+                }
+                _ => bail!("只有 SOCKS5 配置支持更改 UDP ASSOCIATE"),
             }
         }
         ProfileChange::AnyTlsUserPassword { index, password } => {
@@ -1014,6 +1126,24 @@ fn regenerate_profile_credentials(
             *server_cipher = cipher.as_str().to_owned();
             *server_password = generated.clone();
             *password = generated;
+        }
+        Credentials::Socks5 {
+            username, password, ..
+        } => {
+            let ServerProtocol::Socks {
+                username: server_username,
+                password: server_password,
+                ..
+            } = &mut server.protocol
+            else {
+                bail!("SOCKS5 配置与管理状态不一致");
+            };
+            let generated = generated_password();
+            let current_username = username.clone().unwrap_or_else(|| "default".to_owned());
+            *server_username = Some(current_username.clone());
+            *server_password = Some(generated.clone());
+            *username = Some(current_username);
+            *password = Some(generated);
         }
         Credentials::AnyTls { users, .. } => {
             for user in users.iter_mut() {
@@ -1242,7 +1372,8 @@ fn ensure_servers_match_state(servers: &[ServerConfig], profiles: &[ManagedProfi
         let protocol_matches = match (&server.protocol, profile.protocol()) {
             (ServerProtocol::Hysteria2 { .. }, Protocol::Hysteria2)
             | (ServerProtocol::Tuic { .. }, Protocol::Tuic)
-            | (ServerProtocol::Shadowsocks { .. }, Protocol::Shadowsocks) => true,
+            | (ServerProtocol::Shadowsocks { .. }, Protocol::Shadowsocks)
+            | (ServerProtocol::Socks { .. }, Protocol::Socks5) => true,
             (
                 ServerProtocol::Tls {
                     reality_targets, ..
@@ -1546,7 +1677,7 @@ fn validate_request(request: &GenerationRequest) -> Result<()> {
             bail!("配置名称必须为 1..=64 个非控制字符");
         }
     }
-    if !matches!(request.protocol, Protocol::Shadowsocks) {
+    if !matches!(request.protocol, Protocol::Shadowsocks | Protocol::Socks5) {
         validate_server_name(&request.server_name)?;
     }
     if let Some(destination) = &request.reality_dest {
@@ -1608,6 +1739,31 @@ fn validate_request(request: &GenerationRequest) -> Result<()> {
         bail!("--password 仅适用于 Shadowsocks");
     }
 
+    if matches!(request.protocol, Protocol::Socks5) {
+        if request.options.socks5_no_auth {
+            if request.options.socks5_username.is_some()
+                || request.options.socks5_password.is_some()
+            {
+                bail!("--no-auth 不能与 SOCKS5 用户名或密码同时使用");
+            }
+        } else {
+            let username = request
+                .options
+                .socks5_username
+                .as_deref()
+                .unwrap_or("default");
+            validate_socks5_component("用户名", username)?;
+            if let Some(password) = request.options.socks5_password.as_deref() {
+                validate_socks5_component("密码", password)?;
+            }
+        }
+    } else if request.options.socks5_username.is_some()
+        || request.options.socks5_password.is_some()
+        || request.options.socks5_no_auth
+    {
+        bail!("--username/--no-auth 仅适用于 SOCKS5");
+    }
+
     if matches!(request.protocol, Protocol::AnyTls) {
         validate_anytls_users(&request.options.anytls_users)?;
         if let Some(scheme) = &request.options.anytls_padding_scheme {
@@ -1621,6 +1777,13 @@ fn validate_request(request: &GenerationRequest) -> Result<()> {
         || request.options.anytls_fallback.is_some()
     {
         bail!("--user/--padding/--fallback 仅适用于 AnyTLS");
+    }
+    Ok(())
+}
+
+fn validate_socks5_component(label: &str, value: &str) -> Result<()> {
+    if value.is_empty() || value.len() > 255 || value.chars().any(char::is_control) {
+        bail!("SOCKS5 {label}必须为 1..=255 字节且不能包含控制字符");
     }
     Ok(())
 }
@@ -2380,6 +2543,7 @@ mod tests {
             "TROJAN-TLS-9443.yaml",
             "TROJAN-REALITY-10443.yaml",
             "VMESS-WS-TLS-11443.yaml",
+            "SOCKS5-1080.yaml",
         ] {
             assert!(is_managed_profile_file_name(name), "rejected {name}");
         }
@@ -2700,5 +2864,128 @@ mod tests {
             })
             .count();
         assert_eq!(leftovers, 0);
+    }
+
+    #[test]
+    fn socks5_generation_round_trip_and_edits_preserve_exact_auth_and_udp_state() {
+        let mut request = request(Protocol::Socks5, PathBuf::from("unused.yaml"));
+        request.port = 10_880;
+        request.options.socks5_username = Some("alice".to_owned());
+        request.options.socks5_password = Some("chosen-secret".to_owned());
+        request.options.udp_enabled = false;
+        let (mut server, credentials, _, _) =
+            generate_parts(&request, Path::new("."), Uuid::nil()).unwrap();
+        let yaml = serde_yaml::to_string(&vec![server.clone()]).unwrap();
+        assert!(yaml.contains("address: 0.0.0.0:10880"));
+        assert!(yaml.contains("type: socks"));
+        assert!(yaml.contains("username: alice"));
+        assert!(yaml.contains("password: chosen-secret"));
+        assert!(yaml.contains("udp_enabled: false"));
+
+        let mut profile = ManagedProfile {
+            id: Uuid::new_v4(),
+            name: "socks-main".to_owned(),
+            port: request.port,
+            server_address: Some("203.0.113.20".to_owned()),
+            credentials,
+            certificate_path: None,
+            certificate_key_path: None,
+            self_signed_certificate: false,
+        };
+        apply_profile_change(
+            &mut server,
+            &mut profile,
+            ProfileChange::Socks5Username("bob".to_owned()),
+        )
+        .unwrap();
+        apply_profile_change(
+            &mut server,
+            &mut profile,
+            ProfileChange::Password("new-secret".to_owned()),
+        )
+        .unwrap();
+        apply_profile_change(&mut server, &mut profile, ProfileChange::Port(20_880)).unwrap();
+        apply_profile_change(&mut server, &mut profile, ProfileChange::UdpEnabled(true)).unwrap();
+        apply_profile_change(
+            &mut server,
+            &mut profile,
+            ProfileChange::Socks5Authentication(false),
+        )
+        .unwrap();
+        let no_auth_yaml = serde_yaml::to_string(&vec![server.clone()]).unwrap();
+        assert!(!no_auth_yaml.contains("username:"));
+        assert!(!no_auth_yaml.contains("password:"));
+        assert!(no_auth_yaml.contains("udp_enabled: true"));
+        assert!(matches!(
+            profile.credentials,
+            Credentials::Socks5 {
+                username: None,
+                password: None,
+                udp_enabled: true
+            }
+        ));
+
+        apply_profile_change(
+            &mut server,
+            &mut profile,
+            ProfileChange::Socks5Authentication(true),
+        )
+        .unwrap();
+        let Credentials::Socks5 {
+            username,
+            password,
+            udp_enabled,
+        } = &profile.credentials
+        else {
+            unreachable!()
+        };
+        assert_eq!(username.as_deref(), Some("default"));
+        assert!(password.as_ref().is_some_and(|value| value.len() >= 24));
+        assert!(*udp_enabled);
+        ensure_servers_match_state(&[server], &[profile.clone()]).unwrap();
+        let restored: ManagedProfile =
+            serde_json::from_slice(&serde_json::to_vec(&profile).unwrap()).unwrap();
+        assert_eq!(restored.port, 20_880);
+        assert_eq!(
+            serde_json::to_vec(&restored.credentials).unwrap(),
+            serde_json::to_vec(&profile.credentials).unwrap()
+        );
+    }
+
+    #[test]
+    fn socks5_defaults_to_authenticated_udp_and_no_auth_is_explicit() {
+        let default_request = request(Protocol::Socks5, PathBuf::from("unused.yaml"));
+        let (authenticated, credentials, _, _) =
+            generate_parts(&default_request, Path::new("."), Uuid::nil()).unwrap();
+        let Credentials::Socks5 {
+            username,
+            password,
+            udp_enabled,
+        } = credentials
+        else {
+            unreachable!()
+        };
+        assert_eq!(username.as_deref(), Some("default"));
+        assert!(password.is_some());
+        assert!(udp_enabled);
+        let authenticated = serde_yaml::to_string(&vec![authenticated]).unwrap();
+        assert!(authenticated.contains("username: default"));
+        assert!(authenticated.contains("udp_enabled: true"));
+
+        let mut request = request(Protocol::Socks5, PathBuf::from("unused.yaml"));
+        request.options.socks5_no_auth = true;
+        let (anonymous, credentials, _, _) =
+            generate_parts(&request, Path::new("."), Uuid::nil()).unwrap();
+        assert!(matches!(
+            credentials,
+            Credentials::Socks5 {
+                username: None,
+                password: None,
+                udp_enabled: true
+            }
+        ));
+        let anonymous = serde_yaml::to_string(&vec![anonymous]).unwrap();
+        assert!(!anonymous.contains("username:"));
+        assert!(!anonymous.contains("password:"));
     }
 }

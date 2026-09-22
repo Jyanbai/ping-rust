@@ -242,7 +242,7 @@ mod tests {
             );
         }
         assert_eq!(Protocol::from_menu_number(0), None);
-        assert_eq!(Protocol::from_menu_number(11), None);
+        assert_eq!(Protocol::from_menu_number(11), Some(Protocol::Socks5));
     }
 
     #[test]
@@ -272,5 +272,11 @@ mod tests {
             Some("2001:4860:4860::8888".to_owned())
         );
         assert_eq!(parse_detected_address("ip=127.0.0.1"), None);
+    }
+
+    #[test]
+    fn socks5_random_port_is_valid() {
+        let port = select_port(Protocol::Socks5, None).unwrap();
+        assert!((RANDOM_PORT_MIN..=u16::MAX).contains(&port));
     }
 }

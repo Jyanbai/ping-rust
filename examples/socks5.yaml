@@ -1,0 +1,8 @@
+- address: 0.0.0.0:1080
+  protocol:
+    type: socks
+    username: default
+    password: replace-with-a-strong-secret
+    udp_enabled: true
+  rules:
+  - allow-all-direct
