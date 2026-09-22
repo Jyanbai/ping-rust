@@ -229,7 +229,7 @@
 
 ## 发布状态
 
-公开稳定版 v0.1.17 已发布。当前源码在保持原 1–10 菜单编号不变的前提下，将 SOCKS5 作为第 11
+公开稳定版 v0.1.18 已发布。v0.1.18 在保持原 1–10 菜单编号不变的前提下，将 SOCKS5 作为第 11
 项受管协议；默认用户名 `default`、安全随机密码和 UDP ASSOCIATE，只有高级/CLI 明确选择时才允许
 no-auth，并显示公网滥用警告。服务端 schema 严格对应固定 shoes 0.2.8 的
 `type: socks`、可选 `username/password` 与 `udp_enabled`。配置继续使用统一的候选 dry-run、原子提交、
