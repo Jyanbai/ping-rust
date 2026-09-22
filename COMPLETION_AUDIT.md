@@ -229,9 +229,9 @@
 
 ## 发布状态
 
-公开稳定版 v0.1.18 已发布。v0.1.18 在保持原 1–10 菜单编号不变的前提下，将 SOCKS5 作为第 11
-项受管协议；当前 main 为新建配置默认生成安全随机用户名、随机密码和 UDP ASSOCIATE，只有高级/CLI
-明确选择时才允许 no-auth，并显示公网滥用警告。第 12 项为 Snell v3，默认 chacha20-ietf-poly1305、
+公开稳定版 v0.1.19 已发布。v0.1.19 保持原 1–10 菜单编号不变，第 11 项 SOCKS5 为新建配置默认生成
+安全随机用户名、随机密码和 UDP ASSOCIATE，只有高级/CLI 明确选择时才允许 no-auth，并显示公网滥用警告。
+第 12 项为 Snell v3，默认 chacha20-ietf-poly1305、
 随机密码和 UDP-over-TCP，支持 shoes 固定的三个 v3 cipher；Snell 配置继续使用统一的候选 dry-run、
 原子提交、profile/state、服务激活、健康检查和回滚路径，支持查看、编辑、删除、备份恢复与 managed
 filename。Mihomo/Clash Meta 仅对 AES-128-GCM 提供无损 v3 导出；sing-box v3、NekoBox、标准 URI、QR
