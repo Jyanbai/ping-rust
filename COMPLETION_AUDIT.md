@@ -24,7 +24,7 @@ Plain Shadowsocks 命令、旧 state、SIP002 URI/QR 与现有导出保持原行
 
 本文件把原始目标逐项映射到实现、自动化证据和外部验收边界。`已实现` 表示代码路径和自动化证据完整；Debian 12 与成功标准指定的 Ubuntu 24.04 均已完成独立实机验收。
 
-## NaiveProxy 受管支持（进行中）
+## NaiveProxy 受管支持（v0.1.19 feature）
 
 | 项目 | 状态 | 证据/边界 |
 |---|---|---|
@@ -40,10 +40,10 @@ Plain Shadowsocks 命令、旧 state、SIP002 URI/QR 与现有导出保持原行
 | standard URI | UNSUPPORTED | 不伪造 `naive+https` 或 `https://` 分享格式 |
 | QR | UNSUPPORTED | 无稳定标准 URI |
 | chain outbound | NOT_IMPLEMENTED | 当前 chain abstraction 不扩展 NaiveProxy |
-| schema dry-run | NOT_IMPLEMENTED | 待 workflow 增加固定 shoes dry-run fixtures |
-| TCP E2E | NOT_IMPLEMENTED | 待 workflow 增加 TLS h2 → NaiveProxy client/server 测试 |
+| schema dry-run | SUPPORTED | 固定 shoes workflow 覆盖默认、自签、外部证书、padding、fallback 与 UDP 字段 schema；feature run `35862536331` PASS |
+| TCP E2E | SUPPORTED | 固定 shoes workflow 验证 TLS h2 → NaiveProxy client/server → HTTP/TCP 目标；feature run `35862536331` PASS |
 | UDP E2E | NOT_IMPLEMENTED | 明确不声称支持 |
-| Ubuntu acceptance | NOT_IMPLEMENTED | 待 workflow 增加菜单 13 与 self-signed fixture |
+| Ubuntu acceptance | SUPPORTED | 菜单 13 与 CLI、自签名测试 fixture、受管 YAML、active listener；feature run `35862631763` PASS |
 
 ## 需求映射
 
