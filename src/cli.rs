@@ -628,7 +628,7 @@ pub(crate) fn print_add_result(result: &fast_add::AddResult) {
             }
         ) {
             println!(
-                "\nShadowTLS v3 没有通用标准分享 URI/二维码；请使用 sing-box 或 Mihomo 导出。"
+                "\nShadowTLS v3 没有通用标准分享 URI；普通二维码也不支持；请使用 sing-box 或 Mihomo 导出。"
             );
         } else {
             println!("\nSnell v3 没有通用标准分享 URI；配置已成功部署，请按客户端支持情况手动填写或导出 Clash Meta（仅 AES-128-GCM）。");
