@@ -740,6 +740,14 @@ jobs:
           grep -F "ShadowTLS v3" <<<"$shadowtls_add_output"
           grep -F "没有通用标准分享 URI" <<<"$shadowtls_add_output"
           grep -F "普通二维码也不支持" <<<"$shadowtls_add_output"
+          shadowtls_fast_profile_id="$(sudo python3 - <<'PY'
+          import json
+          with open('/etc/shoes/ping-rust-state.json', encoding='utf-8') as stream:
+              profiles = json.load(stream)['profiles']
+          print(next(profile['id'] for profile in profiles if profile['port'] == 25463))
+          PY
+          )"
+          sudo "$PRS" delete "$shadowtls_fast_profile_id" --yes >/dev/null
           run_menu_add 6 25451 vless
           run_menu_add 7 25452 vless
           run_menu_add 8 25453 trojan
