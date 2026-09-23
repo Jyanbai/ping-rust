@@ -964,6 +964,12 @@ jobs:
           expect { eof {} timeout { puts stderr "timeout waiting for delete exit"; exit 37 } }
           EXPECT
           sudo test ! -e /etc/shoes/profiles/SHADOWSOCKS-25449.yaml
+          for _ in {1..20}; do
+            if ! sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)25449$'; then
+              break
+            fi
+            sleep 0.5
+          done
           ! sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)25449$'
 
       - name: Roll back config and systemd state when activation fails
