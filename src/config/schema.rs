@@ -57,6 +57,8 @@ pub(super) enum ServerProtocol {
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         tls_targets: BTreeMap<String, TlsTarget>,
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        shadowtls_targets: BTreeMap<String, ShadowTlsTarget>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         reality_targets: BTreeMap<String, RealityTarget>,
     },
     Hysteria2 {
@@ -132,10 +134,27 @@ pub(super) enum InnerProtocol {
         user_id: Uuid,
         udp_enabled: bool,
     },
+    Shadowsocks {
+        cipher: String,
+        password: String,
+        udp_enabled: bool,
+    },
     #[serde(rename = "websocket")]
     Websocket {
         targets: Vec<WebsocketTarget>,
     },
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub(super) struct ShadowTlsTarget {
+    pub password: String,
+    pub handshake: ShadowTlsHandshake,
+    pub protocol: InnerProtocol,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub(super) struct ShadowTlsHandshake {
+    pub address: String,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

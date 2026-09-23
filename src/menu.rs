@@ -56,6 +56,9 @@ enum ChangeAction {
     Password,
     RealityServerName,
     ShadowsocksCipher,
+    ShadowTlsPassword,
+    ShadowTlsServerName,
+    ShadowTlsHandshake,
     SnellCipher,
     Socks5Username,
     Socks5Authentication,
@@ -276,7 +279,20 @@ async fn change_config_menu() -> Result<()> {
             actions.push((ChangeAction::Password, "更改密码"));
         }
         Protocol::Shadowsocks => {
-            actions.push((ChangeAction::Password, "更改密码"));
+            if matches!(
+                profile.credentials,
+                Credentials::Shadowsocks {
+                    shadowtls: Some(_),
+                    ..
+                }
+            ) {
+                actions.push((ChangeAction::Password, "更改 SS2022 密钥"));
+                actions.push((ChangeAction::ShadowTlsPassword, "更改 ShadowTLS 密码"));
+                actions.push((ChangeAction::ShadowTlsServerName, "更改 ShadowTLS SNI"));
+                actions.push((ChangeAction::ShadowTlsHandshake, "更改握手目标"));
+            } else {
+                actions.push((ChangeAction::Password, "更改密码"));
+            }
             actions.push((ChangeAction::ShadowsocksCipher, "更改加密方式"));
         }
         Protocol::Snell => {
@@ -367,7 +383,9 @@ async fn change_config_menu() -> Result<()> {
                 .allow_empty_password(true)
                 .interact()?;
             if password.is_empty() {
-                if matches!(profile.protocol(), Protocol::Shadowsocks | Protocol::Snell) {
+                if let Credentials::Shadowsocks { cipher, .. } = profile.credentials {
+                    ProfileChange::Password(config::generate_shadowsocks_password(cipher))
+                } else if matches!(profile.protocol(), Protocol::Snell) {
                     ProfileChange::RegenerateCredentials
                 } else {
                     ProfileChange::Password(config::generated_password())
@@ -384,14 +402,29 @@ async fn change_config_menu() -> Result<()> {
             ProfileChange::RealityServerName(server_name)
         }
         ChangeAction::ShadowsocksCipher => {
-            let ciphers = [
-                ShadowsocksCipher::Aes256Gcm2022,
-                ShadowsocksCipher::Aes128Gcm2022,
-                ShadowsocksCipher::Chacha20IetfPoly13052022,
-                ShadowsocksCipher::Aes256Gcm,
-                ShadowsocksCipher::Aes128Gcm,
-                ShadowsocksCipher::Chacha20IetfPoly1305,
-            ];
+            let shadowtls = matches!(
+                profile.credentials,
+                Credentials::Shadowsocks {
+                    shadowtls: Some(_),
+                    ..
+                }
+            );
+            let ciphers = if shadowtls {
+                vec![
+                    ShadowsocksCipher::Aes256Gcm2022,
+                    ShadowsocksCipher::Aes128Gcm2022,
+                    ShadowsocksCipher::Chacha20IetfPoly13052022,
+                ]
+            } else {
+                vec![
+                    ShadowsocksCipher::Aes256Gcm2022,
+                    ShadowsocksCipher::Aes128Gcm2022,
+                    ShadowsocksCipher::Chacha20IetfPoly13052022,
+                    ShadowsocksCipher::Aes256Gcm,
+                    ShadowsocksCipher::Aes128Gcm,
+                    ShadowsocksCipher::Chacha20IetfPoly1305,
+                ]
+            };
             let labels = ciphers
                 .iter()
                 .map(|cipher| cipher.as_str())
@@ -400,6 +433,45 @@ async fn change_config_menu() -> Result<()> {
                 return Ok(());
             };
             ProfileChange::ShadowsocksCipher(ciphers[selected])
+        }
+        ChangeAction::ShadowTlsPassword => {
+            let password = Password::with_theme(&ColorfulTheme::default())
+                .with_prompt("ShadowTLS 密码（留空安全随机生成）")
+                .allow_empty_password(true)
+                .interact()?;
+            ProfileChange::ShadowTlsPassword(if password.is_empty() {
+                config::generated_password()
+            } else {
+                password
+            })
+        }
+        ChangeAction::ShadowTlsServerName => {
+            let Credentials::Shadowsocks {
+                shadowtls: Some(shadowtls),
+                ..
+            } = &profile.credentials
+            else {
+                anyhow::bail!("配置协议与管理状态不一致");
+            };
+            let server_name = Input::<String>::with_theme(&ColorfulTheme::default())
+                .with_prompt("ShadowTLS SNI")
+                .default(shadowtls.server_name.clone())
+                .interact_text()?;
+            ProfileChange::ShadowTlsServerName(server_name)
+        }
+        ChangeAction::ShadowTlsHandshake => {
+            let Credentials::Shadowsocks {
+                shadowtls: Some(shadowtls),
+                ..
+            } = &profile.credentials
+            else {
+                anyhow::bail!("配置协议与管理状态不一致");
+            };
+            let handshake = Input::<String>::with_theme(&ColorfulTheme::default())
+                .with_prompt("Handshake destination（host:port）")
+                .default(shadowtls.handshake_address.clone())
+                .interact_text()?;
+            ProfileChange::ShadowTlsHandshake(handshake)
         }
         ChangeAction::SnellCipher => {
             let Some(cipher) = select_snell_cipher("选择新加密方式")? else {
@@ -855,6 +927,17 @@ async fn fast_add_config_menu() -> Result<MenuControl> {
     }
     let protocol = Protocol::from_menu_number(protocol_number)
         .with_context(|| format!("协议编号无效：{protocol_number}"))?;
+    let shadowsocks_mode = if protocol == Protocol::Shadowsocks {
+        println!("\nShadowsocks 模式:\n\n1) Shadowsocks 2022\n2) Shadowsocks 2022 + ShadowTLS v3（推荐）\n0) 返回\n");
+        match read_menu_choice(2)?.trim() {
+            "1" | "" => config::ShadowsocksMode::Plain,
+            "2" => config::ShadowsocksMode::ShadowTlsV3,
+            "0" => return Ok(MenuControl::Continue),
+            _ => anyhow::bail!("Shadowsocks 模式编号无效"),
+        }
+    } else {
+        config::ShadowsocksMode::Plain
+    };
     let port = loop {
         print!("\n请输入端口（直接回车随机，输入 0 返回）: ");
         io::stdout().flush().context("输出端口提示失败")?;
@@ -870,7 +953,7 @@ async fn fast_add_config_menu() -> Result<MenuControl> {
         }
     };
     let (shadowsocks_cipher, shadowsocks_password) = if protocol == Protocol::Shadowsocks {
-        let Some(cipher) = select_shadowsocks_cipher()? else {
+        let Some(cipher) = select_shadowsocks_cipher(shadowsocks_mode)? else {
             return Ok(MenuControl::Continue);
         };
         let entered_password = Password::with_theme(&ColorfulTheme::default())
@@ -894,18 +977,33 @@ async fn fast_add_config_menu() -> Result<MenuControl> {
         (None, None)
     };
     cli::ensure_shoes_for_add(false).await?;
-    deploy_fast_config(protocol, port, shadowsocks_cipher, shadowsocks_password).await
+    deploy_fast_config(
+        protocol,
+        port,
+        shadowsocks_cipher,
+        shadowsocks_password,
+        shadowsocks_mode,
+    )
+    .await
 }
 
-fn select_shadowsocks_cipher() -> Result<Option<ShadowsocksCipher>> {
-    let ciphers = [
-        ShadowsocksCipher::Aes128Gcm,
-        ShadowsocksCipher::Aes256Gcm,
-        ShadowsocksCipher::Chacha20IetfPoly1305,
-        ShadowsocksCipher::Aes128Gcm2022,
-        ShadowsocksCipher::Aes256Gcm2022,
-        ShadowsocksCipher::Chacha20IetfPoly13052022,
-    ];
+fn select_shadowsocks_cipher(mode: config::ShadowsocksMode) -> Result<Option<ShadowsocksCipher>> {
+    let ciphers = if mode == config::ShadowsocksMode::ShadowTlsV3 {
+        vec![
+            ShadowsocksCipher::Aes128Gcm2022,
+            ShadowsocksCipher::Aes256Gcm2022,
+            ShadowsocksCipher::Chacha20IetfPoly13052022,
+        ]
+    } else {
+        vec![
+            ShadowsocksCipher::Aes128Gcm,
+            ShadowsocksCipher::Aes256Gcm,
+            ShadowsocksCipher::Chacha20IetfPoly1305,
+            ShadowsocksCipher::Aes128Gcm2022,
+            ShadowsocksCipher::Aes256Gcm2022,
+            ShadowsocksCipher::Chacha20IetfPoly13052022,
+        ]
+    };
     println!("\n请选择加密方式:\n");
     for (index, cipher) in ciphers.iter().enumerate() {
         println!("{}) {}", index + 1, cipher.as_str());
@@ -970,6 +1068,7 @@ async fn deploy_fast_config(
     port: Option<u16>,
     shadowsocks_cipher: Option<ShadowsocksCipher>,
     shadowsocks_password: Option<String>,
+    shadowsocks_mode: config::ShadowsocksMode,
 ) -> Result<MenuControl> {
     let server_address = resolve_menu_server_address().await?;
     let result = fast_add::execute(fast_add::AddRequest {
@@ -980,6 +1079,9 @@ async fn deploy_fast_config(
         server_name: None,
         shadowsocks_cipher,
         shadowsocks_password,
+        shadowsocks_mode,
+        shadowtls_password: None,
+        shadowtls_handshake: None,
     })
     .await?;
     cli::print_add_result(&result);
@@ -1024,15 +1126,36 @@ async fn advanced_add_config_menu() -> Result<()> {
         })
         .interact_text()?;
     let mut options = GenerationOptions::default();
+    let mut shadowtls_server_name = None;
     if matches!(protocol, Protocol::Shadowsocks) {
-        let ciphers = [
-            "2022-blake3-aes-256-gcm（推荐）",
-            "2022-blake3-aes-128-gcm",
-            "2022-blake3-chacha20-ietf-poly1305",
-            "aes-256-gcm",
-            "aes-128-gcm",
-            "chacha20-ietf-poly1305",
-        ];
+        let Some(mode) = select_numbered(
+            "Shadowsocks 模式",
+            &["普通 SS2022", "SS2022 + ShadowTLS v3（推荐）"],
+        )?
+        else {
+            return Ok(());
+        };
+        options.shadowsocks_mode = if mode == 1 {
+            config::ShadowsocksMode::ShadowTlsV3
+        } else {
+            config::ShadowsocksMode::Plain
+        };
+        let ciphers = if options.shadowsocks_mode == config::ShadowsocksMode::ShadowTlsV3 {
+            vec![
+                "2022-blake3-aes-256-gcm（推荐）",
+                "2022-blake3-aes-128-gcm",
+                "2022-blake3-chacha20-ietf-poly1305",
+            ]
+        } else {
+            vec![
+                "2022-blake3-aes-256-gcm（推荐）",
+                "2022-blake3-aes-128-gcm",
+                "2022-blake3-chacha20-ietf-poly1305",
+                "aes-256-gcm",
+                "aes-128-gcm",
+                "chacha20-ietf-poly1305",
+            ]
+        };
         let Some(cipher) = select_numbered("选择加密方式", &ciphers)? else {
             return Ok(());
         };
@@ -1044,6 +1167,29 @@ async fn advanced_add_config_menu() -> Result<()> {
             4 => ShadowsocksCipher::Aes128Gcm,
             _ => ShadowsocksCipher::Chacha20IetfPoly1305,
         };
+        if options.shadowsocks_mode == config::ShadowsocksMode::ShadowTlsV3 {
+            let password = Password::with_theme(&ColorfulTheme::default())
+                .with_prompt("SS2022 密钥（留空则安全生成）")
+                .allow_empty_password(true)
+                .interact()?;
+            options.shadowsocks_password = (!password.is_empty()).then_some(password);
+            let shadow_password = Password::with_theme(&ColorfulTheme::default())
+                .with_prompt("ShadowTLS 密码（留空则安全生成）")
+                .allow_empty_password(true)
+                .interact()?;
+            options.shadowtls_password = (!shadow_password.is_empty()).then_some(shadow_password);
+            let sni = Input::<String>::with_theme(&ColorfulTheme::default())
+                .with_prompt("ShadowTLS SNI")
+                .default(config::DEFAULT_SNI.to_owned())
+                .interact_text()?;
+            shadowtls_server_name = Some(sni.clone());
+            let handshake = Input::<String>::with_theme(&ColorfulTheme::default())
+                .with_prompt("Handshake destination（host:port）")
+                .default(format!("{sni}:443"))
+                .interact_text()?;
+            options.shadowtls_handshake = Some(handshake);
+            options.udp_enabled = false;
+        }
     }
     if matches!(protocol, Protocol::Snell) {
         let Some(cipher) = select_snell_cipher("选择 Snell v3 加密方式")? else {
@@ -1151,7 +1297,11 @@ async fn advanced_add_config_menu() -> Result<()> {
         }
     }
     let reality_outer = protocol.uses_reality(options.anytls_mode);
-    let server_name = if matches!(
+    let server_name = if matches!(protocol, Protocol::Shadowsocks)
+        && options.shadowsocks_mode == config::ShadowsocksMode::ShadowTlsV3
+    {
+        shadowtls_server_name.unwrap_or_else(|| config::DEFAULT_SNI.to_owned())
+    } else if matches!(
         protocol,
         Protocol::Shadowsocks | Protocol::Snell | Protocol::Socks5
     ) {

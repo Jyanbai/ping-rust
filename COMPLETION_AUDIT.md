@@ -1,5 +1,25 @@
 # ping-rust 完成度与验收证据
 
+## Shadowsocks 2022 + ShadowTLS v3（v0.1.19 feature）
+
+| 项目 | 状态 | 证据 |
+|---|---|---|
+| server config | SUPPORTED | 固定 shoes `386b11532424b8665ee3e46340c6236fb3c47595` 的 `tls.shadowtls_targets` 外层与内层 Shadowsocks 2022 |
+| state lifecycle | SUPPORTED | 可选 `shadowtls` 凭据向后兼容；查看、删除、备份、恢复、聚合配置、回滚与健康检查复用既有受管生命周期 |
+| edit | SUPPORTED | 名称、端口、公网地址、SS2022 cipher/key、ShadowTLS password、SNI、handshake |
+| sing-box export | SUPPORTED | Shadowsocks outbound `detour` 到 ShadowTLS v3 outbound；JSON 结构测试覆盖 |
+| Mihomo export | SUPPORTED | 官方 Shadowsocks `plugin: shadow-tls` + `plugin-opts` 结构；YAML 结构测试覆盖 |
+| NekoBox | UNSUPPORTED | 未确认稳定专用导入 URI；不制造自定义格式 |
+| URI | UNSUPPORTED | 标准 `ss://` 不能完整表达 ShadowTLS v3 参数 |
+| QR | UNSUPPORTED | 没有标准 URI，因此不生成普通分享二维码 |
+| UDP | NOT_IMPLEMENTED | shoes 内层支持 UoT，但 sing-box ShadowTLS outbound 为 TCP-only，首版不暴露 UDP |
+| chain | NOT_IMPLEMENTED | 不扩展当前分享链接驱动的 chain 模型 |
+| schema dry-run | SUPPORTED | workflow 覆盖默认配置、AES-128 2022 与自定义 handshake |
+| TCP E2E | SUPPORTED | 固定 shoes 同时提供嵌套 ShadowTLS client/server，workflow 启动聚合 listener 并覆盖 TCP 路径 |
+| acceptance | SUPPORTED | Ubuntu workflow 覆盖菜单 3 → ShadowTLS 模式、CLI `--shadowtls`、受管 YAML、active listener 和 info |
+
+Plain Shadowsocks 命令、旧 state、SIP002 URI/QR 与现有导出保持原行为；顶层协议编号仍为 3，SOCKS5=11、Snell v3=12。
+
 审计日期：2026-07-18
 
 本文件把原始目标逐项映射到实现、自动化证据和外部验收边界。`已实现` 表示代码路径和自动化证据完整；Debian 12 与成功标准指定的 Ubuntu 24.04 均已完成独立实机验收。

@@ -86,6 +86,7 @@ pub(super) fn generate(
             quic_settings: None,
             protocol: ServerProtocol::Tls {
                 tls_targets,
+                shadowtls_targets: BTreeMap::new(),
                 reality_targets,
             },
             rules: Vec::new(),

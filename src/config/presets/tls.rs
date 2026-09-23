@@ -37,6 +37,7 @@ pub(super) fn finish(
             quic_settings: None,
             protocol: ServerProtocol::Tls {
                 tls_targets,
+                shadowtls_targets: BTreeMap::new(),
                 reality_targets: BTreeMap::new(),
             },
             rules: Vec::new(),

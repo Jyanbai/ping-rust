@@ -82,6 +82,11 @@ jobs:
             --port 3443 --server-name tuic.example.com --zero-rtt >/dev/null
           "$bin" generate shadowsocks --output "$out/shadowsocks.yaml" \
             --port 4388 >/dev/null
+          "$bin" generate shadowsocks --shadowtls \
+            --output "$out/shadowsocks-shadowtls.yaml" --port 4389 \
+            --server-name www.cloudflare.com \
+            --password AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA= \
+            --shadowtls-password shadowtls-e2e-password >/dev/null
           "$bin" generate anytls --output "$out/anytls.yaml" \
             --port 5443 --server-name anytls.example.com \
             --user alice:anytls-test-password \
@@ -106,7 +111,7 @@ jobs:
             --port 6449 --username default --password socks5-test-password >/dev/null
 
           for config in \
-            reality hysteria2 tuic shadowsocks anytls \
+            reality hysteria2 tuic shadowsocks shadowsocks-shadowtls anytls \
             vless-tls vless-ws-tls trojan-tls trojan-reality vmess-ws-tls snell socks5; do
             shoes --dry-run "$out/$config.yaml"
           done
@@ -115,6 +120,7 @@ jobs:
             "$out/hysteria2.yaml" \
             "$out/tuic.yaml" \
             "$out/shadowsocks.yaml" \
+            "$out/shadowsocks-shadowtls.yaml" \
             "$out/anytls.yaml" \
             "$out/vless-tls.yaml" \
             "$out/vless-ws-tls.yaml" \
@@ -134,12 +140,35 @@ jobs:
           python3 -m http.server 18080 --bind 127.0.0.1 \
             >"$out/socks-origin.log" 2>&1 &
           origin_pid="$!"
-          trap 'kill "$shoes_pid" "$origin_pid" 2>/dev/null || true' EXIT
+          cat >"$out/shadowtls-client.yaml" <<'YAML'
+          - address: 127.0.0.1:10888
+            protocol:
+              type: socks
+              udp_enabled: false
+            rules:
+              - masks: 0.0.0.0/0
+                action: allow
+                client_chains:
+                  address: 127.0.0.1:4389
+                  protocol:
+                    type: shadowtls
+                    password: shadowtls-e2e-password
+                    sni_hostname: www.cloudflare.com
+                    protocol:
+                      type: shadowsocks
+                      cipher: 2022-blake3-aes-256-gcm
+                      password: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+                      udp_enabled: false
+          YAML
+          shoes "$out/shadowtls-client.yaml" >"$out/shadowtls-client.log" 2>&1 &
+          shadowtls_client_pid="$!"
+          trap 'kill "$shoes_pid" "$origin_pid" "$shadowtls_client_pid" 2>/dev/null || true' EXIT
           for _ in {1..40}; do
             tcp_ports="$(ss -H -lnt | awk '{print $4}')"
             udp_ports="$(ss -H -lun | awk '{print $4}')"
             if grep -Eq '(^|:)1443$' <<<"$tcp_ports" \
               && grep -Eq '(^|:)4388$' <<<"$tcp_ports" \
+              && grep -Eq '(^|:)4389$' <<<"$tcp_ports" \
               && grep -Eq '(^|:)5443$' <<<"$tcp_ports" \
               && grep -Eq '(^|:)6443$' <<<"$tcp_ports" \
               && grep -Eq '(^|:)6444$' <<<"$tcp_ports" \
@@ -148,17 +177,22 @@ jobs:
               && grep -Eq '(^|:)6447$' <<<"$tcp_ports" \
               && grep -Eq '(^|:)6448$' <<<"$tcp_ports" \
               && grep -Eq '(^|:)6449$' <<<"$tcp_ports" \
+              && grep -Eq '(^|:)10888$' <<<"$tcp_ports" \
               && grep -Eq '(^|:)2443$' <<<"$udp_ports" \
               && grep -Eq '(^|:)3443$' <<<"$udp_ports"; then
               curl --fail --silent --show-error \
                 --socks5-hostname 127.0.0.1:6449 \
                 --proxy-user default:socks5-test-password \
                 http://127.0.0.1:18080/ >/dev/null
+              curl --fail --silent --show-error \
+                --socks5-hostname 127.0.0.1:10888 \
+                http://127.0.0.1:18080/ >/dev/null
               exit 0
             fi
             sleep 0.25
           done
           cat "$out/runtime.log" >&2
+          cat "$out/shadowtls-client.log" >&2
           exit 1
       - name: Validate all Shadowsocks ciphers and Reality plus AnyTLS
         shell: bash
@@ -189,6 +223,24 @@ jobs:
               --cipher "${ciphers[$index]}" \
               --password "${passwords[$index]}" >/dev/null
             shoes --dry-run "$config"
+          done
+
+          "$bin" generate shadowsocks --shadowtls \
+            --output "$out/ss-shadowtls-default.yaml" --port 6200 \
+            --server-name www.cloudflare.com >/dev/null
+          "$bin" generate shadowsocks --shadowtls \
+            --output "$out/ss-shadowtls-aes128.yaml" --port 6201 \
+            --server-name www.cloudflare.com \
+            --cipher 2022-blake3-aes-128-gcm >/dev/null
+          "$bin" generate shadowsocks --shadowtls \
+            --output "$out/ss-shadowtls-handshake.yaml" --port 6202 \
+            --server-name www.cloudflare.com \
+            --handshake www.example.com:443 >/dev/null
+          for config in "$out"/ss-shadowtls-*.yaml; do
+            shoes --dry-run "$config"
+            grep -F "shadowtls_targets:" "$config"
+            grep -F "type: shadowsocks" "$config"
+            grep -F "udp_enabled: false" "$config"
           done
 
           snell_ciphers=(aes-128-gcm aes-256-gcm chacha20-ietf-poly1305)

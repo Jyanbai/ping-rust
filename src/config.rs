@@ -40,7 +40,7 @@ use commit::{
 };
 use schema::{
     default_h3_alpn, ChainRule, InnerProtocol, QuicSettings, RealityTarget, ServerConfig,
-    ServerProtocol, ServerRule,
+    ServerProtocol, ServerRule, ShadowTlsHandshake, ShadowTlsTarget,
 };
 use transaction::{read_optional, CredentialCleanup, ManagedRollback, ProfileDirectorySnapshot};
 pub(crate) use validation::validate_shadowsocks_password;
@@ -191,12 +191,30 @@ impl ShadowsocksCipher {
         }
     }
 
+    pub fn is_2022(self) -> bool {
+        self.key_len().is_some()
+    }
+
     pub fn client_name(self) -> &'static str {
         match self {
             Self::Chacha20IetfPoly13052022 => "2022-blake3-chacha20-poly1305",
             _ => self.as_str(),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ShadowsocksMode {
+    #[default]
+    Plain,
+    ShadowTlsV3,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ShadowTlsCredentials {
+    pub password: String,
+    pub server_name: String,
+    pub handshake_address: String,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
@@ -306,6 +324,9 @@ pub struct GenerationOptions {
     pub tuic_zero_rtt: bool,
     pub shadowsocks_cipher: ShadowsocksCipher,
     pub shadowsocks_password: Option<String>,
+    pub shadowsocks_mode: ShadowsocksMode,
+    pub shadowtls_password: Option<String>,
+    pub shadowtls_handshake: Option<String>,
     pub snell_cipher: SnellCipher,
     pub snell_password: Option<String>,
     pub socks5_username: Option<String>,
@@ -328,6 +349,9 @@ impl Default for GenerationOptions {
             tuic_zero_rtt: false,
             shadowsocks_cipher: ShadowsocksCipher::default(),
             shadowsocks_password: None,
+            shadowsocks_mode: ShadowsocksMode::Plain,
+            shadowtls_password: None,
+            shadowtls_handshake: None,
             snell_cipher: SnellCipher::default(),
             snell_password: None,
             socks5_username: None,
@@ -363,6 +387,9 @@ pub enum ProfileChange {
     Password(String),
     RealityServerName(String),
     ShadowsocksCipher(ShadowsocksCipher),
+    ShadowTlsPassword(String),
+    ShadowTlsServerName(String),
+    ShadowTlsHandshake(String),
     SnellCipher(SnellCipher),
     Socks5Username(String),
     Socks5Authentication(bool),
@@ -424,6 +451,8 @@ pub enum Credentials {
         cipher: ShadowsocksCipher,
         password: String,
         udp_enabled: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shadowtls: Option<ShadowTlsCredentials>,
     },
     Snell {
         cipher: SnellCipher,
@@ -560,6 +589,9 @@ impl ManagedProfile {
             Credentials::Reality { .. } => "VLESS-Reality-Vision",
             Credentials::Hysteria2 { .. } => "Hysteria2",
             Credentials::Tuic { .. } => "TUIC v5",
+            Credentials::Shadowsocks {
+                shadowtls: Some(_), ..
+            } => "Shadowsocks 2022 + ShadowTLS v3",
             Credentials::Shadowsocks { .. } => "Shadowsocks",
             Credentials::AnyTls { .. } => "AnyTLS",
             Credentials::VlessTls {
@@ -591,6 +623,10 @@ impl ManagedProfile {
             Credentials::VlessTls { server_name, .. }
             | Credentials::Trojan { server_name, .. }
             | Credentials::VmessTls { server_name, .. } => server_name,
+            Credentials::Shadowsocks {
+                shadowtls: Some(shadowtls),
+                ..
+            } => &shadowtls.server_name,
             Credentials::Shadowsocks { .. }
             | Credentials::Snell { .. }
             | Credentials::Socks5 { .. } => "-",
@@ -851,6 +887,13 @@ pub(crate) async fn update_profile_locked(
             }
         }
         ProfileChange::RealityServerName(server_name) => validate_server_name(server_name)?,
+        ProfileChange::ShadowTlsServerName(server_name) => validate_server_name(server_name)?,
+        ProfileChange::ShadowTlsHandshake(handshake) => validate_host_port(handshake)?,
+        ProfileChange::ShadowTlsPassword(password)
+            if password.is_empty() || password.chars().any(char::is_control) =>
+        {
+            bail!("ShadowTLS 密码不能为空或包含控制字符");
+        }
         _ => {}
     }
 
@@ -937,6 +980,31 @@ fn apply_profile_change(
                     *state_password = password;
                 }
                 (
+                    ServerProtocol::Tls {
+                        shadowtls_targets, ..
+                    },
+                    Credentials::Shadowsocks {
+                        cipher,
+                        password: state_password,
+                        shadowtls: Some(shadowtls),
+                        ..
+                    },
+                ) => {
+                    validate_shadowsocks_password(*cipher, &password)?;
+                    let target = shadowtls_targets
+                        .get_mut(&shadowtls.server_name)
+                        .context("ShadowTLS 配置中缺少现有 SNI 目标")?;
+                    let InnerProtocol::Shadowsocks {
+                        password: server_password,
+                        ..
+                    } = &mut target.protocol
+                    else {
+                        bail!("ShadowTLS 内层协议不是 Shadowsocks");
+                    };
+                    *server_password = password.clone();
+                    *state_password = password;
+                }
+                (
                     ServerProtocol::Snell {
                         password: server_password,
                         ..
@@ -993,6 +1061,16 @@ fn apply_profile_change(
             *server_name = new_name;
         }
         ProfileChange::ShadowsocksCipher(cipher) => {
+            if matches!(
+                profile.credentials,
+                Credentials::Shadowsocks {
+                    shadowtls: Some(_),
+                    ..
+                }
+            ) && !cipher.is_2022()
+            {
+                bail!("ShadowTLS v3 模式只允许 Shadowsocks 2022 cipher");
+            }
             let password = generate_shadowsocks_password(cipher);
             match (&mut server.protocol, &mut profile.credentials) {
                 (
@@ -1012,8 +1090,101 @@ fn apply_profile_change(
                     *state_cipher = cipher;
                     *state_password = password;
                 }
+                (
+                    ServerProtocol::Tls {
+                        shadowtls_targets, ..
+                    },
+                    Credentials::Shadowsocks {
+                        cipher: state_cipher,
+                        password: state_password,
+                        shadowtls: Some(shadowtls),
+                        ..
+                    },
+                ) => {
+                    let target = shadowtls_targets
+                        .get_mut(&shadowtls.server_name)
+                        .context("ShadowTLS 配置中缺少现有 SNI 目标")?;
+                    let InnerProtocol::Shadowsocks {
+                        cipher: server_cipher,
+                        password: server_password,
+                        ..
+                    } = &mut target.protocol
+                    else {
+                        bail!("ShadowTLS 内层协议不是 Shadowsocks");
+                    };
+                    *server_cipher = cipher.as_str().to_owned();
+                    *server_password = password.clone();
+                    *state_cipher = cipher;
+                    *state_password = password;
+                }
                 _ => bail!("只有 Shadowsocks 配置支持更改加密方式"),
             }
+        }
+        ProfileChange::ShadowTlsPassword(password) => {
+            let (
+                ServerProtocol::Tls {
+                    shadowtls_targets, ..
+                },
+                Credentials::Shadowsocks {
+                    shadowtls: Some(shadowtls),
+                    ..
+                },
+            ) = (&mut server.protocol, &mut profile.credentials)
+            else {
+                bail!("只有 ShadowTLS Shadowsocks 配置支持更改 ShadowTLS 密码");
+            };
+            shadowtls_targets
+                .get_mut(&shadowtls.server_name)
+                .context("ShadowTLS 配置中缺少现有 SNI 目标")?
+                .password = password.clone();
+            shadowtls.password = password;
+        }
+        ProfileChange::ShadowTlsServerName(new_name) => {
+            let (
+                ServerProtocol::Tls {
+                    shadowtls_targets, ..
+                },
+                Credentials::Shadowsocks {
+                    shadowtls: Some(shadowtls),
+                    ..
+                },
+            ) = (&mut server.protocol, &mut profile.credentials)
+            else {
+                bail!("只有 ShadowTLS Shadowsocks 配置支持更改 SNI");
+            };
+            if shadowtls_targets.len() != 1 {
+                bail!("ShadowTLS 配置必须恰好包含一个目标");
+            }
+            let mut target = shadowtls_targets
+                .remove(&shadowtls.server_name)
+                .or_else(|| shadowtls_targets.pop_first().map(|(_, target)| target))
+                .context("ShadowTLS 配置中缺少现有 SNI 目标")?;
+            if target.handshake.address == format!("{}:443", shadowtls.server_name) {
+                target.handshake.address = format!("{new_name}:443");
+                shadowtls.handshake_address = target.handshake.address.clone();
+            }
+            shadowtls_targets.insert(new_name.clone(), target);
+            shadowtls.server_name = new_name;
+        }
+        ProfileChange::ShadowTlsHandshake(handshake_address) => {
+            let (
+                ServerProtocol::Tls {
+                    shadowtls_targets, ..
+                },
+                Credentials::Shadowsocks {
+                    shadowtls: Some(shadowtls),
+                    ..
+                },
+            ) = (&mut server.protocol, &mut profile.credentials)
+            else {
+                bail!("只有 ShadowTLS Shadowsocks 配置支持更改握手目标");
+            };
+            shadowtls_targets
+                .get_mut(&shadowtls.server_name)
+                .context("ShadowTLS 配置中缺少现有 SNI 目标")?
+                .handshake
+                .address = handshake_address.clone();
+            shadowtls.handshake_address = handshake_address;
         }
         ProfileChange::SnellCipher(cipher) => {
             match (&mut server.protocol, &mut profile.credentials) {
@@ -1212,19 +1383,47 @@ fn regenerate_profile_credentials(
             *password = generated_password;
         }
         Credentials::Shadowsocks {
-            cipher, password, ..
+            cipher,
+            password,
+            shadowtls,
+            ..
         } => {
-            let ServerProtocol::Shadowsocks {
-                cipher: server_cipher,
-                password: server_password,
-                ..
-            } = &mut server.protocol
-            else {
-                bail!("Shadowsocks 配置与管理状态不一致");
-            };
             let generated = generate_shadowsocks_password(*cipher);
-            *server_cipher = cipher.as_str().to_owned();
-            *server_password = generated.clone();
+            if let Some(shadowtls) = shadowtls {
+                let ServerProtocol::Tls {
+                    shadowtls_targets, ..
+                } = &mut server.protocol
+                else {
+                    bail!("ShadowTLS Shadowsocks 配置与管理状态不一致");
+                };
+                let target = shadowtls_targets
+                    .get_mut(&shadowtls.server_name)
+                    .context("ShadowTLS 配置中缺少现有 SNI 目标")?;
+                let InnerProtocol::Shadowsocks {
+                    cipher: server_cipher,
+                    password: server_password,
+                    ..
+                } = &mut target.protocol
+                else {
+                    bail!("ShadowTLS 内层协议不是 Shadowsocks");
+                };
+                *server_cipher = cipher.as_str().to_owned();
+                *server_password = generated.clone();
+                let shadowtls_password = generated_password();
+                target.password = shadowtls_password.clone();
+                shadowtls.password = shadowtls_password;
+            } else {
+                let ServerProtocol::Shadowsocks {
+                    cipher: server_cipher,
+                    password: server_password,
+                    ..
+                } = &mut server.protocol
+                else {
+                    bail!("Shadowsocks 配置与管理状态不一致");
+                };
+                *server_cipher = cipher.as_str().to_owned();
+                *server_password = generated.clone();
+            }
             *password = generated;
         }
         Credentials::Snell {
@@ -1370,6 +1569,7 @@ fn vmess_user_id_mut(protocol: &mut InnerProtocol) -> Result<&mut Uuid> {
 fn anytls_users_mut(server: &mut ServerConfig) -> Result<&mut Vec<AnyTlsUser>> {
     let ServerProtocol::Tls {
         tls_targets,
+        shadowtls_targets: _,
         reality_targets,
     } = &mut server.protocol
     else {
@@ -1493,6 +1693,14 @@ fn ensure_servers_match_state(servers: &[ServerConfig], profiles: &[ManagedProfi
             | (ServerProtocol::Socks { .. }, Protocol::Socks5) => true,
             (
                 ServerProtocol::Tls {
+                    shadowtls_targets, ..
+                },
+                Protocol::Shadowsocks,
+            ) => shadowtls_targets
+                .values()
+                .any(|target| matches!(target.protocol, InnerProtocol::Shadowsocks { .. })),
+            (
+                ServerProtocol::Tls {
                     reality_targets, ..
                 },
                 Protocol::Reality,
@@ -1503,6 +1711,7 @@ fn ensure_servers_match_state(servers: &[ServerConfig], profiles: &[ManagedProfi
                 ServerProtocol::Tls {
                     tls_targets,
                     reality_targets,
+                    ..
                 },
                 Protocol::AnyTls,
             ) => {
@@ -1797,7 +2006,9 @@ fn validate_request(request: &GenerationRequest) -> Result<()> {
     if !matches!(
         request.protocol,
         Protocol::Shadowsocks | Protocol::Snell | Protocol::Socks5
-    ) {
+    ) || (matches!(request.protocol, Protocol::Shadowsocks)
+        && request.options.shadowsocks_mode == ShadowsocksMode::ShadowTlsV3)
+    {
         validate_server_name(&request.server_name)?;
     }
     if let Some(destination) = &request.reality_dest {
@@ -1855,8 +2066,34 @@ fn validate_request(request: &GenerationRequest) -> Result<()> {
         if let Some(password) = &request.options.shadowsocks_password {
             validate_shadowsocks_password(request.options.shadowsocks_cipher, password)?;
         }
+        if request.options.shadowsocks_mode == ShadowsocksMode::ShadowTlsV3 {
+            if !request.options.shadowsocks_cipher.is_2022() {
+                bail!("ShadowTLS v3 模式只允许 Shadowsocks 2022 cipher");
+            }
+            if let Some(password) = &request.options.shadowtls_password {
+                if password.is_empty() || password.chars().any(char::is_control) {
+                    bail!("ShadowTLS 密码不能为空或包含控制字符");
+                }
+            }
+            validate_host_port(
+                request
+                    .options
+                    .shadowtls_handshake
+                    .as_deref()
+                    .unwrap_or(&format!("{}:443", request.server_name)),
+            )?;
+        } else if request.options.shadowtls_password.is_some()
+            || request.options.shadowtls_handshake.is_some()
+        {
+            bail!("ShadowTLS 参数需要显式启用 ShadowTLS v3 模式");
+        }
     } else if request.options.shadowsocks_password.is_some() {
         bail!("--password 仅适用于 Shadowsocks");
+    } else if request.options.shadowsocks_mode != ShadowsocksMode::Plain
+        || request.options.shadowtls_password.is_some()
+        || request.options.shadowtls_handshake.is_some()
+    {
+        bail!("ShadowTLS v3 仅适用于 Shadowsocks");
     }
 
     if matches!(request.protocol, Protocol::Snell) {
@@ -2349,6 +2586,58 @@ mod tests {
             panic!("expected Shadowsocks credentials");
         };
         assert_eq!(STANDARD.decode(password).unwrap().len(), 32);
+    }
+
+    #[tokio::test]
+    async fn shadowtls_v3_generates_nested_tcp_only_shadowsocks() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut req = request(Protocol::Shadowsocks, dir.path().join("shadowtls.yaml"));
+        req.server_name = "www.cloudflare.com".to_owned();
+        req.options.shadowsocks_mode = ShadowsocksMode::ShadowTlsV3;
+        req.options.shadowtls_handshake = Some("www.example.com:443".to_owned());
+        let result = generate_inner(req, false).await.unwrap();
+        let yaml = fs::read_to_string(result.config_path).unwrap();
+        assert!(yaml.contains("shadowtls_targets:"));
+        assert!(yaml.contains("type: shadowsocks"));
+        assert!(yaml.contains("cipher: 2022-blake3-aes-256-gcm"));
+        assert!(yaml.contains("address: www.example.com:443"));
+        assert!(yaml.contains("udp_enabled: false"));
+        let Credentials::Shadowsocks {
+            cipher,
+            password,
+            udp_enabled,
+            shadowtls: Some(shadowtls),
+        } = result.credentials
+        else {
+            panic!("expected ShadowTLS Shadowsocks credentials");
+        };
+        assert!(cipher.is_2022());
+        assert!(!password.is_empty());
+        assert!(!udp_enabled);
+        assert_eq!(shadowtls.server_name, "www.cloudflare.com");
+        assert_eq!(shadowtls.handshake_address, "www.example.com:443");
+        assert!(!shadowtls.password.is_empty());
+    }
+
+    #[test]
+    fn shadowtls_rejects_legacy_cipher_and_invalid_handshake() {
+        let mut req = request(Protocol::Shadowsocks, PathBuf::from("unused.yaml"));
+        req.options.shadowsocks_mode = ShadowsocksMode::ShadowTlsV3;
+        req.options.shadowsocks_cipher = ShadowsocksCipher::Aes256Gcm;
+        assert!(validate_request(&req).is_err());
+        req.options.shadowsocks_cipher = ShadowsocksCipher::Aes256Gcm2022;
+        req.options.shadowtls_handshake = Some("not-a-host-port".to_owned());
+        assert!(validate_request(&req).is_err());
+    }
+
+    #[test]
+    fn legacy_shadowsocks_state_defaults_shadowtls_to_none() {
+        let json = r#"{"schema_version":2,"profiles":[{"id":"00000000-0000-0000-0000-000000000000","name":"ss","port":8388,"credentials":{"Shadowsocks":{"cipher":"2022-blake3-aes-256-gcm","password":"key","udp_enabled":true}},"certificate_path":null,"certificate_key_path":null,"self_signed_certificate":false}]}"#;
+        let state: ManagedState = serde_json::from_str(json).unwrap();
+        let Credentials::Shadowsocks { shadowtls, .. } = &state.profiles[0].credentials else {
+            panic!("expected Shadowsocks");
+        };
+        assert!(shadowtls.is_none());
     }
 
     #[tokio::test]
@@ -3052,6 +3341,56 @@ mod tests {
         };
         assert_eq!(server_cipher, cipher.as_str());
         assert_eq!(server_password, password);
+    }
+
+    #[test]
+    fn shadowtls_regenerate_rotates_both_secrets_and_keeps_routing_fields() {
+        let mut req = request(Protocol::Shadowsocks, PathBuf::from("unused.yaml"));
+        req.server_name = "www.cloudflare.com".to_owned();
+        req.options.shadowsocks_mode = ShadowsocksMode::ShadowTlsV3;
+        req.options.shadowtls_handshake = Some("www.example.com:443".to_owned());
+        let (mut server, credentials, _, _) = generate_shadowsocks(&req);
+        let mut profile = ManagedProfile {
+            id: Uuid::new_v4(),
+            name: "ss-shadowtls".to_owned(),
+            port: req.port,
+            server_address: None,
+            credentials,
+            certificate_path: None,
+            certificate_key_path: None,
+            self_signed_certificate: false,
+        };
+        let Credentials::Shadowsocks {
+            password: old_key,
+            shadowtls: Some(old_shadowtls),
+            ..
+        } = &profile.credentials
+        else {
+            panic!("expected ShadowTLS credentials");
+        };
+        let old_key = old_key.clone();
+        let old_password = old_shadowtls.password.clone();
+        let old_sni = old_shadowtls.server_name.clone();
+        let old_handshake = old_shadowtls.handshake_address.clone();
+        apply_profile_change(
+            &mut server,
+            &mut profile,
+            ProfileChange::RegenerateCredentials,
+        )
+        .unwrap();
+        let Credentials::Shadowsocks {
+            password,
+            shadowtls: Some(shadowtls),
+            ..
+        } = &profile.credentials
+        else {
+            panic!("expected ShadowTLS credentials");
+        };
+        assert_ne!(password, &old_key);
+        assert_ne!(shadowtls.password, old_password);
+        assert_eq!(shadowtls.server_name, old_sni);
+        assert_eq!(shadowtls.handshake_address, old_handshake);
+        ensure_servers_match_state(&[server], &[profile]).unwrap();
     }
 
     #[test]

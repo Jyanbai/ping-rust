@@ -14,7 +14,7 @@ use crate::{
     client::{self, ClientFormat},
     config::{
         self, AnyTlsMode, AnyTlsUser, GenerationOptions, GenerationRequest, Protocol,
-        ShadowsocksCipher, SnellCipher,
+        ShadowsocksCipher, ShadowsocksMode, SnellCipher,
     },
     deployment, fast_add, install_self,
     installer::{self, InstallMethod},
@@ -170,6 +170,9 @@ pub struct AddArgs {
     /// stdout 只输出一行分享 URI（Snell v3 无标准 URI，不支持）
     #[arg(long)]
     pub plain: bool,
+    /// 显式创建 Shadowsocks 2022 + ShadowTLS v3（TCP-only）
+    #[arg(long)]
+    pub shadowtls: bool,
 }
 
 #[derive(Debug, Args)]
@@ -213,6 +216,15 @@ pub struct GenerateArgs {
     /// Shadowsocks、Snell 或 SOCKS5 密码；省略时安全随机生成
     #[arg(long)]
     password: Option<String>,
+    /// 为 Shadowsocks 启用 ShadowTLS v3（TCP-only）
+    #[arg(long)]
+    shadowtls: bool,
+    /// ShadowTLS v3 密码；省略时安全随机生成
+    #[arg(long, requires = "shadowtls")]
+    shadowtls_password: Option<String>,
+    /// ShadowTLS 远程握手目标，格式为 host:port；默认 SNI:443
+    #[arg(long, requires = "shadowtls")]
+    handshake: Option<String>,
     /// SOCKS5 用户名；省略时安全随机生成
     #[arg(long)]
     username: Option<String>,
@@ -303,6 +315,9 @@ pub async fn run(cli: Cli) -> Result<()> {
                 zero_rtt,
                 cipher,
                 password,
+                shadowtls,
+                shadowtls_password,
+                handshake,
                 username,
                 no_auth,
                 anytls_mode,
@@ -358,6 +373,13 @@ pub async fn run(cli: Cli) -> Result<()> {
                     } else {
                         None
                     },
+                    shadowsocks_mode: if shadowtls {
+                        ShadowsocksMode::ShadowTlsV3
+                    } else {
+                        ShadowsocksMode::Plain
+                    },
+                    shadowtls_password,
+                    shadowtls_handshake: handshake,
                     snell_cipher,
                     snell_password: if matches!(protocol, Protocol::Snell) {
                         password.clone()
@@ -514,8 +536,13 @@ pub(crate) async fn update_shoes(method: InstallMethod) -> Result<installer::Ins
 }
 
 async fn run_add(args: AddArgs) -> Result<()> {
-    if args.plain && matches!(args.protocol, Protocol::Snell) {
-        bail!("Snell v3 没有可互操作的标准分享 URI，不能使用 --plain；请直接运行 prs add snell 查看连接参数");
+    if args.shadowtls && !matches!(args.protocol, Protocol::Shadowsocks) {
+        bail!("--shadowtls 仅适用于 Shadowsocks");
+    }
+    if args.plain && (matches!(args.protocol, Protocol::Snell) || args.shadowtls) {
+        bail!(
+            "当前模式没有可互操作的标准分享 URI，不能使用 --plain；请使用 sing-box 或 Mihomo 导出"
+        );
     }
     ensure_shoes_for_add(args.yes).await?;
     let result = fast_add::execute(fast_add::AddRequest {
@@ -526,6 +553,13 @@ async fn run_add(args: AddArgs) -> Result<()> {
         server_name: args.server_name,
         shadowsocks_cipher: None,
         shadowsocks_password: None,
+        shadowsocks_mode: if args.shadowtls {
+            ShadowsocksMode::ShadowTlsV3
+        } else {
+            ShadowsocksMode::Plain
+        },
+        shadowtls_password: None,
+        shadowtls_handshake: None,
     })
     .await?;
     if args.plain {
@@ -565,6 +599,9 @@ pub(crate) async fn bootstrap_default_reality() -> Result<bool> {
         server_name: None,
         shadowsocks_cipher: None,
         shadowsocks_password: None,
+        shadowsocks_mode: ShadowsocksMode::Plain,
+        shadowtls_password: None,
+        shadowtls_handshake: None,
     })
     .await?;
     print_add_result(&result);
@@ -583,7 +620,19 @@ pub(crate) fn print_add_result(result: &fast_add::AddResult) {
         println!("\n复制上方链接即可导入客户端。");
         println!("{}", "安全提示：分享链接包含访问凭据，请勿公开。".yellow());
     } else {
-        println!("\nSnell v3 没有通用标准分享 URI；配置已成功部署，请按客户端支持情况手动填写或导出 Clash Meta（仅 AES-128-GCM）。");
+        if matches!(
+            profile.credentials,
+            config::Credentials::Shadowsocks {
+                shadowtls: Some(_),
+                ..
+            }
+        ) {
+            println!(
+                "\nShadowTLS v3 没有通用标准分享 URI/二维码；请使用 sing-box 或 Mihomo 导出。"
+            );
+        } else {
+            println!("\nSnell v3 没有通用标准分享 URI；配置已成功部署，请按客户端支持情况手动填写或导出 Clash Meta（仅 AES-128-GCM）。");
+        }
     }
 }
 
@@ -675,13 +724,35 @@ fn profile_details_lines(profile: &config::ManagedProfile, share_uri: Option<&st
             lines.push(format!("0-RTT                   = {zero_rtt_handshake}"));
         }
         config::Credentials::Shadowsocks {
-            cipher, password, ..
+            cipher,
+            password,
+            shadowtls,
+            ..
         } => {
-            lines.push("协议 (protocol)         = shadowsocks".to_owned());
-            lines.push(format!("地址 (address)          = {address}"));
-            lines.push(format!("端口 (port)             = {}", profile.port));
-            lines.push(format!("密码 (password)         = {password}"));
-            lines.push(format!("加密方式 (encryption)   = {}", cipher.as_str()));
+            if let Some(shadowtls) = shadowtls {
+                lines.push("协议                   = Shadowsocks 2022".to_owned());
+                lines.push(format!("地址 (address)          = {address}"));
+                lines.push(format!("端口 (port)             = {}", profile.port));
+                lines.push(format!("Cipher                 = {}", cipher.as_str()));
+                lines.push(format!("SS2022 Key             = {password}"));
+                lines.push("传输/伪装              = ShadowTLS v3".to_owned());
+                lines.push(format!("ShadowTLS Password      = {}", shadowtls.password));
+                lines.push(format!(
+                    "SNI                    = {}",
+                    shadowtls.server_name
+                ));
+                lines.push(format!(
+                    "Handshake              = {}",
+                    shadowtls.handshake_address
+                ));
+                lines.push("UDP/UoT                = NOT_IMPLEMENTED (TCP only)".to_owned());
+            } else {
+                lines.push("协议 (protocol)         = shadowsocks".to_owned());
+                lines.push(format!("地址 (address)          = {address}"));
+                lines.push(format!("端口 (port)             = {}", profile.port));
+                lines.push(format!("密码 (password)         = {password}"));
+                lines.push(format!("加密方式 (encryption)   = {}", cipher.as_str()));
+            }
         }
         config::Credentials::Snell {
             cipher,
@@ -1155,11 +1226,23 @@ pub fn print_credentials(result: &config::GenerationResult) {
             cipher,
             password,
             udp_enabled,
+            shadowtls,
         } => {
-            println!("协议：Shadowsocks");
-            println!("加密：{}", cipher.as_str());
-            println!("密码：{password}");
-            println!("UDP：{}", if *udp_enabled { "启用" } else { "关闭" });
+            if let Some(shadowtls) = shadowtls {
+                println!("协议：Shadowsocks 2022");
+                println!("加密：{}", cipher.as_str());
+                println!("SS2022 Key：{password}");
+                println!("传输/伪装：ShadowTLS v3");
+                println!("ShadowTLS Password：{}", shadowtls.password);
+                println!("SNI：{}", shadowtls.server_name);
+                println!("Handshake：{}", shadowtls.handshake_address);
+                println!("UDP/UoT：NOT_IMPLEMENTED（TCP only）");
+            } else {
+                println!("协议：Shadowsocks");
+                println!("加密：{}", cipher.as_str());
+                println!("密码：{password}");
+                println!("UDP：{}", if *udp_enabled { "启用" } else { "关闭" });
+            }
         }
         config::Credentials::AnyTls {
             users,
@@ -1523,6 +1606,7 @@ mod tests {
                 cipher: ShadowsocksCipher::Aes256Gcm2022,
                 password: "generated-password".to_owned(),
                 udp_enabled: true,
+                shadowtls: None,
             },
             certificate_path: None,
             certificate_key_path: None,

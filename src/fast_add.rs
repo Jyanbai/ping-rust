@@ -6,7 +6,9 @@ use reqwest::Client;
 
 use crate::{
     client,
-    config::{self, GenerationOptions, GenerationRequest, Protocol, ShadowsocksCipher},
+    config::{
+        self, GenerationOptions, GenerationRequest, Protocol, ShadowsocksCipher, ShadowsocksMode,
+    },
     deployment, operations, utils,
 };
 
@@ -27,6 +29,9 @@ pub struct AddRequest {
     pub server_name: Option<String>,
     pub shadowsocks_cipher: Option<ShadowsocksCipher>,
     pub shadowsocks_password: Option<String>,
+    pub shadowsocks_mode: ShadowsocksMode,
+    pub shadowtls_password: Option<String>,
+    pub shadowtls_handshake: Option<String>,
 }
 
 pub struct AddResult {
@@ -51,6 +56,12 @@ pub async fn execute(request: AddRequest) -> Result<AddResult> {
     if matches!(request.protocol, Protocol::Shadowsocks) {
         options.shadowsocks_cipher = request.shadowsocks_cipher.unwrap_or_default();
         options.shadowsocks_password = request.shadowsocks_password;
+        options.shadowsocks_mode = request.shadowsocks_mode;
+        options.shadowtls_password = request.shadowtls_password;
+        options.shadowtls_handshake = request.shadowtls_handshake;
+        if request.shadowsocks_mode == ShadowsocksMode::ShadowTlsV3 {
+            options.udp_enabled = false;
+        }
     }
     if matches!(request.protocol, Protocol::AnyTls) {
         options
@@ -82,7 +93,9 @@ pub async fn execute(request: AddRequest) -> Result<AddResult> {
         .await,
         port,
     )?;
-    let share_uri = if matches!(request.protocol, Protocol::Snell) {
+    let share_uri = if matches!(request.protocol, Protocol::Snell)
+        || request.shadowsocks_mode == ShadowsocksMode::ShadowTlsV3
+    {
         None
     } else {
         Some(client::share_uri(&generation.profile, &server_address)?)

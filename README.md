@@ -167,6 +167,8 @@ shoes: running
 1) TUIC
 2) Hysteria2
 3) Shadowsocks
+   ├─ Shadowsocks 2022
+   └─ Shadowsocks 2022 + ShadowTLS v3（推荐）
 4) VLESS-REALITY（推荐）
 5) AnyTLS
 6) VLESS-TLS-Vision
@@ -306,7 +308,21 @@ sudo ping-rust generate shadowsocks \
   --name ss-aes128 \
   --port 8389 \
   --cipher 2022-blake3-aes-128-gcm
+
+# Shadowsocks 2022 + ShadowTLS v3；握手目标默认由 SNI 推导为 SNI:443
+sudo ping-rust generate shadowsocks --shadowtls \
+  --name ss-shadowtls \
+  --port 8443 \
+  --server-name www.cloudflare.com
+
+# 快速添加：旧命令保持普通 Shadowsocks；只有显式参数才启用 ShadowTLS
+sudo prs add shadowsocks
+sudo prs add shadowsocks --shadowtls
 ```
+
+ShadowTLS v3 由当前固定 shoes 内核原生承载，服务端仍只有一个 shoes 进程和一个受管 YAML，不需要额外安装或运行 `shadow-tls`。该模式只接受三种 Shadowsocks 2022 cipher，并分别安全生成合规 SS2022 Base64 密钥与独立 ShadowTLS 密码。当前首版明确为 TCP-only：sing-box 的 ShadowTLS outbound 只暴露 TCP，因此不会生成 `udp: true` 或声称 UDP/UoT 可用。
+
+客户端兼容性以实际 schema 为准：sing-box 导出为 `shadowsocks` outbound 通过 `detour` 连接 `shadowtls` v3 outbound；Mihomo 导出为 Shadowsocks 的 `plugin: shadow-tls` 与 `plugin-opts`。NekoBox 专用 URI、标准 `ss://`、普通二维码和 chain outbound 均不伪造，使用时请导出 sing-box 或 Mihomo 配置。
 
 AnyTLS 默认使用普通 TLS 外层；`--user` 可重复，格式为 `[名称:]密码`。未提供用户时自动创建一个随机密码用户：
 

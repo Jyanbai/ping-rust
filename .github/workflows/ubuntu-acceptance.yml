@@ -581,6 +581,25 @@ jobs:
           printf 'SHADOWSOCKS_PROFILE=%s\n' "$shadowsocks_profile" >> "$GITHUB_ENV"
           sudo rm -f "$shadowsocks_output"
 
+          shadowtls_output="$RUNNER_TEMP/shadowtls-generation.txt"
+          sudo "$PING_RUST" generate shadowsocks --shadowtls \
+            --name acceptance-shadowtls \
+            --port 24448 \
+            --server-name www.cloudflare.com \
+            | sudo tee "$shadowtls_output" >/dev/null
+          for _ in {1..20}; do
+            if sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)24448$'; then
+              break
+            fi
+            sleep 0.5
+          done
+          sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)24448$'
+          grep -F "传输/伪装：ShadowTLS v3" "$shadowtls_output"
+          grep -F "UDP/UoT：NOT_IMPLEMENTED" "$shadowtls_output"
+          sudo test -s /etc/shoes/profiles/SHADOWSOCKS-24448.yaml
+          sudo grep -F "shadowtls_targets:" /etc/shoes/profiles/SHADOWSOCKS-24448.yaml
+          sudo rm -f "$shadowtls_output"
+
           anytls_output="$RUNNER_TEMP/anytls-generation.txt"
           sudo "$PING_RUST" generate anytls \
             --name acceptance-anytls \
@@ -611,6 +630,7 @@ jobs:
             HYSTERIA2-24444.yaml \
             TUIC-24445.yaml \
             SHADOWSOCKS-24446.yaml \
+            SHADOWSOCKS-24448.yaml \
             ANYTLS-24447.yaml; do
             sudo test -s "/etc/shoes/profiles/$profile_file"
           done
@@ -664,6 +684,10 @@ jobs:
           send "1\r"
           wait_for {请选择 \[0-12\]} protocol-menu
           send "$env(PROTOCOL_NUMBER)\r"
+          if {$env(PROTOCOL_NUMBER) == "3"} {
+            wait_for {Shadowsocks 模式} shadowsocks-mode-menu
+            send "1\r"
+          }
           wait_for {输入端口} port-prompt
           send "$env(MENU_PORT)\r"
           if {$env(PROTOCOL_NUMBER) == "3"} {
@@ -686,6 +710,35 @@ jobs:
 
           run_menu_add 4 25448 vless
           run_menu_add 3 25449 ss
+          sudo env PRS_COMMAND="$PRS" expect <<'EXPECT'
+          log_user 0
+          set timeout 180
+          spawn $env(PRS_COMMAND)
+          expect -re {请选择 \[0-10\]}
+          send "1\r"
+          expect -re {请选择 \[0-12\]}
+          send "3\r"
+          expect {Shadowsocks 模式}
+          send "2\r"
+          expect {输入端口}
+          send "25462\r"
+          expect {请选择加密方式}
+          send "\r"
+          expect {请设置密码}
+          send "\r"
+          expect {传输/伪装}
+          expect {ShadowTLS v3}
+          expect {UDP/UoT}
+          expect eof
+          EXPECT
+          sudo test -s /etc/shoes/profiles/SHADOWSOCKS-25462.yaml
+          sudo grep -F "shadowtls_targets:" /etc/shoes/profiles/SHADOWSOCKS-25462.yaml
+          shadowtls_add_output="$(
+            sudo "$PRS" add shadowsocks --shadowtls 25463 \
+              --server-address 203.0.113.10 --yes
+          )"
+          grep -F "ShadowTLS v3" <<<"$shadowtls_add_output"
+          grep -F "没有通用标准分享 URI/二维码" <<<"$shadowtls_add_output"
           run_menu_add 6 25451 vless
           run_menu_add 7 25452 vless
           run_menu_add 8 25453 trojan

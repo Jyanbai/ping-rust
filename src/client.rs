@@ -153,15 +153,29 @@ fn clash_meta(profile: &ManagedProfile, server: &str) -> Result<String> {
             cipher,
             password,
             udp_enabled,
-        } => json!({
-            "name": profile.name,
-            "type": "ss",
-            "server": server,
-            "port": profile.port,
-            "cipher": cipher.client_name(),
-            "password": password,
-            "udp": udp_enabled
-        }),
+            shadowtls,
+        } => {
+            let mut proxy = json!({
+                "name": profile.name,
+                "type": "ss",
+                "server": server,
+                "port": profile.port,
+                "cipher": cipher.client_name(),
+                "password": password,
+                "udp": udp_enabled
+            });
+            if let Some(shadowtls) = shadowtls {
+                proxy["udp"] = json!(false);
+                proxy["plugin"] = json!("shadow-tls");
+                proxy["client-fingerprint"] = json!(config::REALITY_FINGERPRINT);
+                proxy["plugin-opts"] = json!({
+                    "host": shadowtls.server_name,
+                    "password": shadowtls.password,
+                    "version": 3
+                });
+            }
+            proxy
+        }
         Credentials::Socks5 {
             username,
             password,
@@ -328,6 +342,45 @@ fn sing_box(profile: &ManagedProfile, server: &str) -> Result<String> {
             "alpn": alpn
         })
     };
+    if let Credentials::Shadowsocks {
+        cipher,
+        password,
+        shadowtls: Some(shadowtls),
+        ..
+    } = &profile.credentials
+    {
+        let shadowtls_tag = format!("{}-shadowtls", profile.name);
+        return serde_json::to_string_pretty(&json!({
+            "outbounds": [
+                {
+                    "type": "shadowsocks",
+                    "tag": profile.name,
+                    "server": server,
+                    "server_port": profile.port,
+                    "method": cipher.client_name(),
+                    "password": password,
+                    "detour": shadowtls_tag
+                },
+                {
+                    "type": "shadowtls",
+                    "tag": shadowtls_tag,
+                    "server": server,
+                    "server_port": profile.port,
+                    "version": 3,
+                    "password": shadowtls.password,
+                    "tls": {
+                        "enabled": true,
+                        "server_name": shadowtls.server_name,
+                        "utls": {
+                            "enabled": true,
+                            "fingerprint": config::REALITY_FINGERPRINT
+                        }
+                    }
+                }
+            ]
+        }))
+        .context("生成 sing-box ShadowTLS JSON 失败");
+    }
     let outbound: Value = match &profile.credentials {
         Credentials::Reality {
             user_id,
@@ -601,8 +654,14 @@ pub fn share_uri(profile: &ManagedProfile, server: &str) -> Result<String> {
             ))
         }
         Credentials::Shadowsocks {
-            cipher, password, ..
+            cipher,
+            password,
+            shadowtls,
+            ..
         } => {
+            if shadowtls.is_some() {
+                bail!("Shadowsocks 2022 + ShadowTLS v3 没有可互操作的标准 URI；请使用 sing-box 或 Mihomo 导出");
+            }
             let auth = URL_SAFE_NO_PAD.encode(format!("{}:{password}", cipher.client_name()));
             Ok(format!("ss://{auth}@{host}:{}#{fragment}", profile.port))
         }
@@ -1139,6 +1198,7 @@ mod tests {
                 cipher: ShadowsocksCipher::Chacha20IetfPoly13052022,
                 password: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_owned(),
                 udp_enabled: true,
+                shadowtls: None,
             },
             certificate_path: None,
             certificate_key_path: None,
@@ -1154,6 +1214,46 @@ mod tests {
         assert!(clash.contains("2022-blake3-chacha20-poly1305"));
         assert!(sing_box.contains("2022-blake3-chacha20-poly1305"));
         assert!(uri.starts_with("ss://"));
+    }
+
+    #[test]
+    fn exports_shadowtls_to_verified_client_shapes_and_rejects_uri() {
+        let profile = ManagedProfile {
+            id: Uuid::nil(),
+            name: "ss-shadowtls".to_owned(),
+            port: 8443,
+            server_address: None,
+            credentials: Credentials::Shadowsocks {
+                cipher: ShadowsocksCipher::Aes256Gcm2022,
+                password: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_owned(),
+                udp_enabled: false,
+                shadowtls: Some(config::ShadowTlsCredentials {
+                    password: "shadow-secret".to_owned(),
+                    server_name: "www.cloudflare.com".to_owned(),
+                    handshake_address: "www.cloudflare.com:443".to_owned(),
+                }),
+            },
+            certificate_path: None,
+            certificate_key_path: None,
+            self_signed_certificate: false,
+        };
+        let clash = render(&profile, ClientFormat::ClashMeta, "203.0.113.4").unwrap();
+        assert!(clash.contains("plugin: shadow-tls"));
+        assert!(clash.contains("version: 3"));
+        assert!(clash.contains("host: www.cloudflare.com"));
+        let sing = render(&profile, ClientFormat::SingBox, "203.0.113.4").unwrap();
+        let value: Value = serde_json::from_str(&sing).unwrap();
+        let outbounds = value["outbounds"].as_array().unwrap();
+        assert_eq!(outbounds.len(), 2);
+        assert_eq!(outbounds[0]["type"], "shadowsocks");
+        assert_eq!(outbounds[0]["detour"], "ss-shadowtls-shadowtls");
+        assert_eq!(outbounds[1]["type"], "shadowtls");
+        assert_eq!(outbounds[1]["version"], 3);
+        assert_eq!(outbounds[1]["password"], "shadow-secret");
+        assert!(render(&profile, ClientFormat::Nekobox, "203.0.113.4")
+            .unwrap_err()
+            .to_string()
+            .contains("没有可互操作的标准 URI"));
     }
 
     #[test]
