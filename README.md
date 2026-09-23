@@ -9,7 +9,7 @@
 
 核心逻辑全部位于 Rust 源码中；`scripts/install.sh` 只负责执行 Rust 前的架构检测、下载、SHA-256 校验与严格解包，原子安装、快捷命令所有权判断和首次部署均由已校验的 Rust 二进制完成。
 
-> 当前稳定版为 [`v0.1.19`](https://github.com/Jyanbai/ping-rust/releases/tag/v0.1.19)，并已发布至 [crates.io](https://crates.io/crates/ping-rust/0.1.19)。支持 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks、AnyTLS、VLESS-TLS-Vision、VLESS-WS-TLS、Trojan-TLS、Trojan-REALITY、VMess-WS-TLS、SOCKS5、Snell v3 和 NaiveProxy 十三种受管协议。用户只选择完整协议，不需要理解或手动组合传输层、安全层与内层协议。
+> 当前稳定版为 [`v0.1.20`](https://github.com/Jyanbai/ping-rust/releases/tag/v0.1.20)，并已发布至 [crates.io](https://crates.io/crates/ping-rust/0.1.20)。支持 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks、AnyTLS、VLESS-TLS-Vision、VLESS-WS-TLS、Trojan-TLS、Trojan-REALITY、VMess-WS-TLS、SOCKS5、Snell v3 和 NaiveProxy 十三种受管协议。用户只选择完整协议，不需要理解或手动组合传输层、安全层与内层协议。
 
 完整文档：[Wiki](https://github.com/Jyanbai/ping-rust/wiki) · [快速开始](https://github.com/Jyanbai/ping-rust/wiki/Quick-Start) · [链式代理](https://github.com/Jyanbai/ping-rust/wiki/Chain-Proxy) · [故障排查](https://github.com/Jyanbai/ping-rust/wiki/Troubleshooting)
 
@@ -29,7 +29,7 @@ bash <(curl --proto '=https' --tlsv1.2 -fsSL \
 ```bash
 bash <(curl --proto '=https' --tlsv1.2 -fsSL \
   https://raw.githubusercontent.com/Jyanbai/ping-rust/main/scripts/install.sh) \
-  --version v0.1.19
+  --version v0.1.20
 
 bash <(curl --proto '=https' --tlsv1.2 -fsSL \
   https://raw.githubusercontent.com/Jyanbai/ping-rust/main/scripts/install.sh) \
@@ -144,7 +144,7 @@ vless://...security=reality...pbk=...&sid=...#VLESS-REALITY-30060
 ```text
 $ sudo prs
 
-------------- ping-rust v0.1.19 -------------
+------------- ping-rust v0.1.20 -------------
 shoes: running
 项目: https://github.com/Jyanbai/ping-rust
 
