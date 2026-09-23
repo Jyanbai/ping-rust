@@ -733,6 +733,14 @@ jobs:
           EXPECT
           sudo test -s /etc/shoes/profiles/SHADOWSOCKS-25462.yaml
           sudo grep -F "shadowtls_targets:" /etc/shoes/profiles/SHADOWSOCKS-25462.yaml
+          shadowtls_menu_profile_id="$(sudo python3 - <<'PY'
+          import json
+          with open('/etc/shoes/ping-rust-state.json', encoding='utf-8') as stream:
+              profiles = json.load(stream)['profiles']
+          print(next(profile['id'] for profile in profiles if profile['port'] == 25462))
+          PY
+          )"
+          sudo "$PRS" delete "$shadowtls_menu_profile_id" --yes >/dev/null
           shadowtls_add_output="$(
             sudo "$PRS" add shadowsocks --shadowtls 25463 \
               --server-address 203.0.113.10 --yes
