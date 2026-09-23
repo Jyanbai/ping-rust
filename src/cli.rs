@@ -539,10 +539,11 @@ async fn run_add(args: AddArgs) -> Result<()> {
     if args.shadowtls && !matches!(args.protocol, Protocol::Shadowsocks) {
         bail!("--shadowtls 仅适用于 Shadowsocks");
     }
-    if args.plain && (matches!(args.protocol, Protocol::Snell) || args.shadowtls) {
-        bail!(
-            "当前模式没有可互操作的标准分享 URI，不能使用 --plain；请使用 sing-box 或 Mihomo 导出"
-        );
+    if args.plain && matches!(args.protocol, Protocol::Snell) {
+        bail!("Snell v3 没有可互操作的标准分享 URI，不能使用 --plain；请直接运行 prs add snell 查看连接参数");
+    }
+    if args.plain && args.shadowtls {
+        bail!("ShadowTLS v3 没有可互操作的标准分享 URI，不能使用 --plain；请使用 sing-box 或 Mihomo 导出");
     }
     ensure_shoes_for_add(args.yes).await?;
     let result = fast_add::execute(fast_add::AddRequest {
