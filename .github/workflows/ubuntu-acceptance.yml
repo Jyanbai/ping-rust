@@ -904,6 +904,13 @@ jobs:
           sudo grep -q '^address: 0.0.0.0:25450$' \
             /etc/shoes/profiles/VLESS-REALITY-25450.yaml
 
+          profile_number="$(sudo python3 - <<'PY'
+          import json
+          with open('/etc/shoes/ping-rust-state.json', encoding='utf-8') as stream:
+              profiles = json.load(stream)['profiles']
+          print(next(index for index, profile in enumerate(profiles, 1) if profile['port'] == 25450))
+          PY
+          )"
           ss_profile_number="$(sudo python3 - <<'PY'
           import json
           with open('/etc/shoes/ping-rust-state.json', encoding='utf-8') as stream:
