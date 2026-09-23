@@ -639,6 +639,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          trap 'status=$?; printf "numeric PTY failure at line %s: %s (exit %s)\n" "$LINENO" "$BASH_COMMAND" "$status" >&2; exit "$status"' ERR
           config_before_migration="$(sudo sha256sum /etc/shoes/config.yaml | awk '{print $1}')"
           state_before_migration="$(sudo sha256sum /etc/shoes/ping-rust-state.json | awk '{print $1}')"
           sudo mv /etc/shoes/profiles "$RUNNER_TEMP/legacy-profiles"
