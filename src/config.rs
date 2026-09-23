@@ -39,8 +39,8 @@ use commit::{
     commit_managed, profile_documents, profile_documents_are_current, write_profile_documents,
 };
 use schema::{
-    default_h3_alpn, ChainRule, InnerProtocol, QuicSettings, RealityTarget, ServerConfig,
-    ServerProtocol, ServerRule, ShadowTlsHandshake, ShadowTlsTarget,
+    default_h3_alpn, ChainRule, InnerProtocol, NaiveUser, QuicSettings, RealityTarget,
+    ServerConfig, ServerProtocol, ServerRule, ShadowTlsHandshake, ShadowTlsTarget,
 };
 use transaction::{read_optional, CredentialCleanup, ManagedRollback, ProfileDirectorySnapshot};
 pub(crate) use validation::validate_shadowsocks_password;
@@ -89,6 +89,8 @@ pub enum Protocol {
     #[value(name = "socks5", alias = "socks", alias = "s5")]
     Socks5,
     Snell,
+    #[value(name = "naiveproxy", alias = "naive")]
+    NaiveProxy,
 }
 
 impl Protocol {
@@ -139,6 +141,7 @@ impl Protocol {
                 | Self::VlessWsTls
                 | Self::TrojanTls
                 | Self::VmessWsTls
+                | Self::NaiveProxy
         ) || (matches!(self, Self::AnyTls) && anytls_mode == AnyTlsMode::Tls)
     }
 
@@ -337,6 +340,12 @@ pub struct GenerationOptions {
     pub anytls_padding_scheme: Option<Vec<String>>,
     pub anytls_fallback: Option<String>,
     pub websocket_path: Option<String>,
+    pub naive_username: Option<String>,
+    pub naive_password: Option<String>,
+    pub naive_padding: bool,
+    pub naive_udp_enabled: bool,
+    pub naive_fallback: Option<String>,
+    pub naive_self_signed: bool,
 }
 
 impl Default for GenerationOptions {
@@ -362,6 +371,12 @@ impl Default for GenerationOptions {
             anytls_padding_scheme: None,
             anytls_fallback: None,
             websocket_path: None,
+            naive_username: None,
+            naive_password: None,
+            naive_padding: true,
+            naive_udp_enabled: false,
+            naive_fallback: None,
+            naive_self_signed: false,
         }
     }
 }
@@ -395,6 +410,13 @@ pub enum ProfileChange {
     Socks5Authentication(bool),
     UdpEnabled(bool),
     AnyTlsUserPassword { index: usize, password: String },
+    NaiveUsername(String),
+    NaivePassword(String),
+    NaiveServerName(String),
+    NaiveCertificate { certificate: PathBuf, key: PathBuf },
+    NaivePadding(bool),
+    NaiveUdpEnabled(bool),
+    NaiveFallback(Option<String>),
 }
 
 pub struct GenerationResult {
@@ -405,6 +427,8 @@ pub struct GenerationResult {
     pub credentials: Credentials,
     pub profile: ManagedProfile,
     rollback: Option<ManagedRollback>,
+    retired_certificate: Option<PathBuf>,
+    retired_certificate_key: Option<PathBuf>,
     _lock: Option<utils::ExclusiveLock>,
 }
 
@@ -472,6 +496,15 @@ pub enum Credentials {
         alpn_protocols: Vec<String>,
         udp_enabled: bool,
         security: AnyTlsSecurity,
+    },
+    NaiveProxy {
+        username: String,
+        password: String,
+        server_name: String,
+        padding: bool,
+        udp_enabled: bool,
+        #[serde(default)]
+        fallback: Option<String>,
     },
     VlessTls {
         user_id: Uuid,
@@ -561,6 +594,7 @@ impl ManagedProfile {
             Credentials::Hysteria2 { .. } => Protocol::Hysteria2,
             Credentials::Tuic { .. } => Protocol::Tuic,
             Credentials::Shadowsocks { .. } => Protocol::Shadowsocks,
+            Credentials::NaiveProxy { .. } => Protocol::NaiveProxy,
             Credentials::AnyTls { .. } => Protocol::AnyTls,
             Credentials::VlessTls {
                 websocket_path: None,
@@ -593,6 +627,7 @@ impl ManagedProfile {
                 shadowtls: Some(_), ..
             } => "Shadowsocks 2022 + ShadowTLS v3",
             Credentials::Shadowsocks { .. } => "Shadowsocks",
+            Credentials::NaiveProxy { .. } => "NaiveProxy",
             Credentials::AnyTls { .. } => "AnyTLS",
             Credentials::VlessTls {
                 websocket_path: Some(_),
@@ -619,7 +654,8 @@ impl ManagedProfile {
             Credentials::Reality { server_name, .. }
             | Credentials::Hysteria2 { server_name, .. }
             | Credentials::Tuic { server_name, .. }
-            | Credentials::AnyTls { server_name, .. } => server_name,
+            | Credentials::AnyTls { server_name, .. }
+            | Credentials::NaiveProxy { server_name, .. } => server_name,
             Credentials::VlessTls { server_name, .. }
             | Credentials::Trojan { server_name, .. }
             | Credentials::VmessTls { server_name, .. } => server_name,
@@ -840,6 +876,8 @@ async fn generate_inner_with_lock(
         credentials,
         profile,
         rollback,
+        retired_certificate: None,
+        retired_certificate_key: None,
         _lock: lock,
     })
 }
@@ -894,22 +932,76 @@ pub(crate) async fn update_profile_locked(
         {
             bail!("ShadowTLS 密码不能为空或包含控制字符");
         }
+        ProfileChange::NaiveUsername(username) => validate_naive_component("用户名", username)?,
+        ProfileChange::NaivePassword(password) => validate_naive_component("密码", password)?,
+        ProfileChange::NaiveServerName(server_name) => validate_server_name(server_name)?,
+        ProfileChange::NaiveCertificate { certificate, key } => {
+            if !certificate.is_file() || !key.is_file() {
+                bail!("指定的证书或私钥文件不存在");
+            }
+            if state.profiles[index].self_signed_certificate
+                && (state.profiles[index].certificate_path.as_ref() == Some(certificate)
+                    || state.profiles[index].certificate_key_path.as_ref() == Some(key))
+            {
+                bail!("不能把当前自签名测试证书重新标记为受信任外部证书");
+            }
+        }
+        ProfileChange::NaiveFallback(Some(path)) => validate_naive_fallback(path)?,
         _ => {}
     }
 
-    let rollback = ManagedRollback {
+    let retire_owned_certificate = state.profiles[index].self_signed_certificate
+        && matches!(
+            &change,
+            ProfileChange::NaiveCertificate { .. } | ProfileChange::NaiveServerName(_)
+        );
+    let retired_certificate = retire_owned_certificate
+        .then(|| state.profiles[index].certificate_path.clone())
+        .flatten();
+    let retired_certificate_key = retire_owned_certificate
+        .then(|| state.profiles[index].certificate_key_path.clone())
+        .flatten();
+    let mut rollback = ManagedRollback {
         config: read_optional(config_path)?,
         state: read_optional(state_path)?,
         profiles: ProfileDirectorySnapshot::capture(Path::new(utils::PROFILES_DIR))?,
         generated_certificate: None,
         generated_certificate_key: None,
     };
+    let regenerate_naive_certificate = state.profiles[index].self_signed_certificate
+        && matches!(&change, ProfileChange::NaiveServerName(_));
     apply_profile_change(&mut servers[index], &mut state.profiles[index], change)?;
+    let mut generated_cleanup = None;
+    if regenerate_naive_certificate {
+        let new_name = state.profiles[index].server_name().to_owned();
+        let suffix = &Uuid::new_v4().simple().to_string()[..8];
+        let cert = Path::new(utils::CONFIG_DIR).join(format!("cert-{suffix}.pem"));
+        let key = Path::new(utils::CONFIG_DIR).join(format!("key-{suffix}.pem"));
+        write_self_signed_certificate(&new_name, &cert, &key)?;
+        let cleanup = CredentialCleanup::new(true, Some(&cert), Some(&key));
+        let ServerProtocol::Tls { tls_targets, .. } = &mut servers[index].protocol else {
+            bail!("NaiveProxy TLS 配置不一致");
+        };
+        let target = tls_targets
+            .values_mut()
+            .next()
+            .context("NaiveProxy 缺少 TLS 目标")?;
+        target.cert = cert.to_string_lossy().into_owned();
+        target.key = key.to_string_lossy().into_owned();
+        state.profiles[index].certificate_path = Some(cert.clone());
+        state.profiles[index].certificate_key_path = Some(key.clone());
+        rollback.generated_certificate = Some(cert);
+        rollback.generated_certificate_key = Some(key);
+        generated_cleanup = Some(cleanup);
+    }
     let profile = state.profiles[index].clone();
     let yaml = serde_yaml::to_string(&servers).context("序列化更新后 shoes YAML 失败")?;
     validate_yaml(&yaml)?;
     validate_candidate_with_shoes(&yaml, Path::new(utils::CONFIG_DIR)).await?;
     commit_managed(config_path, state_path, &servers, &state)?;
+    if let Some(mut cleanup) = generated_cleanup {
+        cleanup.disarm();
+    }
 
     Ok(GenerationResult {
         profile_id: profile.id,
@@ -919,6 +1011,8 @@ pub(crate) async fn update_profile_locked(
         credentials: profile.credentials.clone(),
         profile,
         rollback: Some(rollback),
+        retired_certificate,
+        retired_certificate_key,
         _lock: Some(lock),
     })
 }
@@ -1185,6 +1279,130 @@ fn apply_profile_change(
                 .handshake
                 .address = handshake_address.clone();
             shadowtls.handshake_address = handshake_address;
+        }
+        ProfileChange::NaiveUsername(username) => {
+            let (
+                server,
+                Credentials::NaiveProxy {
+                    username: state, ..
+                },
+            ) = (&mut server.protocol, &mut profile.credentials)
+            else {
+                bail!("只有 NaiveProxy 配置支持更改用户名");
+            };
+            let InnerProtocol::Naiveproxy { users, .. } = only_tls_protocol_inner_mut(server)?
+            else {
+                bail!("NaiveProxy 内层协议不一致");
+            };
+            let user = users.first_mut().context("NaiveProxy 缺少用户")?;
+            user.username = username.clone();
+            *state = username;
+        }
+        ProfileChange::NaivePassword(password) => {
+            let (
+                server,
+                Credentials::NaiveProxy {
+                    password: state, ..
+                },
+            ) = (&mut server.protocol, &mut profile.credentials)
+            else {
+                bail!("只有 NaiveProxy 配置支持更改密码");
+            };
+            let InnerProtocol::Naiveproxy { users, .. } = only_tls_protocol_inner_mut(server)?
+            else {
+                bail!("NaiveProxy 内层协议不一致");
+            };
+            let user = users.first_mut().context("NaiveProxy 缺少用户")?;
+            user.password = password.clone();
+            *state = password;
+        }
+        ProfileChange::NaiveServerName(new_name) => {
+            let (server, Credentials::NaiveProxy { server_name, .. }) =
+                (&mut server.protocol, &mut profile.credentials)
+            else {
+                bail!("只有 NaiveProxy 配置支持更改 server name");
+            };
+            let ServerProtocol::Tls { tls_targets, .. } = server else {
+                bail!("NaiveProxy TLS 配置不一致");
+            };
+            let target = tls_targets
+                .remove(server_name)
+                .or_else(|| tls_targets.pop_first().map(|(_, t)| t))
+                .context("NaiveProxy 缺少 TLS 目标")?;
+            tls_targets.insert(new_name.clone(), target);
+            *server_name = new_name;
+        }
+        ProfileChange::NaiveCertificate { certificate, key } => {
+            let (server, profile_credentials) = (&mut server.protocol, &mut profile.credentials);
+            let Credentials::NaiveProxy { .. } = profile_credentials else {
+                bail!("只有 NaiveProxy 配置支持证书");
+            };
+            let ServerProtocol::Tls { tls_targets, .. } = server else {
+                bail!("NaiveProxy TLS 配置不一致");
+            };
+            let target = tls_targets
+                .values_mut()
+                .next()
+                .context("NaiveProxy 缺少 TLS 目标")?;
+            target.cert = certificate.to_string_lossy().into_owned();
+            target.key = key.to_string_lossy().into_owned();
+            profile.certificate_path = Some(certificate);
+            profile.certificate_key_path = Some(key);
+            profile.self_signed_certificate = false;
+        }
+        ProfileChange::NaivePadding(enabled) => {
+            let (server, Credentials::NaiveProxy { padding: state, .. }) =
+                (&mut server.protocol, &mut profile.credentials)
+            else {
+                bail!("只有 NaiveProxy 配置支持 padding");
+            };
+            let InnerProtocol::Naiveproxy { padding, .. } = only_tls_protocol_inner_mut(server)?
+            else {
+                bail!("NaiveProxy 内层协议不一致");
+            };
+            *padding = enabled;
+            *state = enabled;
+        }
+        ProfileChange::NaiveUdpEnabled(enabled) => {
+            if enabled {
+                bail!("NaiveProxy UDP-over-TCP 尚未通过端到端验证，当前版本仅支持 TCP");
+            }
+            let (
+                server,
+                Credentials::NaiveProxy {
+                    udp_enabled: state, ..
+                },
+            ) = (&mut server.protocol, &mut profile.credentials)
+            else {
+                bail!("只有 NaiveProxy 配置支持 UDP");
+            };
+            let InnerProtocol::Naiveproxy { udp_enabled, .. } =
+                only_tls_protocol_inner_mut(server)?
+            else {
+                bail!("NaiveProxy 内层协议不一致");
+            };
+            *udp_enabled = enabled;
+            *state = enabled;
+        }
+        ProfileChange::NaiveFallback(fallback) => {
+            let (
+                server,
+                Credentials::NaiveProxy {
+                    fallback: state, ..
+                },
+            ) = (&mut server.protocol, &mut profile.credentials)
+            else {
+                bail!("只有 NaiveProxy 配置支持 fallback");
+            };
+            let InnerProtocol::Naiveproxy {
+                fallback: server_fallback,
+                ..
+            } = only_tls_protocol_inner_mut(server)?
+            else {
+                bail!("NaiveProxy 内层协议不一致");
+            };
+            *server_fallback = fallback.clone();
+            *state = fallback;
         }
         ProfileChange::SnellCipher(cipher) => {
             match (&mut server.protocol, &mut profile.credentials) {
@@ -1460,6 +1678,27 @@ fn regenerate_profile_credentials(
             *username = Some(generated_username);
             *password = Some(generated_password);
         }
+        Credentials::NaiveProxy {
+            username, password, ..
+        } => {
+            let ServerProtocol::Tls { tls_targets, .. } = &mut server.protocol else {
+                bail!("NaiveProxy 配置与管理状态不一致");
+            };
+            let target = tls_targets
+                .values_mut()
+                .next()
+                .context("NaiveProxy 缺少 TLS 目标")?;
+            let InnerProtocol::Naiveproxy { users, .. } = &mut target.protocol else {
+                bail!("NaiveProxy 内层协议不一致");
+            };
+            let new_username = generated_socks5_username();
+            let new_password = generated_password();
+            let user = users.first_mut().context("NaiveProxy 缺少用户")?;
+            user.username = new_username.clone();
+            user.password = new_password.clone();
+            *username = new_username;
+            *password = new_password;
+        }
         Credentials::AnyTls { users, .. } => {
             for user in users.iter_mut() {
                 user.password = random_secret(24);
@@ -1507,7 +1746,11 @@ fn regenerate_profile_credentials(
 }
 
 fn only_tls_inner_mut(server: &mut ServerConfig) -> Result<&mut InnerProtocol> {
-    let ServerProtocol::Tls { tls_targets, .. } = &mut server.protocol else {
+    only_tls_protocol_inner_mut(&mut server.protocol)
+}
+
+fn only_tls_protocol_inner_mut(protocol: &mut ServerProtocol) -> Result<&mut InnerProtocol> {
+    let ServerProtocol::Tls { tls_targets, .. } = protocol else {
         bail!("TLS 配置与管理状态不一致");
     };
     if tls_targets.len() != 1 {
@@ -1721,6 +1964,52 @@ fn ensure_servers_match_state(servers: &[ServerConfig], profiles: &[ManagedProfi
                     || reality_targets
                         .values()
                         .any(|target| matches!(target.protocol, InnerProtocol::AnyTls { .. }))
+            }
+            (
+                ServerProtocol::Tls {
+                    tls_targets,
+                    shadowtls_targets,
+                    reality_targets,
+                },
+                Protocol::NaiveProxy,
+            ) => {
+                let Credentials::NaiveProxy {
+                    username,
+                    password,
+                    server_name,
+                    padding,
+                    udp_enabled,
+                    fallback,
+                } = &profile.credentials
+                else {
+                    unreachable!()
+                };
+                let cert_matches = profile.certificate_path.as_ref().is_some_and(|path| {
+                    tls_targets
+                        .get(server_name)
+                        .is_some_and(|target| target.cert == path.to_string_lossy())
+                });
+                let key_matches = profile.certificate_key_path.as_ref().is_some_and(|path| {
+                    tls_targets
+                        .get(server_name)
+                        .is_some_and(|target| target.key == path.to_string_lossy())
+                });
+                tls_targets.len() == 1
+                    && shadowtls_targets.is_empty()
+                    && reality_targets.is_empty()
+                    && cert_matches
+                    && key_matches
+                    && tls_targets.get(server_name).is_some_and(|target| {
+                        target.alpn_protocols == ["h2"]
+                            && !target.vision
+                            && matches!(&target.protocol, InnerProtocol::Naiveproxy { users, padding: server_padding, udp_enabled: server_udp, fallback: server_fallback }
+                                if users.len() == 1
+                                    && users[0].username == *username
+                                    && users[0].password == *password
+                                    && server_padding == padding
+                                    && server_udp == udp_enabled
+                                    && server_fallback == fallback)
+                    })
             }
             (ServerProtocol::Tls { tls_targets, .. }, Protocol::VlessTlsVision) => {
                 tls_targets.values().any(|target| {
@@ -1994,6 +2283,20 @@ fn random_secret(bytes: usize) -> String {
     URL_SAFE_NO_PAD.encode(value)
 }
 
+fn validate_naive_component(label: &str, value: &str) -> Result<()> {
+    if value.is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
+        bail!("NaiveProxy {label}不能为空、不能超过 256 字符或包含控制字符");
+    }
+    Ok(())
+}
+
+fn validate_naive_fallback(path: &str) -> Result<()> {
+    if !path.starts_with('/') || path.chars().any(char::is_control) {
+        bail!("NaiveProxy fallback 必须是绝对静态文件目录路径");
+    }
+    Ok(())
+}
+
 fn validate_request(request: &GenerationRequest) -> Result<()> {
     if request.port == 0 {
         bail!("端口必须在 1..=65535 范围内");
@@ -2048,6 +2351,34 @@ fn validate_request(request: &GenerationRequest) -> Result<()> {
             bail!("当前协议不使用 --cert/--key")
         }
         _ => {}
+    }
+    if request.protocol == Protocol::NaiveProxy {
+        if request.certificate.is_none() && !request.options.naive_self_signed {
+            bail!("NaiveProxy requires a trusted TLS certificate for production. Provide --server-name, --cert and --key, or explicitly use testing self-signed mode (--self-signed).");
+        }
+        if request.certificate.is_some() && request.options.naive_self_signed {
+            bail!("NaiveProxy --self-signed cannot be combined with --cert/--key");
+        }
+        if let Some(username) = &request.options.naive_username {
+            validate_naive_component("用户名", username)?;
+        }
+        if let Some(password) = &request.options.naive_password {
+            validate_naive_component("密码", password)?;
+        }
+        if let Some(path) = &request.options.naive_fallback {
+            validate_naive_fallback(path)?;
+        }
+        if request.options.naive_udp_enabled {
+            bail!("NaiveProxy UDP-over-TCP 尚未通过端到端验证，当前版本仅支持 TCP");
+        }
+    } else if request.options.naive_username.is_some()
+        || request.options.naive_password.is_some()
+        || request.options.naive_fallback.is_some()
+        || request.options.naive_self_signed
+        || request.options.naive_udp_enabled
+        || !request.options.naive_padding
+    {
+        bail!("NaiveProxy 参数仅适用于 NaiveProxy");
     }
     if request.reality_dest.is_some() && !reality_outer {
         bail!("--dest 仅适用于使用 Reality 的协议预设");
@@ -2559,6 +2890,203 @@ mod tests {
         assert!(yaml.contains("transport: quic"));
         assert!(result.certificate_path.unwrap().is_file());
         assert!(result.certificate_key_path.unwrap().is_file());
+    }
+
+    #[tokio::test]
+    async fn naiveproxy_generates_tls_h2_inner_auth_and_random_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut request = request(Protocol::NaiveProxy, dir.path().join("naive.yaml"));
+        request.options.naive_self_signed = true;
+        request.options.naive_fallback = Some("/var/www/html".to_owned());
+        let result = generate_inner(request, false).await.unwrap();
+        let yaml = fs::read_to_string(result.config_path).unwrap();
+        assert!(yaml.contains("type: tls"));
+        assert!(yaml.contains("alpn_protocols:\n        - h2"));
+        assert!(yaml.contains("type: naiveproxy"));
+        assert!(yaml.contains("padding: true"));
+        assert!(yaml.contains("udp_enabled: false"));
+        assert!(yaml.contains("fallback: /var/www/html"));
+        let Credentials::NaiveProxy {
+            username,
+            password,
+            server_name,
+            padding,
+            udp_enabled,
+            ..
+        } = result.credentials
+        else {
+            panic!("expected NaiveProxy credentials");
+        };
+        assert_eq!(server_name, "www.cloudflare.com");
+        assert!(padding);
+        assert!(!udp_enabled);
+        assert_eq!(username.len(), 12);
+        assert!(username
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'));
+        assert!(!password.is_empty());
+        assert!(yaml.contains(&format!("username: {username}")));
+        assert!(yaml.contains(&format!("password: {password}")));
+    }
+
+    #[tokio::test]
+    async fn naiveproxy_requires_explicit_self_signed_or_external_certificate() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = generate_inner(
+            request(Protocol::NaiveProxy, dir.path().join("naive.yaml")),
+            false,
+        )
+        .await
+        .err()
+        .unwrap()
+        .to_string();
+        assert!(error.contains("trusted TLS certificate"));
+        let mut request = request(Protocol::NaiveProxy, dir.path().join("naive-external.yaml"));
+        let cert = dir.path().join("cert.pem");
+        let key = dir.path().join("key.pem");
+        fs::write(&cert, b"cert").unwrap();
+        fs::write(&key, b"key").unwrap();
+        request.certificate = Some(cert.clone());
+        request.certificate_key = Some(key.clone());
+        let result = generate_inner(request, false).await.unwrap();
+        assert!(!result.profile.self_signed_certificate);
+        assert_eq!(result.profile.protocol(), Protocol::NaiveProxy);
+        assert_eq!(
+            result.profile.certificate_path.as_deref(),
+            Some(cert.as_path())
+        );
+        assert_eq!(
+            result.profile.certificate_key_path.as_deref(),
+            Some(key.as_path())
+        );
+    }
+
+    #[test]
+    fn naiveproxy_edit_and_regenerate_keep_state_and_server_aligned() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut request = request(Protocol::NaiveProxy, dir.path().join("naive.yaml"));
+        request.options.naive_self_signed = true;
+        request.options.naive_username = Some("alice".to_owned());
+        request.options.naive_password = Some("initial-password".to_owned());
+        let generated = presets::generate(&request, dir.path(), Uuid::nil()).unwrap();
+        let mut server = generated.server;
+        let mut profile = ManagedProfile {
+            id: Uuid::nil(),
+            name: "naive".to_owned(),
+            port: 443,
+            server_address: None,
+            credentials: generated.credentials,
+            certificate_path: generated.certificate_path.clone(),
+            certificate_key_path: generated.certificate_key_path.clone(),
+            self_signed_certificate: true,
+        };
+        apply_profile_change(&mut server, &mut profile, ProfileChange::Port(8443)).unwrap();
+        apply_profile_change(
+            &mut server,
+            &mut profile,
+            ProfileChange::NaiveUsername("bob".to_owned()),
+        )
+        .unwrap();
+        apply_profile_change(
+            &mut server,
+            &mut profile,
+            ProfileChange::NaivePassword("new-password".to_owned()),
+        )
+        .unwrap();
+        apply_profile_change(
+            &mut server,
+            &mut profile,
+            ProfileChange::NaivePadding(false),
+        )
+        .unwrap();
+        apply_profile_change(
+            &mut server,
+            &mut profile,
+            ProfileChange::NaiveFallback(Some("/var/www/static".to_owned())),
+        )
+        .unwrap();
+        apply_profile_change(
+            &mut server,
+            &mut profile,
+            ProfileChange::NaiveServerName("new.example.com".to_owned()),
+        )
+        .unwrap();
+        let old_cert = profile.certificate_path.clone();
+        apply_profile_change(
+            &mut server,
+            &mut profile,
+            ProfileChange::RegenerateCredentials,
+        )
+        .unwrap();
+        let Credentials::NaiveProxy {
+            username,
+            password,
+            server_name,
+            padding,
+            udp_enabled,
+            fallback,
+        } = &profile.credentials
+        else {
+            panic!("expected NaiveProxy credentials");
+        };
+        assert_ne!(username, "bob");
+        assert_ne!(password, "new-password");
+        assert_eq!(server_name, "new.example.com");
+        assert!(!padding);
+        assert!(!udp_enabled);
+        assert_eq!(fallback.as_deref(), Some("/var/www/static"));
+        assert_eq!(profile.certificate_path, old_cert);
+        ensure_servers_match_state(&[server.clone()], &[profile.clone()]).unwrap();
+        let yaml = serde_yaml::to_string(&vec![server]).unwrap();
+        assert!(yaml.contains("new.example.com"));
+        assert!(yaml.contains("/var/www/static"));
+        let serialized = serde_json::to_string(&profile).unwrap();
+        let restored: ManagedProfile = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(restored.protocol(), Protocol::NaiveProxy);
+        assert_eq!(restored.server_name(), "new.example.com");
+    }
+
+    #[test]
+    fn naiveproxy_certificate_edit_retires_ownership_and_rejects_udp() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut request = request(Protocol::NaiveProxy, dir.path().join("naive.yaml"));
+        request.options.naive_self_signed = true;
+        let generated = presets::generate(&request, dir.path(), Uuid::nil()).unwrap();
+        let mut server = generated.server;
+        let mut profile = ManagedProfile {
+            id: Uuid::nil(),
+            name: "naive".to_owned(),
+            port: 443,
+            server_address: None,
+            credentials: generated.credentials,
+            certificate_path: generated.certificate_path,
+            certificate_key_path: generated.certificate_key_path,
+            self_signed_certificate: true,
+        };
+        let cert = dir.path().join("external-cert.pem");
+        let key = dir.path().join("external-key.pem");
+        fs::write(&cert, b"external certificate").unwrap();
+        fs::write(&key, b"external private key").unwrap();
+        apply_profile_change(
+            &mut server,
+            &mut profile,
+            ProfileChange::NaiveCertificate {
+                certificate: cert.clone(),
+                key: key.clone(),
+            },
+        )
+        .unwrap();
+        assert!(!profile.self_signed_certificate);
+        assert_eq!(profile.certificate_path.as_deref(), Some(cert.as_path()));
+        assert_eq!(profile.certificate_key_path.as_deref(), Some(key.as_path()));
+        ensure_servers_match_state(&[server.clone()], &[profile.clone()]).unwrap();
+        assert!(apply_profile_change(
+            &mut server,
+            &mut profile,
+            ProfileChange::NaiveUdpEnabled(true),
+        )
+        .is_err());
+        ensure_servers_match_state(&[server], &[profile]).unwrap();
     }
 
     #[tokio::test]

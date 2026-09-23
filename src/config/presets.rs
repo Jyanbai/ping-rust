@@ -7,6 +7,7 @@ use super::{Credentials, GenerationRequest, Protocol, ServerConfig};
 
 mod anytls;
 mod hysteria2;
+mod naiveproxy;
 mod reality;
 mod shadowsocks;
 mod snell;
@@ -173,6 +174,17 @@ const PRESETS: &[PresetDescriptor] = &[
         udp_required: false,
         generator: snell::generate,
     },
+    PresetDescriptor {
+        protocol: Protocol::NaiveProxy,
+        menu_number: 13,
+        menu_label: "NaiveProxy",
+        advanced_label: "NaiveProxy",
+        slug: "naiveproxy",
+        display_prefix: "NAIVEPROXY",
+        tcp_required: true,
+        udp_required: false,
+        generator: naiveproxy::generate,
+    },
 ];
 
 pub(super) fn all() -> &'static [PresetDescriptor] {
@@ -220,6 +232,7 @@ mod tests {
             Protocol::VmessWsTls,
             Protocol::Socks5,
             Protocol::Snell,
+            Protocol::NaiveProxy,
         ];
         assert_eq!(PRESETS.len(), expected.len());
         for (index, (preset, protocol)) in PRESETS.iter().zip(expected).enumerate() {

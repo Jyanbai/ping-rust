@@ -64,6 +64,11 @@ enum ChangeAction {
     Socks5Authentication,
     UdpEnabled,
     AnyTlsUserPassword,
+    NaiveUsername,
+    NaivePadding,
+    NaiveFallback,
+    NaiveCertificate,
+    NaiveServerName,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -306,6 +311,15 @@ async fn change_config_menu() -> Result<()> {
             actions.push((ChangeAction::UdpEnabled, "更改 UDP ASSOCIATE"));
             actions.push((ChangeAction::Socks5Authentication, "更改认证模式"));
         }
+        Protocol::NaiveProxy => {
+            actions.push((ChangeAction::NaiveUsername, "更改 NaiveProxy 用户名"));
+            actions.push((ChangeAction::Password, "更改 NaiveProxy 密码"));
+            actions.push((ChangeAction::NaiveServerName, "更改 NaiveProxy SNI"));
+            actions.push((ChangeAction::NaivePadding, "更改 NaiveProxy padding"));
+            actions.push((ChangeAction::UdpEnabled, "更改 NaiveProxy UDP-over-TCP"));
+            actions.push((ChangeAction::NaiveFallback, "更改 fallback 路径"));
+            actions.push((ChangeAction::NaiveCertificate, "更改 TLS 证书"));
+        }
         Protocol::AnyTls => {
             actions.push((ChangeAction::AnyTlsUserPassword, "更改用户密码"));
         }
@@ -382,7 +396,13 @@ async fn change_config_menu() -> Result<()> {
                 .with_prompt("新密码（留空安全随机生成）")
                 .allow_empty_password(true)
                 .interact()?;
-            if password.is_empty() {
+            if matches!(profile.protocol(), Protocol::NaiveProxy) {
+                ProfileChange::NaivePassword(if password.is_empty() {
+                    config::generated_password()
+                } else {
+                    password
+                })
+            } else if password.is_empty() {
                 if let Credentials::Shadowsocks { cipher, .. } = profile.credentials {
                     ProfileChange::Password(config::generate_shadowsocks_password(cipher))
                 } else if matches!(profile.protocol(), Protocol::Snell) {
@@ -511,14 +531,20 @@ async fn change_config_menu() -> Result<()> {
                 Credentials::Snell { udp_enabled, .. } => {
                     (udp_enabled, "启用 Snell UDP-over-TCP？")
                 }
+                Credentials::NaiveProxy { udp_enabled, .. } => {
+                    (udp_enabled, "启用 NaiveProxy UDP-over-TCP？")
+                }
                 _ => anyhow::bail!("配置协议与管理状态不一致"),
             };
-            ProfileChange::UdpEnabled(
-                Confirm::with_theme(&ColorfulTheme::default())
-                    .with_prompt(prompt)
-                    .default(*udp_enabled)
-                    .interact()?,
-            )
+            let enabled = Confirm::with_theme(&ColorfulTheme::default())
+                .with_prompt(prompt)
+                .default(*udp_enabled)
+                .interact()?;
+            if profile.protocol() == Protocol::NaiveProxy {
+                ProfileChange::NaiveUdpEnabled(enabled)
+            } else {
+                ProfileChange::UdpEnabled(enabled)
+            }
         }
         ChangeAction::AnyTlsUserPassword => {
             let Credentials::AnyTls { users, .. } = &profile.credentials else {
@@ -548,6 +574,57 @@ async fn change_config_menu() -> Result<()> {
                 password
             };
             ProfileChange::AnyTlsUserPassword { index, password }
+        }
+        ChangeAction::NaiveUsername => {
+            let Credentials::NaiveProxy { username, .. } = &profile.credentials else {
+                anyhow::bail!("配置协议与管理状态不一致");
+            };
+            ProfileChange::NaiveUsername(
+                Input::<String>::with_theme(&ColorfulTheme::default())
+                    .with_prompt("NaiveProxy 用户名")
+                    .default(username.clone())
+                    .interact_text()?,
+            )
+        }
+        ChangeAction::NaiveServerName => ProfileChange::NaiveServerName(
+            Input::<String>::with_theme(&ColorfulTheme::default())
+                .with_prompt("NaiveProxy SNI")
+                .default(profile.server_name().to_owned())
+                .interact_text()?,
+        ),
+        ChangeAction::NaivePadding => {
+            let Credentials::NaiveProxy { padding, .. } = &profile.credentials else {
+                anyhow::bail!("配置协议与管理状态不一致");
+            };
+            ProfileChange::NaivePadding(
+                Confirm::with_theme(&ColorfulTheme::default())
+                    .with_prompt("启用 NaiveProxy padding？")
+                    .default(*padding)
+                    .interact()?,
+            )
+        }
+        ChangeAction::NaiveFallback => {
+            let Credentials::NaiveProxy { fallback, .. } = &profile.credentials else {
+                anyhow::bail!("配置协议与管理状态不一致");
+            };
+            let value = Input::<String>::with_theme(&ColorfulTheme::default())
+                .with_prompt("静态 fallback 绝对路径（留空关闭）")
+                .with_initial_text(fallback.clone().unwrap_or_default())
+                .allow_empty(true)
+                .interact_text()?;
+            ProfileChange::NaiveFallback((!value.trim().is_empty()).then_some(value))
+        }
+        ChangeAction::NaiveCertificate => {
+            let cert = Input::<String>::with_theme(&ColorfulTheme::default())
+                .with_prompt("PEM 证书路径")
+                .interact_text()?;
+            let key = Input::<String>::with_theme(&ColorfulTheme::default())
+                .with_prompt("PEM 私钥路径")
+                .interact_text()?;
+            ProfileChange::NaiveCertificate {
+                certificate: cert.into(),
+                key: key.into(),
+            }
         }
     };
 
@@ -910,7 +987,9 @@ fn export_menu() -> Result<()> {
         .interact_text()?;
     let content = client::render(&state.profiles[selected], format, &server)?;
     println!("\n{content}\n");
-    if state.profiles[selected].self_signed_certificate {
+    if state.profiles[selected].self_signed_certificate
+        && state.profiles[selected].protocol() != Protocol::NaiveProxy
+    {
         println!(
             "{}",
             "注意：导出内容为自签名证书启用了 insecure；生产环境建议换用受信任证书。".yellow()
@@ -952,6 +1031,54 @@ async fn fast_add_config_menu() -> Result<MenuControl> {
             None => println!("错误! 请输入 1..=65535 的端口、直接回车随机，或输入 0 返回。"),
         }
     };
+    if protocol == Protocol::NaiveProxy {
+        let server_name = Input::<String>::with_theme(&ColorfulTheme::default())
+            .with_prompt("请输入域名/SNI")
+            .interact_text()?;
+        let Some(mode) = select_numbered(
+            "TLS 证书模式",
+            &["已有受信任证书（推荐）", "自签名测试模式（不推荐）"],
+        )?
+        else {
+            return Ok(MenuControl::Continue);
+        };
+        let (certificate, certificate_key) = if mode == 0 {
+            let cert = Input::<String>::with_theme(&ColorfulTheme::default())
+                .with_prompt("PEM 证书路径")
+                .interact_text()?;
+            let key = Input::<String>::with_theme(&ColorfulTheme::default())
+                .with_prompt("PEM 私钥路径")
+                .interact_text()?;
+            (Some(cert.into()), Some(key.into()))
+        } else {
+            println!("警告：自签名证书仅供测试，不推荐用于生产环境。");
+            (None, None)
+        };
+        cli::ensure_shoes_for_add(false).await?;
+        let server_address = resolve_menu_server_address().await?;
+        let result = fast_add::execute(fast_add::AddRequest {
+            name: None,
+            protocol,
+            port,
+            server_address: Some(server_address),
+            server_name: Some(server_name),
+            shadowsocks_cipher: None,
+            shadowsocks_password: None,
+            shadowsocks_mode: config::ShadowsocksMode::Plain,
+            shadowtls_password: None,
+            shadowtls_handshake: None,
+            certificate,
+            certificate_key,
+            naive_self_signed: mode == 1,
+            naive_username: None,
+            naive_password: None,
+            naive_padding: true,
+            naive_fallback: None,
+        })
+        .await?;
+        cli::print_add_result(&result);
+        return Ok(control_after_success(1));
+    }
     let (shadowsocks_cipher, shadowsocks_password) = if protocol == Protocol::Shadowsocks {
         let Some(cipher) = select_shadowsocks_cipher(shadowsocks_mode)? else {
             return Ok(MenuControl::Continue);
@@ -1082,6 +1209,13 @@ async fn deploy_fast_config(
         shadowsocks_mode,
         shadowtls_password: None,
         shadowtls_handshake: None,
+        certificate: None,
+        certificate_key: None,
+        naive_self_signed: false,
+        naive_username: None,
+        naive_password: None,
+        naive_padding: true,
+        naive_fallback: None,
     })
     .await?;
     cli::print_add_result(&result);
@@ -1296,6 +1430,33 @@ async fn advanced_add_config_menu() -> Result<()> {
             );
         }
     }
+    if protocol == Protocol::NaiveProxy {
+        let username = Input::<String>::with_theme(&ColorfulTheme::default())
+            .with_prompt("NaiveProxy 用户名（留空安全随机生成）")
+            .allow_empty(true)
+            .interact_text()?;
+        options.naive_username = (!username.is_empty()).then_some(username);
+        let password = Password::with_theme(&ColorfulTheme::default())
+            .with_prompt("NaiveProxy 密码（留空安全随机生成）")
+            .allow_empty_password(true)
+            .interact()?;
+        options.naive_password = (!password.is_empty()).then_some(password);
+        options.naive_padding = Confirm::with_theme(&ColorfulTheme::default())
+            .with_prompt("启用 NaiveProxy padding？")
+            .default(true)
+            .interact()?;
+        if Confirm::with_theme(&ColorfulTheme::default())
+            .with_prompt("配置静态 fallback 目录？")
+            .default(false)
+            .interact()?
+        {
+            options.naive_fallback = Some(
+                Input::<String>::with_theme(&ColorfulTheme::default())
+                    .with_prompt("fallback 绝对路径")
+                    .interact_text()?,
+            );
+        }
+    }
     let reality_outer = protocol.uses_reality(options.anytls_mode);
     let server_name = if matches!(protocol, Protocol::Shadowsocks)
         && options.shadowsocks_mode == config::ShadowsocksMode::ShadowTlsV3
@@ -1330,8 +1491,12 @@ async fn advanced_add_config_menu() -> Result<()> {
     let needs_certificate = protocol.requires_certificate(options.anytls_mode);
     let (certificate, certificate_key) = if needs_certificate
         && Confirm::with_theme(&ColorfulTheme::default())
-            .with_prompt("使用已有 PEM 证书和私钥？（否则自动生成自签名证书）")
-            .default(false)
+            .with_prompt(if protocol == Protocol::NaiveProxy {
+                "使用已有受信任 PEM 证书和私钥？（推荐）"
+            } else {
+                "使用已有 PEM 证书和私钥？（否则自动生成自签名证书）"
+            })
+            .default(protocol == Protocol::NaiveProxy)
             .interact()?
     {
         let cert = Input::<String>::with_theme(&ColorfulTheme::default())
@@ -1342,6 +1507,10 @@ async fn advanced_add_config_menu() -> Result<()> {
             .interact_text()?;
         (Some(cert.into()), Some(key.into()))
     } else {
+        if protocol == Protocol::NaiveProxy {
+            options.naive_self_signed = true;
+            println!("警告：NaiveProxy 自签名证书仅供测试，不推荐用于生产环境。");
+        }
         (None, None)
     };
 
@@ -1451,6 +1620,8 @@ mod tests {
         }
         assert_eq!(Protocol::from_menu_number(10), Some(Protocol::VmessWsTls));
         assert_eq!(Protocol::from_menu_number(11), Some(Protocol::Socks5));
+        assert_eq!(Protocol::from_menu_number(12), Some(Protocol::Snell));
+        assert_eq!(Protocol::from_menu_number(13), Some(Protocol::NaiveProxy));
         assert_eq!(protocol_items[10], (11, "SOCKS5"));
         assert_eq!(protocol_items[11], (12, "Snell v3"));
     }

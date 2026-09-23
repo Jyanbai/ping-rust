@@ -36,6 +36,17 @@ impl GenerationResult {
             Path::new(utils::PROFILES_DIR),
         )
     }
+
+    pub fn finish_update(&mut self) {
+        for path in [
+            self.retired_certificate.take(),
+            self.retired_certificate_key.take(),
+        ] {
+            if let Err(error) = remove_managed_credential(path.as_deref()) {
+                eprintln!("警告：NaiveProxy 配置已更新，但旧自签名凭据清理失败：{error:#}");
+            }
+        }
+    }
 }
 
 impl DeletionResult {

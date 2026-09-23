@@ -683,7 +683,7 @@ jobs:
           spawn $env(PRS_COMMAND)
           wait_for {请选择 \[0-10\]} main-menu
           send "1\r"
-          wait_for {请选择 \[0-12\]} protocol-menu
+          wait_for {请选择 \[0-13\]} protocol-menu
           send "$env(PROTOCOL_NUMBER)\r"
           if {$env(PROTOCOL_NUMBER) == "3"} {
             wait_for {Shadowsocks 模式} shadowsocks-mode-menu
@@ -717,7 +717,7 @@ jobs:
           spawn $env(PRS_COMMAND)
           expect -re {请选择 \[0-10\]}
           send "1\r"
-          expect -re {请选择 \[0-12\]}
+          expect -re {请选择 \[0-13\]}
           send "3\r"
           expect {Shadowsocks 模式}
           send "2\r"
@@ -764,6 +764,58 @@ jobs:
           run_menu_add 10 25455 vmess
           run_menu_add 11 25456 socks5
           run_menu_add 12 25457 snell
+          sudo env PRS_COMMAND="$PRS" expect <<'EXPECT'
+          log_user 0
+          set timeout 180
+          spawn $env(PRS_COMMAND)
+          expect -re {请选择 \[0-10\]}
+          send "1\r"
+          expect -re {请选择 \[0-13\]}
+          send "13\r"
+          expect {输入端口}
+          send "25464\r"
+          expect {请输入域名/SNI}
+          send "naive.example.com\r"
+          expect {TLS 证书模式}
+          send "2\r"
+          expect -re {协议[[:space:]]*= naiveproxy}
+          expect -re {ALPN[[:space:]]*= h2}
+          expect {没有通用标准分享 URI}
+          expect eof
+          EXPECT
+          sudo test -s /etc/shoes/profiles/NAIVEPROXY-25464.yaml
+          naive_menu_profile_id="$(sudo python3 - <<'PY'
+          import json
+          with open('/etc/shoes/ping-rust-state.json', encoding='utf-8') as stream:
+              profiles = json.load(stream)['profiles']
+          print(next(profile['id'] for profile in profiles if profile['port'] == 25464))
+          PY
+          )"
+          sudo "$PRS" delete "$naive_menu_profile_id" --yes >/dev/null
+          if sudo "$PRS" add naiveproxy 25465 --server-name naive.example.com \
+            --server-address 203.0.113.10 --yes >"$RUNNER_TEMP/naive-missing-cert.log" 2>&1; then
+            echo 'NaiveProxy unexpectedly accepted missing trusted TLS parameters' >&2
+            exit 1
+          fi
+          grep -F 'trusted TLS certificate' "$RUNNER_TEMP/naive-missing-cert.log"
+          naive_add_output="$(sudo "$PRS" a naiveproxy 25465 \
+            --server-name naive.example.com --self-signed \
+            --server-address 203.0.113.10 --yes)"
+          grep -F '协议                  = naiveproxy' <<<"$naive_add_output"
+          grep -F 'ALPN                  = h2' <<<"$naive_add_output"
+          sudo test -s /etc/shoes/profiles/NAIVEPROXY-25465.yaml
+          sudo grep -F 'type: naiveproxy' /etc/shoes/profiles/NAIVEPROXY-25465.yaml
+          sudo grep -F 'h2' /etc/shoes/profiles/NAIVEPROXY-25465.yaml
+          sudo systemctl is-active --quiet shoes.service
+          sudo ss -H -lnt | grep -Eq '(^|:)25465[[:space:]]'
+          naive_fast_profile_id="$(sudo python3 - <<'PY'
+          import json
+          with open('/etc/shoes/ping-rust-state.json', encoding='utf-8') as stream:
+              profiles = json.load(stream)['profiles']
+          print(next(profile['id'] for profile in profiles if profile['port'] == 25465))
+          PY
+          )"
+          sudo "$PRS" delete "$naive_fast_profile_id" --yes >/dev/null
           snell_add_output="$(
             sudo "$PRS" add snell 25458 --server-address 203.0.113.10 --yes
           )"

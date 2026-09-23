@@ -24,6 +24,27 @@ Plain Shadowsocks 命令、旧 state、SIP002 URI/QR 与现有导出保持原行
 
 本文件把原始目标逐项映射到实现、自动化证据和外部验收边界。`已实现` 表示代码路径和自动化证据完整；Debian 12 与成功标准指定的 Ubuntu 24.04 均已完成独立实机验收。
 
+## NaiveProxy 受管支持（进行中）
+
+| 项目 | 状态 | 证据/边界 |
+|---|---|---|
+| server preset | SUPPORTED | 固定 shoes revision 的 TLS target、ALPN `h2` 与 `naiveproxy` inner protocol |
+| TLS certificate lifecycle | SUPPORTED | 复用现有外部 cert/key、自签名 ownership、删除与回滚清理 |
+| random auth | SUPPORTED | 随机 URL-safe username 与 password；显式凭据可保留 |
+| padding | SUPPORTED | 默认开启，可在高级编辑中关闭 |
+| fallback | SUPPORTED | 可选绝对静态目录路径；默认不配置 |
+| UDP/UoT | NOT_IMPLEMENTED | server 字段存在，但尚无 sing-box/shoes UDP E2E 证据，产品不暴露启用路径 |
+| sing-box | SUPPORTED | `type: naive`、Basic Auth、TLS server_name；自签名导出嵌入公钥证书且不导出私钥 |
+| Mihomo | UNSUPPORTED | 当前未发现已合入的 NaiveProxy schema，不生成 generic HTTPS 冒充 |
+| NekoBox | UNSUPPORTED | 未验证稳定 native Naive 导入路径 |
+| standard URI | UNSUPPORTED | 不伪造 `naive+https` 或 `https://` 分享格式 |
+| QR | UNSUPPORTED | 无稳定标准 URI |
+| chain outbound | NOT_IMPLEMENTED | 当前 chain abstraction 不扩展 NaiveProxy |
+| schema dry-run | NOT_IMPLEMENTED | 待 workflow 增加固定 shoes dry-run fixtures |
+| TCP E2E | NOT_IMPLEMENTED | 待 workflow 增加 TLS h2 → NaiveProxy client/server 测试 |
+| UDP E2E | NOT_IMPLEMENTED | 明确不声称支持 |
+| Ubuntu acceptance | NOT_IMPLEMENTED | 待 workflow 增加菜单 13 与 self-signed fixture |
+
 ## 需求映射
 
 | 原始需求 | 状态 | 实现位置 | 当前证据 |

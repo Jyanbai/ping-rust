@@ -88,6 +88,7 @@ pub async fn update_and_activate(id: Uuid, change: ProfileChange) -> Result<Gene
             ),
         };
     }
+    result.finish_update();
     Ok(result)
 }
 

@@ -109,10 +109,31 @@ jobs:
             --port 6448 --password snell-test-password >/dev/null
           "$bin" generate socks5 --output "$out/socks5.yaml" \
             --port 6449 --username default --password socks5-test-password >/dev/null
+          "$bin" generate naiveproxy --output "$out/naiveproxy-self-signed.yaml" \
+            --port 6450 --server-name naive.example.com --self-signed >/dev/null
+          openssl req -x509 -newkey rsa:2048 -nodes \
+            -keyout "$out/naive-key.pem" -out "$out/naive-cert.pem" \
+            -days 1 -subj '/CN=naive.example.com' \
+            -addext 'subjectAltName=DNS:naive.example.com' >/dev/null 2>&1
+          "$bin" generate naiveproxy --output "$out/naiveproxy-external.yaml" \
+            --port 6451 --server-name naive.example.com \
+            --cert "$out/naive-cert.pem" --key "$out/naive-key.pem" \
+            --username naive-e2e --password naive-e2e-pass >/dev/null
+          "$bin" generate naiveproxy --output "$out/naiveproxy-no-padding.yaml" \
+            --port 6452 --server-name naive.example.com \
+            --cert "$out/naive-cert.pem" --key "$out/naive-key.pem" \
+            --no-padding >/dev/null
+          mkdir -p "$out/naive-static"
+          "$bin" generate naiveproxy --output "$out/naiveproxy-fallback.yaml" \
+            --port 6453 --server-name naive.example.com \
+            --cert "$out/naive-cert.pem" --key "$out/naive-key.pem" \
+            --fallback "$out/naive-static" >/dev/null
 
           for config in \
             reality hysteria2 tuic shadowsocks shadowsocks-shadowtls anytls \
-            vless-tls vless-ws-tls trojan-tls trojan-reality vmess-ws-tls snell socks5; do
+            vless-tls vless-ws-tls trojan-tls trojan-reality vmess-ws-tls snell socks5 \
+            naiveproxy-self-signed naiveproxy-external naiveproxy-no-padding \
+            naiveproxy-fallback; do
             shoes --dry-run "$out/$config.yaml"
           done
           cat \
@@ -128,8 +149,16 @@ jobs:
             "$out/trojan-reality.yaml" \
             "$out/vmess-ws-tls.yaml" \
             "$out/snell.yaml" \
-            "$out/socks5.yaml" >"$out/all-twelve.yaml"
+            "$out/socks5.yaml" \
+            "$out/naiveproxy-external.yaml" >"$out/all-twelve.yaml"
           shoes --dry-run "$out/all-twelve.yaml"
+          grep -F "alpn_protocols:" "$out/naiveproxy-self-signed.yaml"
+          grep -F "type: naiveproxy" "$out/naiveproxy-self-signed.yaml"
+          grep -F "padding: false" "$out/naiveproxy-no-padding.yaml"
+          grep -F "fallback: $out/naive-static" "$out/naiveproxy-fallback.yaml"
+          sed 's/udp_enabled: false/udp_enabled: true/' \
+            "$out/naiveproxy-no-padding.yaml" >"$out/naiveproxy-udp-schema.yaml"
+          shoes --dry-run "$out/naiveproxy-udp-schema.yaml"
       - name: Start every generated listener
         shell: bash
         run: |
@@ -162,7 +191,31 @@ jobs:
           YAML
           shoes "$out/shadowtls-client.yaml" >"$out/shadowtls-client.log" 2>&1 &
           shadowtls_client_pid="$!"
-          trap 'kill "$shoes_pid" "$origin_pid" "$shadowtls_client_pid" 2>/dev/null || true' EXIT
+          cat >"$out/naive-client.yaml" <<'YAML'
+          - address: 127.0.0.1:10889
+            protocol:
+              type: socks
+              udp_enabled: false
+            rules:
+              - masks: 0.0.0.0/0
+                action: allow
+                client_chains:
+                  address: 127.0.0.1:6451
+                  protocol:
+                    type: tls
+                    verify: false # acceptance fixture uses a local self-signed certificate
+                    sni_hostname: naive.example.com
+                    alpn_protocols: ["h2"]
+                    protocol:
+                      type: naiveproxy
+                      username: naive-e2e
+                      password: naive-e2e-pass
+                      padding: true
+          YAML
+          shoes --dry-run "$out/naive-client.yaml"
+          shoes "$out/naive-client.yaml" >"$out/naive-client.log" 2>&1 &
+          naive_client_pid="$!"
+          trap 'kill "$shoes_pid" "$origin_pid" "$shadowtls_client_pid" "$naive_client_pid" 2>/dev/null || true' EXIT
           for _ in {1..40}; do
             tcp_ports="$(ss -H -lnt | awk '{print $4}')"
             udp_ports="$(ss -H -lun | awk '{print $4}')"
@@ -177,7 +230,9 @@ jobs:
               && grep -Eq '(^|:)6447$' <<<"$tcp_ports" \
               && grep -Eq '(^|:)6448$' <<<"$tcp_ports" \
               && grep -Eq '(^|:)6449$' <<<"$tcp_ports" \
+              && grep -Eq '(^|:)6451$' <<<"$tcp_ports" \
               && grep -Eq '(^|:)10888$' <<<"$tcp_ports" \
+              && grep -Eq '(^|:)10889$' <<<"$tcp_ports" \
               && grep -Eq '(^|:)2443$' <<<"$udp_ports" \
               && grep -Eq '(^|:)3443$' <<<"$udp_ports"; then
               curl --fail --silent --show-error \
@@ -187,12 +242,16 @@ jobs:
               curl --fail --silent --show-error \
                 --socks5-hostname 127.0.0.1:10888 \
                 http://127.0.0.1:18080/ >/dev/null
+              curl --fail --silent --show-error \
+                --socks5-hostname 127.0.0.1:10889 \
+                http://127.0.0.1:18080/ >/dev/null
               exit 0
             fi
             sleep 0.25
           done
           cat "$out/runtime.log" >&2
           cat "$out/shadowtls-client.log" >&2
+          cat "$out/naive-client.log" >&2
           exit 1
       - name: Validate all Shadowsocks ciphers and Reality plus AnyTLS
         shell: bash

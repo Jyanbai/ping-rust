@@ -89,6 +89,9 @@ pub fn render(profile: &ManagedProfile, format: ClientFormat, server: &str) -> R
         ClientFormat::Nekobox if matches!(profile.credentials, Credentials::Socks5 { .. }) => {
             bail!("该导出目标暂不支持 SOCKS5；请使用标准 URI/QR、sing-box 或 Clash Meta 导出")
         }
+        ClientFormat::Nekobox if matches!(profile.credentials, Credentials::NaiveProxy { .. }) => {
+            bail!("当前 NekoBox 导入路径未验证 NaiveProxy；请使用包含 Naive 支持的 sing-box JSON")
+        }
         ClientFormat::Nekobox => share_uri(profile, &server),
     }
 }
@@ -193,6 +196,9 @@ fn clash_meta(profile: &ManagedProfile, server: &str) -> Result<String> {
                 proxy["password"] = json!(password);
             }
             proxy
+        }
+        Credentials::NaiveProxy { .. } => {
+            bail!("Mihomo 当前没有已验证的 NaiveProxy 代理 schema；不生成伪造配置")
         }
         Credentials::Snell {
             cipher,
@@ -456,6 +462,34 @@ fn sing_box(profile: &ManagedProfile, server: &str) -> Result<String> {
             }
             outbound
         }
+        Credentials::NaiveProxy {
+            username,
+            password,
+            server_name,
+            udp_enabled,
+            ..
+        } => {
+            let mut tls = json!({ "enabled": true, "server_name": server_name });
+            if profile.self_signed_certificate {
+                let cert = profile
+                    .certificate_path
+                    .as_ref()
+                    .context("自签名 NaiveProxy 缺少证书路径")?;
+                let pem =
+                    std::fs::read_to_string(cert).context("读取自签名 NaiveProxy 公钥证书失败")?;
+                tls["certificate"] = json!([pem]);
+            }
+            json!({
+                "type": "naive",
+                "tag": profile.name,
+                "server": server,
+                "server_port": profile.port,
+                "username": username,
+                "password": password,
+                "udp_over_tcp": if *udp_enabled { json!({}) } else { json!(false) },
+                "tls": tls
+            })
+        }
         Credentials::Snell { .. } => {
             bail!("当前 sing-box 客户端仅支持 Snell v4/v6，不能无损导出 shoes Snell v3")
         }
@@ -664,6 +698,9 @@ pub fn share_uri(profile: &ManagedProfile, server: &str) -> Result<String> {
             }
             let auth = URL_SAFE_NO_PAD.encode(format!("{}:{password}", cipher.client_name()));
             Ok(format!("ss://{auth}@{host}:{}#{fragment}", profile.port))
+        }
+        Credentials::NaiveProxy { .. } => {
+            bail!("NaiveProxy 没有稳定的标准分享 URI；请使用 sing-box JSON")
         }
         Credentials::Socks5 {
             username, password, ..
@@ -1214,6 +1251,78 @@ mod tests {
         assert!(clash.contains("2022-blake3-chacha20-poly1305"));
         assert!(sing_box.contains("2022-blake3-chacha20-poly1305"));
         assert!(uri.starts_with("ss://"));
+    }
+
+    #[test]
+    fn exports_naiveproxy_to_sing_box_and_rejects_unverified_formats() {
+        let profile = ManagedProfile {
+            id: Uuid::nil(),
+            name: "naive".to_owned(),
+            port: 443,
+            server_address: None,
+            credentials: Credentials::NaiveProxy {
+                username: "user".to_owned(),
+                password: "pass".to_owned(),
+                server_name: "naive.example.com".to_owned(),
+                padding: true,
+                udp_enabled: false,
+                fallback: None,
+            },
+            certificate_path: None,
+            certificate_key_path: None,
+            self_signed_certificate: false,
+        };
+        let value: Value =
+            serde_json::from_str(&render(&profile, ClientFormat::SingBox, "203.0.113.9").unwrap())
+                .unwrap();
+        assert_eq!(value["outbounds"][0]["type"], "naive");
+        assert_eq!(value["outbounds"][0]["server"], "203.0.113.9");
+        assert_eq!(value["outbounds"][0]["server_port"], 443);
+        assert_eq!(value["outbounds"][0]["username"], "user");
+        assert_eq!(value["outbounds"][0]["password"], "pass");
+        assert_eq!(value["outbounds"][0]["udp_over_tcp"], false);
+        assert_eq!(value["outbounds"][0]["tls"]["enabled"], true);
+        assert_eq!(
+            value["outbounds"][0]["tls"]["server_name"],
+            "naive.example.com"
+        );
+        assert!(render(&profile, ClientFormat::ClashMeta, "203.0.113.9").is_err());
+        assert!(render(&profile, ClientFormat::Nekobox, "203.0.113.9").is_err());
+        assert!(share_uri(&profile, "203.0.113.9").is_err());
+    }
+
+    #[test]
+    fn naiveproxy_self_signed_export_embeds_only_public_certificate() {
+        let dir = tempfile::tempdir().unwrap();
+        let cert = dir.path().join("cert.pem");
+        let key = dir.path().join("key.pem");
+        std::fs::write(
+            &cert,
+            "-----BEGIN CERTIFICATE-----\nPUBLIC-CERT\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+        std::fs::write(&key, "NEVER-EXPORT-PRIVATE-KEY").unwrap();
+        let profile = ManagedProfile {
+            id: Uuid::nil(),
+            name: "naive-test".to_owned(),
+            port: 443,
+            server_address: None,
+            credentials: Credentials::NaiveProxy {
+                username: "user".to_owned(),
+                password: "pass".to_owned(),
+                server_name: "naive.example.com".to_owned(),
+                padding: true,
+                udp_enabled: false,
+                fallback: None,
+            },
+            certificate_path: Some(cert),
+            certificate_key_path: Some(key),
+            self_signed_certificate: true,
+        };
+        let exported = render(&profile, ClientFormat::SingBox, "203.0.113.9").unwrap();
+        assert!(exported.contains("PUBLIC-CERT"));
+        assert!(!exported.contains("NEVER-EXPORT-PRIVATE-KEY"));
+        assert!(!exported.contains("\"insecure\""));
     }
 
     #[test]

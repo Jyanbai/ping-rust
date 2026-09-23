@@ -32,6 +32,13 @@ pub struct AddRequest {
     pub shadowsocks_mode: ShadowsocksMode,
     pub shadowtls_password: Option<String>,
     pub shadowtls_handshake: Option<String>,
+    pub certificate: Option<std::path::PathBuf>,
+    pub certificate_key: Option<std::path::PathBuf>,
+    pub naive_self_signed: bool,
+    pub naive_username: Option<String>,
+    pub naive_password: Option<String>,
+    pub naive_padding: bool,
+    pub naive_fallback: Option<String>,
 }
 
 pub struct AddResult {
@@ -73,6 +80,13 @@ pub async fn execute(request: AddRequest) -> Result<AddResult> {
             "1=50-100".to_owned(),
         ]);
     }
+    if matches!(request.protocol, Protocol::NaiveProxy) {
+        options.naive_self_signed = request.naive_self_signed;
+        options.naive_username = request.naive_username;
+        options.naive_password = request.naive_password;
+        options.naive_padding = request.naive_padding;
+        options.naive_fallback = request.naive_fallback;
+    }
 
     let generation = add_activation_context(
         deployment::generate_and_activate(GenerationRequest {
@@ -86,14 +100,14 @@ pub async fn execute(request: AddRequest) -> Result<AddResult> {
                 .protocol
                 .uses_reality(config::AnyTlsMode::Tls)
                 .then(|| format!("{server_name}:443")),
-            certificate: None,
-            certificate_key: None,
+            certificate: request.certificate,
+            certificate_key: request.certificate_key,
             options,
         })
         .await,
         port,
     )?;
-    let share_uri = if matches!(request.protocol, Protocol::Snell)
+    let share_uri = if matches!(request.protocol, Protocol::Snell | Protocol::NaiveProxy)
         || request.shadowsocks_mode == ShadowsocksMode::ShadowTlsV3
     {
         None
@@ -261,6 +275,7 @@ mod tests {
         assert_eq!(Protocol::from_menu_number(0), None);
         assert_eq!(Protocol::from_menu_number(11), Some(Protocol::Socks5));
         assert_eq!(Protocol::from_menu_number(12), Some(Protocol::Snell));
+        assert_eq!(Protocol::from_menu_number(13), Some(Protocol::NaiveProxy));
     }
 
     #[test]

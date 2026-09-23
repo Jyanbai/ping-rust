@@ -6,7 +6,7 @@ use std::{
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use colored::Colorize;
-use dialoguer::{theme::ColorfulTheme, Confirm};
+use dialoguer::{theme::ColorfulTheme, Confirm, Input};
 use qrcode::{render::unicode, QrCode};
 use uuid::Uuid;
 
@@ -173,6 +173,33 @@ pub struct AddArgs {
     /// 显式创建 Shadowsocks 2022 + ShadowTLS v3（TCP-only）
     #[arg(long)]
     pub shadowtls: bool,
+    /// NaiveProxy 使用测试自签名证书；生产请提供 --cert/--key
+    #[arg(long)]
+    pub self_signed: bool,
+    /// NaiveProxy 用户名
+    #[arg(long)]
+    pub username: Option<String>,
+    /// NaiveProxy/其它协议密码
+    #[arg(long)]
+    pub password: Option<String>,
+    /// NaiveProxy 服务器证书
+    #[arg(long, requires = "key")]
+    pub cert: Option<PathBuf>,
+    /// NaiveProxy 服务器私钥
+    #[arg(long, requires = "cert")]
+    pub key: Option<PathBuf>,
+    /// NaiveProxy padding（默认开启）
+    #[arg(long, conflicts_with = "no_padding")]
+    pub padding: bool,
+    #[arg(long)]
+    pub no_padding: bool,
+    #[arg(long, conflicts_with = "no_udp")]
+    pub udp: bool,
+    #[arg(long = "no-udp", conflicts_with = "udp")]
+    pub no_udp: bool,
+    /// NaiveProxy 静态 fallback 目录
+    #[arg(long)]
+    pub fallback: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -238,7 +265,7 @@ pub struct GenerateArgs {
     #[arg(long = "user")]
     anytls_users: Vec<AnyTlsUser>,
     /// AnyTLS padding 条目，可重复，例如 --padding stop=8 --padding 0=30-30
-    #[arg(long = "padding")]
+    #[arg(long = "padding", num_args = 0..=1, default_missing_value = "true")]
     anytls_padding: Vec<String>,
     /// AnyTLS 认证失败 fallback，格式为 host:port
     #[arg(long)]
@@ -252,6 +279,11 @@ pub struct GenerateArgs {
     /// 与 --cert 配套的 PEM 私钥
     #[arg(long, requires = "cert")]
     key: Option<PathBuf>,
+    /// NaiveProxy 使用测试自签名证书
+    #[arg(long)]
+    self_signed: bool,
+    #[arg(long)]
+    no_padding: bool,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -327,14 +359,42 @@ pub async fn run(cli: Cli) -> Result<()> {
                 websocket_path,
                 cert,
                 key,
+                self_signed,
+                no_padding,
             } = *args;
             if password.is_some()
                 && !matches!(
                     protocol,
-                    Protocol::Shadowsocks | Protocol::Snell | Protocol::Socks5
+                    Protocol::Shadowsocks
+                        | Protocol::Snell
+                        | Protocol::Socks5
+                        | Protocol::NaiveProxy
                 )
             {
-                bail!("--password 仅适用于 Shadowsocks、Snell v3 或 SOCKS5");
+                bail!("--password 仅适用于 Shadowsocks、Snell v3、SOCKS5 或 NaiveProxy");
+            }
+            if username.is_some() && !matches!(protocol, Protocol::Socks5 | Protocol::NaiveProxy) {
+                bail!("--username 仅适用于 SOCKS5 或 NaiveProxy");
+            }
+            if fallback.is_some() && !matches!(protocol, Protocol::AnyTls | Protocol::NaiveProxy) {
+                bail!("--fallback 仅适用于 AnyTLS 或 NaiveProxy");
+            }
+            if !anytls_padding.is_empty()
+                && !matches!(protocol, Protocol::AnyTls | Protocol::NaiveProxy)
+            {
+                bail!("--padding 仅适用于 AnyTLS 或 NaiveProxy");
+            }
+            if matches!(protocol, Protocol::NaiveProxy) && server_name.is_none() {
+                bail!("NaiveProxy requires --server-name matching the TLS certificate");
+            }
+            if matches!(protocol, Protocol::NaiveProxy) && udp {
+                bail!("NaiveProxy UDP-over-TCP 尚未通过端到端验证，当前版本仅支持 TCP");
+            }
+            if matches!(protocol, Protocol::NaiveProxy)
+                && (!anytls_padding.is_empty() && anytls_padding != ["true"]
+                    || no_padding && !anytls_padding.is_empty())
+            {
+                bail!("NaiveProxy --padding 不需要参数，且不能与 --no-padding 并用");
             }
             let shadowsocks_cipher = cipher.unwrap_or_default();
             let snell_cipher = if matches!(protocol, Protocol::Snell) {
@@ -386,18 +446,46 @@ pub async fn run(cli: Cli) -> Result<()> {
                     } else {
                         None
                     },
-                    socks5_username: username,
+                    socks5_username: if matches!(protocol, Protocol::Socks5) {
+                        username.clone()
+                    } else {
+                        None
+                    },
                     socks5_password: if matches!(protocol, Protocol::Socks5) {
-                        password
+                        password.clone()
                     } else {
                         None
                     },
                     socks5_no_auth: no_auth,
                     anytls_mode,
                     anytls_users,
-                    anytls_padding_scheme: (!anytls_padding.is_empty()).then_some(anytls_padding),
-                    anytls_fallback: fallback,
+                    anytls_padding_scheme: (matches!(protocol, Protocol::AnyTls)
+                        && !anytls_padding.is_empty())
+                    .then_some(anytls_padding),
+                    anytls_fallback: if matches!(protocol, Protocol::AnyTls) {
+                        fallback.clone()
+                    } else {
+                        None
+                    },
                     websocket_path,
+                    naive_username: if matches!(protocol, Protocol::NaiveProxy) {
+                        username.clone()
+                    } else {
+                        None
+                    },
+                    naive_password: if matches!(protocol, Protocol::NaiveProxy) {
+                        password.clone()
+                    } else {
+                        None
+                    },
+                    naive_padding: !no_padding,
+                    naive_udp_enabled: false,
+                    naive_fallback: if matches!(protocol, Protocol::NaiveProxy) {
+                        fallback.clone()
+                    } else {
+                        None
+                    },
+                    naive_self_signed: self_signed,
                 },
             };
             let result = if managed {
@@ -535,15 +623,80 @@ pub(crate) async fn update_shoes(method: InstallMethod) -> Result<installer::Ins
     Ok(report)
 }
 
-async fn run_add(args: AddArgs) -> Result<()> {
+async fn run_add(mut args: AddArgs) -> Result<()> {
     if args.shadowtls && !matches!(args.protocol, Protocol::Shadowsocks) {
         bail!("--shadowtls 仅适用于 Shadowsocks");
+    }
+    if args.plain && matches!(args.protocol, Protocol::NaiveProxy) {
+        bail!("NaiveProxy 没有可互操作的标准分享 URI；请使用 sing-box JSON 导出");
     }
     if args.plain && matches!(args.protocol, Protocol::Snell) {
         bail!("Snell v3 没有可互操作的标准分享 URI，不能使用 --plain；请直接运行 prs add snell 查看连接参数");
     }
     if args.plain && args.shadowtls {
         bail!("ShadowTLS v3 没有可互操作的标准分享 URI，不能使用 --plain；请使用 sing-box 或 Mihomo 导出");
+    }
+    if args.protocol != Protocol::NaiveProxy
+        && (args.self_signed
+            || args.cert.is_some()
+            || args.key.is_some()
+            || args.username.is_some()
+            || args.password.is_some()
+            || args.padding
+            || args.no_padding
+            || args.udp
+            || args.no_udp
+            || args.fallback.is_some())
+    {
+        bail!("这些 TLS/认证参数仅适用于 NaiveProxy 快速添加");
+    }
+    if matches!(args.protocol, Protocol::NaiveProxy) {
+        if args.udp {
+            bail!("NaiveProxy UDP-over-TCP 尚未通过端到端验证，当前版本仅支持 TCP");
+        }
+        if !args.yes && io::stdin().is_terminal() {
+            if args.server_name.is_none() {
+                args.server_name = Some(
+                    Input::<String>::with_theme(&ColorfulTheme::default())
+                        .with_prompt("NaiveProxy 域名 / SNI")
+                        .interact_text()?,
+                );
+            }
+            if !args.self_signed && args.cert.is_none() {
+                println!("TLS 证书模式:\n1) 使用已有受信任证书（推荐）\n2) 自签名证书（仅测试，不推荐）\n0) 返回");
+                let choice = Input::<String>::with_theme(&ColorfulTheme::default())
+                    .with_prompt("请选择 [0-2]")
+                    .default("1".to_owned())
+                    .interact_text()?;
+                match choice.trim() {
+                    "1" => {
+                        let cert = Input::<String>::with_theme(&ColorfulTheme::default())
+                            .with_prompt("PEM 证书路径")
+                            .interact_text()?;
+                        let key = Input::<String>::with_theme(&ColorfulTheme::default())
+                            .with_prompt("PEM 私钥路径")
+                            .interact_text()?;
+                        args.cert = Some(cert.into());
+                        args.key = Some(key.into());
+                    }
+                    "2" => {
+                        args.self_signed = true;
+                        println!("警告：自签名证书仅供测试，不推荐用于生产环境。");
+                    }
+                    "0" => return Ok(()),
+                    _ => bail!("NaiveProxy TLS 证书模式编号无效"),
+                }
+            }
+        }
+        if args.server_name.is_none() {
+            bail!("NaiveProxy requires --server-name matching the TLS certificate");
+        }
+        if !args.self_signed && (args.cert.is_none() || args.key.is_none()) {
+            bail!("NaiveProxy requires a trusted TLS certificate for production. Provide --server-name, --cert and --key, or explicitly use testing self-signed mode (--self-signed).");
+        }
+        if args.self_signed && (args.cert.is_some() || args.key.is_some()) {
+            bail!("NaiveProxy --self-signed cannot be combined with --cert/--key");
+        }
     }
     ensure_shoes_for_add(args.yes).await?;
     let result = fast_add::execute(fast_add::AddRequest {
@@ -561,6 +714,21 @@ async fn run_add(args: AddArgs) -> Result<()> {
         },
         shadowtls_password: None,
         shadowtls_handshake: None,
+        certificate: args.cert,
+        certificate_key: args.key,
+        naive_self_signed: args.self_signed,
+        naive_username: if matches!(args.protocol, Protocol::NaiveProxy) {
+            args.username
+        } else {
+            None
+        },
+        naive_password: if matches!(args.protocol, Protocol::NaiveProxy) {
+            args.password
+        } else {
+            None
+        },
+        naive_padding: args.padding || !args.no_padding,
+        naive_fallback: args.fallback,
     })
     .await?;
     if args.plain {
@@ -603,6 +771,13 @@ pub(crate) async fn bootstrap_default_reality() -> Result<bool> {
         shadowsocks_mode: ShadowsocksMode::Plain,
         shadowtls_password: None,
         shadowtls_handshake: None,
+        certificate: None,
+        certificate_key: None,
+        naive_self_signed: false,
+        naive_username: None,
+        naive_password: None,
+        naive_padding: true,
+        naive_fallback: None,
     })
     .await?;
     print_add_result(&result);
@@ -631,6 +806,8 @@ pub(crate) fn print_add_result(result: &fast_add::AddResult) {
             println!(
                 "\nShadowTLS v3 没有通用标准分享 URI；普通二维码也不支持；请使用 sing-box 或 Mihomo 导出。"
             );
+        } else if matches!(profile.credentials, config::Credentials::NaiveProxy { .. }) {
+            println!("\nNaiveProxy 没有通用标准分享 URI 或普通二维码；请使用包含 Naive 支持的 sing-box JSON 导出。");
         } else {
             println!("\nSnell v3 没有通用标准分享 URI；配置已成功部署，请按客户端支持情况手动填写或导出 Clash Meta（仅 AES-128-GCM）。");
         }
@@ -791,6 +968,45 @@ fn profile_details_lines(profile: &config::ManagedProfile, share_uri: Option<&st
                 "注意：SOCKS5 本身不提供传输加密，请勿将其误认为 TLS/Reality 代理。".to_owned(),
             );
         }
+        config::Credentials::NaiveProxy {
+            username,
+            password,
+            server_name,
+            padding,
+            udp_enabled,
+            fallback,
+        } => {
+            lines.push("协议                  = naiveproxy".to_owned());
+            lines.push(format!("地址                  = {address}"));
+            lines.push(format!("端口                  = {}", profile.port));
+            lines.push(format!("用户名                = {username}"));
+            lines.push(format!("密码                  = {password}"));
+            lines.push(format!("SNI / server name     = {server_name}"));
+            lines.push("ALPN                  = h2".to_owned());
+            lines.push(format!(
+                "Padding               = {}",
+                if *padding { "enabled" } else { "disabled" }
+            ));
+            lines.push(format!(
+                "UDP over TCP           = {}",
+                if *udp_enabled { "enabled" } else { "disabled" }
+            ));
+            lines.push(format!(
+                "Fallback              = {}",
+                fallback.as_deref().unwrap_or("none")
+            ));
+            lines.push(format!(
+                "TLS certificate mode   = {}",
+                if profile.self_signed_certificate {
+                    "self-signed (testing)"
+                } else {
+                    "external trusted"
+                }
+            ));
+            if profile.self_signed_certificate {
+                lines.push("警告：测试模式，需要客户端信任该证书。".to_owned());
+            }
+        }
         config::Credentials::AnyTls {
             users,
             server_name,
@@ -923,7 +1139,7 @@ fn profile_details_lines(profile: &config::ManagedProfile, share_uri: Option<&st
         lines.push("------------- 链接 (URL) -------------".to_owned());
         lines.push(uri.to_owned());
     }
-    if profile.self_signed_certificate {
+    if profile.self_signed_certificate && profile.protocol() != Protocol::NaiveProxy {
         lines.push("警告! 客户端需启用跳过证书验证 (allowInsecure)，或换用受信任证书。".to_owned());
     }
     lines
@@ -1244,6 +1460,31 @@ pub fn print_credentials(result: &config::GenerationResult) {
                 println!("密码：{password}");
                 println!("UDP：{}", if *udp_enabled { "启用" } else { "关闭" });
             }
+        }
+        config::Credentials::NaiveProxy {
+            username,
+            password,
+            server_name,
+            padding,
+            udp_enabled,
+            fallback,
+        } => {
+            println!("协议：NaiveProxy");
+            println!("用户名：{username}");
+            println!("密码：{password}");
+            println!("SNI：{server_name}");
+            println!("ALPN：h2");
+            println!("Padding：{}", if *padding { "启用" } else { "关闭" });
+            println!(
+                "UDP-over-TCP：{}",
+                if *udp_enabled {
+                    "启用"
+                } else {
+                    "NOT_IMPLEMENTED"
+                }
+            );
+            println!("Fallback：{}", fallback.as_deref().unwrap_or("none"));
+            print_certificate_notice(result);
         }
         config::Credentials::AnyTls {
             users,
@@ -1594,6 +1835,44 @@ mod tests {
                 no_bootstrap: true,
             }) if install_dir == Path::new("/tmp/ping-rust-bin")
         ));
+    }
+
+    #[test]
+    fn parses_naiveproxy_quick_and_generate_tls_modes() {
+        let cli = Cli::try_parse_from([
+            "prs",
+            "a",
+            "naiveproxy",
+            "443",
+            "--server-name",
+            "naive.example.com",
+            "--self-signed",
+            "--no-padding",
+            "--username",
+            "alice",
+        ])
+        .unwrap();
+        let Some(Command::Add(args)) = cli.command else {
+            panic!("expected add");
+        };
+        assert_eq!(args.protocol, Protocol::NaiveProxy);
+        assert!(args.self_signed);
+        assert!(args.no_padding);
+        assert_eq!(args.username.as_deref(), Some("alice"));
+        let cli = Cli::try_parse_from([
+            "ping-rust",
+            "generate",
+            "naiveproxy",
+            "--server-name",
+            "naive.example.com",
+            "--self-signed",
+            "--padding",
+        ])
+        .unwrap();
+        let Some(Command::Generate(args)) = cli.command else {
+            panic!("expected generate");
+        };
+        assert_eq!(args.anytls_padding, ["true"]);
     }
 
     #[test]

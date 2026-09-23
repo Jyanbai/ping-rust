@@ -126,6 +126,14 @@ pub(super) enum InnerProtocol {
         #[serde(skip_serializing_if = "Option::is_none")]
         fallback: Option<String>,
     },
+    #[serde(rename = "naiveproxy")]
+    Naiveproxy {
+        users: Vec<NaiveUser>,
+        padding: bool,
+        udp_enabled: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        fallback: Option<String>,
+    },
     Trojan {
         password: String,
     },
@@ -143,6 +151,12 @@ pub(super) enum InnerProtocol {
     Websocket {
         targets: Vec<WebsocketTarget>,
     },
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub(super) struct NaiveUser {
+    pub username: String,
+    pub password: String,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

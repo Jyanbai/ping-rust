@@ -171,6 +171,7 @@ pub(super) fn is_managed_profile_file_name(name: &str) -> bool {
         "VMESS-WS-TLS-",
         "SOCKS5-",
         "SNELL-",
+        "NAIVEPROXY-",
     ];
     prefixes.iter().any(|prefix| {
         stem.strip_prefix(prefix).is_some_and(|value| {
@@ -179,4 +180,17 @@ pub(super) fn is_managed_profile_file_name(name: &str) -> bool {
                 .is_ok_and(|port| port > 0 && port.to_string() == value)
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_managed_profile_file_name;
+
+    #[test]
+    fn naiveproxy_profile_files_are_managed_without_accepting_lookalikes() {
+        assert!(is_managed_profile_file_name("NAIVEPROXY-443.yaml"));
+        assert!(!is_managed_profile_file_name("NAIVEPROXY-0.yaml"));
+        assert!(!is_managed_profile_file_name("NAIVEPROXY-0443.yaml"));
+        assert!(!is_managed_profile_file_name("NAIVEPROXY-443.yaml.bak"));
+    }
 }

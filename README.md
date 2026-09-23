@@ -9,7 +9,7 @@
 
 核心逻辑全部位于 Rust 源码中；`scripts/install.sh` 只负责执行 Rust 前的架构检测、下载、SHA-256 校验与严格解包，原子安装、快捷命令所有权判断和首次部署均由已校验的 Rust 二进制完成。
 
-> 当前稳定版为 [`v0.1.19`](https://github.com/Jyanbai/ping-rust/releases/tag/v0.1.19)，并已发布至 [crates.io](https://crates.io/crates/ping-rust/0.1.19)。支持 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks、AnyTLS、VLESS-TLS-Vision、VLESS-WS-TLS、Trojan-TLS、Trojan-REALITY、VMess-WS-TLS、SOCKS5 和 Snell v3 十二种受管协议。用户只选择完整协议，不需要理解或手动组合传输层、安全层与内层协议。
+> 当前稳定版为 [`v0.1.19`](https://github.com/Jyanbai/ping-rust/releases/tag/v0.1.19)，并已发布至 [crates.io](https://crates.io/crates/ping-rust/0.1.19)。支持 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks、AnyTLS、VLESS-TLS-Vision、VLESS-WS-TLS、Trojan-TLS、Trojan-REALITY、VMess-WS-TLS、SOCKS5、Snell v3 和 NaiveProxy 十三种受管协议。用户只选择完整协议，不需要理解或手动组合传输层、安全层与内层协议。
 
 完整文档：[Wiki](https://github.com/Jyanbai/ping-rust/wiki) · [快速开始](https://github.com/Jyanbai/ping-rust/wiki/Quick-Start) · [链式代理](https://github.com/Jyanbai/ping-rust/wiki/Chain-Proxy) · [故障排查](https://github.com/Jyanbai/ping-rust/wiki/Troubleshooting)
 
@@ -178,9 +178,10 @@ shoes: running
 10) VMess-WS-TLS
 11) SOCKS5
 12) Snell v3
+13) NaiveProxy
 0) 返回
 
-请选择 [0-12]: 4
+请选择 [0-13]: 4
 输入端口（直接回车自动选择随机端口）:
 
 部署成功，shoes 服务已启动。
@@ -225,7 +226,7 @@ vless://...security=reality...pbk=...&sid=...#VLESS-REALITY-25448
 
 CI 在 Debian 12 与 Ubuntu 24.04 的真实 systemd 环境中，从 PTY 菜单完成添加、完整协议测试、选择、启用、切换、关闭和删除。两个隔离网络命名空间提供可区分的 Shadowsocks 出口；测试会核对 HTTP 服务观察到的源地址，并验证 systemd 重启后仍使用所选出口、上游离线时请求失败且不会静默直连。该测试覆盖稳定 TCP 路径，不代表 shoes 已支持 UDP 链式转发。
 
-首次安装流程是：`install.sh → 自动安装 ping-rust/shoes → 自动随机端口部署 VLESS-REALITY → 复制 URL`，中间零输入。Reality 未指定 SNI 时会从 `www.amazon.com`、`www.ebay.com`、`www.paypal.com`、`www.cloudflare.com`、`dash.cloudflare.com`、`aws.amazon.com` 中随机选择；列表不含 Apple，客户端指纹固定为本地 233boy 脚本使用的 `chrome`。后续日常流程是：`prs → 1 → 选择协议 → 输入端口/直接回车随机`；Shadowsocks 会额外选择加密方式和密码，SS 2022 密码不符合所选 cipher 的 Base64 密钥长度时会警告并自动替换。其余协议自动生成 UUID、密码、Reality 密钥、WebSocket 路径或证书。SOCKS5 快速添加默认生成安全随机用户名和密码并启用 UDP ASSOCIATE；Snell v3 快速添加默认生成随机密码并启用 UDP-over-TCP。添加或查看配置成功后直接退出 `prs`；主菜单输入 `0` 退出，任意子菜单输入 `0` 返回主菜单。自动端口从 `20000..=65535` 的高位范围选择；菜单协议选择固定使用连续编号 `1..=12`。信息只会在配置通过 `shoes --dry-run`、原子写入、systemd 启动且确认为 active 后输出；失败会恢复原配置和服务状态。
+首次安装流程是：`install.sh → 自动安装 ping-rust/shoes → 自动随机端口部署 VLESS-REALITY → 复制 URL`，中间零输入。Reality 未指定 SNI 时会从 `www.amazon.com`、`www.ebay.com`、`www.paypal.com`、`www.cloudflare.com`、`dash.cloudflare.com`、`aws.amazon.com` 中随机选择；列表不含 Apple，客户端指纹固定为本地 233boy 脚本使用的 `chrome`。后续日常流程是：`prs → 1 → 选择协议 → 输入端口/直接回车随机`；Shadowsocks 会额外选择加密方式和密码，SS 2022 密码不符合所选 cipher 的 Base64 密钥长度时会警告并自动替换。其余协议自动生成 UUID、密码、Reality 密钥、WebSocket 路径或证书。SOCKS5 快速添加默认生成安全随机用户名和密码并启用 UDP ASSOCIATE；Snell v3 快速添加默认生成随机密码并启用 UDP-over-TCP。NaiveProxy 要求明确选择受信任证书或自签名测试模式，不会静默生成生产自签名配置。添加或查看配置成功后直接退出 `prs`；主菜单输入 `0` 退出，任意子菜单输入 `0` 返回主菜单。自动端口从 `20000..=65535` 的高位范围选择；菜单协议选择固定使用连续编号 `1..=13`。信息只会在配置通过 `shoes --dry-run`、原子写入、systemd 启动且确认为 active 后输出；失败会恢复原配置和服务状态。
 
 非交互方式：
 
@@ -323,6 +324,21 @@ sudo prs add shadowsocks --shadowtls
 ShadowTLS v3 由当前固定 shoes 内核原生承载，服务端仍只有一个 shoes 进程和一个受管 YAML，不需要额外安装或运行 `shadow-tls`。该模式只接受三种 Shadowsocks 2022 cipher，并分别安全生成合规 SS2022 Base64 密钥与独立 ShadowTLS 密码。当前首版明确为 TCP-only：sing-box 的 ShadowTLS outbound 只暴露 TCP，因此不会生成 `udp: true` 或声称 UDP/UoT 可用。
 
 客户端兼容性以实际 schema 为准：sing-box 导出为 `shadowsocks` outbound 通过 `detour` 连接 `shadowtls` v3 outbound；Mihomo 导出为 Shadowsocks 的 `plugin: shadow-tls` 与 `plugin-opts`。NekoBox 专用 URI、标准 `ss://`、普通二维码和 chain outbound 均不伪造，使用时请导出 sing-box 或 Mihomo 配置。
+
+## NaiveProxy
+
+NaiveProxy 使用 shoes 内置的 TLS + HTTP/2 CONNECT 服务端，ALPN 固定为 `h2`，padding 默认开启，不需要额外代理进程。生产环境应使用真实域名与受信任 TLS 证书；自签名仅供测试，不推荐生产使用。当前没有自动 ACME 签发。
+
+```bash
+# 生产：提供与域名匹配的受信任证书和私钥
+sudo prs add naiveproxy --server-name naive.example.com \
+  --cert /etc/ssl/naive/fullchain.pem --key /etc/ssl/naive/privkey.pem
+
+# 测试：明确选择自签名模式
+sudo prs add naiveproxy --server-name naive.example.com --self-signed
+```
+
+用户名、密码默认安全随机生成，fallback 可选绝对静态目录路径。UDP/UoT 尚未完成端到端验证，首版仅支持 TCP。sing-box 原生 `type: naive` 导出只适用于包含 Naive/Chromium 支持的平台或特殊构建；Mihomo、NekoBox、标准 URI、普通二维码和 chain outbound 暂不支持。当前 sing-box Naive outbound 明确拒绝 `insecure: true`，因此自签名测试导出会嵌入公开证书供客户端验证，绝不导出服务器私钥。
 
 AnyTLS 默认使用普通 TLS 外层；`--user` 可重复，格式为 `[名称:]密码`。未提供用户时自动创建一个随机密码用户：
 
