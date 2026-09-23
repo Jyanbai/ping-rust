@@ -738,7 +738,8 @@ jobs:
               --server-address 203.0.113.10 --yes
           )"
           grep -F "ShadowTLS v3" <<<"$shadowtls_add_output"
-          grep -F "没有通用标准分享 URI/二维码" <<<"$shadowtls_add_output"
+          grep -F "没有通用标准分享 URI" <<<"$shadowtls_add_output"
+          grep -F "普通二维码也不支持" <<<"$shadowtls_add_output"
           run_menu_add 6 25451 vless
           run_menu_add 7 25452 vless
           run_menu_add 8 25453 trojan
