@@ -1150,7 +1150,7 @@ jobs:
           sudo tar -tzf "$backup" | grep -q 'shoes/profiles/HYSTERIA2-'
           sudo "$PING_RUST" restore "$backup"
           sudo test -s "/etc/shoes/profiles/VLESS-REALITY-${REALITY_PORT}.yaml"
-          sudo "$PING_RUST" update --method release
+          sudo "$PING_RUST" update --method release --allow-downgrade
           sudo "$PING_RUST" service restart
           sudo "$PING_RUST" service status
           sudo "$PING_RUST" logs --lines 20
@@ -1256,10 +1256,17 @@ jobs:
             test "$ID" = debian
             test "$VERSION_ID" = 12
             test "$(uname -m)" = x86_64
-            state="$(systemctl is-system-running || true)"
+            for _ in $(seq 1 30); do
+              state="$(systemctl is-system-running || true)"
+              case "$state" in
+                running|degraded) break ;;
+                starting) sleep 1 ;;
+                *) echo "unexpected systemd state: $state" >&2; exit 1 ;;
+              esac
+            done
             case "$state" in
               running|degraded) ;;
-              *) echo "unexpected systemd state: $state" >&2; exit 1 ;;
+              *) echo "systemd did not finish starting: $state" >&2; exit 1 ;;
             esac
             test ! -e /usr/local/bin/shoes
             test ! -e /etc/shoes
