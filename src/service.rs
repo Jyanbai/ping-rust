@@ -95,10 +95,14 @@ pub fn install_unit(enable_now: bool) -> Result<()> {
         unit_contents().as_bytes(),
         0o644,
     )?;
+    let anchor_prepared = enable_now && prepare_anchor_before_start();
     systemctl(&["daemon-reload"])?;
     if enable_now {
         for command in activation_commands(was_active, was_failed) {
             systemctl(command)?;
+        }
+        if anchor_prepared {
+            mark_anchor_after_start();
         }
     }
     Ok(())
@@ -115,10 +119,37 @@ pub fn activate_and_verify() -> Result<()> {
 pub fn restart_and_verify() -> Result<()> {
     utils::require_linux_root()?;
     ensure_systemctl()?;
+    let anchor_prepared = prepare_anchor_before_start();
     systemctl_after_reset(RESTART_COMMAND)?;
     verify_active_stable(systemctl_is_active, || {
         thread::sleep(Duration::from_millis(750))
-    })
+    })?;
+    if anchor_prepared {
+        mark_anchor_after_start();
+    }
+    Ok(())
+}
+
+fn prepare_anchor_before_start() -> bool {
+    match utils::refresh_hot_reload_anchor() {
+        Ok(()) => true,
+        Err(error) => {
+            hot_reload_trace(&format!("anchor unavailable: {error:#}"));
+            false
+        }
+    }
+}
+
+fn mark_anchor_after_start() {
+    match main_pid() {
+        Ok(Some(pid)) => {
+            if let Err(error) = utils::mark_hot_reload_anchor_pid(pid) {
+                hot_reload_trace(&format!("cannot mark anchor PID: {error:#}"));
+            }
+        }
+        Ok(None) => hot_reload_trace("service has no MainPID after start"),
+        Err(error) => hot_reload_trace(&format!("cannot read MainPID after start: {error:#}")),
+    }
 }
 
 fn verify_active_stable(
@@ -182,7 +213,10 @@ pub fn capture_hot_reload_snapshot(
     let main_pid = snapshot
         .main_pid
         .context("shoes.service active but MainPID is unavailable")?;
-    utils::prepare_hot_reload_anchor(main_pid)?;
+    if !utils::hot_reload_anchor_ready(main_pid) {
+        hot_reload_trace("hot reload anchor was not prepared before service start");
+        return Ok(None);
+    }
     let snapshot = HotReloadSnapshot {
         main_pid,
         listening_ports: listening_ports(main_pid)?,

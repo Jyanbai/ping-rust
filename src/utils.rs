@@ -198,10 +198,10 @@ pub fn atomic_write(destination: &Path, contents: &[u8], mode: u32) -> Result<()
     persist_replace(temp, destination)
 }
 
-/// Keep a hard link to the inode watched by shoes.  shoes watches the config
-/// file itself, while ping-rust replaces it atomically; touching this anchor
-/// lets the watcher observe later replacements without weakening atomicity.
-pub fn prepare_hot_reload_anchor(pid: u32) -> Result<()> {
+/// Prepare a hard link before shoes starts watching the aggregate config.
+/// Creating a hard link while shoes is running itself emits a metadata change
+/// event, so this must only be used immediately before a service restart.
+pub fn refresh_hot_reload_anchor() -> Result<()> {
     let config = Path::new(CONFIG_FILE);
     let config_metadata = fs::symlink_metadata(config)?;
     if !config_metadata.is_file() || config_metadata.file_type().is_symlink() {
@@ -211,18 +211,14 @@ pub fn prepare_hot_reload_anchor(pid: u32) -> Result<()> {
     let pid_path = Path::new(HOT_RELOAD_ANCHOR_PID_FILE);
     let parent = anchor.parent().context("热重载锚点路径没有父目录")?;
     ensure_directory(parent, 0o700)?;
-    if anchor.exists() {
-        let metadata = fs::symlink_metadata(anchor)?;
+    if let Ok(metadata) = fs::symlink_metadata(anchor) {
         if !metadata.is_file() || metadata.file_type().is_symlink() {
             bail!("热重载锚点不是普通文件：{}", anchor.display());
         }
-        if fs::read_to_string(pid_path)
-            .ok()
-            .is_some_and(|recorded| recorded.trim() == pid.to_string())
-        {
-            return Ok(());
-        }
         fs::remove_file(anchor).context("更新 shoes 热重载锚点失败")?;
+    }
+    if pid_path.exists() {
+        fs::remove_file(pid_path).context("清理旧 shoes 热重载 PID 失败")?;
     }
     fs::hard_link(config, anchor).with_context(|| {
         format!(
@@ -230,8 +226,25 @@ pub fn prepare_hot_reload_anchor(pid: u32) -> Result<()> {
             config.display(),
             anchor.display()
         )
-    })?;
-    atomic_write(pid_path, pid.to_string().as_bytes(), 0o600)
+    })
+}
+
+pub fn mark_hot_reload_anchor_pid(pid: u32) -> Result<()> {
+    atomic_write(
+        Path::new(HOT_RELOAD_ANCHOR_PID_FILE),
+        pid.to_string().as_bytes(),
+        0o600,
+    )
+}
+
+pub fn hot_reload_anchor_ready(pid: u32) -> bool {
+    let anchor = Path::new(HOT_RELOAD_ANCHOR_FILE);
+    anchor
+        .symlink_metadata()
+        .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
+        && fs::read_to_string(HOT_RELOAD_ANCHOR_PID_FILE)
+            .ok()
+            .is_some_and(|recorded| recorded.trim() == pid.to_string())
 }
 
 /// Generate a file modification event on the inode watched by shoes without
