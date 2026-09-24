@@ -252,6 +252,8 @@ mod tests {
         )
         };
         atomic_write(&config, yaml(ports[0]).as_bytes(), 0o600).unwrap();
+        let anchor = work.path().join("config-watch-anchor");
+        fs::hard_link(&config, &anchor).unwrap();
         let log_file = std::fs::File::create(work.path().join("shoes.log")).unwrap();
         let mut process = std::process::Command::new(binary)
             .arg(&config)
@@ -274,6 +276,13 @@ mod tests {
         if initial {
             for index in 1..3 {
                 atomic_write(&config, yaml(ports[index]).as_bytes(), 0o600).unwrap();
+                let first_byte = fs::read(&anchor).unwrap()[0];
+                File::options()
+                    .write(true)
+                    .open(&anchor)
+                    .unwrap()
+                    .write_all(&[first_byte])
+                    .unwrap();
                 replacements.push((wait(ports[index], true), wait(ports[index - 1], false)));
             }
         }
