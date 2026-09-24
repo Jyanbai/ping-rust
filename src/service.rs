@@ -383,6 +383,7 @@ pub fn restore_snapshot(snapshot: ServiceSnapshot) -> Result<()> {
     utils::require_linux_root()?;
     ensure_systemctl()?;
     let path = Path::new(utils::SERVICE_FILE);
+    let managed_unit = snapshot.unit_contents.as_deref() == Some(unit_contents().as_bytes());
 
     if path.exists() {
         let _ = Command::new("systemctl")
@@ -405,10 +406,14 @@ pub fn restore_snapshot(snapshot: ServiceSnapshot) -> Result<()> {
                 .status();
         }
         if snapshot.was_active {
+            let anchor_prepared = managed_unit && prepare_anchor_before_start();
             systemctl_after_reset(START_COMMAND)?;
             verify_active_stable(systemctl_is_active, || {
                 thread::sleep(Duration::from_millis(750))
             })?;
+            if anchor_prepared {
+                mark_anchor_after_start();
+            }
         } else {
             let _ = Command::new("systemctl")
                 .args(["stop", SERVICE_NAME])
