@@ -3,7 +3,7 @@ use std::{collections::BTreeSet, fs, path::Path, process::Command, thread, time:
 use anyhow::{bail, Context, Result};
 use clap::ValueEnum;
 
-use crate::{performance, utils};
+use crate::{installer, performance, utils};
 
 pub const SERVICE_NAME: &str = "shoes.service";
 const RESET_FAILED_COMMAND: &[&str] = &["reset-failed", SERVICE_NAME];
@@ -16,6 +16,12 @@ pub struct ServiceSnapshot {
     was_active: bool,
     was_enabled: bool,
     main_pid: Option<u32>,
+}
+
+impl ServiceSnapshot {
+    pub fn was_active(&self) -> bool {
+        self.was_active
+    }
 }
 
 pub struct HotReloadSnapshot {
@@ -155,7 +161,14 @@ pub fn capture_hot_reload_snapshot(
     {
         return Ok(None);
     }
-    if !systemctl_show_value("DropInPaths")?.is_empty() {
+    let shoes = installer::load_provenance();
+    if shoes.source != "verified-pin"
+        || shoes.revision.as_deref() != Some(installer::verified_pin())
+    {
+        return Ok(None);
+    }
+    let drop_ins = systemctl_show_value("DropInPaths")?;
+    if !drop_ins.is_empty() && drop_ins != "-" {
         return Ok(None);
     }
     let main_pid = snapshot

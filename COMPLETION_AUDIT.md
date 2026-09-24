@@ -13,6 +13,20 @@
 | upstream 兼容验证 | drift 构建精确 upstream HEAD，执行共享 schema/协议矩阵与 chain proxy E2E，并写入 PASS/FAIL summary。 |
 | pin 一致性 | fixed schema CI 在构建前比较 runtime `SHOES_SCHEMA_REVISION` 与 workflow pin。 |
 
+## Goal 2：shoes 原生 Hot Reload
+
+| 项目 | 状态 | 证据 |
+|---|---|---|
+| atomic-write watcher compatibility | SUPPORTED | 固定 pin `386b115...` 的 shoes schema workflow 使用真实 `atomic_write` 加文件锚点，连续两次替换均完成 listener 切换；run [35965397288](https://github.com/Jyanbai/ping-rust/actions/runs/35965397288)。 |
+| active add / edit-port / delete non-last | HOT_RELOAD | `service::hot_reload_and_verify` 要求服务 active、MainPID 不变，并检查 listener 集合；Ubuntu acceptance 已加入 PID 连续性断言。 |
+| runtime unchanged | NO_SERVICE_ACTION | 聚合 YAML 字节相同的 metadata edit 跳过 config 替换和服务动作。 |
+| credential-only edit | FALLBACK_RESTART | 固定 shoes 没有稳定 reload acknowledgement；端口不可观测的凭据修改继续走可靠 restart。 |
+| inactive / bootstrap | START | 没有 active MainPID 时保留现有 activation 语义。 |
+| delete last | STOP | 最后一个 profile 仍停止 shoes。 |
+| reload failure / crash | FALLBACK_RESTART | 超时、服务失活或 MainPID 改变使候选失败，恢复 config/state/profiles 与旧 service snapshot。 |
+| cert cleanup | SUPPORTED | 既有 `finish_update` / deletion finish 仍在 activation 成功后清理旧凭据。 |
+| backup restore / chain / shoes update | NOT_ENABLED | 本 Goal 保留这些路径的既有 restart/activation 语义。 |
+
 ## Shadowsocks 2022 + ShadowTLS v3（v0.1.19 feature）
 
 | 项目 | 状态 | 证据 |

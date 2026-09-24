@@ -195,7 +195,13 @@ vless://...security=reality...pbk=...&sid=...#VLESS-REALITY-25448
 ------------- END -------------
 ```
 
-菜单 `2. 更改配置` 会先选择现有配置，再按协议提供端口、名称、公网地址、凭据、Reality SNI、Shadowsocks/Snell cipher、Snell/SOCKS5 UDP 开关或 AnyTLS 用户密码等修改项。新配置必须通过真实 `shoes --dry-run` 才会原子提交；服务重启失败时自动恢复修改前的配置与 systemd 状态。Snell v3 没有统一标准分享 URI，因此成功后显示完整手动连接参数，不生成伪 URI 或二维码。
+菜单 `2. 更改配置` 会先选择现有配置，再按协议提供端口、名称、公网地址、凭据、Reality SNI、Shadowsocks/Snell cipher、Snell/SOCKS5 UDP 开关或 AnyTLS 用户密码等修改项。新配置必须通过真实 `shoes --dry-run` 才会原子提交；应用失败时自动恢复修改前的配置与 systemd 状态。Snell v3 没有统一标准分享 URI，因此成功后显示完整手动连接参数，不生成伪 URI 或二维码。
+
+### Hot Reload
+
+当 shoes 已运行且服务 unit 未被修改时，新增监听、修改监听端口和删除非最后一个节点会尝试 shoes 原生配置热重载。ping-rust 保留聚合配置的原子替换，并用受保护的文件锚点通知固定 shoes 的文件 watcher；只有 MainPID 不变、服务保持 active、预期监听出现且旧监听消失时才算成功。候选配置仍先通过 `shoes --dry-run`。热重载未能确认时，操作失败并恢复旧配置与服务状态，必要时重新启动旧服务。
+
+只改显示名称或公网地址等不影响运行 YAML 的信息无需服务动作。凭据等无法从监听端口证明已生效的修改继续重启 shoes；首次部署仍启动服务，删除最后一个节点仍停止服务。备份恢复、链式代理切换和 shoes 二进制更新保持原有服务处理流程。
 
 每个节点都会保存为 `/etc/shoes/profiles/` 下的真实独立 YAML 文件；查看、更改和删除时直接显示该文件名，例如 `VLESS-REALITY-53453.yaml` 或 `SNELL-8389.yaml`。支持分享 URI 的协议会以相同文件基名作为 URI 标签，并在添加或查看时显示终端二维码；Snell v3 只显示手动连接参数。只有一个配置时自动选中，多个配置时才显示数字列表。shoes 继续加载由 Rust 确定性聚合的 `/etc/shoes/config.yaml`，内部 UUID 仅用于安全定位。
 

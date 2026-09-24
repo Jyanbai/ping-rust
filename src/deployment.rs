@@ -9,6 +9,38 @@ use crate::{
 };
 use uuid::Uuid;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ApplyOperation {
+    AddOrEdit,
+    Delete,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ApplyStrategy {
+    NoServiceAction,
+    Activate,
+    Stop,
+    HotReload,
+}
+
+fn plan_apply(
+    operation: ApplyOperation,
+    runtime_changed: bool,
+    was_active: bool,
+    remaining_profiles: usize,
+    hot_reload_ready: bool,
+) -> ApplyStrategy {
+    if !runtime_changed || (operation == ApplyOperation::Delete && !was_active) {
+        ApplyStrategy::NoServiceAction
+    } else if operation == ApplyOperation::Delete && remaining_profiles == 0 {
+        ApplyStrategy::Stop
+    } else if was_active && hot_reload_ready {
+        ApplyStrategy::HotReload
+    } else {
+        ApplyStrategy::Activate
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct ActivationFailure {
     message: String,
@@ -52,7 +84,15 @@ pub async fn generate_and_activate(request: GenerationRequest) -> Result<Generat
             })
         });
     let mut result = config::generate_locked(request, lock).await?;
-    let activation = if let Some(snapshot) = hot_reload_snapshot {
+    let strategy = plan_apply(
+        ApplyOperation::AddOrEdit,
+        true,
+        service_snapshot.was_active(),
+        1,
+        hot_reload_snapshot.is_some(),
+    );
+    let activation = if strategy == ApplyStrategy::HotReload {
+        let snapshot = hot_reload_snapshot.expect("hot reload strategy requires a snapshot");
         let mut expected = snapshot.listening_ports.clone();
         expected.insert(result.profile.port);
         service::hot_reload_and_verify(snapshot, &expected, &BTreeSet::new())
@@ -107,11 +147,19 @@ pub async fn update_and_activate(id: Uuid, change: ProfileChange) -> Result<Gene
             previous_port.is_some_and(|port| snapshot.listening_ports.contains(&port))
         });
     let mut result = config::update_profile_locked(id, change, lock).await?;
-    if !result.runtime_config_changed {
+    let strategy = plan_apply(
+        ApplyOperation::AddOrEdit,
+        result.runtime_config_changed,
+        service_snapshot.was_active(),
+        1,
+        hot_reload_snapshot.is_some() && observable_port_change,
+    );
+    if strategy == ApplyStrategy::NoServiceAction {
         result.finish_update();
         return Ok(result);
     }
-    let activation = if let Some(snapshot) = hot_reload_snapshot {
+    let activation = if strategy == ApplyStrategy::HotReload {
+        let snapshot = hot_reload_snapshot.expect("hot reload strategy requires a snapshot");
         let mut expected = snapshot.listening_ports.clone();
         if let Some(previous_port) = previous_port {
             expected.remove(&previous_port);
@@ -169,17 +217,24 @@ pub async fn delete_and_activate(id: Uuid) -> Result<config::ManagedProfile> {
         })
     });
     let mut result = config::delete_profile_locked(id, lock).await?;
-    let activation = if !was_active {
-        Ok(())
-    } else if result.remaining_profiles == 0 {
-        service::execute(service::ServiceAction::Stop)
-    } else if let Some(snapshot) = hot_reload_snapshot {
-        let mut expected = snapshot.listening_ports.clone();
-        expected.remove(&result.profile.port);
-        let removed = BTreeSet::from([result.profile.port]);
-        service::hot_reload_and_verify(snapshot, &expected, &removed)
-    } else {
-        service::activate_and_verify()
+    let strategy = plan_apply(
+        ApplyOperation::Delete,
+        true,
+        was_active,
+        result.remaining_profiles,
+        hot_reload_snapshot.is_some(),
+    );
+    let activation = match strategy {
+        ApplyStrategy::NoServiceAction => Ok(()),
+        ApplyStrategy::Stop => service::execute(service::ServiceAction::Stop),
+        ApplyStrategy::HotReload => {
+            let snapshot = hot_reload_snapshot.expect("hot reload strategy requires a snapshot");
+            let mut expected = snapshot.listening_ports.clone();
+            expected.remove(&result.profile.port);
+            let removed = BTreeSet::from([result.profile.port]);
+            service::hot_reload_and_verify(snapshot, &expected, &removed)
+        }
+        ApplyStrategy::Activate => service::activate_and_verify(),
     };
     if let Err(activation) = activation {
         let _rollback_timer = performance::stage("rollback_restore");
@@ -230,4 +285,40 @@ pub async fn update_chain_proxy(change: ChainProxyChange) -> Result<config::Mana
         }
     }
     Ok(result.finish())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn apply_planner_preserves_start_stop_and_verified_reload_boundaries() {
+        let plan = |operation, changed, active, remaining, observable| {
+            plan_apply(operation, changed, active, remaining, observable)
+        };
+        assert_eq!(
+            plan(ApplyOperation::AddOrEdit, false, true, 1, true),
+            ApplyStrategy::NoServiceAction
+        );
+        assert_eq!(
+            plan(ApplyOperation::AddOrEdit, true, true, 2, true),
+            ApplyStrategy::HotReload
+        );
+        assert_eq!(
+            plan(ApplyOperation::AddOrEdit, true, true, 2, false),
+            ApplyStrategy::Activate
+        );
+        assert_eq!(
+            plan(ApplyOperation::AddOrEdit, true, false, 1, false),
+            ApplyStrategy::Activate
+        );
+        assert_eq!(
+            plan(ApplyOperation::Delete, true, true, 0, true),
+            ApplyStrategy::Stop
+        );
+        assert_eq!(
+            plan(ApplyOperation::Delete, true, false, 1, false),
+            ApplyStrategy::NoServiceAction
+        );
+    }
 }

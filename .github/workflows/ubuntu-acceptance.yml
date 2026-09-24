@@ -180,6 +180,7 @@ jobs:
 
           reality_uri="$(sudo "$PING_RUST" url)"
           sudo rm -f "$bootstrap_output"
+
           printf '%s' "$reality_uri" | grep -q '^vless://' \
             || { echo 'saved URI missing' >&2; exit 1; }
           for parameter in security=reality flow=xtls-rprx-vision pbk= sid=; do
@@ -259,6 +260,13 @@ jobs:
           test -n "$reality_profile" \
             || { echo 'Reality profile UUID missing' >&2; exit 1; }
           printf 'REALITY_PROFILE=%s\n' "$reality_profile" >> "$GITHUB_ENV"
+
+      - name: Switch runtime to the verified shoes pin
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo env PATH="$PATH" CARGO_HOME="$HOME/.cargo" \
+            RUSTUP_HOME="$HOME/.rustup" "$PING_RUST" update --method cargo
 
       - name: View the only profile without a selection menu
         shell: bash
