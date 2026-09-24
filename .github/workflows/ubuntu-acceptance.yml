@@ -505,7 +505,7 @@ jobs:
 
           current_pid="$(sudo systemctl show --property MainPID --value shoes.service)"
           test "$current_pid" -gt 0
-          test "$current_pid" != "$previous_pid"
+          test "$current_pid" = "$previous_pid"
           sudo systemctl is-active --quiet shoes.service
           for _ in {1..20}; do
             if sudo ss -H -lun | awk '{print $4}' | grep -Eq '(^|:)24444$'; then
@@ -539,7 +539,7 @@ jobs:
 
           current_pid="$(sudo systemctl show --property MainPID --value shoes.service)"
           test "$current_pid" -gt 0
-          test "$current_pid" != "$previous_pid"
+          test "$current_pid" = "$previous_pid"
           sudo systemctl is-active --quiet shoes.service
           for _ in {1..20}; do
             if sudo ss -H -lun | awk '{print $4}' | grep -Eq '(^|:)24445$'; then
@@ -915,6 +915,7 @@ jobs:
             sudo test -s "/etc/shoes/profiles/$profile_file"
           done
 
+          edit_pid_before="$(sudo systemctl show --property MainPID --value shoes.service)"
           profile_number="$(sudo python3 - <<'PY'
           import json
           with open('/etc/shoes/ping-rust-state.json', encoding='utf-8') as stream:
@@ -949,6 +950,7 @@ jobs:
           wait_for {已退出} exit-message
           expect { eof {} timeout { puts stderr "timeout waiting for change exit"; exit 33 } }
           EXPECT
+          test "$(sudo systemctl show --property MainPID --value shoes.service)" = "$edit_pid_before"
           wait_listener t 25450
           ! sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)25448$'
           sudo test ! -e /etc/shoes/profiles/VLESS-REALITY-25448.yaml
@@ -971,6 +973,7 @@ jobs:
           print(next(index for index, profile in enumerate(profiles, 1) if profile['port'] == 25449))
           PY
           )"
+          delete_pid_before="$(sudo systemctl show --property MainPID --value shoes.service)"
           sudo env PRS_COMMAND="$PRS" PROFILE_NUMBER="$profile_number" \
             SS_PROFILE_NUMBER="$ss_profile_number" expect <<'EXPECT'
           log_user 0
@@ -1016,6 +1019,8 @@ jobs:
           wait_for {已退出} exit-message
           expect { eof {} timeout { puts stderr "timeout waiting for delete exit"; exit 37 } }
           EXPECT
+          test "$(sudo systemctl show --property MainPID --value shoes.service)" = "$delete_pid_before"
+          wait_listener t 25450
           sudo test ! -e /etc/shoes/profiles/SHADOWSOCKS-25449.yaml
           for _ in {1..20}; do
             if ! sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)25449$'; then

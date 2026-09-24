@@ -43,10 +43,14 @@ where
     let old_profiles = ProfileDirectorySnapshot::capture(profiles_path)?;
     let documents = profile_documents(servers, &state.profiles)?;
     let aggregate_yaml = aggregate_profile_documents(&documents, &state.profiles)?;
+    let runtime_unchanged = old_config.as_deref() == Some(aggregate_yaml.as_bytes());
     let commit = (|| {
         write_profile_documents(profiles_path, &documents)?;
-        utils::atomic_write(config_path, aggregate_yaml.as_bytes(), 0o600)?;
-        write_state(state_path, state)
+        write_state(state_path, state)?;
+        if !runtime_unchanged {
+            utils::atomic_write(config_path, aggregate_yaml.as_bytes(), 0o600)?;
+        }
+        Ok::<(), anyhow::Error>(())
     })();
     if let Err(error) = commit {
         let state_rollback = restore_snapshot(state_path, old_state.as_deref(), 0o600);

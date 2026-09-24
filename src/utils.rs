@@ -1,7 +1,7 @@
 use std::{
     env, fs,
     fs::File,
-    io::{self, Write},
+    io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::Command,
 };
@@ -17,6 +17,8 @@ pub const STATE_FILE: &str = "/etc/shoes/ping-rust-state.json";
 pub const SHOES_PROVENANCE_FILE: &str = "/var/lib/ping-rust/shoes-install.json";
 pub const LOCK_FILE: &str = "/run/lock/ping-rust.lock";
 pub const SERVICE_FILE: &str = "/etc/systemd/system/shoes.service";
+pub const HOT_RELOAD_ANCHOR_FILE: &str = "/var/lib/ping-rust/.shoes-config-watch";
+const HOT_RELOAD_ANCHOR_PID_FILE: &str = "/var/lib/ping-rust/.shoes-config-watch-pid";
 
 pub fn remove_command_aliases() -> Result<usize> {
     let executable = env::current_exe().context("无法确定 ping-rust 当前路径")?;
@@ -194,6 +196,64 @@ pub fn atomic_write(destination: &Path, contents: &[u8], mode: u32) -> Result<()
     temp.as_file().sync_all().context("同步临时文件失败")?;
     set_mode(temp.path(), mode)?;
     persist_replace(temp, destination)
+}
+
+/// Keep a hard link to the inode watched by shoes.  shoes watches the config
+/// file itself, while ping-rust replaces it atomically; touching this anchor
+/// lets the watcher observe later replacements without weakening atomicity.
+pub fn prepare_hot_reload_anchor(pid: u32) -> Result<()> {
+    let config = Path::new(CONFIG_FILE);
+    let config_metadata = fs::symlink_metadata(config)?;
+    if !config_metadata.is_file() || config_metadata.file_type().is_symlink() {
+        bail!("shoes 聚合配置不是普通文件：{}", config.display());
+    }
+    let anchor = Path::new(HOT_RELOAD_ANCHOR_FILE);
+    let pid_path = Path::new(HOT_RELOAD_ANCHOR_PID_FILE);
+    let parent = anchor.parent().context("热重载锚点路径没有父目录")?;
+    ensure_directory(parent, 0o700)?;
+    if anchor.exists() {
+        let metadata = fs::symlink_metadata(anchor)?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            bail!("热重载锚点不是普通文件：{}", anchor.display());
+        }
+        if fs::read_to_string(pid_path)
+            .ok()
+            .is_some_and(|recorded| recorded.trim() == pid.to_string())
+        {
+            return Ok(());
+        }
+        fs::remove_file(anchor).context("更新 shoes 热重载锚点失败")?;
+    }
+    fs::hard_link(config, anchor).with_context(|| {
+        format!(
+            "创建 shoes 热重载锚点失败：{} -> {}",
+            config.display(),
+            anchor.display()
+        )
+    })?;
+    atomic_write(pid_path, pid.to_string().as_bytes(), 0o600)
+}
+
+/// Generate a file modification event on the inode watched by shoes without
+/// changing its contents. The aggregate config is already committed when this
+/// is called, so shoes rereads the new path atomically.
+pub fn notify_hot_reload_anchor() -> Result<()> {
+    let anchor = Path::new(HOT_RELOAD_ANCHOR_FILE);
+    let mut file = File::options()
+        .read(true)
+        .write(true)
+        .open(anchor)
+        .with_context(|| format!("打开 shoes 热重载锚点失败：{}", anchor.display()))?;
+    let length = file.metadata()?.len();
+    if length == 0 {
+        file.set_len(0)?;
+    } else {
+        let mut byte = [0u8; 1];
+        file.read_exact(&mut byte)?;
+        file.seek(SeekFrom::Start(0))?;
+        file.write_all(&byte)?;
+    }
+    file.sync_all().context("同步 shoes 热重载锚点失败")
 }
 
 pub fn ensure_directory(path: &Path, mode: u32) -> Result<()> {

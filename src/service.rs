@@ -1,4 +1,4 @@
-use std::{fs, path::Path, process::Command, thread, time::Duration};
+use std::{collections::BTreeSet, fs, path::Path, process::Command, thread, time::Duration};
 
 use anyhow::{bail, Context, Result};
 use clap::ValueEnum;
@@ -15,7 +15,16 @@ pub struct ServiceSnapshot {
     unit_contents: Option<Vec<u8>>,
     was_active: bool,
     was_enabled: bool,
+    main_pid: Option<u32>,
 }
+
+pub struct HotReloadSnapshot {
+    pub main_pid: u32,
+    pub listening_ports: BTreeSet<u16>,
+}
+
+const HOT_RELOAD_TIMEOUT: Duration = Duration::from_secs(6);
+const HOT_RELOAD_POLL: Duration = Duration::from_millis(200);
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum ServiceAction {
@@ -130,11 +139,134 @@ pub fn capture_snapshot() -> Result<ServiceSnapshot> {
         Err(error) => return Err(error).context("读取现有 systemd unit 失败"),
     };
     let unit_exists = unit_contents.is_some();
+    let was_active = unit_exists && systemctl_is_active()?;
     Ok(ServiceSnapshot {
         unit_contents,
-        was_active: unit_exists && systemctl_is_active()?,
+        was_active,
         was_enabled: unit_exists && systemctl_is_enabled()?,
+        main_pid: was_active.then(main_pid).transpose()?.flatten(),
     })
+}
+
+pub fn capture_hot_reload_snapshot(
+    snapshot: &ServiceSnapshot,
+) -> Result<Option<HotReloadSnapshot>> {
+    if !snapshot.was_active || snapshot.unit_contents.as_deref() != Some(unit_contents().as_bytes())
+    {
+        return Ok(None);
+    }
+    if !systemctl_show_value("DropInPaths")?.is_empty() {
+        return Ok(None);
+    }
+    let main_pid = snapshot
+        .main_pid
+        .context("shoes.service active but MainPID is unavailable")?;
+    utils::prepare_hot_reload_anchor(main_pid)?;
+    Ok(Some(HotReloadSnapshot {
+        main_pid,
+        listening_ports: listening_ports(main_pid)?,
+    }))
+}
+
+pub fn hot_reload_and_verify(
+    snapshot: HotReloadSnapshot,
+    expected_ports: &BTreeSet<u16>,
+    removed_ports: &BTreeSet<u16>,
+) -> Result<()> {
+    utils::notify_hot_reload_anchor()?;
+    let deadline = std::time::Instant::now() + HOT_RELOAD_TIMEOUT;
+    loop {
+        let active = systemctl_is_active()?;
+        let current_pid = main_pid()?.unwrap_or(0);
+        let ports = if active && current_pid == snapshot.main_pid {
+            listening_ports(current_pid)?
+        } else {
+            BTreeSet::new()
+        };
+        if reload_observation(
+            snapshot.main_pid,
+            current_pid,
+            active,
+            &ports,
+            expected_ports,
+            removed_ports,
+        )? {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            bail!(
+                "shoes 热重载未在 {:?} 内达到预期监听端口；当前={ports:?}，期望新增={expected_ports:?}，期望删除={removed_ports:?}",
+                HOT_RELOAD_TIMEOUT
+            );
+        }
+        thread::sleep(HOT_RELOAD_POLL);
+    }
+}
+
+fn reload_observation(
+    original_pid: u32,
+    current_pid: u32,
+    active: bool,
+    ports: &BTreeSet<u16>,
+    expected_ports: &BTreeSet<u16>,
+    removed_ports: &BTreeSet<u16>,
+) -> Result<bool> {
+    if !active || current_pid == 0 {
+        bail!("shoes 热重载后服务未保持 active");
+    }
+    if current_pid != original_pid {
+        bail!(
+            "shoes 热重载触发了进程重启（旧 MainPID={}，新 MainPID={}）",
+            original_pid,
+            current_pid
+        );
+    }
+    Ok(expected_ports.is_subset(ports) && removed_ports.is_disjoint(ports))
+}
+
+pub fn main_pid() -> Result<Option<u32>> {
+    let value = systemctl_show_value("MainPID")?;
+    let pid = value
+        .parse::<u32>()
+        .with_context(|| format!("systemd 返回了无效 MainPID：{value}"))?;
+    Ok((pid != 0).then_some(pid))
+}
+
+fn systemctl_show_value(property: &str) -> Result<String> {
+    let output = Command::new("systemctl")
+        .args([
+            "show",
+            &format!("--property={property}"),
+            "--value",
+            SERVICE_NAME,
+        ])
+        .output()
+        .with_context(|| format!("无法查询 shoes.service {property}"))?;
+    if !output.status.success() {
+        bail!(
+            "查询 shoes.service {property} 失败（退出码：{}）",
+            output.status
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+fn listening_ports(pid: u32) -> Result<BTreeSet<u16>> {
+    let output = Command::new("ss")
+        .args(["-H", "-lntup"])
+        .output()
+        .context("无法查询 shoes 监听端口")?;
+    if !output.status.success() {
+        bail!("查询 shoes 监听端口失败（退出码：{}）", output.status);
+    }
+    let marker = format!("pid={pid},");
+    let ports = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| line.contains(&marker))
+        .filter_map(|line| line.split_whitespace().nth(4))
+        .filter_map(|address| address.rsplit_once(':')?.1.parse::<u16>().ok())
+        .collect();
+    Ok(ports)
 }
 
 pub fn restore_snapshot(snapshot: ServiceSnapshot) -> Result<()> {
@@ -164,6 +296,9 @@ pub fn restore_snapshot(snapshot: ServiceSnapshot) -> Result<()> {
         }
         if snapshot.was_active {
             systemctl_after_reset(START_COMMAND)?;
+            verify_active_stable(systemctl_is_active, || {
+                thread::sleep(Duration::from_millis(750))
+            })?;
         } else {
             let _ = Command::new("systemctl")
                 .args(["stop", SERVICE_NAME])
@@ -325,5 +460,32 @@ mod tests {
 
         let mut samples = [true, false].into_iter();
         assert!(verify_active_stable(|| Ok(samples.next().unwrap()), || {}).is_err());
+    }
+
+    #[test]
+    fn hot_reload_requires_same_pid_and_exact_listener_delta() {
+        let expected = BTreeSet::from([1001, 1003]);
+        let removed = BTreeSet::from([1002]);
+        assert!(reload_observation(42, 42, true, &expected, &expected, &removed).unwrap());
+        assert!(!reload_observation(
+            42,
+            42,
+            true,
+            &BTreeSet::from([1001, 1002]),
+            &expected,
+            &removed
+        )
+        .unwrap());
+        assert!(!reload_observation(
+            42,
+            42,
+            true,
+            &BTreeSet::from([1001, 1002, 1003]),
+            &expected,
+            &removed
+        )
+        .unwrap());
+        assert!(reload_observation(42, 43, true, &expected, &expected, &removed).is_err());
+        assert!(reload_observation(42, 0, false, &expected, &expected, &removed).is_err());
     }
 }

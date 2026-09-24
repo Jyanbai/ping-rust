@@ -1,4 +1,4 @@
-use std::{error::Error, fmt, path::Path};
+use std::{collections::BTreeSet, error::Error, fmt, path::Path};
 
 use anyhow::{bail, Result};
 
@@ -40,8 +40,26 @@ pub async fn generate_and_activate(request: GenerationRequest) -> Result<Generat
     utils::require_linux_root()?;
     let lock = utils::exclusive_lock(Path::new(utils::LOCK_FILE))?;
     let service_snapshot = service::capture_snapshot()?;
+    let hot_reload_snapshot = service::capture_hot_reload_snapshot(&service_snapshot)
+        .ok()
+        .flatten()
+        .filter(|snapshot| {
+            config::load_state().is_ok_and(|state| {
+                state
+                    .profiles
+                    .iter()
+                    .all(|profile| snapshot.listening_ports.contains(&profile.port))
+            })
+        });
     let mut result = config::generate_locked(request, lock).await?;
-    if let Err(activation) = service::activate_and_verify() {
+    let activation = if let Some(snapshot) = hot_reload_snapshot {
+        let mut expected = snapshot.listening_ports.clone();
+        expected.insert(result.profile.port);
+        service::hot_reload_and_verify(snapshot, &expected, &BTreeSet::new())
+    } else {
+        service::activate_and_verify()
+    };
+    if let Err(activation) = activation {
         let _rollback_timer = performance::stage("rollback_restore");
         let config_rollback = result.rollback_managed();
         let service_rollback = service::restore_snapshot(service_snapshot);
@@ -68,8 +86,46 @@ pub async fn update_and_activate(id: Uuid, change: ProfileChange) -> Result<Gene
     utils::require_linux_root()?;
     let lock = utils::exclusive_lock(Path::new(utils::LOCK_FILE))?;
     let service_snapshot = service::capture_snapshot()?;
+    let observable_port_change = matches!(&change, ProfileChange::Port(_));
+    let previous_port = if observable_port_change {
+        config::load_state()?
+            .profiles
+            .iter()
+            .find(|profile| profile.id == id)
+            .map(|profile| profile.port)
+    } else {
+        None
+    };
+    let hot_reload_snapshot = observable_port_change
+        .then(|| {
+            service::capture_hot_reload_snapshot(&service_snapshot)
+                .ok()
+                .flatten()
+        })
+        .flatten()
+        .filter(|snapshot| {
+            previous_port.is_some_and(|port| snapshot.listening_ports.contains(&port))
+        });
     let mut result = config::update_profile_locked(id, change, lock).await?;
-    if let Err(activation) = service::activate_and_verify() {
+    if !result.runtime_config_changed {
+        result.finish_update();
+        return Ok(result);
+    }
+    let activation = if let Some(snapshot) = hot_reload_snapshot {
+        let mut expected = snapshot.listening_ports.clone();
+        if let Some(previous_port) = previous_port {
+            expected.remove(&previous_port);
+        }
+        expected.insert(result.profile.port);
+        let mut removed = BTreeSet::new();
+        if let Some(previous_port) = previous_port.filter(|port| *port != result.profile.port) {
+            removed.insert(previous_port);
+        }
+        service::hot_reload_and_verify(snapshot, &expected, &removed)
+    } else {
+        service::activate_and_verify()
+    };
+    if let Err(activation) = activation {
         let _rollback_timer = performance::stage("rollback_restore");
         let config_rollback = result.rollback_managed();
         let service_rollback = service::restore_snapshot(service_snapshot);
@@ -97,11 +153,31 @@ pub async fn delete_and_activate(id: Uuid) -> Result<config::ManagedProfile> {
     let lock = utils::exclusive_lock(Path::new(utils::LOCK_FILE))?;
     let service_snapshot = service::capture_snapshot()?;
     let was_active = Path::new(utils::SERVICE_FILE).exists() && service::is_active()?;
+    let hot_reload_snapshot = if was_active {
+        service::capture_hot_reload_snapshot(&service_snapshot)
+            .ok()
+            .flatten()
+    } else {
+        None
+    }
+    .filter(|snapshot| {
+        config::load_state().is_ok_and(|state| {
+            state
+                .profiles
+                .iter()
+                .all(|profile| snapshot.listening_ports.contains(&profile.port))
+        })
+    });
     let mut result = config::delete_profile_locked(id, lock).await?;
     let activation = if !was_active {
         Ok(())
     } else if result.remaining_profiles == 0 {
         service::execute(service::ServiceAction::Stop)
+    } else if let Some(snapshot) = hot_reload_snapshot {
+        let mut expected = snapshot.listening_ports.clone();
+        expected.remove(&result.profile.port);
+        let removed = BTreeSet::from([result.profile.port]);
+        service::hot_reload_and_verify(snapshot, &expected, &removed)
     } else {
         service::activate_and_verify()
     };

@@ -426,6 +426,7 @@ pub struct GenerationResult {
     pub certificate_key_path: Option<PathBuf>,
     pub credentials: Credentials,
     pub profile: ManagedProfile,
+    pub(crate) runtime_config_changed: bool,
     rollback: Option<ManagedRollback>,
     retired_certificate: Option<PathBuf>,
     retired_certificate_key: Option<PathBuf>,
@@ -875,6 +876,7 @@ async fn generate_inner_with_lock(
         certificate_key_path,
         credentials,
         profile,
+        runtime_config_changed: true,
         rollback,
         retired_certificate: None,
         retired_certificate_key: None,
@@ -996,6 +998,7 @@ pub(crate) async fn update_profile_locked(
     }
     let profile = state.profiles[index].clone();
     let yaml = serde_yaml::to_string(&servers).context("序列化更新后 shoes YAML 失败")?;
+    let runtime_config_changed = rollback.config.as_deref() != Some(yaml.as_bytes());
     validate_yaml(&yaml)?;
     validate_candidate_with_shoes(&yaml, Path::new(utils::CONFIG_DIR)).await?;
     commit_managed(config_path, state_path, &servers, &state)?;
@@ -1010,6 +1013,7 @@ pub(crate) async fn update_profile_locked(
         certificate_key_path: profile.certificate_key_path.clone(),
         credentials: profile.credentials.clone(),
         profile,
+        runtime_config_changed,
         rollback: Some(rollback),
         retired_certificate,
         retired_certificate_key,
