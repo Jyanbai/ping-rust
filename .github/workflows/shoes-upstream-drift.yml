@@ -62,6 +62,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo build --locked
+          PING_RUST_SHOES_E2E_BIN=/usr/local/bin/shoes cargo test --locked pinned_shoes_watches_repeated_atomic_config_replacements -- --nocapture
           PING_RUST_SHOES_E2E_BIN=/usr/local/bin/shoes bash scripts/ci/validate-shoes-schema.sh \
             2>&1 | tee "$RUNNER_TEMP/shoes-upstream-validation.log"
           echo '::warning::New shoes upstream commit is available and compatible with current ping-rust tests.'

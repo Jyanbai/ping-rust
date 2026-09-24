@@ -56,6 +56,10 @@ jobs:
           grep -F "$SHOES_VERSION" <<<"$shoes_version"
       - name: Build ping-rust
         run: cargo build --locked
+      - name: Probe repeated atomic replacements against pinned shoes
+        env:
+          PING_RUST_SHOES_E2E_BIN: /usr/local/bin/shoes
+        run: cargo test --locked pinned_shoes_watches_repeated_atomic_config_replacements -- --nocapture
       - name: Validate complete shoes compatibility matrix
         env:
           PING_RUST_SHOES_E2E_BIN: /usr/local/bin/shoes

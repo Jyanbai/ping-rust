@@ -234,6 +234,58 @@ mod tests {
     use super::*;
 
     #[test]
+    fn pinned_shoes_watches_repeated_atomic_config_replacements() {
+        let Some(binary) = std::env::var_os("PING_RUST_SHOES_E2E_BIN") else {
+            return;
+        };
+        let work = tempfile::tempdir().unwrap();
+        let config = work.path().join("config.yaml");
+        let ports = (0..3)
+            .map(|_| {
+                let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                listener.local_addr().unwrap().port()
+            })
+            .collect::<Vec<_>>();
+        let yaml = |port| {
+            format!(
+            "- address: 127.0.0.1:{port}\n  protocol:\n    type: socks\n    udp_enabled: false\n  rules:\n  - allow-all-direct\n"
+        )
+        };
+        atomic_write(&config, yaml(ports[0]).as_bytes(), 0o600).unwrap();
+        let log_file = std::fs::File::create(work.path().join("shoes.log")).unwrap();
+        let mut process = std::process::Command::new(binary)
+            .arg(&config)
+            .stdout(log_file.try_clone().unwrap())
+            .stderr(log_file)
+            .spawn()
+            .unwrap();
+        let probe = |port| std::net::TcpStream::connect(("127.0.0.1", port)).is_ok();
+        let wait = |port, expected| {
+            for _ in 0..100 {
+                if probe(port) == expected {
+                    return true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            false
+        };
+        let initial = wait(ports[0], true);
+        let mut replacements = Vec::new();
+        if initial {
+            for index in 1..3 {
+                atomic_write(&config, yaml(ports[index]).as_bytes(), 0o600).unwrap();
+                replacements.push((wait(ports[index], true), wait(ports[index - 1], false)));
+            }
+        }
+        let _ = process.kill();
+        let _ = process.wait();
+        let log = std::fs::read_to_string(work.path().join("shoes.log")).unwrap();
+        println!("shoes hot reload probe: initial={initial}, replacements={replacements:?}\n{log}");
+        assert!(initial, "initial shoes listener did not start");
+        assert_eq!(replacements, vec![(true, true), (true, true)]);
+    }
+
+    #[test]
     fn atomic_write_replaces_content() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("config.yaml");
