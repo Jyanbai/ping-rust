@@ -159,26 +159,40 @@ pub fn capture_hot_reload_snapshot(
 ) -> Result<Option<HotReloadSnapshot>> {
     if !snapshot.was_active || snapshot.unit_contents.as_deref() != Some(unit_contents().as_bytes())
     {
+        hot_reload_trace("service inactive or unit differs from managed unit");
         return Ok(None);
     }
     let shoes = installer::load_provenance();
     if shoes.source != "verified-pin"
         || shoes.revision.as_deref() != Some(installer::verified_pin())
     {
+        hot_reload_trace("shoes verified-pin provenance unavailable");
         return Ok(None);
     }
     let drop_ins = systemctl_show_value("DropInPaths")?;
     if !drop_ins.is_empty() && drop_ins != "-" {
+        hot_reload_trace("systemd unit has drop-ins");
         return Ok(None);
     }
     let main_pid = snapshot
         .main_pid
         .context("shoes.service active but MainPID is unavailable")?;
     utils::prepare_hot_reload_anchor(main_pid)?;
-    Ok(Some(HotReloadSnapshot {
+    let snapshot = HotReloadSnapshot {
         main_pid,
         listening_ports: listening_ports(main_pid)?,
-    }))
+    };
+    hot_reload_trace(&format!(
+        "candidate PID={} ports={:?}",
+        snapshot.main_pid, snapshot.listening_ports
+    ));
+    Ok(Some(snapshot))
+}
+
+pub(crate) fn hot_reload_trace(message: &str) {
+    if std::env::var_os("PING_RUST_HOT_RELOAD_TRACE").is_some() {
+        eprintln!("hot reload: {message}");
+    }
 }
 
 pub fn hot_reload_and_verify(
@@ -186,6 +200,10 @@ pub fn hot_reload_and_verify(
     expected_ports: &BTreeSet<u16>,
     removed_ports: &BTreeSet<u16>,
 ) -> Result<()> {
+    hot_reload_trace(&format!(
+        "trigger PID={} expected={expected_ports:?} removed={removed_ports:?}",
+        snapshot.main_pid
+    ));
     utils::notify_hot_reload_anchor()?;
     let deadline = std::time::Instant::now() + HOT_RELOAD_TIMEOUT;
     loop {
@@ -204,9 +222,11 @@ pub fn hot_reload_and_verify(
             expected_ports,
             removed_ports,
         )? {
+            hot_reload_trace("verified listener delta");
             return Ok(());
         }
         if std::time::Instant::now() >= deadline {
+            hot_reload_trace(&format!("timeout current={ports:?}"));
             bail!(
                 "shoes 热重载未在 {:?} 内达到预期监听端口；当前={ports:?}，期望新增={expected_ports:?}，期望删除={removed_ports:?}",
                 HOT_RELOAD_TIMEOUT
