@@ -285,21 +285,54 @@ fn systemctl_show_value(property: &str) -> Result<String> {
 }
 
 fn listening_ports(pid: u32) -> Result<BTreeSet<u16>> {
-    let output = Command::new("ss")
-        .args(["-H", "-lntup"])
-        .output()
-        .context("无法查询 shoes 监听端口")?;
-    if !output.status.success() {
-        bail!("查询 shoes 监听端口失败（退出码：{}）", output.status);
+    let fd_dir = format!("/proc/{pid}/fd");
+    let mut socket_inodes = BTreeSet::new();
+    for entry in fs::read_dir(&fd_dir).with_context(|| format!("读取 {fd_dir} 失败"))? {
+        let entry = entry?;
+        let target = match fs::read_link(entry.path()) {
+            Ok(target) => target,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error).context("读取 shoes socket fd 失败"),
+        };
+        if let Some(inode) = target
+            .to_string_lossy()
+            .strip_prefix("socket:[")
+            .and_then(|value| value.strip_suffix(']'))
+            .and_then(|value| value.parse::<u64>().ok())
+        {
+            socket_inodes.insert(inode);
+        }
     }
-    let marker = format!("pid={pid},");
-    let ports = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter(|line| line.contains(&marker))
-        .filter_map(|line| line.split_whitespace().nth(4))
-        .filter_map(|address| address.rsplit_once(':')?.1.parse::<u16>().ok())
-        .collect();
+    let mut ports = BTreeSet::new();
+    for (name, tcp) in [
+        ("tcp", true),
+        ("tcp6", true),
+        ("udp", false),
+        ("udp6", false),
+    ] {
+        let path = format!("/proc/net/{name}");
+        let table = fs::read_to_string(&path).with_context(|| format!("读取 {path} 失败"))?;
+        ports.extend(parse_proc_net_ports(&table, &socket_inodes, tcp));
+    }
     Ok(ports)
+}
+
+fn parse_proc_net_ports(table: &str, socket_inodes: &BTreeSet<u64>, tcp: bool) -> BTreeSet<u16> {
+    table
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let columns = line.split_whitespace().collect::<Vec<_>>();
+            let local = *columns.get(1)?;
+            let state = *columns.get(3)?;
+            let inode = columns.get(9)?.parse::<u64>().ok()?;
+            if !socket_inodes.contains(&inode) || (tcp && state != "0A") {
+                return None;
+            }
+            let port = local.rsplit_once(':')?.1;
+            u16::from_str_radix(port, 16).ok()
+        })
+        .collect()
 }
 
 pub fn restore_snapshot(snapshot: ServiceSnapshot) -> Result<()> {
@@ -520,5 +553,12 @@ mod tests {
         .unwrap());
         assert!(reload_observation(42, 43, true, &expected, &expected, &removed).is_err());
         assert!(reload_observation(42, 0, false, &expected, &expected, &removed).is_err());
+    }
+
+    #[test]
+    fn proc_net_parser_filters_pid_sockets_and_tcp_state() {
+        let table = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n  0: 0100007F:1F90 00000000:0000 0A 00000000:0000 00:00000000 00000000   0        0 7001 1 0000000000000000 100 0 0 10 0\n  1: 0100007F:1F91 00000000:0000 01 00000000:0000 00:00000000 00000000   0        0 7002 1 0000000000000000 100 0 0 10 0\n";
+        let ports = parse_proc_net_ports(table, &BTreeSet::from([7001, 7002]), true);
+        assert_eq!(ports, BTreeSet::from([8080]));
     }
 }
