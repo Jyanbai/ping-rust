@@ -14,6 +14,7 @@ pub const CONFIG_DIR: &str = "/etc/shoes";
 pub const CONFIG_FILE: &str = "/etc/shoes/config.yaml";
 pub const PROFILES_DIR: &str = "/etc/shoes/profiles";
 pub const STATE_FILE: &str = "/etc/shoes/ping-rust-state.json";
+pub const SHOES_PROVENANCE_FILE: &str = "/var/lib/ping-rust/shoes-install.json";
 pub const LOCK_FILE: &str = "/run/lock/ping-rust.lock";
 pub const SERVICE_FILE: &str = "/etc/systemd/system/shoes.service";
 

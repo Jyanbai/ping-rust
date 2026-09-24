@@ -47,6 +47,14 @@ const OPERATIONS_MENU_ITEMS: [&str; 9] = [
     "更新 ping-rust",
 ];
 
+const UPDATE_CENTER_ITEMS: [&str; 3] =
+    ["更新 ping-rust（推荐）", "更新 shoes 内核", "检查更新状态"];
+
+const SHOES_UPDATE_ITEMS: [&str; 2] = [
+    "安装 ping-rust 已验证版本（推荐）",
+    "安装 shoes 最新 GitHub Release（高级）",
+];
+
 #[derive(Clone, Copy)]
 enum ChangeAction {
     Port,
@@ -231,10 +239,7 @@ pub async fn run() -> Result<()> {
                 service_menu()?;
                 Ok(MenuControl::Continue)
             }
-            6 => {
-                update_menu().await?;
-                Ok(MenuControl::Continue)
-            }
+            6 => update_menu().await,
             7 => {
                 uninstall_menu()?;
                 Ok(MenuControl::Continue)
@@ -244,10 +249,7 @@ pub async fn run() -> Result<()> {
                 println!("高级帮助：ping-rust --help");
                 Ok(MenuControl::Continue)
             }
-            9 => {
-                operations_menu().await?;
-                Ok(MenuControl::Continue)
-            }
+            9 => operations_menu().await,
             10 => {
                 println!("ping-rust {}", env!("CARGO_PKG_VERSION"));
                 println!("Rust 实现的 shoes 菜单式安装与管理工具");
@@ -694,10 +696,17 @@ async fn delete_config_menu() -> Result<()> {
     Ok(())
 }
 
-async fn operations_menu() -> Result<()> {
+async fn operations_menu() -> Result<MenuControl> {
     let Some(selected) = select_numbered("运维工具", &OPERATIONS_MENU_ITEMS)? else {
-        return Ok(());
+        return Ok(MenuControl::Continue);
     };
+    if selected == 8 {
+        return Ok(if cli::run_self_update(None, false).await? {
+            MenuControl::Exit
+        } else {
+            MenuControl::Continue
+        });
+    }
     match selected {
         0 => chain_proxy_menu().await,
         1 => advanced_add_config_menu().await,
@@ -745,9 +754,9 @@ async fn operations_menu() -> Result<()> {
             Ok(())
         }
         7 => export_menu(),
-        8 => cli::run_self_update(None, false).await,
         _ => unreachable!("运维菜单编号已验证"),
-    }
+    }?;
+    Ok(MenuControl::Continue)
 }
 
 async fn chain_proxy_menu() -> Result<()> {
@@ -1540,17 +1549,55 @@ async fn advanced_add_config_menu() -> Result<()> {
     Ok(())
 }
 
-async fn update_menu() -> Result<()> {
-    let choices = ["GitHub Release（推荐）", "cargo 固定源码编译 shoes"];
-    let Some(selected) = select_numbered("选择更新方式", &choices)? else {
+async fn update_menu() -> Result<MenuControl> {
+    let Some(selected) = select_numbered("更新中心", &UPDATE_CENTER_ITEMS)? else {
+        return Ok(MenuControl::Continue);
+    };
+    match selected {
+        0 => Ok(if cli::run_self_update(None, false).await? {
+            MenuControl::Exit
+        } else {
+            MenuControl::Continue
+        }),
+        1 => shoes_update_menu().await.map(|_| MenuControl::Continue),
+        2 => {
+            cli::print_update_status().await?;
+            Ok(MenuControl::Continue)
+        }
+        _ => unreachable!("更新中心编号已验证"),
+    }
+}
+
+async fn shoes_update_menu() -> Result<()> {
+    let Some(selected) = select_numbered("shoes 内核", &SHOES_UPDATE_ITEMS)? else {
         return Ok(());
     };
-    let method = match selected {
-        0 => InstallMethod::Release,
-        1 => InstallMethod::Cargo,
-        _ => unreachable!("更新菜单编号已验证"),
+    let report = match selected {
+        0 => cli::update_shoes(InstallMethod::Cargo).await?,
+        1 => {
+            let target = installer::latest_release_tag().await?;
+            let known = installer::load_provenance();
+            let needs_override = std::path::Path::new(crate::utils::SHOES_BIN).is_file()
+                && !installer::downgrade_allowed(known.version.as_deref(), Some(&target), false);
+            let prompt = if needs_override {
+                match known.version.as_deref() {
+                    Some(current) => format!("GitHub Release {target} 低于当前已知 shoes {current}。明确允许降级？"),
+                    None => format!("当前 shoes 版本/来源未知，无法证明 GitHub Release {target} 不会降级。明确允许安装？"),
+                }
+            } else {
+                format!("安装 shoes GitHub Release {target}（高级选项）？")
+            };
+            if !Confirm::with_theme(&ColorfulTheme::default())
+                .with_prompt(prompt)
+                .default(false)
+                .interact()?
+            {
+                return Ok(());
+            }
+            cli::update_shoes_with_options(InstallMethod::Release, needs_override).await?
+        }
+        _ => unreachable!("shoes 更新菜单编号已验证"),
     };
-    let report = cli::update_shoes(method).await?;
     println!("{} {}", "更新成功：".green(), report.version);
     Ok(())
 }
@@ -1602,6 +1649,19 @@ fn uninstall_menu() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn update_center_numbers_are_stable_and_explicit() {
+        assert_eq!(
+            UPDATE_CENTER_ITEMS,
+            ["更新 ping-rust（推荐）", "更新 shoes 内核", "检查更新状态",]
+        );
+        assert_eq!(SHOES_UPDATE_ITEMS[0], "安装 ping-rust 已验证版本（推荐）");
+        assert_eq!(
+            SHOES_UPDATE_ITEMS[1],
+            "安装 shoes 最新 GitHub Release（高级）"
+        );
+    }
 
     #[test]
     fn uses_zero_for_exit_and_sequential_protocol_numbers() {

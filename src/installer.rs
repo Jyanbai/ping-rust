@@ -13,7 +13,9 @@ use flate2::read::GzDecoder;
 use futures_util::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::Client;
+use semver::Version;
 use serde::Deserialize;
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tar::Archive;
 use tokio::process::Command;
@@ -23,6 +25,7 @@ use crate::{config, performance, utils};
 const LATEST_RELEASE_API: &str = "https://api.github.com/repos/cfal/shoes/releases/latest";
 const SHOES_GIT_REPOSITORY: &str = "https://github.com/cfal/shoes";
 const SHOES_SCHEMA_REVISION: &str = "386b11532424b8665ee3e46340c6236fb3c47595";
+const SHOES_SCHEMA_VERSION: &str = "0.2.8";
 const MAX_ARCHIVE_SIZE: u64 = 128 * 1024 * 1024;
 const MAX_BINARY_SIZE: u64 = 128 * 1024 * 1024;
 const LOW_MEMORY_THRESHOLD_KIB: u64 = 1024 * 1024;
@@ -35,6 +38,96 @@ pub enum InstallMethod {
     Cargo,
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ShoesProvenance {
+    pub source: String,
+    pub version: Option<String>,
+    pub revision: Option<String>,
+    pub release_tag: Option<String>,
+    pub binary_sha256: Option<String>,
+}
+
+pub fn verified_pin() -> &'static str {
+    SHOES_SCHEMA_REVISION
+}
+
+pub fn verified_version() -> &'static str {
+    SHOES_SCHEMA_VERSION
+}
+
+pub fn load_provenance() -> ShoesProvenance {
+    load_provenance_from(
+        Path::new(utils::SHOES_PROVENANCE_FILE),
+        Path::new(utils::SHOES_BIN),
+    )
+}
+
+fn load_provenance_from(path: &Path, binary: &Path) -> ShoesProvenance {
+    if !path
+        .symlink_metadata()
+        .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
+    {
+        return ShoesProvenance::default();
+    }
+    let parsed = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|value| serde_json::from_str(&value).ok())
+        .unwrap_or_default();
+    let ShoesProvenance {
+        binary_sha256: Some(expected),
+        ..
+    } = &parsed
+    else {
+        return ShoesProvenance::default();
+    };
+    match binary_digest(binary) {
+        Ok(actual) if &actual == expected => parsed,
+        _ => ShoesProvenance::default(),
+    }
+}
+
+fn binary_digest(path: &Path) -> Result<String> {
+    let bytes = fs::read(path).with_context(|| format!("读取 {} 失败", path.display()))?;
+    Ok(hex::encode(Sha256::digest(&bytes)))
+}
+
+fn write_provenance(provenance: &ShoesProvenance) -> Result<()> {
+    let path = Path::new(utils::SHOES_PROVENANCE_FILE);
+    write_provenance_to(path, Path::new(utils::SHOES_BIN), provenance)
+}
+
+fn write_provenance_to(path: &Path, binary: &Path, provenance: &ShoesProvenance) -> Result<()> {
+    let parent = path.parent().context("shoes 安装来源路径没有父目录")?;
+    utils::ensure_directory(parent, 0o700)?;
+    if path
+        .symlink_metadata()
+        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+    {
+        bail!("shoes 安装来源路径不能是符号链接")
+    }
+    let mut provenance = provenance.clone();
+    provenance.binary_sha256 = Some(binary_digest(binary)?);
+    let json = serde_json::to_vec_pretty(&provenance).context("序列化 shoes 安装来源失败")?;
+    utils::atomic_write(path, &json, 0o600)
+}
+
+fn release_version(tag: &str) -> Option<Version> {
+    Version::parse(tag.trim().strip_prefix('v').unwrap_or(tag.trim())).ok()
+}
+
+pub fn downgrade_allowed(current: Option<&str>, target: Option<&str>, allow: bool) -> bool {
+    if allow {
+        return true;
+    }
+    match (
+        current.and_then(release_version),
+        target.and_then(release_version),
+    ) {
+        (Some(current), Some(target)) => target >= current,
+        _ => false,
+    }
+}
+
 #[derive(Debug)]
 pub struct InstallReport {
     pub version: String,
@@ -42,6 +135,7 @@ pub struct InstallReport {
     pub destination: PathBuf,
     _lock: Option<utils::ExclusiveLock>,
     rollback: Option<BinaryRollback>,
+    provenance: Option<ShoesProvenance>,
 }
 
 #[derive(Debug)]
@@ -52,6 +146,13 @@ struct BinaryRollback {
 }
 
 impl InstallReport {
+    pub fn commit_provenance(&mut self) -> Result<()> {
+        if let Some(provenance) = &self.provenance {
+            write_provenance(provenance)?;
+            self.provenance = None;
+        }
+        Ok(())
+    }
     pub fn rollback_binary(&mut self) -> Result<()> {
         self.rollback
             .take()
@@ -98,6 +199,23 @@ struct GithubRelease {
     assets: Vec<ReleaseAsset>,
 }
 
+pub async fn latest_release_tag() -> Result<String> {
+    let client = Client::builder()
+        .user_agent(concat!("ping-rust/", env!("CARGO_PKG_VERSION")))
+        .https_only(true)
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(20))
+        .build()?;
+    Ok(client
+        .get(LATEST_RELEASE_API)
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<GithubRelease>()
+        .await?
+        .tag_name)
+}
+
 #[derive(Clone, Debug, Deserialize)]
 struct ReleaseAsset {
     name: String,
@@ -107,21 +225,42 @@ struct ReleaseAsset {
 }
 
 pub async fn install(method: InstallMethod, force: bool) -> Result<InstallReport> {
+    install_with_options(method, force, false).await
+}
+
+pub async fn install_with_options(
+    method: InstallMethod,
+    force: bool,
+    allow_downgrade: bool,
+) -> Result<InstallReport> {
     let _timer = performance::stage("shoes_install_total");
     utils::require_linux_root()?;
     let lock = utils::exclusive_lock(Path::new(utils::LOCK_FILE))?;
-    install_locked(method, force, lock).await
+    let mut report = install_locked_with_options(method, force, allow_downgrade, lock).await?;
+    if let Err(error) = report.commit_provenance() {
+        let restore = report.rollback_binary();
+        return match restore {
+            Ok(()) => Err(error.context("保存 shoes 安装来源失败，旧二进制已恢复")),
+            Err(restore) => {
+                bail!("保存 shoes 安装来源失败且回滚失败：写入={error:#}；回滚={restore:#}")
+            }
+        };
+    }
+    Ok(report)
 }
 
-pub(crate) async fn install_locked(
+pub(crate) async fn install_locked_with_options(
     method: InstallMethod,
     force: bool,
+    allow_downgrade: bool,
     lock: utils::ExclusiveLock,
 ) -> Result<InstallReport> {
     utils::require_linux_root()?;
     let rollback = BinaryRollback::capture(Path::new(utils::SHOES_BIN))?;
     let installation = match method {
-        InstallMethod::Release => install_release(Path::new(utils::SHOES_BIN)).await,
+        InstallMethod::Release => {
+            install_release(Path::new(utils::SHOES_BIN), allow_downgrade).await
+        }
         InstallMethod::Cargo => install_cargo(force).await,
     };
     match installation {
@@ -143,6 +282,23 @@ pub(crate) async fn install_locked(
                     };
                 }
             }
+            let provenance = match method {
+                InstallMethod::Cargo => ShoesProvenance {
+                    source: "verified-pin".to_owned(),
+                    version: Some(SHOES_SCHEMA_VERSION.to_owned()),
+                    revision: Some(SHOES_SCHEMA_REVISION.to_owned()),
+                    release_tag: None,
+                    binary_sha256: None,
+                },
+                InstallMethod::Release => ShoesProvenance {
+                    source: "github-release".to_owned(),
+                    version: Some(report.version.trim_start_matches('v').to_owned()),
+                    revision: None,
+                    release_tag: Some(report.version.clone()),
+                    binary_sha256: None,
+                },
+            };
+            report.provenance = Some(provenance);
             report._lock = Some(lock);
             report.rollback = Some(rollback);
             Ok(report)
@@ -156,7 +312,7 @@ pub(crate) async fn install_locked(
     }
 }
 
-async fn install_release(destination: &Path) -> Result<InstallReport> {
+async fn install_release(destination: &Path, allow_downgrade: bool) -> Result<InstallReport> {
     let client = Client::builder()
         .user_agent(concat!("ping-rust/", env!("CARGO_PKG_VERSION")))
         .https_only(true)
@@ -179,6 +335,24 @@ async fn install_release(destination: &Path) -> Result<InstallReport> {
             .context("解析 GitHub Release 信息失败")?
     };
 
+    let known = load_provenance();
+    if destination.is_file()
+        && !downgrade_allowed(
+            known.version.as_deref(),
+            Some(&release.tag_name),
+            allow_downgrade,
+        )
+    {
+        if known.version.is_some() {
+            bail!(
+                "检测到 GitHub Release {} 低于当前已知 shoes {}。为避免隐式降级，已取消更新；如确实需要降级，请使用 --allow-downgrade。",
+                release.tag_name,
+                known.version.unwrap_or_default()
+            );
+        }
+        bail!("当前 shoes 来源未知，无法证明目标 Release 不会造成降级；请使用 --allow-downgrade 明确允许安装。")
+    }
+
     let mut failures = Vec::new();
     for target in release_targets()? {
         let expected_name = format!("shoes-{target}.tar.gz");
@@ -198,6 +372,7 @@ async fn install_release(destination: &Path) -> Result<InstallReport> {
                     destination: destination.to_path_buf(),
                     _lock: None,
                     rollback: None,
+                    provenance: None,
                 });
             }
             Err(error) => failures.push(format!("{target}: {error:#}")),
@@ -272,15 +447,15 @@ async fn install_cargo(force: bool) -> Result<InstallReport> {
         bail!("cargo install shoes 执行失败（退出码：{status}）");
     }
 
-    let version = installed_version()
-        .await
-        .unwrap_or_else(|_| "unknown".to_owned());
+    binary_health(Path::new(utils::SHOES_BIN)).await?;
+    let version = SHOES_SCHEMA_VERSION.to_owned();
     Ok(InstallReport {
         version,
         source: format!("GitHub source ({})", &SHOES_SCHEMA_REVISION[..12]),
         destination: PathBuf::from(utils::SHOES_BIN),
         _lock: None,
         rollback: None,
+        provenance: None,
     })
 }
 
@@ -531,6 +706,44 @@ mod tests {
             release_targets_for("linux", "x86_64", true).unwrap(),
             vec!["x86_64-unknown-linux-musl"]
         );
+    }
+
+    #[test]
+    fn known_release_downgrade_is_blocked_unless_explicitly_allowed() {
+        assert!(!downgrade_allowed(Some("0.2.8"), Some("0.2.7"), false));
+        assert!(downgrade_allowed(Some("0.2.7"), Some("0.2.8"), false));
+        assert!(downgrade_allowed(Some("0.2.8"), Some("0.2.8"), false));
+        assert!(downgrade_allowed(Some("0.2.8"), Some("0.2.7"), true));
+        assert!(!downgrade_allowed(None, Some("0.2.8"), false));
+    }
+
+    #[test]
+    fn corrupt_or_legacy_provenance_is_unknown() {
+        let provenance = serde_json::from_str::<ShoesProvenance>("not-json");
+        assert!(provenance.is_err());
+        assert_eq!(ShoesProvenance::default().source, "");
+    }
+
+    #[test]
+    fn provenance_round_trip_is_atomic_and_digest_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("shoes");
+        let metadata = dir.path().join("state").join("shoes-install.json");
+        fs::write(&binary, b"verified shoes").unwrap();
+        let provenance = ShoesProvenance {
+            source: "verified-pin".to_owned(),
+            version: Some("0.2.8".to_owned()),
+            revision: Some(SHOES_SCHEMA_REVISION.to_owned()),
+            release_tag: None,
+            binary_sha256: None,
+        };
+        write_provenance_to(&metadata, &binary, &provenance).unwrap();
+        assert_eq!(
+            load_provenance_from(&metadata, &binary).source,
+            "verified-pin"
+        );
+        fs::write(&binary, b"changed shoes").unwrap();
+        assert_eq!(load_provenance_from(&metadata, &binary).source, "");
     }
 
     #[test]

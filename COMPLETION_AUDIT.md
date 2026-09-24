@@ -1,5 +1,18 @@
 # ping-rust 完成度与验收证据
 
+## Goal 1：统一更新中心与 shoes upstream drift
+
+| 项目 | 证据 |
+|---|---|
+| Update Center | 主菜单 `6` 提供 ping-rust 自更新、已验证 shoes pin、GitHub Release 高级安装和状态检查。 |
+| self-update 旧进程退出 | 自更新 handler 返回明确的 Updated 信号；成功原子替换后交互菜单退出。 |
+| shoes verified pin | `InstallMethod::Cargo` 使用固定 `SHOES_SCHEMA_REVISION` 与 `--locked`，并作为推荐项。 |
+| Release 降级保护 | 已知较低 Release 默认拒绝，只有 `--allow-downgrade` 才允许；legacy unknown CLI 安装 fail-closed，高级菜单要求确认。 |
+| provenance/status | `/var/lib/ping-rust/shoes-install.json` 原子记录来源、版本、revision/tag 与 binary digest；缺失、损坏或 digest 不匹配按 unknown 处理。 |
+| upstream drift 检测 | `.github/workflows/shoes-upstream-drift.yml` 每周和手动运行，解析生产 pin 与 `cfal/shoes` master HEAD，绝不修改 pin。 |
+| upstream 兼容验证 | drift 构建精确 upstream HEAD，执行共享 schema/协议矩阵与 chain proxy E2E，并写入 PASS/FAIL summary。 |
+| pin 一致性 | fixed schema CI 在构建前比较 runtime `SHOES_SCHEMA_REVISION` 与 workflow pin。 |
+
 ## Shadowsocks 2022 + ShadowTLS v3（v0.1.19 feature）
 
 | 项目 | 状态 | 证据 |

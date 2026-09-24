@@ -125,6 +125,9 @@ pub enum Command {
     Update {
         #[arg(long, value_enum, default_value_t = InstallMethod::Release)]
         method: InstallMethod,
+        /// 明确允许 shoes Release 降级或来源未知的旧安装
+        #[arg(long)]
+        allow_downgrade: bool,
     },
     /// 更新 ping-rust 自身（不会修改 shoes）
     SelfUpdate {
@@ -564,12 +567,17 @@ pub async fn run(cli: Cli) -> Result<()> {
             println!("{}", "BBR 已启用并验证生效。".green());
             Ok(())
         }
-        Command::Update { method } => {
-            let report = update_shoes(method).await?;
+        Command::Update {
+            method,
+            allow_downgrade,
+        } => {
+            let report = update_shoes_with_options(method, allow_downgrade).await?;
             println!("{} {}", "shoes 更新完成：".green(), report.version);
             Ok(())
         }
-        Command::SelfUpdate { version, force } => run_self_update(version.as_deref(), force).await,
+        Command::SelfUpdate { version, force } => {
+            run_self_update(version.as_deref(), force).await.map(|_| ())
+        }
         Command::Uninstall { purge } => {
             crate::utils::require_linux_root()?;
             let _lock =
@@ -593,12 +601,26 @@ pub async fn run(cli: Cli) -> Result<()> {
 }
 
 pub(crate) async fn update_shoes(method: InstallMethod) -> Result<installer::InstallReport> {
+    update_shoes_with_options(method, false).await
+}
+
+pub(crate) async fn update_shoes_with_options(
+    method: InstallMethod,
+    allow_downgrade: bool,
+) -> Result<installer::InstallReport> {
     crate::utils::require_linux_root()?;
     let lock = crate::utils::exclusive_lock(std::path::Path::new(crate::utils::LOCK_FILE))?;
     let unit_exists = std::path::Path::new(crate::utils::SERVICE_FILE).exists();
     let was_active = unit_exists && service::is_active()?;
-    let mut report = installer::install_locked(method, true, lock).await?;
+    let mut report =
+        installer::install_locked_with_options(method, true, allow_downgrade, lock).await?;
     if !was_active {
+        if let Err(error) = report.commit_provenance() {
+            report
+                .rollback_binary()
+                .context("shoes 安装来源保存失败，二进制回滚失败")?;
+            return Err(error.context("shoes 安装来源保存失败，旧二进制已恢复"));
+        }
         return Ok(report);
     }
     if let Err(restart) = service::restart_and_verify() {
@@ -619,6 +641,13 @@ pub(crate) async fn update_shoes(method: InstallMethod) -> Result<installer::Ins
                 "新版 shoes 启动失败，旧二进制已恢复但服务恢复失败：启动={restart:#}；服务={service:#}"
             ),
         };
+    }
+    if let Err(error) = report.commit_provenance() {
+        report
+            .rollback_binary()
+            .context("shoes 安装来源保存失败，二进制回滚失败")?;
+        service::restart_and_verify().context("shoes 安装来源保存失败，旧服务恢复失败")?;
+        return Err(error.context("shoes 安装来源保存失败，旧二进制和服务已恢复"));
     }
     Ok(report)
 }
@@ -1218,8 +1247,10 @@ pub(crate) async fn ensure_shoes_for_add(yes: bool) -> Result<()> {
     Ok(())
 }
 
-pub async fn run_self_update(version: Option<&str>, force: bool) -> Result<()> {
-    match self_update::update(version, force).await? {
+pub async fn run_self_update(version: Option<&str>, force: bool) -> Result<bool> {
+    let report = self_update::update(version, force).await?;
+    let updated = should_exit_after_self_update(&report);
+    match report {
         self_update::UpdateReport::Current { current, available } => {
             if current == available {
                 println!("ping-rust 已是当前版本：{current}");
@@ -1234,8 +1265,148 @@ pub async fn run_self_update(version: Option<&str>, force: bool) -> Result<()> {
         } => {
             println!("{} {from} → {to}", "ping-rust 自更新完成：".green());
             println!("路径：{}", destination.display());
-            println!("请重新运行 ping-rust 使用新版本。");
+            println!("当前旧进程即将退出，请重新运行 ping-rust 使用新版本。");
         }
+    };
+    Ok(updated)
+}
+
+fn should_exit_after_self_update(report: &self_update::UpdateReport) -> bool {
+    matches!(report, self_update::UpdateReport::Updated { .. })
+}
+
+fn ping_version_status(current: &str, latest_tag: &str) -> &'static str {
+    match (
+        semver::Version::parse(current),
+        semver::Version::parse(latest_tag.trim_start_matches('v')),
+    ) {
+        (Ok(current), Ok(latest)) if latest > current => "有更新",
+        (Ok(_), Ok(_)) => "已是最新",
+        _ => "Release tag 无法解析",
+    }
+}
+
+fn upstream_drift(pin: &str, head: &str) -> bool {
+    pin != head
+}
+
+pub async fn print_update_status() -> Result<()> {
+    #[derive(serde::Deserialize)]
+    struct ReleaseTag {
+        tag_name: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct CommitSha {
+        sha: String,
+    }
+
+    let client = reqwest::Client::builder()
+        .user_agent(concat!("ping-rust/", env!("CARGO_PKG_VERSION")))
+        .https_only(true)
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(20))
+        .build()?;
+    let ping_latest = async {
+        Ok::<_, anyhow::Error>(
+            client
+                .get("https://api.github.com/repos/Jyanbai/ping-rust/releases/latest")
+                .send()
+                .await?
+                .error_for_status()?
+                .json::<ReleaseTag>()
+                .await?
+                .tag_name,
+        )
+    }
+    .await;
+    let shoes_latest = async {
+        Ok::<_, anyhow::Error>(
+            client
+                .get("https://api.github.com/repos/cfal/shoes/releases/latest")
+                .send()
+                .await?
+                .error_for_status()?
+                .json::<ReleaseTag>()
+                .await?
+                .tag_name,
+        )
+    }
+    .await;
+    let upstream = async {
+        Ok::<_, anyhow::Error>(
+            client
+                .get("https://api.github.com/repos/cfal/shoes/commits/master")
+                .send()
+                .await?
+                .error_for_status()?
+                .json::<CommitSha>()
+                .await?
+                .sha,
+        )
+    }
+    .await;
+    let installed = Path::new(crate::utils::SHOES_BIN).is_file();
+    let known = if installed {
+        installer::load_provenance()
+    } else {
+        Default::default()
+    };
+    println!("\nping-rust:");
+    println!("  当前：{}", env!("CARGO_PKG_VERSION"));
+    match ping_latest {
+        Ok(tag) => {
+            println!("  GitHub Latest：{tag}");
+            println!(
+                "  状态：{}",
+                ping_version_status(env!("CARGO_PKG_VERSION"), &tag)
+            );
+        }
+        Err(error) => println!("  GitHub Latest：查询失败（{error}）"),
+    }
+    println!("shoes:");
+    println!("  二进制：{}", if installed { "已安装" } else { "未安装" });
+    println!(
+        "  已知安装来源：{}",
+        if known.source.is_empty() {
+            "unknown"
+        } else {
+            &known.source
+        }
+    );
+    println!(
+        "  已知安装版本：{}",
+        known.version.as_deref().unwrap_or("未知")
+    );
+    println!(
+        "  已知 revision/tag：{}",
+        known
+            .revision
+            .as_deref()
+            .or(known.release_tag.as_deref())
+            .unwrap_or("未知")
+    );
+    println!("ping-rust 验证 pin:");
+    println!("  commit: {}", installer::verified_pin());
+    println!("  version: {}", installer::verified_version());
+    println!("shoes GitHub Latest Release:");
+    match shoes_latest {
+        Ok(tag) => println!("  tag: {tag}"),
+        Err(error) => println!("  tag: 查询失败（{error}）"),
+    }
+    println!("shoes upstream master:");
+    match upstream {
+        Ok(sha) => {
+            println!("  HEAD: {sha}");
+            println!(
+                "Upstream drift: {}",
+                if upstream_drift(installer::verified_pin(), &sha) {
+                    "detected；生产 pin 保持不变，请查看 shoes upstream drift CI"
+                } else {
+                    "none"
+                }
+            );
+        }
+        Err(error) => println!("  HEAD: 查询失败（{error}）"),
     }
     Ok(())
 }
@@ -1616,12 +1787,55 @@ mod tests {
     }
 
     #[test]
+    fn self_update_current_continues_but_updated_exits_menu() {
+        let current = self_update::UpdateReport::Current {
+            current: semver::Version::new(0, 1, 20),
+            available: semver::Version::new(0, 1, 20),
+        };
+        let updated = self_update::UpdateReport::Updated {
+            from: semver::Version::new(0, 1, 20),
+            to: semver::Version::new(0, 2, 0),
+            destination: PathBuf::from("/tmp/ping-rust"),
+        };
+        assert!(!should_exit_after_self_update(&current));
+        assert!(should_exit_after_self_update(&updated));
+    }
+
+    #[test]
+    fn update_status_comparison_is_fail_soft_and_drift_is_explicit() {
+        assert_eq!(ping_version_status("0.1.20", "v0.1.20"), "已是最新");
+        assert_eq!(ping_version_status("0.1.20", "v0.2.0"), "有更新");
+        assert_eq!(
+            ping_version_status("0.1.20", "latest"),
+            "Release tag 无法解析"
+        );
+        assert!(!upstream_drift("abc", "abc"));
+        assert!(upstream_drift("abc", "def"));
+    }
+
+    #[test]
     fn keeps_shoes_update_as_distinct_command() {
         let cli = Cli::try_parse_from(["ping-rust", "update"]).unwrap();
         assert!(matches!(
             cli.command,
             Some(Command::Update {
-                method: InstallMethod::Release
+                method: InstallMethod::Release,
+                allow_downgrade: false
+            })
+        ));
+        let cli = Cli::try_parse_from([
+            "ping-rust",
+            "update",
+            "--method",
+            "release",
+            "--allow-downgrade",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Update {
+                allow_downgrade: true,
+                ..
             })
         ));
     }

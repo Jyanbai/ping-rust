@@ -1,0 +1,82 @@
+name: shoes upstream drift
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 6 * * 1'
+
+permissions:
+  contents: read
+
+env:
+  SHOES_REPOSITORY: https://github.com/cfal/shoes.git
+
+jobs:
+  drift:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Resolve production pin and upstream HEAD
+        id: revisions
+        shell: bash
+        run: |
+          set -euo pipefail
+          pin="$(sed -n 's/^const SHOES_SCHEMA_REVISION: &str = "\([0-9a-f]*\)";$/\1/p' src/installer.rs)"
+          test "${#pin}" -eq 40
+          git init "$RUNNER_TEMP/shoes-source"
+          git -C "$RUNNER_TEMP/shoes-source" remote add origin "$SHOES_REPOSITORY"
+          git -C "$RUNNER_TEMP/shoes-source" fetch --depth 1 origin master
+          upstream="$(git -C "$RUNNER_TEMP/shoes-source" rev-parse FETCH_HEAD)"
+          {
+            echo "pin=$pin"
+            echo "upstream=$upstream"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "### shoes upstream drift"
+            echo "- pinned commit: $pin"
+            echo "- upstream HEAD: $upstream"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Report no drift
+        if: steps.revisions.outputs.pin == steps.revisions.outputs.upstream
+        run: |
+          echo '- validation: PASS (no upstream drift; production pin is current)' >> "$GITHUB_STEP_SUMMARY"
+      - name: Build upstream HEAD
+        if: steps.revisions.outputs.pin != steps.revisions.outputs.upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          source="$RUNNER_TEMP/shoes-source"
+          target="$RUNNER_TEMP/shoes-target"
+          git -C "$source" checkout --detach "${{ steps.revisions.outputs.upstream }}"
+          test "$(git -C "$source" rev-parse HEAD)" = "${{ steps.revisions.outputs.upstream }}"
+          CARGO_TARGET_DIR="$target" cargo build --locked --release --manifest-path "$source/Cargo.toml"
+          sudo install -m 0755 "$target/release/shoes" /usr/local/bin/shoes
+          shoes --version
+      - name: Build ping-rust and validate upstream compatibility
+        if: steps.revisions.outputs.pin != steps.revisions.outputs.upstream
+        env:
+          PING_RUST_BIN: ${{ github.workspace }}/target/debug/ping-rust
+          SHOES_BIN: /usr/local/bin/shoes
+        run: |
+          set -euo pipefail
+          cargo build --locked
+          PING_RUST_SHOES_E2E_BIN=/usr/local/bin/shoes bash scripts/ci/validate-shoes-schema.sh \
+            2>&1 | tee "$RUNNER_TEMP/shoes-upstream-validation.log"
+          echo '::warning::New shoes upstream commit is available and compatible with current ping-rust tests.'
+          {
+            echo "- validation: PASS"
+            echo "- production pin remains unchanged"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Fail with compatibility report
+        if: failure() && steps.revisions.outputs.pin != steps.revisions.outputs.upstream
+        run: |
+          first_stage="$(grep '^::group::' "$RUNNER_TEMP/shoes-upstream-validation.log" 2>/dev/null | tail -n 1 || true)"
+          {
+            echo "- validation: FAIL"
+            echo "- pinned commit: ${{ steps.revisions.outputs.pin }}"
+            echo "- upstream HEAD: ${{ steps.revisions.outputs.upstream }}"
+            echo "- first failing stage: ${first_stage:-build or source checkout}"
+            echo "Production pin was not modified."
+          } >> "$GITHUB_STEP_SUMMARY"
