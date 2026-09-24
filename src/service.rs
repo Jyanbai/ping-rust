@@ -131,24 +131,12 @@ pub fn restart_and_verify() -> Result<()> {
 }
 
 fn prepare_anchor_before_start() -> bool {
-    match utils::refresh_hot_reload_anchor() {
-        Ok(()) => true,
-        Err(error) => {
-            hot_reload_trace(&format!("anchor unavailable: {error:#}"));
-            false
-        }
-    }
+    utils::refresh_hot_reload_anchor().is_ok()
 }
 
 fn mark_anchor_after_start() {
-    match main_pid() {
-        Ok(Some(pid)) => {
-            if let Err(error) = utils::mark_hot_reload_anchor_pid(pid) {
-                hot_reload_trace(&format!("cannot mark anchor PID: {error:#}"));
-            }
-        }
-        Ok(None) => hot_reload_trace("service has no MainPID after start"),
-        Err(error) => hot_reload_trace(&format!("cannot read MainPID after start: {error:#}")),
+    if let Ok(Some(pid)) = main_pid() {
+        let _ = utils::mark_hot_reload_anchor_pid(pid);
     }
 }
 
@@ -190,48 +178,32 @@ pub fn capture_hot_reload_snapshot(
 ) -> Result<Option<HotReloadSnapshot>> {
     if !snapshot.was_active || snapshot.unit_contents.as_deref() != Some(unit_contents().as_bytes())
     {
-        hot_reload_trace("service inactive or unit differs from managed unit");
         return Ok(None);
     }
-    hot_reload_trace(&format!(
-        "unit={} pin={}",
-        systemctl_show_value("FragmentPath")?,
-        installer::load_provenance().source
-    ));
+    if systemctl_show_value("FragmentPath")? != utils::SERVICE_FILE {
+        return Ok(None);
+    }
     let shoes = installer::load_provenance();
     if shoes.source != "verified-pin"
         || shoes.revision.as_deref() != Some(installer::verified_pin())
     {
-        hot_reload_trace("shoes verified-pin provenance unavailable");
         return Ok(None);
     }
     let drop_ins = systemctl_show_value("DropInPaths")?;
     if !drop_ins.is_empty() && drop_ins != "-" {
-        hot_reload_trace("systemd unit has drop-ins");
         return Ok(None);
     }
     let main_pid = snapshot
         .main_pid
         .context("shoes.service active but MainPID is unavailable")?;
     if !utils::hot_reload_anchor_ready(main_pid) {
-        hot_reload_trace("hot reload anchor was not prepared before service start");
         return Ok(None);
     }
     let snapshot = HotReloadSnapshot {
         main_pid,
         listening_ports: listening_ports(main_pid)?,
     };
-    hot_reload_trace(&format!(
-        "candidate PID={} ports={:?}",
-        snapshot.main_pid, snapshot.listening_ports
-    ));
     Ok(Some(snapshot))
-}
-
-pub(crate) fn hot_reload_trace(message: &str) {
-    if std::env::var_os("PING_RUST_HOT_RELOAD_TRACE").is_some() {
-        eprintln!("hot reload: {message}");
-    }
 }
 
 pub fn hot_reload_and_verify(
@@ -239,10 +211,6 @@ pub fn hot_reload_and_verify(
     expected_ports: &BTreeSet<u16>,
     removed_ports: &BTreeSet<u16>,
 ) -> Result<()> {
-    hot_reload_trace(&format!(
-        "trigger PID={} expected={expected_ports:?} removed={removed_ports:?}",
-        snapshot.main_pid
-    ));
     utils::notify_hot_reload_anchor()?;
     let deadline = std::time::Instant::now() + HOT_RELOAD_TIMEOUT;
     loop {
@@ -261,11 +229,9 @@ pub fn hot_reload_and_verify(
             expected_ports,
             removed_ports,
         )? {
-            hot_reload_trace("verified listener delta");
             return Ok(());
         }
         if std::time::Instant::now() >= deadline {
-            hot_reload_trace(&format!("timeout current={ports:?}"));
             bail!(
                 "shoes 热重载未在 {:?} 内达到预期监听端口；当前={ports:?}，期望新增={expected_ports:?}，期望删除={removed_ports:?}",
                 HOT_RELOAD_TIMEOUT
@@ -342,10 +308,6 @@ fn listening_ports(pid: u32) -> Result<BTreeSet<u16>> {
             socket_inodes.insert(inode);
         }
     }
-    hot_reload_trace(&format!(
-        "socket inodes for PID {pid}: {}",
-        socket_inodes.len()
-    ));
     let mut ports = BTreeSet::new();
     for (name, tcp) in [
         ("tcp", true),
@@ -357,7 +319,6 @@ fn listening_ports(pid: u32) -> Result<BTreeSet<u16>> {
         let table = fs::read_to_string(&path).with_context(|| format!("读取 {path} 失败"))?;
         ports.extend(parse_proc_net_ports(&table, &socket_inodes, tcp));
     }
-    hot_reload_trace(&format!("ports for PID {pid}: {ports:?}"));
     Ok(ports)
 }
 

@@ -18,12 +18,12 @@
 | 项目 | 状态 | 证据 |
 |---|---|---|
 | atomic-write watcher compatibility | SUPPORTED | 固定 pin `386b115...` 的 shoes schema workflow 使用真实 `atomic_write` 加文件锚点，连续两次替换均完成 listener 切换；run [35965397288](https://github.com/Jyanbai/ping-rust/actions/runs/35965397288)。 |
-| active add / edit-port / delete non-last | HOT_RELOAD | `service::hot_reload_and_verify` 要求服务 active、MainPID 不变，并检查 listener 集合；Ubuntu acceptance 已加入 PID 连续性断言。 |
+| active add / edit-port / delete non-last | HOT_RELOAD | `service::hot_reload_and_verify` 要求服务 active、MainPID 不变，并检查 listener 集合；Ubuntu acceptance run [35981570098](https://github.com/Jyanbai/ping-rust/actions/runs/35981570098) 通过三种操作的 PID 连续性断言。 |
 | runtime unchanged | NO_SERVICE_ACTION | 聚合 YAML 字节相同的 metadata edit 跳过 config 替换和服务动作。 |
 | credential-only edit | FALLBACK_RESTART | 固定 shoes 没有稳定 reload acknowledgement；端口不可观测的凭据修改继续走可靠 restart。 |
 | inactive / bootstrap | START | 没有 active MainPID 时保留现有 activation 语义。 |
 | delete last | STOP | 最后一个 profile 仍停止 shoes。 |
-| reload failure / crash | FALLBACK_RESTART | 超时、服务失活或 MainPID 改变使候选失败，恢复 config/state/profiles 与旧 service snapshot。 |
+| reload failure / crash | FALLBACK_RESTART | 超时、服务失活或 MainPID 改变使候选失败；Ubuntu acceptance run [35981570098](https://github.com/Jyanbai/ping-rust/actions/runs/35981570098) 用暂停 shoes 触发真实超时，验证 config/state/profiles/unit 哈希恢复、旧 listener 恢复和锚点重新绑定到恢复后的 PID。 |
 | cert cleanup | SUPPORTED | 既有 `finish_update` / deletion finish 仍在 activation 成功后清理旧凭据。 |
 | backup restore / chain / shoes update | NOT_ENABLED | 本 Goal 保留这些路径的既有 restart/activation 语义。 |
 

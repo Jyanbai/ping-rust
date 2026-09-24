@@ -72,25 +72,17 @@ pub async fn generate_and_activate(request: GenerationRequest) -> Result<Generat
     utils::require_linux_root()?;
     let lock = utils::exclusive_lock(Path::new(utils::LOCK_FILE))?;
     let service_snapshot = service::capture_snapshot()?;
-    let hot_reload_snapshot = match service::capture_hot_reload_snapshot(&service_snapshot) {
-        Ok(snapshot) => snapshot,
-        Err(error) => {
-            service::hot_reload_trace(&format!("capture failed: {error:#}"));
-            None
-        }
-    }
-    .filter(|snapshot| {
-        let observed = config::load_state().is_ok_and(|state| {
-            state
-                .profiles
-                .iter()
-                .all(|profile| snapshot.listening_ports.contains(&profile.port))
+    let hot_reload_snapshot = service::capture_hot_reload_snapshot(&service_snapshot)
+        .ok()
+        .flatten()
+        .filter(|snapshot| {
+            config::load_state().is_ok_and(|state| {
+                state
+                    .profiles
+                    .iter()
+                    .all(|profile| snapshot.listening_ports.contains(&profile.port))
+            })
         });
-        if !observed {
-            service::hot_reload_trace("existing managed ports not observed");
-        }
-        observed
-    });
     let mut result = config::generate_locked(request, lock).await?;
     let strategy = plan_apply(
         ApplyOperation::AddOrEdit,
