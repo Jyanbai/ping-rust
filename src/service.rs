@@ -162,6 +162,11 @@ pub fn capture_hot_reload_snapshot(
         hot_reload_trace("service inactive or unit differs from managed unit");
         return Ok(None);
     }
+    hot_reload_trace(&format!(
+        "unit={} pin={}",
+        systemctl_show_value("FragmentPath")?,
+        installer::load_provenance().source
+    ));
     let shoes = installer::load_provenance();
     if shoes.source != "verified-pin"
         || shoes.revision.as_deref() != Some(installer::verified_pin())
@@ -303,6 +308,10 @@ fn listening_ports(pid: u32) -> Result<BTreeSet<u16>> {
             socket_inodes.insert(inode);
         }
     }
+    hot_reload_trace(&format!(
+        "socket inodes for PID {pid}: {}",
+        socket_inodes.len()
+    ));
     let mut ports = BTreeSet::new();
     for (name, tcp) in [
         ("tcp", true),
@@ -310,10 +319,11 @@ fn listening_ports(pid: u32) -> Result<BTreeSet<u16>> {
         ("udp", false),
         ("udp6", false),
     ] {
-        let path = format!("/proc/net/{name}");
+        let path = format!("/proc/{pid}/net/{name}");
         let table = fs::read_to_string(&path).with_context(|| format!("读取 {path} 失败"))?;
         ports.extend(parse_proc_net_ports(&table, &socket_inodes, tcp));
     }
+    hot_reload_trace(&format!("ports for PID {pid}: {ports:?}"));
     Ok(ports)
 }
 
