@@ -505,7 +505,7 @@ jobs:
           test "$previous_pid" -gt 0
 
           hysteria_output="$RUNNER_TEMP/hysteria2-generation.txt"
-          sudo "$PING_RUST" generate hysteria2 \
+          sudo env PING_RUST_HOT_RELOAD_TRACE=1 "$PING_RUST" generate hysteria2 \
             --name acceptance-hysteria2 \
             --port 24444 \
             --server-name localhost \
