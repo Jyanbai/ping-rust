@@ -503,6 +503,11 @@ jobs:
           set -euo pipefail
           previous_pid="$(sudo systemctl show --property MainPID --value shoes.service)"
           test "$previous_pid" -gt 0
+          sudo ss -H -lntup | grep -E "(:${REALITY_PORT}[[:space:]]|:24444[[:space:]])" || true
+          sudo ls -l "/proc/$previous_pid/fd" | grep socket || true
+          sudo ps -fp "$previous_pid"
+          sudo head -n 12 "/proc/$previous_pid/net/tcp"
+          sudo head -n 12 "/proc/$previous_pid/net/tcp6"
 
           hysteria_output="$RUNNER_TEMP/hysteria2-generation.txt"
           sudo env PING_RUST_HOT_RELOAD_TRACE=1 "$PING_RUST" generate hysteria2 \
