@@ -107,9 +107,14 @@ fn serve_socks(mut incoming: TcpStream) -> io::Result<()> {
     };
     let mut port = [0; 2];
     incoming.read_exact(&mut port)?;
-    let destination = (host.as_str(), u16::from_be_bytes(port))
+    let addresses = (host.as_str(), u16::from_be_bytes(port))
         .to_socket_addrs()?
-        .next()
+        .collect::<Vec<_>>();
+    let destination = addresses
+        .iter()
+        .find(|address| address.is_ipv4())
+        .or_else(|| addresses.first())
+        .copied()
         .ok_or_else(|| io::Error::other("unresolved SOCKS destination"))?;
     let mut outgoing = TcpStream::connect_timeout(&destination, Duration::from_secs(3))?;
     incoming.write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 0])?;
