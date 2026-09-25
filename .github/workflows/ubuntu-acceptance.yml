@@ -1306,7 +1306,7 @@ jobs:
               state="$(systemctl is-system-running || true)"
               case "$state" in
                 running|degraded) break ;;
-                starting) sleep 1 ;;
+                initializing|starting) sleep 1 ;;
                 *) echo "unexpected systemd state: $state" >&2; exit 1 ;;
               esac
             done
