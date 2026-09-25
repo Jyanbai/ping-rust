@@ -115,11 +115,11 @@ switch -- $action {
     }
     delete_chain {
         send_choice 3
-        expect_or_fail {Chain 管理:} "chain menu"
+        expect_or_fail {Chain 管理：} "chain menu"
         send_choice 4
         expect_or_fail {选择 Chain} "chain selector"
         send_choice 1
-        expect_or_fail {Chain 管理:} "chain deleted"
+        expect_or_fail {Chain 管理：} "chain deleted"
         send_choice 0
     }
     default {
