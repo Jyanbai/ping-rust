@@ -789,11 +789,9 @@ async fn add_chain_node() -> Result<()> {
         .default(parsed.name.clone())
         .interact_text()?;
     let node = parsed.with_name(name)?;
-    let state = deployment::update_chain_proxy(ChainProxyChange::Add(node.clone())).await?;
+    deployment::update_chain_proxy(ChainProxyChange::Add(node.clone())).await?;
     println!("{} {}", "节点已添加：".green(), node.name);
-    if state.chain_proxy.active_node == Some(node.id) {
-        println!("该节点已设为当前出口；启用链式代理后生效。");
-    }
+    println!("默认路由仍为 DIRECT；可选择出口节点或设置默认路由。");
     Ok(())
 }
 

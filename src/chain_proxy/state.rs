@@ -292,11 +292,7 @@ impl ChainProxyState {
                 }) {
                     bail!("链式节点名称或 ID 已存在：{}", node.name);
                 }
-                let id = node.id;
                 self.nodes.push(node);
-                if self.active_node.is_none() {
-                    self.active_node = Some(id);
-                }
             }
             ChainProxyChange::Select(id) => {
                 self.require_node(id)?;
@@ -520,6 +516,7 @@ mod tests {
         let node = parse_share_uri("socks5://127.0.0.1:1080#edge").unwrap();
         state.apply(ChainProxyChange::Add(node)).unwrap();
         assert_eq!(state.default_route, RouteTarget::Direct);
+        assert!(state.active().is_none());
         assert!(!state.legacy_layout);
         let json = serde_json::to_string(&state).unwrap();
         assert!(json.contains("\"version\":2"));
