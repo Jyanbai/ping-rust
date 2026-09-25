@@ -27,6 +27,7 @@ use crate::{
 
 mod commit;
 mod presets;
+mod routing;
 mod schema;
 mod transaction;
 mod validation;
@@ -38,6 +39,8 @@ use commit::{
 use commit::{
     commit_managed, profile_documents, profile_documents_are_current, write_profile_documents,
 };
+pub(crate) use routing::chain_value;
+use routing::render_rules;
 use schema::{
     default_h3_alpn, ChainRule, InnerProtocol, NaiveUser, QuicSettings, RealityTarget,
     ServerConfig, ServerProtocol, ServerRule, ShadowTlsHandshake, ShadowTlsTarget,
@@ -677,18 +680,22 @@ fn direct_rules() -> Vec<ServerRule> {
 
 fn chain_rules(client: &ShoesClientConfig) -> Vec<ServerRule> {
     vec![ServerRule::Inline(ChainRule {
-        masks: "0.0.0.0/0".to_owned(),
+        masks: schema::RuleMasks::One("0.0.0.0/0".to_owned()),
         action: "allow".to_owned(),
-        client_chains: client.clone(),
+        client_chains: Some(serde_yaml::to_value(client).expect("client serializes")),
     })]
 }
 
 fn apply_chain_proxy_rules(servers: &mut [ServerConfig], state: &ManagedState) {
-    let rules = state
-        .chain_proxy
-        .effective()
-        .map(|node| chain_rules(&node.client))
-        .unwrap_or_else(direct_rules);
+    let rules = if state.chain_proxy.legacy_layout {
+        state
+            .chain_proxy
+            .effective()
+            .map(|node| chain_rules(&node.client))
+            .unwrap_or_else(direct_rules)
+    } else {
+        render_rules(&state.chain_proxy)
+    };
     for server in servers {
         server.rules.clone_from(&rules);
     }
@@ -696,7 +703,21 @@ fn apply_chain_proxy_rules(servers: &mut [ServerConfig], state: &ManagedState) {
 
 fn ensure_chain_proxy_matches_state(servers: &[ServerConfig], state: &ManagedState) -> Result<()> {
     state.chain_proxy.validate().context("链式代理状态无效")?;
-    if let Some(node) = state.chain_proxy.effective() {
+    if state.chain_proxy.legacy_layout {
+        let expected = state
+            .chain_proxy
+            .effective()
+            .map(|node| chain_rules(&node.client))
+            .unwrap_or_else(direct_rules);
+        if servers.iter().any(|server| server.rules != expected) {
+            bail!("旧版链式代理状态与 shoes 配置不一致");
+        }
+    } else if state.chain_proxy.enabled {
+        let expected = render_rules(&state.chain_proxy);
+        if servers.iter().any(|server| server.rules != expected) {
+            bail!("链式代理状态与 shoes 配置不一致");
+        }
+    } else if let Some(node) = state.chain_proxy.effective() {
         let expected = chain_rules(&node.client);
         if servers.iter().any(|server| server.rules != expected) {
             bail!("链式代理状态与 shoes 配置不一致");
@@ -713,7 +734,7 @@ fn ensure_chain_proxy_matches_state(servers: &[ServerConfig], state: &ManagedSta
 }
 
 fn ensure_chain_proxy_has_no_direct_udp_path(state: &ManagedState) -> Result<()> {
-    if state.chain_proxy.effective().is_none() {
+    if !state.chain_proxy.enabled {
         return Ok(());
     }
     let unsafe_profiles = state
@@ -837,7 +858,7 @@ async fn generate_inner_with_lock(
     servers.push(server);
     state.profiles.push(profile.clone());
     ensure_chain_proxy_has_no_direct_udp_path(&state)?;
-    if state.chain_proxy.effective().is_some() {
+    if state.chain_proxy.enabled {
         apply_chain_proxy_rules(&mut servers, &state);
     }
 
@@ -2092,6 +2113,20 @@ fn load_state_from(path: &Path) -> Result<ManagedState> {
         bail!("不支持的管理状态版本 {}", state.schema_version);
     }
     state.schema_version = 2;
+    let has_v2_chain_state = serde_json::from_str::<serde_json::Value>(&json)
+        .ok()
+        .is_some_and(|value| {
+            value
+                .get("chain_proxy")
+                .and_then(|chain| chain.get("version"))
+                .is_some()
+        });
+    if !has_v2_chain_state && state.chain_proxy.active_node.is_some() {
+        state
+            .chain_proxy
+            .migrate_legacy()
+            .context("迁移旧版链式代理状态失败")?;
+    }
     state.chain_proxy.validate().context("链式代理状态无效")?;
     Ok(state)
 }
@@ -2125,14 +2160,18 @@ pub(crate) async fn update_chain_proxy_locked(
         generated_certificate: None,
         generated_certificate_key: None,
     };
-    let old_effective = state.chain_proxy.effective().map(|node| node.id);
+    let old_rules = servers
+        .iter()
+        .map(|server| server.rules.clone())
+        .collect::<Vec<_>>();
     state.chain_proxy.apply(change)?;
     ensure_chain_proxy_has_no_direct_udp_path(&state)?;
-    let new_effective = state.chain_proxy.effective().map(|node| node.id);
-    let configuration_changed = old_effective != new_effective;
-    if configuration_changed {
-        apply_chain_proxy_rules(&mut servers, &state);
-    }
+    apply_chain_proxy_rules(&mut servers, &state);
+    let configuration_changed = servers
+        .iter()
+        .map(|server| server.rules.clone())
+        .collect::<Vec<_>>()
+        != old_rules;
     let yaml = serde_yaml::to_string(&servers).context("序列化链式代理配置失败")?;
     if !servers.is_empty() {
         validate_yaml(&yaml)?;
@@ -2703,6 +2742,122 @@ mod tests {
     }
 
     #[test]
+    fn legacy_chain_migration_survives_an_unrelated_state_save() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        let node = crate::chain_proxy::parse_share_uri("socks5://127.0.0.1:1080#old").unwrap();
+        let old = serde_json::json!({
+            "schema_version": 1,
+            "profiles": [],
+            "chain_proxy": {
+                "enabled": true,
+                "active_node": node.id,
+                "nodes": [node]
+            }
+        });
+        let old_bytes = serde_json::to_vec_pretty(&old).unwrap();
+        fs::write(&path, &old_bytes).unwrap();
+        let migrated = load_state_from(&path).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), old_bytes);
+        assert!(migrated.chain_proxy.legacy_layout);
+        let mut servers = Vec::new();
+        apply_chain_proxy_rules(&mut servers, &migrated);
+        save_state_to(&path, &migrated).unwrap();
+        let reloaded = load_state_from(&path).unwrap();
+        assert!(reloaded.chain_proxy.legacy_layout);
+        assert_eq!(reloaded.chain_proxy.chains.len(), 1);
+        assert!(reloaded.chain_proxy.effective().is_some());
+        assert!(
+            serde_json::from_slice::<serde_json::Value>(&fs::read(&path).unwrap()).unwrap()
+                ["chain_proxy"]["active_node"]
+                .is_null()
+        );
+    }
+
+    #[test]
+    fn managed_snapshots_accept_v1_and_v2_chain_routing() {
+        let node = crate::chain_proxy::parse_share_uri("socks5://127.0.0.1:1080#old").unwrap();
+        let (mut old_server, old_profile) = reality_server_and_profile(53453);
+        old_server.rules = chain_rules(&node.client);
+        let old_dir = tempfile::tempdir().unwrap();
+        let old_config = old_dir.path().join("config.yaml");
+        let old_state = old_dir.path().join("ping-rust-state.json");
+        fs::write(
+            &old_config,
+            serde_yaml::to_string(&vec![old_server]).unwrap(),
+        )
+        .unwrap();
+        let old_json = serde_json::json!({
+            "schema_version": 2,
+            "profiles": [old_profile],
+            "chain_proxy": { "enabled": true, "active_node": node.id, "nodes": [node] }
+        });
+        let old_bytes = serde_json::to_vec_pretty(&old_json).unwrap();
+        fs::write(&old_state, &old_bytes).unwrap();
+        assert!(prepare_managed_snapshot(old_dir.path()).unwrap());
+        validate_managed_snapshot(&old_config, &old_state).unwrap();
+        assert_eq!(fs::read(&old_state).unwrap(), old_bytes);
+        let restored_old = load_state_from(&old_state).unwrap();
+        assert!(restored_old.chain_proxy.enabled);
+        assert_eq!(restored_old.chain_proxy.chains.len(), 1);
+
+        let new_dir = tempfile::tempdir().unwrap();
+        let new_config = new_dir.path().join("config.yaml");
+        let new_state = new_dir.path().join("ping-rust-state.json");
+        let (server, profile) = reality_server_and_profile(53454);
+        let mut state = ManagedState {
+            schema_version: 2,
+            profiles: vec![profile],
+            chain_proxy: ChainProxyState::default(),
+        };
+        let node =
+            crate::chain_proxy::parse_share_uri("ss://YWVzLTEyOC1nY206cGFzcw==@127.0.0.1:1081#new")
+                .unwrap();
+        let node_id = node.id;
+        state
+            .chain_proxy
+            .apply(ChainProxyChange::Add(node))
+            .unwrap();
+        state
+            .chain_proxy
+            .apply(ChainProxyChange::Select(node_id))
+            .unwrap();
+        state
+            .chain_proxy
+            .apply(ChainProxyChange::SetEnabled(true))
+            .unwrap();
+        let first = crate::chain_proxy::RoutingRule {
+            id: Uuid::new_v4(),
+            name: "private".to_owned(),
+            enabled: true,
+            masks: vec!["10.0.0.0/8".to_owned()],
+            target: crate::chain_proxy::RouteTarget::Direct,
+        };
+        let second = crate::chain_proxy::RoutingRule {
+            id: Uuid::new_v4(),
+            name: "blocked".to_owned(),
+            enabled: true,
+            masks: vec!["blocked.test".to_owned()],
+            target: crate::chain_proxy::RouteTarget::Block,
+        };
+        state
+            .chain_proxy
+            .apply(ChainProxyChange::SetRules(vec![
+                first.clone(),
+                second.clone(),
+            ]))
+            .unwrap();
+        let mut servers = vec![server];
+        apply_chain_proxy_rules(&mut servers, &state);
+        fs::write(&new_config, serde_yaml::to_string(&servers).unwrap()).unwrap();
+        save_state_to(&new_state, &state).unwrap();
+        assert!(prepare_managed_snapshot(new_dir.path()).unwrap());
+        validate_managed_snapshot(&new_config, &new_state).unwrap();
+        let restored_new = load_state_from(&new_state).unwrap();
+        assert_eq!(restored_new.chain_proxy.rules, vec![first, second]);
+    }
+
+    #[test]
     fn chain_proxy_compiles_to_shoes_client_chain_for_every_server() {
         let (first, first_profile) = reality_server_and_profile(53453);
         let (second, second_profile) = reality_server_and_profile(53454);
@@ -2733,8 +2888,9 @@ mod tests {
         ensure_chain_proxy_matches_state(&servers, &state).unwrap();
         let yaml = serde_yaml::to_string(&servers).unwrap();
         validate_yaml(&yaml).unwrap();
-        assert_eq!(yaml.matches("client_chains:").count(), 2);
+        assert_eq!(yaml.matches("client_chains:").count(), 4);
         assert_eq!(yaml.matches("masks: 0.0.0.0/0").count(), 2);
+        assert_eq!(yaml.matches("masks: ::/0").count(), 2);
         assert!(yaml.contains("type: socks"));
         assert!(yaml.contains("username: alice"));
         assert!(yaml.contains("password: secret"));

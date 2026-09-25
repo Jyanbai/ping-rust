@@ -3,11 +3,12 @@ name: Chain proxy systemd acceptance
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [main, codex/feat-chain-proxy-v2]
     paths:
       - .github/workflows/chain-systemd.yml
       - tests/chain_menu.exp
       - tests/chain_systemd_e2e.rs
+      - tests/chain_v2_e2e.rs
       - src/**
       - Cargo.toml
       - Cargo.lock
@@ -16,14 +17,13 @@ permissions:
   contents: read
 
 env:
-  SHOES_ARCHIVE_SHA256: e60ccde92490624d9ff399dd58e69d4d6943b33c5cc4f0b0d1509b0c644fbc2a
-  SHOES_URL: https://github.com/cfal/shoes/releases/download/v0.2.7/shoes-x86_64-unknown-linux-musl.tar.gz
+  SHOES_COMMIT: 386b11532424b8665ee3e46340c6236fb3c47595
 
 jobs:
   ubuntu-24-04:
     name: Ubuntu 24.04 real systemd and isolated exits
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
@@ -43,18 +43,23 @@ jobs:
           sudo apt-get install -y --no-install-recommends expect iproute2
           sudo install -m 0755 target/release/ping-rust /usr/local/bin/ping-rust
           sudo install -m 0755 "$runner" /usr/local/bin/chain-systemd-e2e
-      - name: Install checksum-pinned shoes v0.2.7
+      - name: Build and install fixed shoes revision
         shell: bash
         run: |
           set -euo pipefail
-          archive="$RUNNER_TEMP/shoes.tar.gz"
-          directory="$RUNNER_TEMP/shoes"
-          curl --fail --location --retry 3 --proto '=https' --tlsv1.2 \
-            --output "$archive" "$SHOES_URL"
-          echo "$SHOES_ARCHIVE_SHA256  $archive" | sha256sum --check --strict
-          mkdir -p "$directory"
-          tar -xzf "$archive" -C "$directory"
-          sudo install -m 0755 "$directory/shoes" /usr/local/bin/shoes
+          runtime_pin="$(sed -n 's/^const SHOES_SCHEMA_REVISION: &str = "\([0-9a-f]*\)";$/\1/p' src/installer.rs)"
+          test "$runtime_pin" = "$SHOES_COMMIT"
+          git init "$RUNNER_TEMP/shoes-source"
+          git -C "$RUNNER_TEMP/shoes-source" remote add origin https://github.com/cfal/shoes.git
+          git -C "$RUNNER_TEMP/shoes-source" fetch --depth 1 origin "$SHOES_COMMIT"
+          git -C "$RUNNER_TEMP/shoes-source" checkout --detach FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/shoes-source" rev-parse HEAD)" = "$SHOES_COMMIT"
+          CARGO_TARGET_DIR="$RUNNER_TEMP/shoes-target" cargo build --locked --release --manifest-path "$RUNNER_TEMP/shoes-source/Cargo.toml"
+          sudo install -m 0755 "$RUNNER_TEMP/shoes-target/release/shoes" /usr/local/bin/shoes
+      - name: Exercise Chain Proxy 2.0 local traffic matrix
+        env:
+          PING_RUST_SHOES_E2E_BIN: /usr/local/bin/shoes
+        run: cargo test --locked --test chain_v2_e2e -- --nocapture
       - name: Exercise Rust production menu, state, network exits and systemd
         shell: bash
         run: |
@@ -67,12 +72,12 @@ jobs:
   debian-12:
     name: Debian 12 real systemd and isolated exits
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - name: Build static ping-rust and fetch checksum-pinned shoes
+      - name: Build static ping-rust and fixed shoes
         shell: bash
         run: |
           set -euo pipefail
@@ -88,12 +93,14 @@ jobs:
           )"
           test -n "$runner"
           install -m 0755 "$runner" "$RUNNER_TEMP/chain-systemd-e2e"
-          archive="$RUNNER_TEMP/shoes.tar.gz"
-          mkdir -p "$RUNNER_TEMP/shoes"
-          curl --fail --location --retry 3 --proto '=https' --tlsv1.2 \
-            --output "$archive" "$SHOES_URL"
-          echo "$SHOES_ARCHIVE_SHA256  $archive" | sha256sum --check --strict
-          tar -xzf "$archive" -C "$RUNNER_TEMP/shoes"
+          runtime_pin="$(sed -n 's/^const SHOES_SCHEMA_REVISION: &str = "\([0-9a-f]*\)";$/\1/p' src/installer.rs)"
+          test "$runtime_pin" = "$SHOES_COMMIT"
+          git init "$RUNNER_TEMP/shoes-source"
+          git -C "$RUNNER_TEMP/shoes-source" remote add origin https://github.com/cfal/shoes.git
+          git -C "$RUNNER_TEMP/shoes-source" fetch --depth 1 origin "$SHOES_COMMIT"
+          git -C "$RUNNER_TEMP/shoes-source" checkout --detach FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/shoes-source" rev-parse HEAD)" = "$SHOES_COMMIT"
+          CARGO_TARGET_DIR="$RUNNER_TEMP/shoes-target" cargo build --locked --release --target x86_64-unknown-linux-musl --manifest-path "$RUNNER_TEMP/shoes-source/Cargo.toml"
       - name: Start privileged Debian 12 with systemd
         shell: bash
         run: |
@@ -124,7 +131,7 @@ jobs:
           set -euo pipefail
           docker cp target/x86_64-unknown-linux-musl/release/ping-rust \
             ping-rust-debian:/usr/local/bin/ping-rust
-          docker cp "$RUNNER_TEMP/shoes/shoes" ping-rust-debian:/usr/local/bin/shoes
+          docker cp "$RUNNER_TEMP/shoes-target/x86_64-unknown-linux-musl/release/shoes" ping-rust-debian:/usr/local/bin/shoes
           docker cp "$RUNNER_TEMP/chain-systemd-e2e" \
             ping-rust-debian:/usr/local/bin/chain-systemd-e2e
           docker exec ping-rust-debian chmod 0755 \

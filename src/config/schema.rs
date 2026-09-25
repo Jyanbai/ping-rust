@@ -3,7 +3,8 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::{AnyTlsUser, ShoesClientConfig};
+use super::AnyTlsUser;
+use serde_yaml::Value;
 
 pub(super) fn default_h3_alpn() -> Vec<String> {
     vec!["h3".to_owned()]
@@ -34,10 +35,22 @@ pub(super) enum ServerRule {
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(super) struct ChainRule {
-    pub masks: String,
+    pub masks: RuleMasks,
     pub action: String,
-    #[serde(rename = "client_chains", alias = "client_chain")]
-    pub client_chains: ShoesClientConfig,
+    #[serde(
+        rename = "client_chains",
+        alias = "client_chain",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub client_chains: Option<Value>,
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub(super) enum RuleMasks {
+    One(String),
+    Many(Vec<String>),
 }
 
 #[derive(Clone, Serialize, Deserialize)]

@@ -21,6 +21,8 @@ use crate::{
     service::{self, ServiceAction},
 };
 
+mod chain;
+
 const MAIN_MENU_ITEMS: &[(usize, &str)] = &[
     (1, "添加配置"),
     (2, "更改配置"),
@@ -760,76 +762,7 @@ async fn operations_menu() -> Result<MenuControl> {
 }
 
 async fn chain_proxy_menu() -> Result<()> {
-    loop {
-        let state = config::load_state()?;
-        println!("\n------------- 链式代理管理 -------------");
-        println!(
-            "状态：{}",
-            if state.chain_proxy.enabled {
-                "● 已启用"
-            } else {
-                "○ 未启用"
-            }
-        );
-        match state.chain_proxy.active() {
-            Some(node) => println!(
-                "当前出口：{} | {} | {}",
-                node.name,
-                node.protocol_name(),
-                node.address()
-            ),
-            None => println!("当前出口：未选择"),
-        }
-        println!("节点数量：{}\n", state.chain_proxy.nodes.len());
-        let action = if state.chain_proxy.enabled {
-            "关闭链式代理"
-        } else {
-            "启用链式代理"
-        };
-        let items = [
-            (1, "添加节点（分享链接）"),
-            (2, "选择出口节点"),
-            (3, action),
-            (4, "测试节点（完整代理）"),
-            (5, "查看节点"),
-            (6, "删除节点"),
-            (0, "返回"),
-        ];
-        match select_keyed("", &items)? {
-            0 => return Ok(()),
-            1 => add_chain_node().await?,
-            2 => select_chain_exit().await?,
-            3 => {
-                let enabled = !state.chain_proxy.enabled;
-                if enabled
-                    && state
-                        .chain_proxy
-                        .active()
-                        .is_some_and(|node| !node.supports_udp_over_tcp())
-                    && !Confirm::with_theme(&ColorfulTheme::default())
-                        .with_prompt("当前出口不支持 UDP-over-TCP，UDP 请求将失败；仍要启用？")
-                        .default(false)
-                        .interact()?
-                {
-                    continue;
-                }
-                deployment::update_chain_proxy(ChainProxyChange::SetEnabled(enabled)).await?;
-                println!(
-                    "{}",
-                    if enabled {
-                        "链式代理已启用：受支持的 TCP 流量将经当前节点转发。"
-                    } else {
-                        "链式代理已关闭：所有受管入站已恢复直连。"
-                    }
-                    .green()
-                );
-            }
-            4 => test_chain_node().await?,
-            5 => print_chain_nodes(&state.chain_proxy.nodes, state.chain_proxy.active_node),
-            6 => delete_chain_node().await?,
-            _ => unreachable!("链式代理菜单编号已验证"),
-        }
-    }
+    chain::menu().await
 }
 
 async fn add_chain_node() -> Result<()> {

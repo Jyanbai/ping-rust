@@ -649,6 +649,29 @@ fn assert_final_state() -> TestResult {
     Ok(())
 }
 
+fn seed_legacy_chain_state() -> TestResult {
+    let path = format!("{CONFIG_DIR}/ping-rust-state.json");
+    let mut state: Value = serde_json::from_slice(&fs::read(&path)?)?;
+    let nodes = state
+        .pointer("/chain_proxy/nodes")
+        .and_then(Value::as_array)
+        .ok_or("chain nodes missing before legacy migration")?
+        .clone();
+    let selected = nodes
+        .first()
+        .and_then(|node| node.get("id"))
+        .ok_or("first chain node has no ID")?
+        .clone();
+    state["schema_version"] = Value::from(1);
+    state["chain_proxy"] = serde_json::json!({
+        "enabled": false,
+        "active_node": selected,
+        "nodes": nodes,
+    });
+    fs::write(path, serde_json::to_vec_pretty(&state)?)?;
+    Ok(())
+}
+
 fn systemctl(args: &[&str], description: &str) -> TestResult {
     run_status(Command::new("systemctl").args(args), description)
 }
@@ -779,6 +802,10 @@ fn run_acceptance(harness: &mut Harness) -> TestResult {
     )?;
     harness.set_stage("adding second Shadowsocks chain node");
     run_menu(&expect_script, &ping_rust, "add", Some(&uri_two), None)?;
+    harness.set_stage("selecting a single-hop default chain");
+    run_menu(&expect_script, &ping_rust, "select", Some("1"), None)?;
+    harness.set_stage("loading a v1 chain state without rewriting its direct config");
+    seed_legacy_chain_state()?;
     harness.set_stage("enabling first chain node");
     run_menu(&expect_script, &ping_rust, "enable", None, None)?;
 
@@ -827,6 +854,9 @@ fn run_acceptance(harness: &mut Harness) -> TestResult {
         IpAddr::V4(Ipv4Addr::new(10, 231, 1, 1)),
     )?;
 
+    harness.set_stage("removing default route and its referenced chain");
+    run_menu(&expect_script, &ping_rust, "set_direct", None, None)?;
+    run_menu(&expect_script, &ping_rust, "delete_chain", None, None)?;
     harness.set_stage("deleting both chain nodes");
     run_menu(&expect_script, &ping_rust, "delete", Some("1"), None)?;
     run_menu(&expect_script, &ping_rust, "delete", Some("1"), None)?;

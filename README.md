@@ -205,32 +205,37 @@ vless://...security=reality...pbk=...&sid=...#VLESS-REALITY-25448
 
 每个节点都会保存为 `/etc/shoes/profiles/` 下的真实独立 YAML 文件；查看、更改和删除时直接显示该文件名，例如 `VLESS-REALITY-53453.yaml` 或 `SNELL-8389.yaml`。支持分享 URI 的协议会以相同文件基名作为 URI 标签，并在添加或查看时显示终端二维码；Snell v3 只显示手动连接参数。只有一个配置时自动选中，多个配置时才显示数字列表。shoes 继续加载由 Rust 确定性聚合的 `/etc/shoes/config.yaml`，内部 UUID 仅用于安全定位。
 
-### 链式代理
+### 链式代理 2.0
 
 从主菜单进入 `9) 其他 → 1) 链式代理`：
 
 ```text
-------------- 链式代理管理 -------------
-状态：○ 未启用
-当前出口：未选择
-节点数量：0
+------------- Chain Proxy 2.0 -------------
+状态：启用 / 禁用
+默认路由：DIRECT
 
-1) 添加节点（分享链接）
-2) 选择出口节点
-3) 启用链式代理
-4) 测试节点（完整代理）
-5) 查看节点
-6) 删除节点
+1) 节点管理
+2) Pool 管理
+3) Chain 管理
+4) 路由规则
+5) 默认路由
+6) 启用 / 禁用
+7) 测试节点 / Chain
+8) 查看当前拓扑
 0) 返回
 ```
 
+配置按 **Nodes → Pools → Chains → Routing Rules → Default Route** 组合。Chain 可以包含有序的多跳；Pool 在某一 hop 内轮询节点；多条完整 Chain 可以通过 whole-chain round-robin 轮询。规则支持 IPv4/IPv6 CIDR、精确主机名和通配主机名，并提供 DIRECT、BLOCK、Chain 和多 Chain 轮询目标。默认路由覆盖未匹配规则的 IPv4 与 IPv6 流量。
+
+Pool 与多 Chain 轮询只表示连接分布，不提供健康检查、自动故障切换或延迟选择。
+
 第一版支持 SOCKS5、HTTP/HTTPS、Shadowsocks、VLESS TCP/TLS/Reality/WebSocket 和 Trojan TLS/WebSocket 分享链接。由于当前 shoes 内核没有对应客户端实现，Hysteria2、TUIC、WireGuard/WARP 不能作为链式出口；ping-rust 会返回明确错误，不生成近似配置。HTTP、SOCKS5 和 Trojan 出口不支持 UDP-over-TCP，启用或切换时会再次警告；相关 UDP 请求会失败，不会自动回退直连。
 
-“测试节点（完整代理）”严格复用当前节点生成临时 shoes SOCKS5 入口，再通过该入口访问 `https://www.gstatic.com/generate_204`。只有地址可达、协议认证/Reality 握手、无重定向且响应精确为 `204 No Content` 才报告节点可用；普通 `200 OK` 页面也会被拒绝，避免劫持页或错误落地页造成误报。测试进程和权限为 `0600` 的临时配置随后立即删除。它不会修改当前出口或线上 systemd 服务。
+“测试节点 / Chain”严格复用临时 shoes SOCKS5 入口执行完整代理请求；Chain 测试会验证所有有序 hop，而不是逐节点测试的集合。测试进程和权限为 `0600` 的临时配置随后立即删除。它不会修改当前出口或线上 systemd 服务。
 
-添加第一个节点时会自动选为当前出口，但不会自动启用。启用后，受支持的 TCP 流量使用同一个上游节点；关闭或删除正在使用的节点会恢复 `allow-all-direct`。固定 shoes 0.2.8 的 Hysteria2/TUIC UDP 服务端路径会忽略 client chain 并直接创建 UDP socket，因此只要当前存在 Hysteria2 或 TUIC 入站，ping-rust 就会拒绝启用全局链式代理，避免静默直连泄漏；链式代理已经启用时也不能新增这两类入站。节点凭据保存在权限为 `0600` 的管理状态和配置文件中，备份同样包含这些敏感信息。
+新建 v2 状态的默认路由是 DIRECT；在节点管理中“选择出口”会创建或更新单跳默认 Chain，兼容旧版操作习惯。旧版 `active_node` 状态在内存中迁移为单跳 Chain，保留原启用状态与出口；仅读取状态不会改写文件。仍被 Pool、Chain、规则或默认路由引用的对象不能删除。固定 shoes 0.2.8 的 Hysteria2/TUIC UDP 服务端路径会忽略 client chain 并直接创建 UDP socket，因此存在这些入站时会拒绝启用全局链式代理。节点凭据保存在权限为 `0600` 的管理状态和配置文件中，备份同样包含这些敏感信息。
 
-CI 在 Debian 12 与 Ubuntu 24.04 的真实 systemd 环境中，从 PTY 菜单完成添加、完整协议测试、选择、启用、切换、关闭和删除。两个隔离网络命名空间提供可区分的 Shadowsocks 出口；测试会核对 HTTP 服务观察到的源地址，并验证 systemd 重启后仍使用所选出口、上游离线时请求失败且不会静默直连。该测试覆盖稳定 TCP 路径，不代表 shoes 已支持 UDP 链式转发。
+示例：`JP Pool = jp-1, jp-2`；`HK-JP Chain = HK → JP Pool`；规则 `10.0.0.0/8 → DIRECT`、`*.finance.example → TW Chain`、`*.ads.example → BLOCK`；默认路由 `HK-JP Chain`。规则顺序与菜单顺序相同，先匹配的规则优先；可上移和下移。Chain/路由修改继续走候选 `shoes --dry-run`、原子提交、systemd 重启与失败回滚；普通 profile 的已验证 Hot Reload 行为不变。
 
 首次安装流程是：`install.sh → 自动安装 ping-rust/shoes → 自动随机端口部署 VLESS-REALITY → 复制 URL`，中间零输入。Reality 未指定 SNI 时会从 `www.amazon.com`、`www.ebay.com`、`www.paypal.com`、`www.cloudflare.com`、`dash.cloudflare.com`、`aws.amazon.com` 中随机选择；列表不含 Apple，客户端指纹固定为本地 233boy 脚本使用的 `chrome`。后续日常流程是：`prs → 1 → 选择协议 → 输入端口/直接回车随机`；Shadowsocks 会额外选择加密方式和密码，SS 2022 密码不符合所选 cipher 的 Base64 密钥长度时会警告并自动替换。其余协议自动生成 UUID、密码、Reality 密钥、WebSocket 路径或证书。SOCKS5 快速添加默认生成安全随机用户名和密码并启用 UDP ASSOCIATE；Snell v3 快速添加默认生成随机密码并启用 UDP-over-TCP。NaiveProxy 要求明确选择受信任证书或自签名测试模式，不会静默生成生产自签名配置。添加或查看配置成功后直接退出 `prs`；主菜单输入 `0` 退出，任意子菜单输入 `0` 返回主菜单。自动端口从 `20000..=65535` 的高位范围选择；菜单协议选择固定使用连续编号 `1..=13`。信息只会在配置通过 `shoes --dry-run`、原子写入、systemd 启动且确认为 active 后输出；失败会恢复原配置和服务状态。
 

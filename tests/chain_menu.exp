@@ -38,7 +38,7 @@ expect_or_fail {请选择 \[0-10\]} "main menu"
 send_choice 9
 expect_or_fail {运维工具} "operations menu"
 send_choice 1
-expect_or_fail {链式代理管理} "chain menu"
+expect_or_fail {Chain Proxy 2.0} "chain menu"
 
 switch -- $action {
     add {
@@ -47,36 +47,46 @@ switch -- $action {
             exit 2
         }
         send_choice 1
+        expect_or_fail {节点管理:} "node menu"
+        send_choice 1
         expect_or_fail {粘贴分享链接} "share URI prompt"
         send_choice $argument
         expect_or_fail {节点名称} "node name prompt"
         send_choice ""
         expect_or_fail {节点已添加} "node add result"
+        expect_or_fail {节点管理:} "node menu after add"
+        send_choice 0
     }
     enable {
-        send_choice 3
-        expect_or_fail {链式代理已启用} "enable result"
+        send_choice 6
+        expect_or_fail {状态：启用} "enable result"
     }
     disable {
-        send_choice 3
-        expect_or_fail {链式代理已关闭} "disable result"
+        send_choice 6
+        expect_or_fail {状态：禁用} "disable result"
     }
     select {
         if {![string is integer -strict $argument] || $argument < 1} {
             puts stderr "select action requires a positive node index"
             exit 2
         }
-        send_choice 2
+        send_choice 1
+        expect_or_fail {节点管理:} "node menu"
+        send_choice 6
         expect_or_fail {选择出口节点} "node selector"
         send_choice $argument
         expect_or_fail {当前出口已切换为} "select result"
+        expect_or_fail {节点管理:} "node menu after select"
+        send_choice 0
     }
     test {
         if {![string is integer -strict $argument] || $argument < 1} {
             puts stderr "test action requires a positive node index"
             exit 2
         }
-        send_choice 4
+        send_choice 7
+        expect_or_fail {测试完整 Chain} "test menu"
+        send_choice 1
         expect_or_fail {选择测试节点} "test node selector"
         send_choice $argument
         expect_or_fail {节点可用} "full proxy test result"
@@ -86,12 +96,31 @@ switch -- $action {
             puts stderr "delete action requires a positive node index"
             exit 2
         }
-        send_choice 6
+        send_choice 1
+        expect_or_fail {节点管理:} "node menu"
+        send_choice 4
         expect_or_fail {选择删除节点} "delete selector"
         send_choice $argument
         expect_or_fail {确认删除链式节点} "delete confirmation"
         send_choice y
         expect_or_fail {节点已删除} "delete result"
+        expect_or_fail {节点管理:} "node menu after delete"
+        send_choice 0
+    }
+    set_direct {
+        send_choice 5
+        expect_or_fail {路由动作} "default route selector"
+        send_choice 1
+        expect_or_fail {默认路由：DIRECT} "direct default result"
+    }
+    delete_chain {
+        send_choice 3
+        expect_or_fail {Chain 管理:} "chain menu"
+        send_choice 4
+        expect_or_fail {选择 Chain} "chain selector"
+        send_choice 1
+        expect_or_fail {Chain 管理:} "chain deleted"
+        send_choice 0
     }
     default {
         puts stderr "unknown action: $action"
@@ -99,7 +128,7 @@ switch -- $action {
     }
 }
 
-expect_or_fail {链式代理管理} "return to chain menu"
+expect_or_fail {Chain Proxy 2.0} "return to chain menu"
 send_choice 0
 expect_or_fail {请选择 \[0-10\]} "return to main menu"
 send_choice 0

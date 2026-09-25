@@ -12,6 +12,8 @@ shoes --dry-run examples/socks5-no-udp.yaml
 shoes --dry-run examples/socks5-no-auth.yaml
 shoes --dry-run examples/snell.yaml
 cargo test --locked --test chain_proxy_e2e -- --nocapture
+cargo test --locked pinned_schema_accepts_full_v2_rule_shape -- --nocapture
+cargo test --locked --test chain_v2_e2e -- --nocapture
 )
 echo '::endgroup::'
 

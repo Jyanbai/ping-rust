@@ -1,5 +1,21 @@
 # ping-rust 完成度与验收证据
 
+## Goal 3：Chain Proxy 2.0 + Rule-based Routing
+
+| 项目 | 状态 | 证据 |
+|---|---|---|
+| v1 state migration / disabled selection | LOCAL PASS | `load_state_from` 内存迁移为单跳默认 Chain；读取不改盘；禁用状态与出口在保存、重载后保留。 |
+| Nodes / Pools / multi-hop Chains / whole-chain RR | LOCAL PASS | state 引用校验与有序渲染单测；固定 shoes 本地流量测试实际通过多跳、hop Pool 和多 Chain 轮询。 |
+| CIDR / hostname / DIRECT / BLOCK / default | LOCAL PASS | 固定 shoes schema dry-run 与 `chain_v2_e2e` 的本地流量路径验证；IPv6 CIDR 已通过 schema dry-run。 |
+| reference integrity / deletion / rule order / limits | LOCAL PASS | 状态单测覆盖缺失引用、重复、空对象、超限、删除保护及规则顺序 JSON 往返。 |
+| UDP capability propagation | LOCAL PASS | 对 Chain、Pool 与 whole-chain RR 的所有可选 hop 作保守计算；单测覆盖混合能力。 |
+| v1/v2 backup restore staging | LOCAL PASS | `prepare_managed_snapshot` 和 `validate_managed_snapshot` 接受 v1 与 v2 路由状态；v2 规则顺序保持。 |
+| transaction rollback / Hot Reload boundary | LOCAL PASS | Chain 更新继续走现有 lock、候选校验、原子提交、service activate 与 rollback；profile Hot Reload 规划单测保持原边界。 |
+| Ubuntu/Debian systemd acceptance | PENDING CI | 已更新 v2 菜单驱动，继续验证真实服务路径。 |
+| feature CI / main CI / upstream drift | PENDING | 合入前后分别记录运行结果。 |
+
+Pool 与多 Chain 轮询均不是健康感知故障切换。生产 shoes revision 与 ping-rust 版本号保持不变；本 Goal 不发布。
+
 ## Goal 1：统一更新中心与 shoes upstream drift
 
 | 项目 | 证据 |

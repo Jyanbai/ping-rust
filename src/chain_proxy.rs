@@ -17,104 +17,27 @@ use uuid::Uuid;
 
 use crate::utils;
 
+mod state;
+#[allow(unused_imports)]
+pub use state::{
+    ChainDefinition, ChainHop, ChainPool, ChainProxyChange, ChainProxyState, RouteTarget,
+    RoutingRule,
+};
+
 const DEFAULT_PROXY_PROBE_URL: &str = "https://www.gstatic.com/generate_204";
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ChainProxyState {
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active_node: Option<Uuid>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub nodes: Vec<ChainNode>,
-}
-
-impl ChainProxyState {
-    pub fn validate(&self) -> Result<()> {
-        if let Some(id) = self.active_node {
-            self.require_node(id)?;
-        }
-        if self.enabled && self.active().is_none() {
-            bail!("链式代理已标记启用，但当前节点不存在");
-        }
-        for (index, node) in self.nodes.iter().enumerate() {
-            validate_node_name(&node.name)?;
-            if self.nodes[..index].iter().any(|existing| {
-                existing.id == node.id || existing.name.eq_ignore_ascii_case(&node.name)
-            }) {
-                bail!("链式代理状态包含重复节点：{}", node.name);
-            }
-        }
-        Ok(())
+fn validate_mask(mask: &str) -> Result<()> {
+    if mask.is_empty() || mask.len() > 255 || mask.chars().any(char::is_control) {
+        bail!("路由 mask 必须为 1..=255 字节且不能包含控制字符");
     }
-
-    pub fn active(&self) -> Option<&ChainNode> {
-        self.active_node
-            .and_then(|id| self.nodes.iter().find(|node| node.id == id))
-    }
-
-    pub fn effective(&self) -> Option<&ChainNode> {
-        self.enabled.then(|| self.active()).flatten()
-    }
-
-    pub fn apply(&mut self, change: ChainProxyChange) -> Result<()> {
-        match change {
-            ChainProxyChange::Add(node) => {
-                validate_node_name(&node.name)?;
-                if self
-                    .nodes
-                    .iter()
-                    .any(|existing| existing.name.eq_ignore_ascii_case(&node.name))
-                {
-                    bail!("链式节点名称已存在：{}", node.name);
-                }
-                if self.nodes.iter().any(|existing| existing.id == node.id) {
-                    bail!("链式节点 ID 已存在：{}", node.id);
-                }
-                let id = node.id;
-                self.nodes.push(node);
-                if self.active_node.is_none() {
-                    self.active_node = Some(id);
-                }
-            }
-            ChainProxyChange::Select(id) => {
-                self.require_node(id)?;
-                self.active_node = Some(id);
-            }
-            ChainProxyChange::SetEnabled(enabled) => {
-                if enabled && self.active().is_none() {
-                    bail!("请先添加并选择一个链式代理节点");
-                }
-                self.enabled = enabled;
-            }
-            ChainProxyChange::Delete(id) => {
-                self.require_node(id)?;
-                self.nodes.retain(|node| node.id != id);
-                if self.active_node == Some(id) {
-                    self.active_node = None;
-                    self.enabled = false;
-                }
-            }
-        }
-        self.validate()?;
-        Ok(())
-    }
-
-    fn require_node(&self, id: Uuid) -> Result<()> {
-        if self.nodes.iter().any(|node| node.id == id) {
-            Ok(())
-        } else {
-            bail!("未找到链式代理节点 {id}")
+    if let Some((ip, bits)) = mask.split_once('/') {
+        let ip: std::net::IpAddr = ip.parse().context("CIDR 地址无效")?;
+        let bits: u8 = bits.parse().context("CIDR 前缀无效")?;
+        if bits > if ip.is_ipv4() { 32 } else { 128 } {
+            bail!("CIDR 前缀超过地址长度");
         }
     }
-}
-
-#[derive(Clone, Debug)]
-pub enum ChainProxyChange {
-    Add(ChainNode),
-    Select(Uuid),
-    SetEnabled(bool),
-    Delete(Uuid),
+    Ok(())
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -171,9 +94,24 @@ struct ProbeRule<'a> {
     client_chains: &'a ShoesClientConfig,
 }
 
+#[derive(Serialize)]
+struct ChainProbeRule {
+    masks: &'static str,
+    action: &'static str,
+    client_chains: serde_yaml::Value,
+}
+
+#[derive(Serialize)]
+struct ChainProbeServer {
+    address: String,
+    protocol: ProbeSocksProtocol,
+    rules: Vec<ChainProbeRule>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum ShoesClientProtocol {
+    Direct,
     Http {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         username: Option<String>,
@@ -228,6 +166,7 @@ pub enum ShoesClientProtocol {
 impl ShoesClientProtocol {
     fn protocol_name(&self) -> &'static str {
         match self {
+            Self::Direct => "DIRECT",
             Self::Http { .. } => "HTTP",
             Self::Socks { .. } => "SOCKS5",
             Self::Shadowsocks { .. } => "Shadowsocks",
@@ -254,6 +193,7 @@ impl ShoesClientProtocol {
 
     fn supports_udp_over_tcp(&self) -> bool {
         match self {
+            Self::Direct => true,
             Self::Shadowsocks { udp_enabled, .. } | Self::Vless { udp_enabled, .. } => *udp_enabled,
             // shoes 0.2.8 still leaves Trojan UDP client handling unimplemented.
             Self::Trojan { .. } => false,
@@ -662,6 +602,28 @@ fn probe_config(node: &ChainNode, port: u16) -> Result<String> {
     serde_yaml::to_string(&servers).context("生成链式节点测试配置失败")
 }
 
+fn probe_chain_config(state: &ChainProxyState, chain_id: Uuid, port: u16) -> Result<String> {
+    state.validate()?;
+    let chain = state
+        .chains
+        .iter()
+        .find(|chain| chain.id == chain_id)
+        .with_context(|| format!("未找到 Chain {chain_id}"))?;
+    let servers = [ChainProbeServer {
+        address: format!("127.0.0.1:{port}"),
+        protocol: ProbeSocksProtocol {
+            kind: "socks",
+            udp_enabled: false,
+        },
+        rules: vec![ChainProbeRule {
+            masks: "0.0.0.0/0",
+            action: "allow",
+            client_chains: crate::config::chain_value(state, chain.id),
+        }],
+    }];
+    serde_yaml::to_string(&servers).context("生成完整 Chain 测试配置失败")
+}
+
 fn reserve_loopback_port() -> Result<u16> {
     let listener = TcpListener::bind(("127.0.0.1", 0)).context("无法分配链式节点测试端口")?;
     listener
@@ -694,6 +656,38 @@ fn validate_probe_status(status: reqwest::StatusCode, node_name: &str) -> Result
 }
 
 pub async fn test_proxy_handshake(node: &ChainNode, timeout: Duration) -> Result<Duration> {
+    let port = reserve_loopback_port()?;
+    test_proxy_yaml(&node.name, probe_config(node, port)?, port, timeout).await
+}
+
+pub async fn test_chain(
+    state: &ChainProxyState,
+    chain_id: Uuid,
+    timeout: Duration,
+) -> Result<Duration> {
+    let name = state
+        .chains
+        .iter()
+        .find(|chain| chain.id == chain_id)
+        .with_context(|| format!("未找到 Chain {chain_id}"))?
+        .name
+        .clone();
+    let port = reserve_loopback_port()?;
+    test_proxy_yaml(
+        &name,
+        probe_chain_config(state, chain_id, port)?,
+        port,
+        timeout,
+    )
+    .await
+}
+
+async fn test_proxy_yaml(
+    name: &str,
+    yaml: String,
+    port: u16,
+    timeout: Duration,
+) -> Result<Duration> {
     utils::require_linux_root()?;
     if !std::path::Path::new(utils::SHOES_BIN).is_file() {
         bail!("未找到 shoes：{}", utils::SHOES_BIN);
@@ -701,8 +695,6 @@ pub async fn test_proxy_handshake(node: &ChainNode, timeout: Duration) -> Result
 
     let directory = tempfile::tempdir().context("创建链式节点测试目录失败")?;
     let config_path = directory.path().join("probe.yaml");
-    let port = reserve_loopback_port()?;
-    let yaml = probe_config(node, port)?;
     utils::atomic_write(&config_path, yaml.as_bytes(), 0o600)?;
 
     let dry_run = tokio::process::Command::new(utils::SHOES_BIN)
@@ -745,8 +737,8 @@ pub async fn test_proxy_handshake(node: &ChainNode, timeout: Duration) -> Result
             .get(&probe_url)
             .send()
             .await
-            .with_context(|| format!("完整代理请求失败，节点 {} 未通过协议握手", node.name))?;
-        validate_probe_status(response.status(), &node.name)?;
+            .with_context(|| format!("完整代理请求失败，{} 未通过协议握手", name))?;
+        validate_probe_status(response.status(), name)?;
         Ok(started.elapsed())
     }
     .await;
@@ -851,18 +843,26 @@ mod tests {
     }
 
     #[test]
-    fn state_requires_selection_before_enable_and_disables_on_active_delete() {
+    fn state_selects_a_single_hop_default_and_protects_references() {
         let mut state = ChainProxyState::default();
-        assert!(state.apply(ChainProxyChange::SetEnabled(true)).is_err());
+        assert_eq!(state.default_route, RouteTarget::Direct);
         let node = parse_share_uri("socks5://127.0.0.1:1080#edge").unwrap();
         let id = node.id;
         state.apply(ChainProxyChange::Add(node)).unwrap();
         state.apply(ChainProxyChange::Select(id)).unwrap();
         state.apply(ChainProxyChange::SetEnabled(true)).unwrap();
         assert!(state.effective().is_some());
+        assert!(state.apply(ChainProxyChange::Delete(id)).is_err());
+        let RouteTarget::Chain(chain_id) = state.default_route else {
+            panic!("expected selected chain")
+        };
+        state
+            .apply(ChainProxyChange::SetDefault(RouteTarget::Direct))
+            .unwrap();
+        state
+            .apply(ChainProxyChange::DeleteChain(chain_id))
+            .unwrap();
         state.apply(ChainProxyChange::Delete(id)).unwrap();
-        assert!(!state.enabled);
-        assert!(state.active_node.is_none());
     }
 
     #[test]
@@ -874,5 +874,26 @@ mod tests {
         assert!(yaml.contains("address: 127.0.0.1:1080"));
         assert!(yaml.contains("username: alice"));
         assert!(yaml.contains("password: secret"));
+    }
+
+    #[test]
+    fn chain_probe_contains_every_ordered_hop() {
+        let first = parse_share_uri("socks5://127.0.0.1:1081#first").unwrap();
+        let second = parse_share_uri("socks5://127.0.0.1:1082#second").unwrap();
+        let chain = ChainDefinition {
+            id: Uuid::new_v4(),
+            name: "two hops".to_owned(),
+            hops: vec![ChainHop::Node(first.id), ChainHop::Node(second.id)],
+        };
+        let state = ChainProxyState {
+            nodes: vec![first, second],
+            chains: vec![chain.clone()],
+            ..ChainProxyState::default()
+        };
+        let yaml = probe_chain_config(&state, chain.id, 19080).unwrap();
+        let first_offset = yaml.find("address: 127.0.0.1:1081").unwrap();
+        let second_offset = yaml.find("address: 127.0.0.1:1082").unwrap();
+        assert!(first_offset < second_offset);
+        assert!(yaml.contains("chain:"));
     }
 }
