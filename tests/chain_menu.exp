@@ -128,7 +128,9 @@ switch -- $action {
     }
 }
 
-expect_or_fail {Chain Proxy 2.0} "return to chain menu"
+if {$action ni {enable disable set_direct}} {
+    expect_or_fail {Chain Proxy 2.0} "return to chain menu"
+}
 send_choice 0
 expect_or_fail {请选择 \[0-10\]} "return to main menu"
 send_choice 0
