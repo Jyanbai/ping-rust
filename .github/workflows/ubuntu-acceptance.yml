@@ -1228,10 +1228,22 @@ jobs:
             "vmess-ws-tls:$VMESS_WS_TLS_PROFILE"; do
             name="${entry%%:*}"
             profile="${entry#*:}"
-            sudo "$PING_RUST" export clash-meta \
-              --profile "$profile" \
-              --server 127.0.0.1 \
-              --output "$RUNNER_TEMP/$name-clash.yaml"
+            if [ "$profile" = "$VMESS_WS_TLS_PROFILE" ]; then
+              if sudo "$PING_RUST" export clash-meta \
+                --profile "$profile" \
+                --server 127.0.0.1 \
+                --output "$RUNNER_TEMP/$name-clash.yaml" \
+                >"$RUNNER_TEMP/$name-clash.log" 2>&1; then
+                echo "Mihomo unexpectedly accepted H2MUX profile" >&2
+                exit 1
+              fi
+              grep -Fq "当前 Mihomo H2MUX 存在已知兼容问题" "$RUNNER_TEMP/$name-clash.log"
+            else
+              sudo "$PING_RUST" export clash-meta \
+                --profile "$profile" \
+                --server 127.0.0.1 \
+                --output "$RUNNER_TEMP/$name-clash.yaml"
+            fi
             sudo "$PING_RUST" export sing-box \
               --profile "$profile" \
               --server 127.0.0.1 \
@@ -1240,7 +1252,9 @@ jobs:
               --profile "$profile" \
               --server 127.0.0.1 \
               --output "$RUNNER_TEMP/$name-nekobox.txt"
-            sudo test -s "$RUNNER_TEMP/$name-clash.yaml"
+            if [ "$profile" != "$VMESS_WS_TLS_PROFILE" ]; then
+              sudo test -s "$RUNNER_TEMP/$name-clash.yaml"
+            fi
             sudo test -s "$RUNNER_TEMP/$name-sing-box.json"
             sudo test -s "$RUNNER_TEMP/$name-nekobox.txt"
             sudo python3 -m json.tool \
@@ -1280,7 +1294,7 @@ jobs:
             echo "- Reality deployment: ${{ steps.reality.outputs.elapsed }} seconds"
             echo '- systemd: enabled, active, restart verified'
             echo '- Protocol listeners: all ten menu presets'
-            echo '- Client exports: all ten menu presets to Clash Meta, sing-box, Nekobox'
+            echo '- Client exports: nine standard presets to Clash Meta, all ten to sing-box and Nekobox; H2MUX Mihomo rejection verified'
             echo '- Operations: logs, backup, restore, update, restart, info'
           } >> "$GITHUB_STEP_SUMMARY"
 
