@@ -13,7 +13,7 @@
 | sing-box data E2E | SUPPORTED | sing-box 1.14.2 Trojan H2MUX 客户端连接固定 shoes 服务端，small/1 MiB half-close 本地流量通过。 |
 | Mihomo H2MUX / NekoBox H2MUX | NOT_ENABLED | Mihomo 启用偏好时明确拒绝导出；NekoBox 普通分享链接不承载偏好。 |
 | URI / QR H2MUX | NOT_IMPLEMENTED | 普通 URI/QR 不发明 mux 参数，UI 与 CLI 明确提示。 |
-| profile preference service action / MainPID | NOT_ENABLED | 聚合 YAML 字节相同会选择既有 `NoServiceAction`；Ubuntu PID acceptance 尚待运行。 |
+| profile preference service action / MainPID | SUPPORTED | 聚合 YAML 字节相同会选择既有 `NoServiceAction`；Ubuntu acceptance 验证配置 YAML 与 MainPID 均保持不变。 |
 | Chain node H2MUX / multi-hop | SUPPORTED | 节点独立 H2MUX 配置；固定 shoes 本地 H2MUX + SOCKS 第二 hop 流量通过。 |
 | padding / concurrent streams / half-close | SUPPORTED | Trojan padding=true、自定义 2/2；VMess/VLESS 默认 4/4；各协议 12 并发流及小/1 MiB half-close 通过。 |
 
