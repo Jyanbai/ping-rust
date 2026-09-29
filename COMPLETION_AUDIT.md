@@ -30,8 +30,8 @@ H2MUX UDP 仍为 NOT_IMPLEMENTED。生产 shoes pin、依赖与 ping-rust 版本
 | UDP capability propagation | LOCAL PASS | 对 Chain、Pool 与 whole-chain RR 的所有可选 hop 作保守计算；单测覆盖混合能力。 |
 | v1/v2 backup restore staging | LOCAL PASS | `prepare_managed_snapshot` 和 `validate_managed_snapshot` 接受 v1 与 v2 路由状态；v2 规则顺序保持。 |
 | transaction rollback / Hot Reload boundary | LOCAL PASS | Chain 更新继续走现有 lock、候选校验、原子提交、service activate 与 rollback；profile Hot Reload 规划单测保持原边界。 |
-| Ubuntu/Debian systemd acceptance | PENDING CI | 已更新 v2 菜单驱动，继续验证真实服务路径。 |
-| feature CI / main CI / upstream drift | PENDING | 合入前后分别记录运行结果。 |
+| Ubuntu/Debian systemd acceptance | PASS | main acceptance 已通过真实 Ubuntu/Debian systemd 服务路径验证。 |
+| feature CI / main CI / upstream drift | PASS | feature、main required checks 与手动 shoes-upstream-drift 均已通过。 |
 
 Pool 与多 Chain 轮询均不是健康感知故障切换。生产 shoes revision 与 ping-rust 版本号保持不变；本 Goal 不发布。
 
