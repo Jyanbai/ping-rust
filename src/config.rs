@@ -7,6 +7,7 @@ use std::{
     str::FromStr,
 };
 
+use crate::h2mux::H2MuxOptions;
 use anyhow::{bail, Context, Result};
 use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
@@ -398,6 +399,7 @@ pub struct GenerationRequest {
 }
 
 pub enum ProfileChange {
+    H2Mux(H2MuxOptions),
     Name(String),
     Port(u16),
     ServerAddress(Option<String>),
@@ -581,9 +583,46 @@ pub struct ManagedProfile {
     pub certificate_path: Option<PathBuf>,
     pub certificate_key_path: Option<PathBuf>,
     pub self_signed_certificate: bool,
+    #[serde(default, skip_serializing_if = "H2MuxOptions::is_disabled")]
+    pub h2mux: H2MuxOptions,
 }
 
 impl ManagedProfile {
+    pub fn h2mux_eligible(&self) -> bool {
+        matches!(
+            &self.credentials,
+            Credentials::VmessTls { .. }
+                | Credentials::Trojan {
+                    security: TlsSecurity::Tls,
+                    ..
+                }
+                | Credentials::VlessTls { vision: false, .. }
+        )
+    }
+
+    pub fn validate_h2mux(&self) -> Result<()> {
+        self.h2mux.validate()?;
+        if !self.h2mux.enabled {
+            return Ok(());
+        }
+        if self.h2mux_eligible() {
+            Ok(())
+        } else {
+            match &self.credentials {
+                Credentials::Reality { .. } | Credentials::VlessTls { vision: true, .. } => {
+                    bail!("H2MUX cannot be enabled with VLESS Vision")
+                }
+                Credentials::Trojan {
+                    security: TlsSecurity::Reality { .. },
+                    ..
+                } => {
+                    bail!("Trojan-Reality H2MUX 尚未通过真实流量验证")
+                }
+                _ => bail!("该协议不支持 H2MUX 客户端配置"),
+            }
+        }
+    }
+
     pub fn display_name(&self) -> String {
         format!("{}-{}", self.protocol().display_prefix(), self.port)
     }
@@ -832,6 +871,7 @@ async fn generate_inner_with_lock(
     } = generated;
 
     let profile = ManagedProfile {
+        h2mux: Default::default(),
         id: profile_id,
         name: profile_name,
         port: request.port,
@@ -926,6 +966,11 @@ pub(crate) async fn update_profile_locked(
     ensure_chain_proxy_matches_state(&servers, &state)?;
 
     match &change {
+        ProfileChange::H2Mux(options) => {
+            let mut candidate = state.profiles[index].clone();
+            candidate.h2mux = options.clone();
+            candidate.validate_h2mux()?;
+        }
         ProfileChange::Name(name) => validate_profile_name(name, &state.profiles, Some(id))?,
         ProfileChange::Port(port) => {
             if *port == 0 {
@@ -1048,6 +1093,7 @@ fn apply_profile_change(
     change: ProfileChange,
 ) -> Result<()> {
     match change {
+        ProfileChange::H2Mux(options) => profile.h2mux = options,
         ProfileChange::Name(name) => profile.name = name.trim().to_owned(),
         ProfileChange::Port(port) => {
             server.address = format!("0.0.0.0:{port}");
@@ -2128,6 +2174,11 @@ fn load_state_from(path: &Path) -> Result<ManagedState> {
             .context("迁移旧版链式代理状态失败")?;
     }
     state.chain_proxy.validate().context("链式代理状态无效")?;
+    for profile in &state.profiles {
+        profile
+            .validate_h2mux()
+            .with_context(|| format!("配置 {} 的 H2MUX 状态无效", profile.name))?;
+    }
     Ok(state)
 }
 
@@ -2718,6 +2769,7 @@ mod tests {
         request.port = port;
         let (server, credentials, _, _) = generate_reality(&request);
         let profile = ManagedProfile {
+            h2mux: Default::default(),
             id: Uuid::new_v4(),
             name: format!("reality-{port}"),
             port,
@@ -3131,6 +3183,7 @@ mod tests {
         let generated = presets::generate(&request, dir.path(), Uuid::nil()).unwrap();
         let mut server = generated.server;
         let mut profile = ManagedProfile {
+            h2mux: Default::default(),
             id: Uuid::nil(),
             name: "naive".to_owned(),
             port: 443,
@@ -3214,6 +3267,7 @@ mod tests {
         let generated = presets::generate(&request, dir.path(), Uuid::nil()).unwrap();
         let mut server = generated.server;
         let mut profile = ManagedProfile {
+            h2mux: Default::default(),
             id: Uuid::nil(),
             name: "naive".to_owned(),
             port: 443,
@@ -3545,6 +3599,7 @@ mod tests {
             let generated = presets::generate(&request, directory.path(), profile_id).unwrap();
             let mut server = generated.server;
             let mut profile = ManagedProfile {
+                h2mux: Default::default(),
                 id: profile_id,
                 name: format!("{}-test", protocol.slug()),
                 port: request.port,
@@ -3669,6 +3724,7 @@ mod tests {
         let (second_server, second_credentials, _, _) = generate_reality(&second_request);
         let profiles = vec![
             ManagedProfile {
+                h2mux: Default::default(),
                 id: Uuid::new_v4(),
                 name: "first".to_owned(),
                 port: first_request.port,
@@ -3679,6 +3735,7 @@ mod tests {
                 self_signed_certificate: false,
             },
             ManagedProfile {
+                h2mux: Default::default(),
                 id: Uuid::new_v4(),
                 name: "second".to_owned(),
                 port: second_request.port,
@@ -3891,6 +3948,7 @@ mod tests {
     #[test]
     fn old_managed_profiles_without_server_address_still_deserialize() {
         let profile = ManagedProfile {
+            h2mux: Default::default(),
             id: Uuid::nil(),
             name: "legacy".to_owned(),
             port: 443,
@@ -3910,11 +3968,55 @@ mod tests {
         value.as_object_mut().unwrap().remove("server_address");
         let restored: ManagedProfile = serde_json::from_value(value).unwrap();
         assert!(restored.server_address.is_none());
+        assert!(!restored.h2mux.enabled);
+    }
+
+    #[test]
+    fn h2mux_preference_round_trips_without_changing_server_yaml() {
+        let request = request(Protocol::VmessWsTls, PathBuf::from("unused.yaml"));
+        let directory = tempfile::tempdir().unwrap();
+        let (mut server, credentials, _, _) =
+            generate_parts(&request, directory.path(), Uuid::nil()).unwrap();
+        let mut profile = ManagedProfile {
+            id: Uuid::new_v4(),
+            name: "vmess-h2mux".to_owned(),
+            port: request.port,
+            server_address: None,
+            credentials,
+            certificate_path: None,
+            certificate_key_path: None,
+            self_signed_certificate: false,
+            h2mux: H2MuxOptions::default(),
+        };
+        let original_yaml = serde_yaml::to_string(&server).unwrap();
+        let old_json = serde_json::to_value(&profile).unwrap();
+        assert!(old_json.get("h2mux").is_none());
+        let old: ManagedProfile = serde_json::from_value(old_json).unwrap();
+        assert!(!old.h2mux.enabled);
+        let options = H2MuxOptions {
+            enabled: true,
+            max_connections: 2,
+            min_streams: 2,
+            max_streams: 0,
+            padding: true,
+        };
+        apply_profile_change(
+            &mut server,
+            &mut profile,
+            ProfileChange::H2Mux(options.clone()),
+        )
+        .unwrap();
+        assert_eq!(serde_yaml::to_string(&server).unwrap(), original_yaml);
+        let saved = serde_json::to_vec(&profile).unwrap();
+        let restored: ManagedProfile = serde_json::from_slice(&saved).unwrap();
+        assert_eq!(restored.h2mux, options);
+        restored.validate_h2mux().unwrap();
     }
 
     #[test]
     fn profile_name_validation_rejects_case_insensitive_duplicates() {
         let existing = ManagedProfile {
+            h2mux: Default::default(),
             id: Uuid::new_v4(),
             name: "Main".to_owned(),
             port: 443,
@@ -3939,6 +4041,7 @@ mod tests {
         let request = request(Protocol::Reality, PathBuf::from("unused.yaml"));
         let (mut server, credentials, _, _) = generate_reality(&request);
         let mut profile = ManagedProfile {
+            h2mux: Default::default(),
             id: Uuid::new_v4(),
             name: "reality-main".to_owned(),
             port: request.port,
@@ -3995,6 +4098,7 @@ mod tests {
         let request = request(Protocol::Shadowsocks, PathBuf::from("unused.yaml"));
         let (mut server, credentials, _, _) = generate_shadowsocks(&request);
         let mut profile = ManagedProfile {
+            h2mux: Default::default(),
             id: Uuid::new_v4(),
             name: "ss-main".to_owned(),
             port: request.port,
@@ -4039,6 +4143,7 @@ mod tests {
         req.options.shadowtls_handshake = Some("www.example.com:443".to_owned());
         let (mut server, credentials, _, _) = generate_shadowsocks(&req);
         let mut profile = ManagedProfile {
+            h2mux: Default::default(),
             id: Uuid::new_v4(),
             name: "ss-shadowtls".to_owned(),
             port: req.port,
@@ -4087,6 +4192,7 @@ mod tests {
         let (mut server, credentials, _, _) =
             generate_parts(&request, Path::new("."), Uuid::nil()).unwrap();
         let mut profile = ManagedProfile {
+            h2mux: Default::default(),
             id: Uuid::new_v4(),
             name: "snell-main".to_owned(),
             port: request.port,
@@ -4166,6 +4272,7 @@ mod tests {
         let (mut server, credentials, certificate, certificate_key) =
             generate_anytls(&request, dir.path(), Uuid::new_v4()).unwrap();
         let mut profile = ManagedProfile {
+            h2mux: Default::default(),
             id: Uuid::new_v4(),
             name: "anytls-main".to_owned(),
             port: request.port,
@@ -4234,6 +4341,7 @@ mod tests {
         assert!(yaml.contains("udp_enabled: false"));
 
         let mut profile = ManagedProfile {
+            h2mux: Default::default(),
             id: Uuid::new_v4(),
             name: "socks-main".to_owned(),
             port: request.port,
@@ -4352,6 +4460,7 @@ mod tests {
         let (mut server, credentials, _, _) =
             generate_parts(&request, Path::new("."), Uuid::nil()).unwrap();
         let mut profile = ManagedProfile {
+            h2mux: Default::default(),
             id: Uuid::new_v4(),
             name: "socks-main".to_owned(),
             port: request.port,
@@ -4393,6 +4502,7 @@ mod tests {
         let (mut server, credentials, _, _) =
             generate_parts(&request, Path::new("."), Uuid::nil()).unwrap();
         let mut profile = ManagedProfile {
+            h2mux: Default::default(),
             id: Uuid::new_v4(),
             name: "legacy-socks".to_owned(),
             port: request.port,

@@ -39,6 +39,9 @@ pub fn export(
         None => bail!("存在多个配置，请用 --profile <UUID> 指定导出对象"),
     };
     let content = render(profile, format, server)?;
+    if profile.h2mux.enabled && matches!(format, ClientFormat::Nekobox) {
+        eprintln!("提示：NekoBox 分享链接不包含 H2MUX 客户端偏好；普通节点连接仍可使用。");
+    }
     if let Some(path) = output {
         utils::atomic_write(path, content.as_bytes(), 0o600)?;
     }
@@ -82,6 +85,7 @@ pub fn stored_share_uri(profile: &ManagedProfile, override_server: Option<&str>)
 }
 
 pub fn render(profile: &ManagedProfile, format: ClientFormat, server: &str) -> Result<String> {
+    profile.validate_h2mux()?;
     let server = normalize_server_address(server)?;
     match format {
         ClientFormat::ClashMeta => clash_meta(profile, &server),
@@ -97,6 +101,9 @@ pub fn render(profile: &ManagedProfile, format: ClientFormat, server: &str) -> R
 }
 
 fn clash_meta(profile: &ManagedProfile, server: &str) -> Result<String> {
+    if profile.h2mux.enabled {
+        bail!("当前 Mihomo H2MUX 存在已知兼容问题；请使用 sing-box 导出，或关闭 H2MUX preference 后导出普通 Mihomo 节点");
+    }
     let proxy = match &profile.credentials {
         Credentials::Reality {
             user_id,
@@ -387,7 +394,7 @@ fn sing_box(profile: &ManagedProfile, server: &str) -> Result<String> {
         }))
         .context("生成 sing-box ShadowTLS JSON 失败");
     }
-    let outbound: Value = match &profile.credentials {
+    let mut outbound: Value = match &profile.credentials {
         Credentials::Reality {
             user_id,
             public_key,
@@ -611,6 +618,9 @@ fn sing_box(profile: &ManagedProfile, server: &str) -> Result<String> {
             }
         }),
     };
+    if profile.h2mux.enabled {
+        outbound["multiplex"] = profile.h2mux.sing_box_value()?;
+    }
     serde_json::to_string_pretty(&json!({ "outbounds": [outbound] }))
         .context("生成 sing-box JSON 失败")
 }
@@ -911,6 +921,7 @@ mod tests {
 
     fn reality_profile() -> ManagedProfile {
         ManagedProfile {
+            h2mux: Default::default(),
             id: Uuid::nil(),
             name: "reality-test".to_owned(),
             port: 443,
@@ -926,6 +937,85 @@ mod tests {
             certificate_key_path: None,
             self_signed_certificate: false,
         }
+    }
+
+    #[test]
+    fn h2mux_exports_only_valid_sing_box_preferences() {
+        let mut profile = reality_profile();
+        profile.credentials = Credentials::VmessTls {
+            user_id: Uuid::nil(),
+            server_name: "example.com".to_owned(),
+            alpn_protocols: vec!["http/1.1".to_owned()],
+            websocket_path: "/vmess".to_owned(),
+        };
+        let ordinary = render(&profile, ClientFormat::SingBox, "example.com").unwrap();
+        assert!(!ordinary.contains("multiplex"));
+        profile.h2mux.enabled = true;
+        for credentials in [
+            profile.credentials.clone(),
+            Credentials::VlessTls {
+                user_id: Uuid::nil(),
+                server_name: "example.com".to_owned(),
+                alpn_protocols: vec![],
+                vision: false,
+                websocket_path: Some("/vless".to_owned()),
+            },
+            Credentials::Trojan {
+                password: "secret".to_owned(),
+                server_name: "example.com".to_owned(),
+                alpn_protocols: vec![],
+                security: TlsSecurity::Tls,
+            },
+        ] {
+            profile.credentials = credentials;
+            let content = render(&profile, ClientFormat::SingBox, "example.com").unwrap();
+            let exported: Value = serde_json::from_str(&content).unwrap();
+            let multiplex = &exported["outbounds"][0]["multiplex"];
+            assert_eq!(multiplex["enabled"], true);
+            assert_eq!(multiplex["protocol"], "h2mux");
+            assert_eq!(multiplex["max_connections"], 4);
+            assert_eq!(multiplex["min_streams"], 4);
+            assert_eq!(multiplex["max_streams"], 0);
+            assert_eq!(multiplex["padding"], false);
+            if let Some(binary) = std::env::var_os("PING_RUST_SING_BOX_BIN") {
+                let file = tempfile::NamedTempFile::new().unwrap();
+                std::fs::write(file.path(), &content).unwrap();
+                let output = std::process::Command::new(binary)
+                    .args(["check", "-c"])
+                    .arg(file.path())
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "sing-box rejected export: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            assert!(render(&profile, ClientFormat::ClashMeta, "example.com").is_err());
+            let uri = render(&profile, ClientFormat::Nekobox, "example.com").unwrap();
+            assert!(!uri.contains("h2mux"));
+        }
+        profile.credentials = Credentials::VlessTls {
+            user_id: Uuid::nil(),
+            server_name: "example.com".to_owned(),
+            alpn_protocols: vec![],
+            vision: true,
+            websocket_path: None,
+        };
+        assert!(render(&profile, ClientFormat::SingBox, "example.com").is_err());
+        profile.credentials = reality_profile().credentials;
+        assert!(render(&profile, ClientFormat::SingBox, "example.com").is_err());
+        profile.credentials = Credentials::Trojan {
+            password: "secret".to_owned(),
+            server_name: "example.com".to_owned(),
+            alpn_protocols: vec![],
+            security: TlsSecurity::Reality {
+                private_key: "private".to_owned(),
+                public_key: "public".to_owned(),
+                short_id: "0123456789abcdef".to_owned(),
+            },
+        };
+        assert!(render(&profile, ClientFormat::SingBox, "example.com").is_err());
     }
 
     #[test]
@@ -972,6 +1062,7 @@ mod tests {
     fn exports_new_presets_to_all_client_formats() {
         let base =
             |name: &str, credentials: Credentials, self_signed_certificate: bool| ManagedProfile {
+                h2mux: Default::default(),
                 id: Uuid::new_v4(),
                 name: name.to_owned(),
                 port: 443,
@@ -1134,6 +1225,7 @@ mod tests {
     #[test]
     fn exports_hysteria2_self_signed_warning_flag() {
         let profile = ManagedProfile {
+            h2mux: Default::default(),
             id: Uuid::nil(),
             name: "hy2".to_owned(),
             port: 8443,
@@ -1156,6 +1248,7 @@ mod tests {
     #[test]
     fn self_signed_share_uris_include_v2rayn_insecure_flags() {
         let hysteria2 = ManagedProfile {
+            h2mux: Default::default(),
             id: Uuid::nil(),
             name: "hy2".to_owned(),
             port: 443,
@@ -1170,6 +1263,7 @@ mod tests {
             self_signed_certificate: true,
         };
         let tuic = ManagedProfile {
+            h2mux: Default::default(),
             id: Uuid::nil(),
             name: "tuic".to_owned(),
             port: 443,
@@ -1203,6 +1297,7 @@ mod tests {
     #[test]
     fn exports_tuic_required_fields() {
         let profile = ManagedProfile {
+            h2mux: Default::default(),
             id: Uuid::nil(),
             name: "tuic".to_owned(),
             port: 443,
@@ -1227,6 +1322,7 @@ mod tests {
     #[test]
     fn exports_shadowsocks_to_parseable_formats() {
         let profile = ManagedProfile {
+            h2mux: Default::default(),
             id: Uuid::nil(),
             name: "ss-2022".to_owned(),
             port: 8388,
@@ -1256,6 +1352,7 @@ mod tests {
     #[test]
     fn exports_naiveproxy_to_sing_box_and_rejects_unverified_formats() {
         let profile = ManagedProfile {
+            h2mux: Default::default(),
             id: Uuid::nil(),
             name: "naive".to_owned(),
             port: 443,
@@ -1303,6 +1400,7 @@ mod tests {
         .unwrap();
         std::fs::write(&key, "NEVER-EXPORT-PRIVATE-KEY").unwrap();
         let profile = ManagedProfile {
+            h2mux: Default::default(),
             id: Uuid::nil(),
             name: "naive-test".to_owned(),
             port: 443,
@@ -1328,6 +1426,7 @@ mod tests {
     #[test]
     fn exports_shadowtls_to_verified_client_shapes_and_rejects_uri() {
         let profile = ManagedProfile {
+            h2mux: Default::default(),
             id: Uuid::nil(),
             name: "ss-shadowtls".to_owned(),
             port: 8443,
@@ -1368,6 +1467,7 @@ mod tests {
     #[test]
     fn snell_v3_exports_only_lossless_clash_meta_and_never_fakes_a_uri() {
         let profile = |cipher| ManagedProfile {
+            h2mux: Default::default(),
             id: Uuid::nil(),
             name: "snell-main".to_owned(),
             port: 8389,
@@ -1407,6 +1507,7 @@ mod tests {
 
     fn anytls_profile(security: AnyTlsSecurity) -> ManagedProfile {
         ManagedProfile {
+            h2mux: Default::default(),
             id: Uuid::nil(),
             name: "anytls-test".to_owned(),
             port: 443,
@@ -1482,6 +1583,7 @@ mod tests {
     #[test]
     fn socks5_uri_and_client_exports_preserve_auth_udp_ipv6_and_encoding() {
         let profile = ManagedProfile {
+            h2mux: Default::default(),
             id: Uuid::nil(),
             name: "SOCKS #测试".to_owned(),
             port: 1080,
@@ -1535,6 +1637,7 @@ mod tests {
     fn generated_socks5_username_flows_through_uri_and_client_exports() {
         let username = config::generated_socks5_username();
         let profile = ManagedProfile {
+            h2mux: Default::default(),
             id: Uuid::nil(),
             name: "generated-socks".to_owned(),
             port: 1080,

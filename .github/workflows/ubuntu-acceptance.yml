@@ -1037,6 +1037,64 @@ jobs:
           done
           ! sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)25449$'
 
+      - name: Edit H2MUX client preference without shoes service action
+        shell: bash
+        run: |
+          set -euo pipefail
+          config_before="$(sudo sha256sum /etc/shoes/config.yaml | awk '{print $1}')"
+          pid_before="$(sudo systemctl show --property MainPID --value shoes.service)"
+          test "$pid_before" -gt 0
+          profile_number="$(sudo python3 - <<'PY'
+          import json
+          with open('/etc/shoes/ping-rust-state.json', encoding='utf-8') as stream:
+              profiles = json.load(stream)['profiles']
+          print(next(index for index, profile in enumerate(profiles, 1) if profile['port'] == 25455))
+          PY
+          )"
+          sudo env PRS_COMMAND="$PRS" PROFILE_NUMBER="$profile_number" expect <<'EXPECT'
+          log_user 0
+          set timeout 180
+          proc wait_for {pattern stage} {
+            expect {
+              -re $pattern { return }
+              eof { puts stderr "unexpected EOF at $stage"; exit 51 }
+              timeout { puts stderr "timeout at $stage"; exit 52 }
+            }
+          }
+          spawn $env(PRS_COMMAND)
+          wait_for {请选择 \[0-10\]} main-menu
+          send "2\r"
+          wait_for {请选择配置} profile-menu
+          wait_for {请选择} profile-prompt
+          send "$env(PROFILE_NUMBER)\r"
+          wait_for {配置 H2MUX 客户端偏好} change-menu
+          wait_for {请选择} change-prompt
+          send "5\r"
+          wait_for {H2MUX 客户端偏好} mux-menu
+          wait_for {请选择} mux-prompt
+          send "2\r"
+          wait_for {Max connections} max-connections
+          send "\r"
+          wait_for {Min streams} min-streams
+          send "\r"
+          wait_for {启用 H2MUX padding} padding
+          send "\r"
+          wait_for {配置更改成功} change-success
+          wait_for {请选择 \[0-10\]} main-menu-return
+          send "0\r"
+          wait_for {已退出} exit-message
+          expect { eof {} timeout { puts stderr "timeout waiting for H2MUX edit exit"; exit 53 } }
+          EXPECT
+          test "$(sudo sha256sum /etc/shoes/config.yaml | awk '{print $1}')" = "$config_before"
+          test "$(sudo systemctl show --property MainPID --value shoes.service)" = "$pid_before"
+          sudo python3 - <<'PY'
+          import json
+          with open('/etc/shoes/ping-rust-state.json', encoding='utf-8') as stream:
+              profiles = json.load(stream)['profiles']
+          profile = next(profile for profile in profiles if profile['port'] == 25455)
+          assert profile['h2mux'] == {'enabled': True, 'max_connections': 4, 'min_streams': 4, 'max_streams': 0, 'padding': False}
+          PY
+
       - name: Roll back exact config and runtime when hot reload times out
         shell: bash
         run: |

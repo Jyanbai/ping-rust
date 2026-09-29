@@ -127,6 +127,7 @@ async fn nodes_menu() -> Result<()> {
             (4, "删除"),
             (5, "查看"),
             (6, "选择出口"),
+            (7, "配置节点 H2MUX"),
             (0, "返回"),
         ];
         match select_keyed("节点管理", &items)? {
@@ -144,6 +145,38 @@ async fn nodes_menu() -> Result<()> {
             4 => delete_chain_node().await?,
             5 => print_chain_nodes(&state.nodes, state.active().map(|node| node.id)),
             6 => select_chain_exit().await?,
+            7 => {
+                let eligible = state
+                    .nodes
+                    .iter()
+                    .filter(|node| node.h2mux_eligible())
+                    .collect::<Vec<_>>();
+                if eligible.is_empty() {
+                    println!("没有支持 H2MUX 的链式节点。");
+                    continue;
+                }
+                let labels = eligible
+                    .iter()
+                    .map(|node| {
+                        format!(
+                            "{} | {} | H2MUX: {}",
+                            node.name,
+                            node.protocol_name(),
+                            h2mux_status(&node.h2mux)
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let Some(index) = select_numbered("选择节点", &labels)? else {
+                    continue;
+                };
+                let node = eligible[index];
+                if let Some(options) = prompt_h2mux_options(&node.h2mux)? {
+                    deployment::update_chain_proxy(ChainProxyChange::SetNodeH2Mux(
+                        node.id, options,
+                    ))
+                    .await?;
+                }
+            }
             _ => unreachable!(),
         }
     }

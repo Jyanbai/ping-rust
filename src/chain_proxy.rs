@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 use uuid::Uuid;
 
+use crate::h2mux::H2MuxOptions;
 use crate::utils;
 
 mod state;
@@ -45,9 +46,34 @@ pub struct ChainNode {
     pub id: Uuid,
     pub name: String,
     pub client: ShoesClientConfig,
+    #[serde(default, skip_serializing_if = "H2MuxOptions::is_disabled")]
+    pub h2mux: H2MuxOptions,
 }
 
 impl ChainNode {
+    pub fn h2mux_eligible(&self) -> bool {
+        self.client.protocol.validate_h2mux_eligibility().is_ok()
+    }
+
+    pub fn validate_h2mux(&self) -> Result<()> {
+        self.h2mux.validate()?;
+        if self.h2mux.enabled {
+            self.client.protocol.validate_h2mux_eligibility()?;
+        }
+        Ok(())
+    }
+
+    pub fn shoes_value(&self) -> Result<serde_yaml::Value> {
+        self.validate_h2mux()?;
+        let mut value = serde_yaml::to_value(&self.client)?;
+        if self.h2mux.enabled {
+            self.client
+                .protocol
+                .insert_h2mux(&mut value["protocol"], self.h2mux.shoes_value()?)?;
+        }
+        Ok(value)
+    }
+
     pub fn with_name(mut self, name: String) -> Result<Self> {
         validate_node_name(&name)?;
         self.name = name;
@@ -74,10 +100,10 @@ pub struct ShoesClientConfig {
 }
 
 #[derive(Serialize)]
-struct ProbeServer<'a> {
+struct ProbeServer {
     address: String,
     protocol: ProbeSocksProtocol,
-    rules: Vec<ProbeRule<'a>>,
+    rules: Vec<ProbeRule>,
 }
 
 #[derive(Serialize)]
@@ -88,10 +114,10 @@ struct ProbeSocksProtocol {
 }
 
 #[derive(Serialize)]
-struct ProbeRule<'a> {
+struct ProbeRule {
     masks: &'static str,
     action: &'static str,
-    client_chains: &'a ShoesClientConfig,
+    client_chains: serde_yaml::Value,
 }
 
 #[derive(Serialize)]
@@ -135,6 +161,12 @@ pub enum ShoesClientProtocol {
         #[serde(default = "default_true")]
         udp_enabled: bool,
     },
+    Vmess {
+        cipher: String,
+        user_id: String,
+        #[serde(default = "default_true")]
+        udp_enabled: bool,
+    },
     Trojan {
         password: String,
     },
@@ -164,6 +196,38 @@ pub enum ShoesClientProtocol {
 }
 
 impl ShoesClientProtocol {
+    fn validate_h2mux_eligibility(&self) -> Result<()> {
+        match self {
+            Self::Vless { .. } | Self::Vmess { .. } | Self::Trojan { .. } => Ok(()),
+            Self::Reality { vision: true, .. } | Self::Tls { vision: true, .. } => {
+                bail!("H2MUX cannot be enabled with VLESS Vision")
+            }
+            Self::Reality { protocol, .. }
+            | Self::Tls { protocol, .. }
+            | Self::Websocket { protocol, .. } => protocol.validate_h2mux_eligibility(),
+            _ => bail!("该链式节点协议不支持 H2MUX"),
+        }
+    }
+
+    fn insert_h2mux(
+        &self,
+        value: &mut serde_yaml::Value,
+        options: serde_yaml::Value,
+    ) -> Result<()> {
+        match self {
+            Self::Vless { .. } | Self::Vmess { .. } | Self::Trojan { .. } => {
+                value["h2mux"] = options;
+                Ok(())
+            }
+            Self::Reality { protocol, .. }
+            | Self::Tls { protocol, .. }
+            | Self::Websocket { protocol, .. } => {
+                protocol.insert_h2mux(&mut value["protocol"], options)
+            }
+            _ => bail!("该链式节点协议不支持 H2MUX"),
+        }
+    }
+
     fn protocol_name(&self) -> &'static str {
         match self {
             Self::Direct => "DIRECT",
@@ -171,6 +235,7 @@ impl ShoesClientProtocol {
             Self::Socks { .. } => "SOCKS5",
             Self::Shadowsocks { .. } => "Shadowsocks",
             Self::Vless { .. } => "VLESS",
+            Self::Vmess { .. } => "VMess",
             Self::Trojan { .. } => "Trojan",
             Self::Reality { protocol, .. } => match protocol.as_ref() {
                 Self::Vless { .. } => "VLESS-Reality",
@@ -179,6 +244,7 @@ impl ShoesClientProtocol {
             Self::Tls { protocol, .. } => match protocol.as_ref() {
                 Self::Websocket { protocol, .. } => match protocol.as_ref() {
                     Self::Vless { .. } => "VLESS-WS-TLS",
+                    Self::Vmess { .. } => "VMess-WS-TLS",
                     Self::Trojan { .. } => "Trojan-WS-TLS",
                     _ => "WebSocket-TLS",
                 },
@@ -194,7 +260,9 @@ impl ShoesClientProtocol {
     fn supports_udp_over_tcp(&self) -> bool {
         match self {
             Self::Direct => true,
-            Self::Shadowsocks { udp_enabled, .. } | Self::Vless { udp_enabled, .. } => *udp_enabled,
+            Self::Shadowsocks { udp_enabled, .. }
+            | Self::Vless { udp_enabled, .. }
+            | Self::Vmess { udp_enabled, .. } => *udp_enabled,
             // shoes 0.2.8 still leaves Trojan UDP client handling unimplemented.
             Self::Trojan { .. } => false,
             Self::Reality { protocol, .. }
@@ -234,12 +302,101 @@ pub fn parse_share_uri(input: &str) -> Result<ChainNode> {
         "ss" => parse_shadowsocks(input),
         "vless" => parse_vless(input),
         "trojan" => parse_trojan(input),
-        "vmess" | "anytls" => bail!(
+        "vmess" => parse_vmess(input),
+        "anytls" => bail!(
             "当前版本尚未启用 {} 分享链接导入；未验证的格式不会被近似转换",
             scheme
         ),
         _ => bail!("不支持的链式代理分享链接协议：{scheme}"),
     }
+}
+
+fn parse_vmess(input: &str) -> Result<ChainNode> {
+    let encoded = input
+        .strip_prefix("vmess://")
+        .context("VMess 分享链接格式无效")?;
+    let decoded = decode_base64_text(encoded).context("VMess 分享链接 Base64 无效")?;
+    let value: serde_json::Value =
+        serde_json::from_str(&decoded).context("VMess 分享链接 JSON 无效")?;
+    let field = |key: &str| -> Result<&str> {
+        value
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .with_context(|| format!("VMess 分享链接缺少 {key}"))
+    };
+    if value.get("v").and_then(serde_json::Value::as_u64) != Some(2)
+        || !matches!(
+            value.get("aid").and_then(serde_json::Value::as_u64),
+            Some(0)
+        )
+        || !matches!(field("scy")?, "auto" | "")
+        || field("net")? != "ws"
+        || field("type")? != "none"
+        || field("tls")? != "tls"
+    {
+        bail!("VMess 链式导入仅支持本项目的 AEAD + WebSocket + TLS 分享链接");
+    }
+    let user_id = field("id")?.to_owned();
+    Uuid::parse_str(&user_id).context("VMess 用户 ID 必须是有效 UUID")?;
+    let port = value
+        .get("port")
+        .and_then(serde_json::Value::as_u64)
+        .or_else(|| {
+            value
+                .get("port")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|text| text.parse::<u64>().ok())
+        })
+        .filter(|port| (1..=65535).contains(port))
+        .context("VMess 端口必须在 1..=65535 范围内")?;
+    let host = field("add")?;
+    let url = Url::parse(&format!(
+        "http://{}:{port}",
+        if host.contains(':') {
+            format!("[{host}]")
+        } else {
+            host.to_owned()
+        }
+    ))
+    .context("VMess 服务器地址无效")?;
+    let path = field("path")?;
+    if !path.starts_with('/') || path.contains(['?', '#']) || path.chars().any(char::is_control) {
+        bail!("VMess WebSocket 路径无效");
+    }
+    let ws_host = field("host")?;
+    let sni = field("sni")?;
+    if sni.is_empty() || sni.chars().any(char::is_control) || ws_host.chars().any(char::is_control)
+    {
+        bail!("VMess SNI 或 WebSocket Host 无效");
+    }
+    let insecure = field("insecure")?;
+    let verify = match insecure {
+        "0" => true,
+        "1" => false,
+        _ => bail!("VMess insecure 必须为 0 或 1"),
+    };
+    let protocol = ShoesClientProtocol::Tls {
+        verify,
+        sni_hostname: sni.to_owned(),
+        vision: false,
+        protocol: Box::new(ShoesClientProtocol::Websocket {
+            matching_path: Some(path.to_owned()),
+            matching_headers: (!ws_host.is_empty())
+                .then(|| BTreeMap::from([("Host".to_owned(), ws_host.to_owned())])),
+            protocol: Box::new(ShoesClientProtocol::Vmess {
+                cipher: "any".to_owned(),
+                user_id,
+                udp_enabled: true,
+            }),
+        }),
+    };
+    let mut node = build_node(&url, protocol)?;
+    if let Some(name) = value.get("ps").and_then(serde_json::Value::as_str) {
+        if !name.trim().is_empty() {
+            node = node.with_name(name.to_owned())?;
+        }
+    }
+    Ok(node)
 }
 
 enum ProxyKind {
@@ -453,6 +610,7 @@ fn build_node(url: &Url, protocol: ShoesClientProtocol) -> Result<ChainNode> {
         id: Uuid::new_v4(),
         name,
         client: ShoesClientConfig { address, protocol },
+        h2mux: H2MuxOptions::default(),
     })
 }
 
@@ -596,7 +754,7 @@ fn probe_config(node: &ChainNode, port: u16) -> Result<String> {
         rules: vec![ProbeRule {
             masks: "0.0.0.0/0",
             action: "allow",
-            client_chains: &node.client,
+            client_chains: node.shoes_value()?,
         }],
     }];
     serde_yaml::to_string(&servers).context("生成链式节点测试配置失败")
@@ -840,6 +998,61 @@ mod tests {
         );
         assert!(parse_share_uri(&invalid_short_id).is_err());
         assert!(parse_share_uri("trojan://secret@example.com:443?security=none&type=tcp").is_err());
+    }
+
+    #[test]
+    fn node_h2mux_is_nested_at_proxy_protocol_and_old_nodes_default_off() {
+        let mut node = parse_share_uri("vless://b85798ef-e9dc-46a4-9a87-8da4499d36d0@example.com:443?security=tls&type=ws&path=%2Fvless&sni=example.com#edge").unwrap();
+        let old_json = serde_json::to_value(&node).unwrap();
+        assert!(old_json.get("h2mux").is_none());
+        let old: ChainNode = serde_json::from_value(old_json).unwrap();
+        assert!(!old.h2mux.enabled);
+        node.h2mux.enabled = true;
+        let value = node.shoes_value().unwrap();
+        let nested = &value["protocol"]["protocol"]["protocol"]["h2mux"];
+        assert_eq!(nested["max_connections"].as_u64(), Some(4));
+        assert_eq!(nested["padding"].as_bool(), Some(false));
+        assert!(value["protocol"]["h2mux"].is_null());
+        let saved = serde_json::to_vec(&node).unwrap();
+        let restored: ChainNode = serde_json::from_slice(&saved).unwrap();
+        assert_eq!(restored.h2mux, node.h2mux);
+        let mut vision = parse_share_uri("vless://b85798ef-e9dc-46a4-9a87-8da4499d36d0@example.com:443?security=tls&type=tcp&flow=xtls-rprx-vision&sni=example.com#vision").unwrap();
+        vision.h2mux.enabled = true;
+        assert!(vision.shoes_value().is_err());
+        let mut unsupported = parse_share_uri("socks5://127.0.0.1:1080#socks").unwrap();
+        unsupported.h2mux.enabled = true;
+        assert!(unsupported.shoes_value().is_err());
+    }
+
+    #[test]
+    fn imports_only_supported_vmess_ws_tls_shape() {
+        let payload = serde_json::json!({
+            "v": 2, "ps": "vmess-edge", "add": "example.com", "port": 443,
+            "id": "b85798ef-e9dc-46a4-9a87-8da4499d36d0", "aid": 0,
+            "scy": "auto", "net": "ws", "type": "none", "host": "example.com",
+            "path": "/vmess", "tls": "tls", "sni": "example.com", "insecure": "0"
+        });
+        let uri = format!("vmess://{}", STANDARD.encode(payload.to_string()));
+        let mut node = parse_share_uri(&uri).unwrap();
+        assert_eq!(node.name, "vmess-edge");
+        assert_eq!(node.protocol_name(), "VMess-WS-TLS");
+        node.h2mux.enabled = true;
+        let rendered = node.shoes_value().unwrap();
+        assert_eq!(
+            rendered["protocol"]["protocol"]["protocol"]["h2mux"]["max_connections"].as_u64(),
+            Some(4)
+        );
+        for (field, replacement) in [
+            ("aid", serde_json::json!(1)),
+            ("net", serde_json::json!("tcp")),
+            ("tls", serde_json::json!("none")),
+            ("insecure", serde_json::json!("maybe")),
+        ] {
+            let mut invalid = payload.clone();
+            invalid[field] = replacement;
+            let uri = format!("vmess://{}", STANDARD.encode(invalid.to_string()));
+            assert!(parse_share_uri(&uri).is_err(), "accepted invalid {field}");
+        }
     }
 
     #[test]

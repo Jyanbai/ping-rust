@@ -1,5 +1,24 @@
 # ping-rust 完成度与验收证据
 
+## Goal 4：H2MUX
+
+| 项目 | 状态 | 证据 |
+|---|---|---|
+| VMess WS TLS / VLESS non-Vision WS TLS / Trojan TLS H2MUX | SUPPORTED | 固定 shoes pin 的本地 TCP 数据面测试：小 payload、1 MiB half-close、每协议 12 并发流；VMess H2MUX 同时通过双 hop Chain。 |
+| VLESS Vision rejection | SUPPORTED | profile、Chain node、state load 和 export 验证拒绝冲突配置。 |
+| Trojan Reality H2MUX | NOT_ENABLED | 尚无匹配产品传输的本地数据面验证。 |
+| Shadowsocks / SS2022 + ShadowTLS / Snell v3 / 其它协议 H2MUX | NOT_IMPLEMENTED | 管理 UI 与状态校验不允许开启。 |
+| server auto-detection | SUPPORTED | 固定 shoes 源码与本地测试；服务端 YAML 无 H2MUX 字段。 |
+| sing-box export | SUPPORTED | `multiplex` JSON 单测；sing-box 1.14.2 `check` 验证三种导出。 |
+| sing-box data E2E | SUPPORTED | sing-box 1.14.2 Trojan H2MUX 客户端连接固定 shoes 服务端，small/1 MiB half-close 本地流量通过。 |
+| Mihomo H2MUX / NekoBox H2MUX | NOT_ENABLED | Mihomo 启用偏好时明确拒绝导出；NekoBox 普通分享链接不承载偏好。 |
+| URI / QR H2MUX | NOT_IMPLEMENTED | 普通 URI/QR 不发明 mux 参数，UI 与 CLI 明确提示。 |
+| profile preference service action / MainPID | NOT_ENABLED | 聚合 YAML 字节相同会选择既有 `NoServiceAction`；Ubuntu PID acceptance 尚待运行。 |
+| Chain node H2MUX / multi-hop | SUPPORTED | 节点独立 H2MUX 配置；固定 shoes 本地 H2MUX + SOCKS 第二 hop 流量通过。 |
+| padding / concurrent streams / half-close | SUPPORTED | Trojan padding=true、自定义 2/2；VMess/VLESS 默认 4/4；各协议 12 并发流及小/1 MiB half-close 通过。 |
+
+H2MUX UDP 仍为 NOT_IMPLEMENTED。生产 shoes pin、依赖与 ping-rust 版本号保持不变；本 Goal 不发布。
+
 ## Goal 3：Chain Proxy 2.0 + Rule-based Routing
 
 | 项目 | 状态 | 证据 |

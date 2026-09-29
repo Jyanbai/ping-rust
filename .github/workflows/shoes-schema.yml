@@ -56,6 +56,20 @@ jobs:
           grep -F "$SHOES_VERSION" <<<"$shoes_version"
       - name: Build ping-rust
         run: cargo build --locked
+      - name: Check H2MUX exports with sing-box 1.14.2
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/sing-box-1.14.2-linux-amd64.tar.gz"
+          curl --fail --location --retry 3 \
+            'https://github.com/SagerNet/sing-box/releases/download/v1.14.2/sing-box-1.14.2-linux-amd64.tar.gz' \
+            --output "$archive"
+          echo "a684484d7477d1437282ee411f4d131d0340aaad60a7868841ebd5d87dd8a0c6  $archive" | sha256sum --check
+          tar -xzf "$archive" -C "$RUNNER_TEMP"
+          binary="$RUNNER_TEMP/sing-box-1.14.2-linux-amd64/sing-box"
+          test -x "$binary"
+          echo "PING_RUST_SING_BOX_BIN=$binary" >> "$GITHUB_ENV"
+          PING_RUST_SING_BOX_BIN="$binary" cargo test --locked h2mux_exports_only_valid_sing_box_preferences -- --nocapture
       - name: Probe repeated atomic replacements against pinned shoes
         env:
           PING_RUST_SHOES_E2E_BIN: /usr/local/bin/shoes

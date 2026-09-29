@@ -4,6 +4,7 @@ mod client;
 mod config;
 mod deployment;
 mod fast_add;
+mod h2mux;
 mod install_self;
 mod installer;
 mod menu;

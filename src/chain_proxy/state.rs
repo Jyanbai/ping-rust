@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::{validate_mask, validate_node_name, ChainNode};
+use crate::h2mux::H2MuxOptions;
 
 pub const CHAIN_PROXY_STATE_VERSION: u8 = 2;
 const MAX_NODES: usize = 512;
@@ -116,6 +117,9 @@ impl ChainProxyState {
             bail!("链式代理对象数量超过限制");
         }
         validate_unique_nodes(&self.nodes)?;
+        for node in &self.nodes {
+            node.validate_h2mux()?;
+        }
         validate_named(self.pools.iter().map(|pool| (pool.id, &pool.name)), "Pool")?;
         validate_named(
             self.chains.iter().map(|chain| (chain.id, &chain.name)),
@@ -346,6 +350,14 @@ impl ChainProxyState {
                     .ok_or_else(|| anyhow!("未找到节点 {id}"))?;
                 node.name = name;
             }
+            ChainProxyChange::SetNodeH2Mux(id, options) => {
+                let node = self
+                    .nodes
+                    .iter_mut()
+                    .find(|node| node.id == id)
+                    .ok_or_else(|| anyhow!("未找到链式节点 {id}"))?;
+                node.h2mux = options;
+            }
             ChainProxyChange::AddPool(pool) => self.pools.push(pool),
             ChainProxyChange::UpdatePool(pool) => {
                 let current = self
@@ -491,6 +503,7 @@ pub enum ChainProxyChange {
     SetEnabled(bool),
     Delete(Uuid),
     RenameNode(Uuid, String),
+    SetNodeH2Mux(Uuid, H2MuxOptions),
     AddPool(ChainPool),
     UpdatePool(ChainPool),
     DeletePool(Uuid),

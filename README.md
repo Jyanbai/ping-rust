@@ -229,13 +229,19 @@ vless://...security=reality...pbk=...&sid=...#VLESS-REALITY-25448
 
 Pool 与多 Chain 轮询只表示连接分布，不提供健康检查、自动故障切换或延迟选择。
 
-第一版支持 SOCKS5、HTTP/HTTPS、Shadowsocks、VLESS TCP/TLS/Reality/WebSocket 和 Trojan TLS/WebSocket 分享链接。由于当前 shoes 内核没有对应客户端实现，Hysteria2、TUIC、WireGuard/WARP 不能作为链式出口；ping-rust 会返回明确错误，不生成近似配置。HTTP、SOCKS5 和 Trojan 出口不支持 UDP-over-TCP，启用或切换时会再次警告；相关 UDP 请求会失败，不会自动回退直连。
+第一版支持 SOCKS5、HTTP/HTTPS、Shadowsocks、VLESS TCP/TLS/Reality/WebSocket、Trojan TLS/WebSocket，以及由 ping-rust 生成的 VMess WebSocket TLS 分享链接。由于当前 shoes 内核没有对应客户端实现，Hysteria2、TUIC、WireGuard/WARP 不能作为链式出口；ping-rust 会返回明确错误，不生成近似配置。HTTP、SOCKS5 和 Trojan 出口不支持 UDP-over-TCP，启用或切换时会再次警告；相关 UDP 请求会失败，不会自动回退直连。
 
 “测试节点 / Chain”严格复用临时 shoes SOCKS5 入口执行完整代理请求；Chain 测试会验证所有有序 hop，而不是逐节点测试的集合。测试进程和权限为 `0600` 的临时配置随后立即删除。它不会修改当前出口或线上 systemd 服务。
 
 新建 v2 状态的默认路由是 DIRECT；在节点管理中“选择出口”会创建或更新单跳默认 Chain，兼容旧版操作习惯。旧版 `active_node` 状态在内存中迁移为单跳 Chain，保留原启用状态与出口；仅读取状态不会改写文件。仍被 Pool、Chain、规则或默认路由引用的对象不能删除。固定 shoes 0.2.8 的 Hysteria2/TUIC UDP 服务端路径会忽略 client chain 并直接创建 UDP socket，因此存在这些入站时会拒绝启用全局链式代理。节点凭据保存在权限为 `0600` 的管理状态和配置文件中，备份同样包含这些敏感信息。
 
 示例：`JP Pool = jp-1, jp-2`；`HK-JP Chain = HK → JP Pool`；规则 `10.0.0.0/8 → DIRECT`、`*.finance.example → TW Chain`、`*.ads.example → BLOCK`；默认路由 `HK-JP Chain`。规则顺序与菜单顺序相同，先匹配的规则优先；可上移和下移。Chain/路由修改继续走候选 `shoes --dry-run`、原子提交、systemd 重启与失败回滚；普通 profile 的已验证 Hot Reload 行为不变。
+
+### H2MUX 客户端偏好
+
+VMess WebSocket TLS、非 Vision VLESS WebSocket TLS 和 Trojan TLS 可在“更改配置”中设置 H2MUX；链式代理的相应节点可独立设置。默认关闭。连接数模式默认 `max_connections=4`、`min_streams=4`、`max_streams=0`、`padding=false`；最大 streams 模式与连接数模式互斥。固定 shoes 服务端自动识别 H2MUX，无需更改服务端 YAML。只修改受管 profile 的客户端偏好时，运行配置不变，服务无需重启或热重载；修改链式节点会更新运行配置并走现有安全重启路径。
+
+sing-box 导出会携带 `multiplex.protocol=h2mux`；固定 shoes 上的 VMess/VLESS WebSocket TLS 和 Trojan TLS 已通过本地 TCP、并发流、half-close 与大 payload 验证，sing-box 1.14.2 已通过导出配置检查及 Trojan H2MUX 数据面测试。Mihomo H2MUX 存在已知兼容问题，开启偏好时拒绝 Mihomo 导出；NekoBox、普通分享 URI 与 QR 仍可用于普通连接，但不携带 H2MUX 设置。VLESS Vision、Shadowsocks、SS2022 + ShadowTLS、Snell v3 及其它协议不提供 H2MUX 开关。H2MUX UDP 尚未验证或启用；Pool、Chain 和路由语义不受该偏好影响。
 
 首次安装流程是：`install.sh → 自动安装 ping-rust/shoes → 自动随机端口部署 VLESS-REALITY → 复制 URL`，中间零输入。Reality 未指定 SNI 时会从 `www.amazon.com`、`www.ebay.com`、`www.paypal.com`、`www.cloudflare.com`、`dash.cloudflare.com`、`aws.amazon.com` 中随机选择；列表不含 Apple，客户端指纹固定为本地 233boy 脚本使用的 `chrome`。后续日常流程是：`prs → 1 → 选择协议 → 输入端口/直接回车随机`；Shadowsocks 会额外选择加密方式和密码，SS 2022 密码不符合所选 cipher 的 Base64 密钥长度时会警告并自动替换。其余协议自动生成 UUID、密码、Reality 密钥、WebSocket 路径或证书。SOCKS5 快速添加默认生成安全随机用户名和密码并启用 UDP ASSOCIATE；Snell v3 快速添加默认生成随机密码并启用 UDP-over-TCP。NaiveProxy 要求明确选择受信任证书或自签名测试模式，不会静默生成生产自签名配置。添加或查看配置成功后直接退出 `prs`；主菜单输入 `0` 退出，任意子菜单输入 `0` 返回主菜单。自动端口从 `20000..=65535` 的高位范围选择；菜单协议选择固定使用连续编号 `1..=13`。信息只会在配置通过 `shoes --dry-run`、原子写入、systemd 启动且确认为 active 后输出；失败会恢复原配置和服务状态。
 

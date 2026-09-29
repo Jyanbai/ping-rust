@@ -16,6 +16,7 @@ use crate::{
         ProfileChange, Protocol, ShadowsocksCipher, SnellCipher,
     },
     deployment, fast_add,
+    h2mux::H2MuxOptions,
     installer::{self, InstallMethod},
     operations,
     service::{self, ServiceAction},
@@ -59,6 +60,7 @@ const SHOES_UPDATE_ITEMS: [&str; 2] = [
 
 #[derive(Clone, Copy)]
 enum ChangeAction {
+    H2Mux,
     Port,
     Name,
     ServerAddress,
@@ -333,12 +335,21 @@ async fn change_config_menu() -> Result<()> {
         | Protocol::TrojanReality
         | Protocol::VmessWsTls => {}
     }
+    if profile.h2mux_eligible() {
+        actions.push((ChangeAction::H2Mux, "配置 H2MUX 客户端偏好"));
+    }
     let action_labels = actions.iter().map(|(_, label)| *label).collect::<Vec<_>>();
     let Some(action_index) = select_numbered("选择更改项目", &action_labels)? else {
         return Ok(());
     };
     let action = actions[action_index].0;
     let change = match action {
+        ChangeAction::H2Mux => {
+            let Some(options) = prompt_h2mux_options(&profile.h2mux)? else {
+                return Ok(());
+            };
+            ProfileChange::H2Mux(options)
+        }
         ChangeAction::Port => {
             let value = Input::<String>::with_theme(&ColorfulTheme::default())
                 .with_prompt("输入新端口（直接回车自动选择随机端口）")
@@ -644,6 +655,9 @@ async fn change_config_menu() -> Result<()> {
             Err(error) => eprintln!("分享链接生成失败：{error:#}"),
         }
     }
+    if result.profile.h2mux.enabled {
+        println!("提示：分享链接不包含 H2MUX 客户端偏好；请使用 sing-box 导出。shoes 服务端自动识别 H2MUX。");
+    }
     Ok(())
 }
 
@@ -876,7 +890,70 @@ fn print_chain_nodes(nodes: &[ChainNode], active: Option<uuid::Uuid>) {
             node.protocol_name(),
             node.address()
         );
+        println!("    H2MUX: {}", h2mux_status(&node.h2mux));
     }
+}
+
+fn h2mux_status(options: &H2MuxOptions) -> String {
+    if !options.enabled {
+        return "off".to_owned();
+    }
+    format!(
+        "on (max_connections={}, min_streams={}, max_streams={}, padding={})",
+        options.max_connections, options.min_streams, options.max_streams, options.padding
+    )
+}
+
+fn prompt_h2mux_options(current: &H2MuxOptions) -> Result<Option<H2MuxOptions>> {
+    let Some(action) = select_numbered(
+        "H2MUX 客户端偏好",
+        &["关闭", "开启：连接数模式", "开启：最大 streams 模式"],
+    )?
+    else {
+        return Ok(None);
+    };
+    if action == 0 {
+        return Ok(Some(H2MuxOptions::default()));
+    }
+    let mut options = H2MuxOptions {
+        enabled: true,
+        ..H2MuxOptions::default()
+    };
+    if action == 1 {
+        options.max_connections = Input::<u32>::with_theme(&ColorfulTheme::default())
+            .with_prompt("Max connections")
+            .default(if current.max_connections > 0 {
+                current.max_connections
+            } else {
+                4
+            })
+            .interact_text()?;
+        options.min_streams = Input::<u32>::with_theme(&ColorfulTheme::default())
+            .with_prompt("Min streams")
+            .default(if current.min_streams > 0 {
+                current.min_streams
+            } else {
+                4
+            })
+            .interact_text()?;
+    } else {
+        options.max_connections = 0;
+        options.min_streams = 0;
+        options.max_streams = Input::<u32>::with_theme(&ColorfulTheme::default())
+            .with_prompt("Max streams")
+            .default(if current.max_streams > 0 {
+                current.max_streams
+            } else {
+                8
+            })
+            .interact_text()?;
+    }
+    options.padding = Confirm::with_theme(&ColorfulTheme::default())
+        .with_prompt("启用 H2MUX padding？")
+        .default(current.padding)
+        .interact()?;
+    options.validate()?;
+    Ok(Some(options))
 }
 
 async fn delete_chain_node() -> Result<()> {
@@ -927,6 +1004,9 @@ fn export_menu() -> Result<()> {
         .interact_text()?;
     let content = client::render(&state.profiles[selected], format, &server)?;
     println!("\n{content}\n");
+    if state.profiles[selected].h2mux.enabled && matches!(format, ClientFormat::Nekobox) {
+        println!("提示：NekoBox 分享链接不包含 H2MUX 客户端偏好；普通节点连接仍可使用。");
+    }
     if state.profiles[selected].self_signed_certificate
         && state.profiles[selected].protocol() != Protocol::NaiveProxy
     {
@@ -1648,6 +1728,7 @@ mod tests {
     #[test]
     fn single_profile_is_selected_without_showing_a_choice_menu() {
         let profile = config::ManagedProfile {
+            h2mux: Default::default(),
             id: uuid::Uuid::new_v4(),
             name: "only-profile".to_owned(),
             port: 443,
@@ -1670,6 +1751,7 @@ mod tests {
     #[test]
     fn anytls_reality_view_keeps_details_when_standard_uri_is_unsupported() {
         let profile = config::ManagedProfile {
+            h2mux: Default::default(),
             id: uuid::Uuid::new_v4(),
             name: "anytls-reality".to_owned(),
             port: 443,
@@ -1732,6 +1814,7 @@ mod tests {
     #[test]
     fn profile_lists_use_real_protocol_and_port_file_names() {
         let profile = config::ManagedProfile {
+            h2mux: Default::default(),
             id: uuid::Uuid::new_v4(),
             name: "reality-abcd1234".to_owned(),
             port: 53453,

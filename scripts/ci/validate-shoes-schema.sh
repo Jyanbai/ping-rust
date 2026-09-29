@@ -14,6 +14,7 @@ shoes --dry-run examples/snell.yaml
 cargo test --locked --test chain_proxy_e2e -- --nocapture
 cargo test --locked pinned_schema_accepts_full_v2_rule_shape -- --nocapture
 cargo test --locked --test chain_v2_e2e -- --nocapture
+python3 scripts/ci/validate-h2mux.py
 )
 echo '::endgroup::'
 

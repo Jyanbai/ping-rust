@@ -31,7 +31,7 @@ pub(crate) fn chain_value(state: &ChainProxyState, id: Uuid) -> Value {
                     .iter()
                     .find(|node| node.id == *node_id)
                     .expect("validated node");
-                serde_yaml::to_value(&node.client).expect("client serializes")
+                node.shoes_value().expect("validated client serializes")
             }
             ChainHop::Pool(pool_id) => {
                 let pool = state
@@ -48,7 +48,7 @@ pub(crate) fn chain_value(state: &ChainProxyState, id: Uuid) -> Value {
                             .iter()
                             .find(|node| node.id == *node_id)
                             .expect("validated node");
-                        serde_yaml::to_value(&node.client).expect("client serializes")
+                        node.shoes_value().expect("validated client serializes")
                     })
                     .collect();
                 serde_yaml::to_value(PoolYaml { pool: members }).expect("pool serializes")

@@ -1164,6 +1164,18 @@ fn profile_details_lines(profile: &config::ManagedProfile, share_uri: Option<&st
             ));
         }
     }
+    if profile.h2mux.enabled {
+        lines.push(format!(
+            "H2MUX 客户端偏好       = on (max_connections={}, min_streams={}, max_streams={}, padding={})",
+            profile.h2mux.max_connections,
+            profile.h2mux.min_streams,
+            profile.h2mux.max_streams,
+            profile.h2mux.padding
+        ));
+        lines.push("shoes 服务端自动识别 H2MUX；普通 URI/QR 不包含此偏好。".to_owned());
+    } else if profile.h2mux_eligible() {
+        lines.push("H2MUX 客户端偏好       = off".to_owned());
+    }
     if let Some(uri) = share_uri {
         lines.push("------------- 链接 (URL) -------------".to_owned());
         lines.push(uri.to_owned());
@@ -1491,6 +1503,9 @@ fn print_saved_url(selector: Option<&str>, server_address: Option<&str>) -> Resu
     let state = config::load_state()?;
     let profile = client::select_profile(&state.profiles, selector)?;
     println!("{}", client::stored_share_uri(profile, server_address)?);
+    if profile.h2mux.enabled {
+        eprintln!("提示：标准 URI 不包含 H2MUX 客户端偏好；此链接仍可用于普通连接。");
+    }
     Ok(())
 }
 
@@ -1500,6 +1515,9 @@ fn print_saved_qr(selector: Option<&str>, server_address: Option<&str>) -> Resul
     let uri = client::stored_share_uri(profile, server_address)?;
     let (output, error) = terminal_qr_or_url_text(&uri);
     println!("{output}");
+    if profile.h2mux.enabled {
+        eprintln!("提示：二维码不包含 H2MUX 客户端偏好；此链接仍可用于普通连接。");
+    }
     if let Some(error) = error {
         eprintln!("二维码生成失败：{error}；已改为输出原始 URL，可直接复制。");
     }
@@ -2092,6 +2110,7 @@ mod tests {
     #[test]
     fn shadowsocks_details_include_import_fields() {
         let profile = config::ManagedProfile {
+            h2mux: Default::default(),
             id: Uuid::nil(),
             name: "ss-main".to_owned(),
             port: 34333,
@@ -2142,6 +2161,7 @@ mod tests {
     #[test]
     fn snell_details_show_every_manual_client_field_without_fake_url() {
         let profile = config::ManagedProfile {
+            h2mux: Default::default(),
             id: Uuid::nil(),
             name: "snell-main".to_owned(),
             port: 8389,
@@ -2178,6 +2198,7 @@ mod tests {
     #[test]
     fn socks5_details_show_auth_udp_encryption_and_share_uri() {
         let profile = config::ManagedProfile {
+            h2mux: Default::default(),
             id: Uuid::nil(),
             name: "socks-main".to_owned(),
             port: 1080,
@@ -2244,6 +2265,7 @@ mod tests {
     #[test]
     fn all_protocol_details_include_client_fields() {
         let reality = config::ManagedProfile {
+            h2mux: Default::default(),
             id: Uuid::nil(),
             name: "reality".to_owned(),
             port: 443,
@@ -2274,6 +2296,7 @@ mod tests {
         assert!(!reality_output.contains("never-print-private"));
 
         let hysteria2 = config::ManagedProfile {
+            h2mux: Default::default(),
             id: Uuid::nil(),
             name: "hysteria2".to_owned(),
             port: 2443,
@@ -2300,6 +2323,7 @@ mod tests {
         }
 
         let tuic = config::ManagedProfile {
+            h2mux: Default::default(),
             id: Uuid::nil(),
             name: "tuic".to_owned(),
             port: 3443,
@@ -2328,6 +2352,7 @@ mod tests {
         }
 
         let anytls = config::ManagedProfile {
+            h2mux: Default::default(),
             id: Uuid::nil(),
             name: "anytls".to_owned(),
             port: 4443,
