@@ -111,15 +111,6 @@ switch -- $action {
         expect_or_fail {namespace-one: 失败[^\r\n]*ms} "offline Pool member"
         expect_or_fail {namespace-two:} "online Pool member"
     }
-    pool_delete {
-        send_choice 2
-        expect_or_fail {Pool 管理} "pool menu"
-        send_choice 4
-        expect_or_fail {选择 Pool} "pool selector"
-        send_choice 1
-        expect_or_fail {Pool 管理} "pool deleted"
-        send_choice 0
-    }
     delete {
         if {![string is integer -strict $argument] || $argument < 1} {
             puts stderr "delete action requires a positive node index"

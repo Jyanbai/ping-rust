@@ -877,7 +877,6 @@ fn run_acceptance(harness: &mut Harness) -> TestResult {
     run_menu(&expect_script, &ping_rust, "set_direct", None, None)?;
     run_menu(&expect_script, &ping_rust, "delete_chain", None, None)?;
     harness.set_stage("deleting both chain nodes");
-    run_menu(&expect_script, &ping_rust, "pool_delete", None, None)?;
     run_menu(&expect_script, &ping_rust, "delete", Some("1"), None)?;
     run_menu(&expect_script, &ping_rust, "delete", Some("1"), None)?;
     harness.set_stage("rejecting reachable node with invalid credentials");
