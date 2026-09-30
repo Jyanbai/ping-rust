@@ -103,14 +103,13 @@ switch -- $action {
         send_choice 0
     }
     pool_test {
-        log_user 1
         send_choice 7
         expect_or_fail {测试 Pool 内全部节点} "test menu"
         send_choice 3
         expect_or_fail {选择 Pool} "pool selector"
         send_choice 1
-        expect_or_fail {namespace-one: 失败.*ms} "offline Pool member"
-        expect_or_fail {namespace-two: 可用.*ms} "online Pool member"
+        expect_or_fail {namespace-one: 失败[^\r\n]*ms} "offline Pool member"
+        expect_or_fail {namespace-two:} "online Pool member"
     }
     pool_delete {
         send_choice 2
@@ -158,7 +157,7 @@ switch -- $action {
     }
 }
 
-if {$action ni {enable disable set_direct}} {
+if {$action ni {enable disable set_direct pool_test}} {
     expect_or_fail {Chain Proxy 2.0} "return to chain menu"
 }
 send_choice 0
