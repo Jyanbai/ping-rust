@@ -500,32 +500,116 @@ sudo /usr/local/bin/shoes --dry-run /etc/shoes/config.yaml
 
 ```text
 ping-rust/
-├── .github/workflows/      # CI、schema、systemd、upstream drift 与发布工作流
-├── examples/               # 协议、Chain、Pool 和路由示例 YAML
-├── scripts/install.sh
+├── .github/
+│   ├── workflows/
+│   │   ├── chain-systemd.yml
+│   │   ├── ci.yml
+│   │   ├── performance-baseline.yml
+│   │   ├── release.yml
+│   │   ├── security-audit.yml
+│   │   ├── shoes-schema.yml
+│   │   ├── shoes-upstream-drift.yml
+│   │   └── ubuntu-acceptance.yml
+│   └── dependabot.yml
+├── docs/
+│   ├── wiki/
+│   │   ├── _Sidebar.md
+│   │   ├── Chain-Proxy.md
+│   │   ├── Home.md
+│   │   ├── Installation.md
+│   │   ├── Operations.md
+│   │   ├── Protocols.md
+│   │   ├── Quick-Start.md
+│   │   └── Troubleshooting.md
+│   └── SHOES_PIN_UPGRADE.md
+├── examples/
+│   ├── anytls.yaml
+│   ├── chain-e2e-client.yaml
+│   ├── chain-e2e-downstream.yaml
+│   ├── chain-e2e-upstream.yaml
+│   ├── chain-proxy.yaml
+│   ├── hysteria2.yaml
+│   ├── naiveproxy-self-signed.yaml
+│   ├── reality.yaml
+│   ├── shadowsocks.yaml
+│   ├── snell.yaml
+│   ├── socks5-no-auth.yaml
+│   ├── socks5-no-udp.yaml
+│   ├── socks5.yaml
+│   ├── ss2022-shadowtls-v3.yaml
+│   ├── trojan-reality.yaml
+│   ├── trojan-tls.yaml
+│   ├── tuic.yaml
+│   ├── vless-tls-vision.yaml
+│   ├── vless-ws-tls.yaml
+│   └── vmess-ws-tls.yaml
+├── scripts/
+│   ├── ci/
+│   │   ├── validate-h2mux.py
+│   │   └── validate-shoes-schema.sh
+│   └── install.sh
 ├── src/
+│   ├── chain_proxy/
+│   │   └── state.rs
+│   ├── config/
+│   │   ├── presets/
+│   │   │   ├── anytls.rs
+│   │   │   ├── hysteria2.rs
+│   │   │   ├── naiveproxy.rs
+│   │   │   ├── reality.rs
+│   │   │   ├── shadowsocks.rs
+│   │   │   ├── snell.rs
+│   │   │   ├── socks5.rs
+│   │   │   ├── tls.rs
+│   │   │   ├── trojan_reality.rs
+│   │   │   ├── trojan_tls.rs
+│   │   │   ├── tuic.rs
+│   │   │   ├── vless_tls_vision.rs
+│   │   │   ├── vless_ws_tls.rs
+│   │   │   └── vmess_ws_tls.rs
+│   │   ├── commit.rs
+│   │   ├── presets.rs
+│   │   ├── routing.rs
+│   │   ├── schema.rs
+│   │   ├── transaction.rs
+│   │   └── validation.rs
+│   ├── menu/
+│   │   └── chain.rs
 │   ├── chain_proxy.rs
-│   ├── chain_proxy/state.rs
-│   ├── config.rs
-│   ├── config/{commit,presets,schema,transaction,validation}.rs
-│   ├── deployment.rs
-│   ├── menu.rs
-│   ├── menu/chain.rs
 │   ├── cli.rs
 │   ├── client.rs
+│   ├── config.rs
+│   ├── deployment.rs
+│   ├── fast_add.rs
+│   ├── h2mux.rs
+│   ├── install_self.rs
 │   ├── installer.rs
+│   ├── main.rs
+│   ├── menu.rs
+│   ├── operations.rs
+│   ├── performance.rs
+│   ├── self_update.rs
 │   ├── service.rs
-│   └── main.rs
-├── tests/                  # chain、systemd、性能和 PTY 验收
-├── systemd/ping-rust.service
-├── Cargo.toml
+│   └── utils.rs
+├── systemd/
+│   └── ping-rust.service
+├── tests/
+│   ├── chain_menu.exp
+│   ├── chain_proxy_e2e.rs
+│   ├── chain_systemd_e2e.rs
+│   ├── chain_v2_e2e.rs
+│   ├── performance_baseline.rs
+│   └── performance_change.exp
+├── .gitattributes
+├── .gitignore
 ├── Cargo.lock
-├── README.md
+├── Cargo.toml
 ├── COMPLETION_AUDIT.md
+├── LICENSE
+├── README.md
 └── SOURCE_SNAPSHOT.md
 ```
 
-`git ls-files` 是仓库结构的权威来源；上图省略了各目录中的逐文件协议预设和测试 fixture。
 ## 项目仓库
 
 源码仓库：[Jyanbai/ping-rust](https://github.com/Jyanbai/ping-rust)

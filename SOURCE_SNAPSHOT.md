@@ -1,6 +1,6 @@
-# ping-rust 完整源码快照
+# ping-rust v0.1.9 历史源码快照
 
-> 由真实仓库文件逐个机械合并并校验；实际构建仍使用原始文件。
+> 本文件记录 v0.1.9 时的历史源码，不代表当前 v0.2.0。当前实现请查看 `src/`、`examples/`、`tests/` 和 `.github/workflows/`；验证证据见 `COMPLETION_AUDIT.md`。实际构建始终使用原始文件。
 
 
 ## `Cargo.toml`
