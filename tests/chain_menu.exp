@@ -103,6 +103,7 @@ switch -- $action {
         send_choice 0
     }
     pool_test {
+        log_user 1
         send_choice 7
         expect_or_fail {测试 Pool 内全部节点} "test menu"
         send_choice 3

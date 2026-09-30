@@ -715,7 +715,7 @@ fn run_acceptance(harness: &mut Harness) -> TestResult {
     validate_shoes(&shoes, &upstream_one)?;
     validate_shoes(&shoes, &upstream_two)?;
     harness.spawn_logged(
-        "upstream-one-restarted",
+        "upstream-one",
         Command::new("ip")
             .args(["netns", "exec", &namespace_one])
             .arg(&shoes)
@@ -804,7 +804,7 @@ fn run_acceptance(harness: &mut Harness) -> TestResult {
     run_menu(&expect_script, &ping_rust, "add", Some(&uri_two), None)?;
     harness.set_stage("creating a Pool containing online and offline candidates");
     run_menu(&expect_script, &ping_rust, "pool_create", None, None)?;
-    harness.stop_child("upstream-one-restarted")?;
+    harness.stop_child("upstream-one")?;
     harness.set_stage("testing every Pool member and collecting mixed results");
     run_menu(
         &expect_script,
@@ -814,7 +814,7 @@ fn run_acceptance(harness: &mut Harness) -> TestResult {
         Some(&success_url),
     )?;
     harness.spawn_logged(
-        "upstream-one",
+        "upstream-one-restarted",
         Command::new("ip")
             .args(["netns", "exec", &namespace_one])
             .arg(&shoes)
@@ -854,7 +854,7 @@ fn run_acceptance(harness: &mut Harness) -> TestResult {
     )?;
 
     harness.set_stage("verifying no direct fallback while first node is offline");
-    harness.stop_child("upstream-one")?;
+    harness.stop_child("upstream-one-restarted")?;
     probe_must_fail(harness, *client_port)?;
 
     harness.set_stage("switching to second chain node");
