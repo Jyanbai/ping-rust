@@ -71,7 +71,7 @@ jobs:
           sudo cp /etc/shoes/server-key.pem /etc/shoes/key.pem
           for example in examples/*.yaml; do
             echo "--dry-run $example"
-            shoes --dry-run "$example"
+            sudo shoes --dry-run "$example"
           done
       - name: Check H2MUX exports with sing-box 1.14.2
         shell: bash
