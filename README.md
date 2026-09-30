@@ -418,7 +418,7 @@ sudo ping-rust self-update
 `update` 只更新 shoes 内核；`self-update` 更新 ping-rust 本身。已知较低的 GitHub Release 默认会被拒绝，只有明确使用 `--allow-downgrade` 才会允许：
 
 ```bash
-sudo ping-rust self-update --version v0.1.15
+sudo ping-rust self-update --version v0.2.0
 sudo ping-rust update --method release --allow-downgrade
 ```
 

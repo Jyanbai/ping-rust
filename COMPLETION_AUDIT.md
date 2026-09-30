@@ -12,12 +12,14 @@
 | Pool 内全部节点手动探针 | 单元测试；CI systemd acceptance（本 PR 新增场景） | `chain_proxy::tests::pool_probe_summary_reports_success_and_failure`；`chain_systemd_acceptance` 的 mixed Pool stage |
 | Update Center 与降级保护 | 单元测试 | `cli::tests::update_status_comparison_is_fail_soft_and_drift_is_explicit`；`installer::tests::known_release_downgrade_is_blocked_unless_explicitly_allowed` |
 | H2MUX | CI 容器、单元测试 | `.github/workflows/shoes-schema.yml` 的 sing-box 检查与 watcher probe；`client::tests::h2mux_exports_only_valid_sing_box_preferences` |
-| SOCKS5、Snell v3、NaiveProxy、SS2022+ShadowTLS v3 | CI systemd acceptance、单元测试 | `.github/workflows/ubuntu-acceptance.yml` 对应菜单/CLI 步骤；`config.rs` 与 `client.rs` 中对应测试 |
+| SOCKS5、Snell v3、NaiveProxy、SS2022+ShadowTLS v3 | CI systemd acceptance、单元测试 | `.github/workflows/ubuntu-acceptance.yml` 的 `Verify prs numeric PTY flow for all protocol presets`；`config::tests::socks5_generation_round_trip_and_edits_preserve_exact_auth_and_udp_state`、`config::tests::snell_v3_yaml_matches_fixed_shoes_schema`、`config::tests::naiveproxy_generates_tls_h2_inner_auth_and_random_credentials`、`config::tests::shadowtls_v3_generates_nested_tcp_only_shadowsocks` |
 | 实机 VPS v0.2.0 全量清单 | 未验证 | 本任务未获得 SSH 测试 VPS，未新增实机结论 |
 
 ### 证据边界
 
 本文早期 Milestone 保留历史版本记录；每条 Debian/Ubuntu VPS 记录适用其标题和条目中注明的 ping-rust、shoes 版本，不可外推为 v0.2.0。本文新增代码的门禁结果只在实际运行后记录。
+
+本 PR 的实际运行记录：本地 `cargo fmt --all -- --check`、`cargo clippy --locked --all-targets --all-features -- -D warnings`、`cargo test --locked --all-targets` 通过（160 个单元测试）；[CI run 36703040410](https://github.com/Jyanbai/ping-rust/actions/runs/36703040410)、[shoes schema run 36703040429](https://github.com/Jyanbai/ping-rust/actions/runs/36703040429)、[Ubuntu/Debian Chain systemd run 36703814702](https://github.com/Jyanbai/ping-rust/actions/runs/36703814702)、[Ubuntu/Debian acceptance run 36700674910](https://github.com/Jyanbai/ping-rust/actions/runs/36700674910) 和[upstream drift run 36700674699](https://github.com/Jyanbai/ping-rust/actions/runs/36700674699) 已成功。前两项基于修复后的 commit `f686743`，Chain run 包含最新 Pool 验收；更早的失败 run 仅用于定位并修复示例证书权限和 PTY 断言，不计为通过证据。
 
 ## Goal 4：H2MUX
 
