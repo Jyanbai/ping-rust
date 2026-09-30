@@ -512,15 +512,6 @@ ping-rust/
 │   │   └── ubuntu-acceptance.yml
 │   └── dependabot.yml
 ├── docs/
-│   ├── wiki/
-│   │   ├── _Sidebar.md
-│   │   ├── Chain-Proxy.md
-│   │   ├── Home.md
-│   │   ├── Installation.md
-│   │   ├── Operations.md
-│   │   ├── Protocols.md
-│   │   ├── Quick-Start.md
-│   │   └── Troubleshooting.md
 │   └── SHOES_PIN_UPGRADE.md
 ├── examples/
 │   ├── anytls.yaml

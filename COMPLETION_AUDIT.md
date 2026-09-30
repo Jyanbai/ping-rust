@@ -9,7 +9,7 @@
 | 13 种协议配置与 schema | CI 容器 / shoes `--dry-run` | `.github/workflows/shoes-schema.yml` 的 `Dry-run every checked-in example`、`scripts/ci/validate-shoes-schema.sh` |
 | Verified Hot Reload | CI systemd acceptance、单元测试 | `.github/workflows/ubuntu-acceptance.yml` 热重载步骤；`service::tests::hot_reload_requires_same_pid_and_exact_listener_delta` |
 | Chain Proxy 2.0 Nodes/Pools/Chains/规则 | CI systemd acceptance、单元测试 | `.github/workflows/chain-systemd.yml` 的 `chain_systemd_acceptance`；`tests/chain_v2_e2e.rs`；`chain_proxy::state::tests::*` |
-| Pool 内全部节点手动探针 | 单元测试；CI systemd acceptance（本 PR 新增场景） | `chain_proxy::tests::pool_probe_summary_reports_success_and_failure`；`chain_systemd_acceptance` 的 mixed Pool stage |
+| Pool 内全部节点手动探针 | 单元测试、CI systemd acceptance 通过 | `chain_proxy::tests::pool_probe_summary_reports_success_and_failure`、`chain_proxy::tests::pool_probe_reports_missing_member_without_network`；`.github/workflows/chain-systemd.yml` 的 `chain_systemd_acceptance` mixed Pool stage 对在线节点严格断言 `namespace-two: 可用[^\r\n]*ms`，Ubuntu/Debian [run 36713152604](https://github.com/Jyanbai/ping-rust/actions/runs/36713152604) 通过 |
 | Update Center 与降级保护 | 单元测试 | `cli::tests::update_status_comparison_is_fail_soft_and_drift_is_explicit`；`installer::tests::known_release_downgrade_is_blocked_unless_explicitly_allowed` |
 | H2MUX | CI 容器、单元测试 | `.github/workflows/shoes-schema.yml` 的 sing-box 检查与 watcher probe；`client::tests::h2mux_exports_only_valid_sing_box_preferences` |
 | SOCKS5、Snell v3、NaiveProxy、SS2022+ShadowTLS v3 | CI systemd acceptance、单元测试 | `.github/workflows/ubuntu-acceptance.yml` 的 `Verify prs numeric PTY flow for all protocol presets`；`config::tests::socks5_generation_round_trip_and_edits_preserve_exact_auth_and_udp_state`、`config::tests::snell_v3_yaml_matches_fixed_shoes_schema`、`config::tests::naiveproxy_generates_tls_h2_inner_auth_and_random_credentials`、`config::tests::shadowtls_v3_generates_nested_tcp_only_shadowsocks` |
@@ -19,7 +19,7 @@
 
 本文早期 Milestone 保留历史版本记录；每条 Debian/Ubuntu VPS 记录适用其标题和条目中注明的 ping-rust、shoes 版本，不可外推为 v0.2.0。本文新增代码的门禁结果只在实际运行后记录。
 
-本 PR 的实际运行记录：本地 `cargo fmt --all -- --check`、`cargo clippy --locked --all-targets --all-features -- -D warnings`、`cargo test --locked --all-targets` 通过（160 个单元测试）；[CI run 36703040410](https://github.com/Jyanbai/ping-rust/actions/runs/36703040410)、[shoes schema run 36703040429](https://github.com/Jyanbai/ping-rust/actions/runs/36703040429)、[Ubuntu/Debian Chain systemd run 36703814702](https://github.com/Jyanbai/ping-rust/actions/runs/36703814702)、[Ubuntu/Debian acceptance run 36700674910](https://github.com/Jyanbai/ping-rust/actions/runs/36700674910) 和[upstream drift run 36700674699](https://github.com/Jyanbai/ping-rust/actions/runs/36700674699) 已成功。前两项基于修复后的 commit `f686743`，Chain run 包含最新 Pool 验收；更早的失败 run 仅用于定位并修复示例证书权限和 PTY 断言，不计为通过证据。
+本 PR 的历史运行记录：本地三项 Rust 门禁通过（160 个单元测试）；[CI run 36703040410](https://github.com/Jyanbai/ping-rust/actions/runs/36703040410)、[shoes schema run 36703040429](https://github.com/Jyanbai/ping-rust/actions/runs/36703040429)、[Ubuntu/Debian Chain systemd run 36703814702](https://github.com/Jyanbai/ping-rust/actions/runs/36703814702)、[Ubuntu/Debian acceptance run 36700674910](https://github.com/Jyanbai/ping-rust/actions/runs/36700674910) 和[upstream drift run 36700674699](https://github.com/Jyanbai/ping-rust/actions/runs/36700674699) 已成功。这些 run 均早于本次严格在线 Pool 断言。当前本地 `cargo fmt --all -- --check`、`cargo clippy --locked --all-targets --all-features -- -D warnings`、`cargo test --locked --all-targets` 已通过（161 个单元测试）；严格在线 Pool 断言在 [Ubuntu/Debian Chain run 36713152604](https://github.com/Jyanbai/ping-rust/actions/runs/36713152604) 通过。旧版 upstream drift run 的整体成功不代表 ping-rust 的 systemd 热重载流程经过 upstream shoes 验证。
 
 ## Goal 4：H2MUX
 
@@ -67,6 +67,7 @@ Pool 与多 Chain 轮询均不是健康感知故障切换。生产 shoes revisio
 | provenance/status | `/var/lib/ping-rust/shoes-install.json` 原子记录来源、版本、revision/tag 与 binary digest；缺失、损坏或 digest 不匹配按 unknown 处理。 |
 | upstream drift 检测 | `.github/workflows/shoes-upstream-drift.yml` 每周和手动运行，解析生产 pin 与 `cfal/shoes` master HEAD，绝不修改 pin。 |
 | upstream 兼容验证 | drift 构建精确 upstream HEAD，执行共享 schema/协议矩阵与 chain proxy E2E，并写入 PASS/FAIL summary。 |
+| upstream watcher 验收边界 | drift 的原子替换 watcher 测试使用 upstream shoes，但不覆盖 ping-rust 的 systemd 热重载流程；升级 pin 时必须按 `docs/SHOES_PIN_UPGRADE.md` 手动验证新增监听、MainPID 连续和监听切换。 |
 | pin 一致性 | fixed schema CI 在构建前比较 runtime `SHOES_SCHEMA_REVISION` 与 workflow pin。 |
 
 ## Goal 2：shoes 原生 Hot Reload
