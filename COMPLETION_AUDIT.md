@@ -1,5 +1,24 @@
 # ping-rust 完成度与验收证据
 
+## v0.2.0 功能 × 验证方式
+
+下表只引用仓库中实际存在的测试或 workflow；本地未运行的验收不会标成通过。
+
+| 功能 | 验证方式 | 具体证据 |
+|---|---|---|
+| 13 种协议配置与 schema | CI 容器 / shoes `--dry-run` | `.github/workflows/shoes-schema.yml` 的 `Dry-run every checked-in example`、`scripts/ci/validate-shoes-schema.sh` |
+| Verified Hot Reload | CI systemd acceptance、单元测试 | `.github/workflows/ubuntu-acceptance.yml` 热重载步骤；`service::tests::hot_reload_requires_same_pid_and_exact_listener_delta` |
+| Chain Proxy 2.0 Nodes/Pools/Chains/规则 | CI systemd acceptance、单元测试 | `.github/workflows/chain-systemd.yml` 的 `chain_systemd_acceptance`；`tests/chain_v2_e2e.rs`；`chain_proxy::state::tests::*` |
+| Pool 内全部节点手动探针 | 单元测试；CI systemd acceptance（本 PR 新增场景） | `chain_proxy::tests::pool_probe_summary_reports_success_and_failure`；`chain_systemd_acceptance` 的 mixed Pool stage |
+| Update Center 与降级保护 | 单元测试 | `cli::tests::update_status_comparison_is_fail_soft_and_drift_is_explicit`；`installer::tests::known_release_downgrade_is_blocked_unless_explicitly_allowed` |
+| H2MUX | CI 容器、单元测试 | `.github/workflows/shoes-schema.yml` 的 sing-box 检查与 watcher probe；`client::tests::h2mux_exports_only_valid_sing_box_preferences` |
+| SOCKS5、Snell v3、NaiveProxy、SS2022+ShadowTLS v3 | CI systemd acceptance、单元测试 | `.github/workflows/ubuntu-acceptance.yml` 对应菜单/CLI 步骤；`config.rs` 与 `client.rs` 中对应测试 |
+| 实机 VPS v0.2.0 全量清单 | 未验证 | 本任务未获得 SSH 测试 VPS，未新增实机结论 |
+
+### 证据边界
+
+本文早期 Milestone 保留历史版本记录；每条 Debian/Ubuntu VPS 记录适用其标题和条目中注明的 ping-rust、shoes 版本，不可外推为 v0.2.0。本文新增代码的门禁结果只在实际运行后记录。
+
 ## Goal 4：H2MUX
 
 | 项目 | 状态 | 证据 |
@@ -243,7 +262,7 @@ Plain Shadowsocks 命令、旧 state、SIP002 URI/QR 与现有导出保持原行
 - 移除对最小系统可能缺失的 `which` 依赖，直接安全遍历 `PATH`。
 - 为 Release 解包的 shoes 单文件增加 128 MiB 上限。
 
-## Milestone 7 Debian 12 VPS 证据
+## Milestone 7 Debian 12 VPS 证据（ping-rust v0.1.x；shoes v0.2.7）
 
 - 环境：Debian 12 bookworm x86_64、systemd 252、404 MiB RAM + 2.5 GiB swap；初始无 Rust、shoes、ping-rust 或 shoes.service。
 - `cargo install --path . --locked` 在低内存环境原生完成；默认 Release 安装随后约 2 秒完成。
@@ -257,7 +276,7 @@ Plain Shadowsocks 命令、旧 state、SIP002 URI/QR 与现有导出保持原行
 - 逐配置删除覆盖 active 有剩余、inactive 保持、最后一条自动停服；默认卸载确认保留配置哈希，随后 Release 重装恢复 enabled/active。
 - 安装 chrony 后 NTP 误差约 0.1 ms；真实 reboot 后 boot ID 改变，shoes/chrony 自动启动，三端口监听且公网 Reality 再次成功。
 
-## Milestone 9 Ubuntu 24.04 VPS 证据
+## Milestone 9 Ubuntu 24.04 VPS 证据（ping-rust v0.1.x；shoes v0.2.7）
 
 - 环境：Ubuntu 24.04.3 LTS x86_64、systemd 255、约 960 MiB RAM；初始无 Rust、ping-rust、shoes、配置或 unit。
 - 最小 rustup 环境首次暴露缺少 `cc` 的真实前置；安装 Ubuntu 官方 `build-essential pkg-config git ca-certificates` 后，公开 crates.io 0.1.2 与固定 Git 提交均约 2 分钟完成，README 已补充该依赖。
@@ -332,7 +351,7 @@ Plain Shadowsocks 命令、旧 state、SIP002 URI/QR 与现有导出保持原行
 
 ## 发布状态
 
-公开稳定版 v0.1.19 已发布。v0.1.19 保持原 1–10 菜单编号不变，第 11 项 SOCKS5 为新建配置默认生成
+历史公开稳定版 v0.1.19 已发布；当前源码对应 v0.2.0。v0.1.19 保持原 1–10 菜单编号不变，第 11 项 SOCKS5 为新建配置默认生成
 安全随机用户名、随机密码和 UDP ASSOCIATE，只有高级/CLI 明确选择时才允许 no-auth，并显示公网滥用警告。
 第 12 项为 Snell v3，默认 chacha20-ietf-poly1305、
 随机密码和 UDP-over-TCP，支持 shoes 固定的三个 v3 cipher；Snell 配置继续使用统一的候选 dry-run、
@@ -341,3 +360,4 @@ filename。Mihomo/Clash Meta 仅对 AES-128-GCM 提供无损 v3 导出；sing-bo
 和 Snell chain outbound 明确 NOT_SUPPORTED/NOT_IMPLEMENTED，不生成伪格式。固定 shoes workflow 覆盖
 Snell 三种 cipher、UDP true/false、聚合 dry-run 和 Ubuntu 第 12 项菜单验收；SOCKS5 第 11 项及随机用户名
 行为保持不变。
+

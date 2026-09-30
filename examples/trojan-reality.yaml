@@ -1,0 +1,14 @@
+# 示例凭据均为假值；仅用于 shoes --dry-run。
+- address: 0.0.0.0:443
+  protocol:
+    type: tls
+    reality_targets:
+      www.cloudflare.com:
+        private_key: AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE
+        short_ids: [0123456789abcdef]
+        dest: www.cloudflare.com:443
+        max_time_diff: 60000
+        vision: false
+        protocol:
+          type: trojan
+          password: replace-with-trojan-password

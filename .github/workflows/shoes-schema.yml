@@ -56,6 +56,16 @@ jobs:
           grep -F "$SHOES_VERSION" <<<"$shoes_version"
       - name: Build ping-rust
         run: cargo build --locked
+      - name: Dry-run every checked-in example
+        env:
+          PING_RUST_SHOES_E2E_BIN: /usr/local/bin/shoes
+        shell: bash
+        run: |
+          set -euo pipefail
+          for example in examples/*.yaml; do
+            echo "--dry-run $example"
+            shoes --dry-run "$example"
+          done
       - name: Check H2MUX exports with sing-box 1.14.2
         shell: bash
         run: |

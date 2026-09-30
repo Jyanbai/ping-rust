@@ -1,0 +1,16 @@
+# 自签名测试模式示例；证书文件由测试环境准备，凭据为假值。
+- address: 0.0.0.0:443
+  protocol:
+    type: tls
+    tls_targets:
+      naive.example.com:
+        cert: /etc/shoes/server.pem
+        key: /etc/shoes/server-key.pem
+        alpn_protocols: [h2]
+        protocol:
+          type: naiveproxy
+          users:
+            - username: example-user
+              password: replace-with-naive-password
+          padding: true
+          udp_enabled: false
