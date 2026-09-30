@@ -62,6 +62,10 @@ async fn test_menu(state: &ChainProxyState) -> Result<()> {
             Ok(())
         }
         3 => {
+            if state.pools.is_empty() {
+                println!("尚未创建 Pool");
+                return Ok(());
+            }
             let labels = state
                 .pools
                 .iter()

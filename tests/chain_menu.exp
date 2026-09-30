@@ -109,7 +109,7 @@ switch -- $action {
         expect_or_fail {选择 Pool} "pool selector"
         send_choice 1
         expect_or_fail {namespace-one: 失败[^\r\n]*ms} "offline Pool member"
-        expect_or_fail {namespace-two:} "online Pool member"
+        expect_or_fail {namespace-two: 可用[^\r\n]*ms} "online Pool member"
     }
     delete {
         if {![string is integer -strict $argument] || $argument < 1} {

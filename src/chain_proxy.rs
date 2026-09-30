@@ -1030,6 +1030,27 @@ mod tests {
         assert!(summary.contains("offline: 失败 (连接超时; 8 ms)"));
     }
 
+    #[tokio::test]
+    async fn pool_probe_reports_missing_member_without_network() {
+        let pool_id = Uuid::new_v4();
+        let missing_id = Uuid::new_v4();
+        let state = ChainProxyState {
+            pools: vec![ChainPool {
+                id: pool_id,
+                name: "stale".to_owned(),
+                members: vec![missing_id],
+            }],
+            ..ChainProxyState::default()
+        };
+
+        let results = test_pool(&state, pool_id, Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].node, missing_id.to_string());
+        assert_eq!(results[0].error.as_deref(), Some("Pool 引用了不存在的节点"));
+    }
+
     #[test]
     fn parses_both_sip002_shadowsocks_forms() {
         let user = URL_SAFE_NO_PAD.encode("aes-128-gcm:secret");
