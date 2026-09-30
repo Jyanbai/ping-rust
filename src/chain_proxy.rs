@@ -818,6 +818,68 @@ pub async fn test_proxy_handshake(node: &ChainNode, timeout: Duration) -> Result
     test_proxy_yaml(&node.name, probe_config(node, port)?, port, timeout).await
 }
 
+/// Probe every member of a Pool in declaration order. Each member gets its own
+/// temporary SOCKS5 entry; failures are collected so one offline node does not
+/// hide the result of the remaining nodes.
+pub async fn test_pool(
+    state: &ChainProxyState,
+    pool_id: Uuid,
+    timeout: Duration,
+) -> Result<Vec<PoolProbeResult>> {
+    let pool = state
+        .pools
+        .iter()
+        .find(|pool| pool.id == pool_id)
+        .with_context(|| format!("未找到 Pool {pool_id}"))?;
+    let mut results = Vec::with_capacity(pool.members.len());
+    for member_id in &pool.members {
+        let started = Instant::now();
+        let Some(node) = state.nodes.iter().find(|node| node.id == *member_id) else {
+            results.push(PoolProbeResult {
+                node: member_id.to_string(),
+                elapsed: started.elapsed(),
+                error: Some("Pool 引用了不存在的节点".to_owned()),
+            });
+            continue;
+        };
+        match test_proxy_handshake(node, timeout).await {
+            Ok(elapsed) => results.push(PoolProbeResult {
+                node: node.name.clone(),
+                elapsed,
+                error: None,
+            }),
+            Err(error) => results.push(PoolProbeResult {
+                node: node.name.clone(),
+                elapsed: started.elapsed(),
+                error: Some(format!("{error:#}")),
+            }),
+        }
+    }
+    Ok(results)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PoolProbeResult {
+    pub node: String,
+    pub elapsed: Duration,
+    pub error: Option<String>,
+}
+
+pub fn pool_probe_summary(results: &[PoolProbeResult]) -> String {
+    results
+        .iter()
+        .map(|result| match &result.error {
+            None => format!("{}: 可用 ({} ms)", result.node, result.elapsed.as_millis()),
+            Some(error) => format!(
+                "{}: 失败 ({error}; {} ms)",
+                result.node,
+                result.elapsed.as_millis()
+            ),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 pub async fn test_chain(
     state: &ChainProxyState,
     chain_id: Uuid,
@@ -947,6 +1009,25 @@ mod tests {
             .to_string();
         assert!(error.contains("HTTP 200"), "{error}");
         assert!(error.contains("204 No Content"), "{error}");
+    }
+
+    #[test]
+    fn pool_probe_summary_reports_success_and_failure() {
+        let results = vec![
+            PoolProbeResult {
+                node: "online".to_owned(),
+                elapsed: Duration::from_millis(12),
+                error: None,
+            },
+            PoolProbeResult {
+                node: "offline".to_owned(),
+                elapsed: Duration::from_millis(8),
+                error: Some("连接超时".to_owned()),
+            },
+        ];
+        let summary = pool_probe_summary(&results);
+        assert!(summary.contains("online: 可用 (12 ms)"));
+        assert!(summary.contains("offline: 失败 (连接超时; 8 ms)"));
     }
 
     #[test]

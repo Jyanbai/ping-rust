@@ -802,6 +802,25 @@ fn run_acceptance(harness: &mut Harness) -> TestResult {
     )?;
     harness.set_stage("adding second Shadowsocks chain node");
     run_menu(&expect_script, &ping_rust, "add", Some(&uri_two), None)?;
+    harness.set_stage("creating a Pool containing online and offline candidates");
+    run_menu(&expect_script, &ping_rust, "pool_create", None, None)?;
+    harness.stop_child("upstream-one")?;
+    harness.set_stage("testing every Pool member and collecting mixed results");
+    run_menu(
+        &expect_script,
+        &ping_rust,
+        "pool_test",
+        None,
+        Some(&success_url),
+    )?;
+    harness.spawn_logged(
+        "upstream-one",
+        Command::new("ip")
+            .args(["netns", "exec", &namespace_one])
+            .arg(&shoes)
+            .arg(&upstream_one),
+    )?;
+    wait_for_port(SocketAddr::from(([10, 231, 1, 2], *upstream_one_port)))?;
     harness.set_stage("selecting a single-hop default chain");
     run_menu(&expect_script, &ping_rust, "select", Some("1"), None)?;
     harness.set_stage("loading a v1 chain state without rewriting its direct config");
@@ -858,6 +877,7 @@ fn run_acceptance(harness: &mut Harness) -> TestResult {
     run_menu(&expect_script, &ping_rust, "set_direct", None, None)?;
     run_menu(&expect_script, &ping_rust, "delete_chain", None, None)?;
     harness.set_stage("deleting both chain nodes");
+    run_menu(&expect_script, &ping_rust, "pool_delete", None, None)?;
     run_menu(&expect_script, &ping_rust, "delete", Some("1"), None)?;
     run_menu(&expect_script, &ping_rust, "delete", Some("1"), None)?;
     harness.set_stage("rejecting reachable node with invalid credentials");
