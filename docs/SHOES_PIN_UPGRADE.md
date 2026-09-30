@@ -13,3 +13,5 @@
 ## 热重载依赖的 watcher 行为
 
 ping-rust 依赖固定 shoes watcher 监听聚合配置文件的内容变化，并能在原子替换后重新打开文件。ping-rust 同时维护文件锚点通知和 MainPID/监听集合验证；只要 watcher 不重新加载新 inode、丢失锚点事件、或无法在短时间内应用新监听，ping-rust 就会进入失败回滚路径。该依赖只适用于可观察的监听变更，不能证明凭据等不可观测字段已经生效。
+
+`shoes-upstream-drift` 会用 upstream shoes 执行原子替换 watcher 测试、schema 和 Chain 兼容检查，但不会运行真实 systemd 热重载流程。upstream watcher 对 ping-rust 新增监听、MainPID 连续性和监听切换的完整影响，只能在升级 pin 时按上面的 hot reload acceptance 清单手动验证；drift workflow 成功不能代替这项验收。
