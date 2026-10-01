@@ -13,7 +13,7 @@
 | Update Center 与降级保护 | 单元测试 | `cli::tests::update_status_comparison_is_fail_soft_and_drift_is_explicit`；`installer::tests::known_release_downgrade_is_blocked_unless_explicitly_allowed` |
 | H2MUX | CI 容器、单元测试 | `.github/workflows/shoes-schema.yml` 的 sing-box 检查与 watcher probe；`client::tests::h2mux_exports_only_valid_sing_box_preferences` |
 | SOCKS5、Snell v3、NaiveProxy、SS2022+ShadowTLS v3 | CI systemd acceptance、单元测试 | `.github/workflows/ubuntu-acceptance.yml` 的 `Verify prs numeric PTY flow for all protocol presets`；`config::tests::socks5_generation_round_trip_and_edits_preserve_exact_auth_and_udp_state`、`config::tests::snell_v3_yaml_matches_fixed_shoes_schema`、`config::tests::naiveproxy_generates_tls_h2_inner_auth_and_random_credentials`、`config::tests::shadowtls_v3_generates_nested_tcp_only_shadowsocks` |
-| 实机 VPS v0.2.0 全量清单 | 失败（第 1 项闸门） | 2026-10-01，MERGE_SHA 零输入部署成功，但 Windows sing-box 外部 Reality 请求失败；第 2–8 项未验证，停止发版。详见“v0.2.x 实机 VPS 验收”。 |
+| 实机 VPS v0.2.0 全量清单 | 失败（第 1 项闸门） | 2026-10-01，HK 与用户更换的新 VPS 均完成 MERGE_SHA 零输入部署，但 Windows sing-box 外部 Reality 请求均失败；第 2–8 项未验证，停止发版。HK 已按用户要求清理。详见“v0.2.x 实机 VPS 验收”。 |
 
 ### 证据边界
 
@@ -64,6 +64,30 @@
 - 未更换 shoes、未改变 pin、节点参数或系统时钟，未执行后续验收。根因未确定；须继续检查 Reality 握手阶段、网络路径和运行环境。
 
 发布闸门：实机第 1 项失败，已停止，等待用户处理。当前未创建 `release/v0.2.1` PR、未推 `v0.2.1` tag、未发布 GitHub Release 或 crates.io；阶段 4 的默认安装 / v0.2.0 升级 / 最终 purge 均为未验证。本记录供失败报告和后续定位，不代表发版验收完成。
+
+### 2026-10-01：用户授权清理 HK 并更换测试 VPS
+
+- HK 清理：通过。用户要求清理旧测试实例后，实际执行 `sudo ping-rust uninstall --purge`、`cargo uninstall ping-rust`，移除本次安装的 `/usr/local/bin/ping-rust` 与私有远端测试目录，并删除残留来源记录和进程锁。确认 `/etc/shoes`、shoes unit、shoes / ping-rust / cargo ping-rust 二进制、`prs` 别名和测试目录均不存在；无 shoes 进程，服务为 inactive/not-found。此清理不改变上述 Reality 失败结论，也不补足重启等未执行项。
+- 新 VPS 环境：Debian GNU/Linux 13.4 trixie、x86_64、systemd 257、3 vCPU、1964 MiB RAM、3071 MiB swap；root SSH，`NTPSynchronized=yes`。主机地址、一次性登录密码和 SSH 私钥均不进入仓库记录。
+- 初次登录发现新 VPS 已有 `ping-rust 0.2.0`、shoes enabled/active、配置和 unit。用户明确选择“备份后清理并重新验收”，随后实际执行产品 `backup`，并额外备份配置、unit、来源记录和原二进制，备份权限 0600。两份备份已复制到本机仓库之外，分别与远端 SHA-256 比对一致；保留恢复能力。
+- 已执行 `sudo ping-rust uninstall --purge` 并清理原管理二进制，确认首次部署基线无配置、unit、shoes / ping-rust 二进制及 shoes 进程；将本机 `prs-test` 指向新测试 VPS。
+- 构建前置依赖已安装；最小 Rust 工具链为 `rustc 1.98.1` / `cargo 1.98.1`。实际执行原 MERGE_SHA 的 `cargo install --git https://github.com/Jyanbai/ping-rust.git --rev 74b39c86d1065c1fb483c4c7c2f163976f120f2f --locked`，4m16s 完成，退出 0，`sudo ping-rust --version` 返回 `ping-rust 0.2.0`；临时构建文件使用根磁盘私有目录，避免 tmpfs 限制。
+- 新 VPS 实际执行 `sudo ping-rust`，部署阶段零输入，进入管理菜单后才输入 `0` 退出。默认安装 shoes GitHub Release v0.2.7；自动 Reality 部署退出 0，MainPID `2545078`，服务 enabled/active，`ss -ltnp` 确认 TCP `48662`。
+- 本机官方 Windows sing-box 1.14.2 读取新导出配置，`check` 退出 0、`run` 正常启动；loopback mixed/SOCKS5 入口配置认证。沿用上表第 1 项脱敏 curl 命令，实际请求再次退出 97：`cannot complete SOCKS5 connection to api.ipify.org. (1)`；客户端 VLESS outbound 约 15.0s 后 `context deadline exceeded`。未取得出口 IP，出口一致性未验证。
+- 失败后只读诊断：外部 TCP `48662` 可连接；VPS 到所选 Reality fallback 的 HTTPS HEAD 退出 0，返回 `HTTP/2 302`；地址、端口、UUID、SNI、公钥、short ID 在内存中比对均匹配。服务端仅取得本次 Reality 监听启动日志，未取得握手阶段错误。VPS `NTPSynchronized=yes`，估计比 Windows 快约 43.65 秒（查询 RTT 约 0.14 秒）；因果关系未验证。两次共同客户端/内核版本为 Windows sing-box 1.14.2 / shoes v0.2.7，不能据此认定根因。
+
+| 新 VPS 项目 | 状态 | 命令 / 脱敏结果 / 边界 |
+|---|---|---|
+| 1. 零输入 Reality 与外部握手/出口 | 失败 | `sudo ping-rust` 部署成功；`sing-box check/run` 成功；带认证本地代理后的外部 curl 退出 97，VLESS outbound 15.0s 超时。出口一致性未验证。 |
+| 2. Hot Reload 新增/改端口/删除非最后节点 | 未验证 | 第 1 项闸门后停止，未执行 SOCKS5 节点操作或前后 PID/监听比对。 |
+| 3. SS2022 + ShadowTLS v3 / SOCKS5 / Hysteria2 / NaiveProxy | 未验证 | 四种协议均因第 1 项闸门未执行外部连接。未测试 UDP 放行；本机声明支持 Naive outbound，未以客户端缺失为由跳过。 |
+| 4. Chain / Pool / BLOCK / DIRECT / 断链禁止直连 | 未验证 | 未启动 loopback 上游或创建拓扑，未执行路由、Pool 探针或故障注入；第 1 项闸门后停止。 |
+| 5. Update Center 与降级拒绝 | 未验证 | 未执行状态菜单或降级命令；第 1 项闸门后停止。 |
+| 6. 本次配置 backup → 修改 → restore | 未验证 | 新 VPS 原配置的测试前备份与保全成功，不等于本次配置的修改/恢复/哈希验收；第 1 项闸门后停止。 |
+| 7. 真实 reboot 与恢复 | 未验证 | 未执行 reboot 或重启后外部握手；第 1 项闸门后停止。 |
+| 8. 本次部署 uninstall --purge | 未验证 | 新 VPS 测试前 purge 成功，不等于本次部署后的最终卸载验收；保留当前实例供定位。 |
+
+新 VPS 第 1 项再次触发停止闸门，已停止后续验收和发版，等待用户处理。旧 HK 失败记录保留；没有 release PR、v0.2.1 tag、GitHub Release 或 crates.io 发布，阶段 4 均未验证。
 
 ## Goal 4：H2MUX
 
