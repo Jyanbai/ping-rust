@@ -67,7 +67,7 @@ def chain_case(shoes, root):
         return "被 dry-run 拦截", "authenticated SS hops + Pool + ordered BLOCK/DIRECT/default Chain schema rejected"
     processes = []
     with (root / "chain.log").open("wb") as log, h2.socket.socket() as origin:
-        origin.bind(("127.0.0.1", 0))
+        origin.bind(("0.0.0.0", 0))
         origin.listen()
         port = origin.getsockname()[1]
         done = threading.Event()
@@ -78,10 +78,10 @@ def chain_case(shoes, root):
                 processes.append(subprocess.Popen([shoes, str(path)], stdout=log, stderr=log))
             for port_number in (a, b, ingress, pool_port):
                 h2.wait_port(port_number)
-            # 127.0.0.1 is DIRECT; localhost remains a domain and uses default Chain.
+            # Separate loopback destinations avoid localhost resolving to IPv6.
             request(ingress, "127.0.0.1", port)
-            request(ingress, "localhost", port)
-            request(pool_port, "localhost", port)
+            request(ingress, "127.0.0.2", port)
+            request(pool_port, "127.0.0.2", port)
             try:
                 request(ingress, "blocked.example.invalid", port)
             except (OSError, AssertionError):
@@ -91,7 +91,7 @@ def chain_case(shoes, root):
             stop(processes[0])
             request(ingress, "127.0.0.1", port)
             try:
-                request(ingress, "localhost", port)
+                request(ingress, "127.0.0.2", port)
             except (OSError, AssertionError):
                 pass
             else:
@@ -167,7 +167,10 @@ def main():
             else:
                 assert dry_run(shoes, path) == 0
                 record(rows, protocol, "可用", f"ping-rust generate {protocol} --output <TEMP> + shoes --dry-run: exit=0; schema only, external data not verified here")
-        status, evidence = chain_case(shoes, root)
+        try:
+            status, evidence = chain_case(shoes, root)
+        except (OSError, AssertionError, subprocess.SubprocessError) as error:
+            status, evidence = "不可用", f"authenticated Chain data probe failed: {type(error).__name__}; private logs not published"
         record(rows, "Chain 2.0", status, evidence)
         try:
             h2.main()
