@@ -29,6 +29,105 @@ pub struct HotReloadSnapshot {
     pub listening_ports: BTreeSet<u16>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HotReloadReason {
+    ServiceNotRunning,
+    UnitModified,
+    ShoesSourceUnsupported(installer::ShoesProvenance),
+    DropInPresent,
+    AnchorNotReady,
+    ListenerSnapshotMismatch,
+    InspectionFailed(String),
+}
+
+impl HotReloadReason {
+    pub fn restart_notice(&self) -> String {
+        let reason = match self {
+            Self::ServiceNotRunning => "shoes 服务未运行".to_owned(),
+            Self::UnitModified => "shoes unit 内容或加载路径已被修改".to_owned(),
+            Self::ShoesSourceUnsupported(shoes) if shoes.source == "github-release" => format!(
+                "当前 shoes 来源为 GitHub Release {}，热重载需要固定 pin 构建",
+                shoes.release_tag.as_deref().unwrap_or("（版本未知）")
+            ),
+            Self::ShoesSourceUnsupported(_) => {
+                "shoes 来源或 revision 不满足固定 pin 验证要求".to_owned()
+            }
+            Self::DropInPresent => "shoes unit 存在 drop-in".to_owned(),
+            Self::AnchorNotReady => "热重载文件锚点未就绪".to_owned(),
+            Self::ListenerSnapshotMismatch => {
+                "当前监听与受管配置不一致，无法验证监听变更".to_owned()
+            }
+            Self::InspectionFailed(error) => format!("热重载前置检查失败：{error}"),
+        };
+        let switch = if matches!(self, Self::ShoesSourceUnsupported(_)) {
+            "可在 Update Center 中切换到固定 pin，或运行 sudo ping-rust update --method cargo；需要源码编译时间和足够内存。"
+        } else {
+            "请检查服务、unit 和日志中的热重载前置条件。"
+        };
+        format!("{reason}；本次使用受控重启。{switch}")
+    }
+}
+
+pub enum HotReloadReadiness {
+    Ready(HotReloadSnapshot),
+    Unavailable(HotReloadReason),
+}
+
+impl HotReloadReadiness {
+    pub fn is_ready(&self) -> bool {
+        matches!(self, Self::Ready(_))
+    }
+
+    pub fn filter(self, predicate: impl FnOnce(&HotReloadSnapshot) -> bool) -> Self {
+        match self {
+            Self::Ready(snapshot) if !predicate(&snapshot) => {
+                Self::Unavailable(HotReloadReason::ListenerSnapshotMismatch)
+            }
+            other => other,
+        }
+    }
+
+    pub fn into_snapshot(self) -> Option<HotReloadSnapshot> {
+        match self {
+            Self::Ready(snapshot) => Some(snapshot),
+            Self::Unavailable(_) => None,
+        }
+    }
+
+    pub fn report_controlled_restart(&self, was_active: bool) {
+        if let Self::Unavailable(reason) = self {
+            if was_active {
+                // Keep add --plain stdout as one URI line.
+                eprintln!("提示：{}", reason.restart_notice());
+            }
+        }
+    }
+}
+
+fn hot_reload_unavailable_reason(
+    was_active: bool,
+    unit_matches: bool,
+    shoes: &installer::ShoesProvenance,
+    drop_ins: &str,
+    anchor_ready: bool,
+) -> Option<HotReloadReason> {
+    if !was_active {
+        Some(HotReloadReason::ServiceNotRunning)
+    } else if !unit_matches {
+        Some(HotReloadReason::UnitModified)
+    } else if shoes.source != "verified-pin"
+        || shoes.revision.as_deref() != Some(installer::verified_pin())
+    {
+        Some(HotReloadReason::ShoesSourceUnsupported(shoes.clone()))
+    } else if !drop_ins.is_empty() && drop_ins != "-" {
+        Some(HotReloadReason::DropInPresent)
+    } else if !anchor_ready {
+        Some(HotReloadReason::AnchorNotReady)
+    } else {
+        None
+    }
+}
+
 const HOT_RELOAD_TIMEOUT: Duration = Duration::from_secs(6);
 const HOT_RELOAD_POLL: Duration = Duration::from_millis(200);
 
@@ -173,37 +272,53 @@ pub fn capture_snapshot() -> Result<ServiceSnapshot> {
     })
 }
 
-pub fn capture_hot_reload_snapshot(
-    snapshot: &ServiceSnapshot,
-) -> Result<Option<HotReloadSnapshot>> {
-    if !snapshot.was_active || snapshot.unit_contents.as_deref() != Some(unit_contents().as_bytes())
-    {
-        return Ok(None);
+pub fn capture_hot_reload_snapshot(snapshot: &ServiceSnapshot) -> Result<HotReloadReadiness> {
+    if !snapshot.was_active {
+        return Ok(HotReloadReadiness::Unavailable(
+            HotReloadReason::ServiceNotRunning,
+        ));
+    }
+    if snapshot.unit_contents.as_deref() != Some(unit_contents().as_bytes()) {
+        return Ok(HotReloadReadiness::Unavailable(
+            HotReloadReason::UnitModified,
+        ));
     }
     if systemctl_show_value("FragmentPath")? != utils::SERVICE_FILE {
-        return Ok(None);
+        return Ok(HotReloadReadiness::Unavailable(
+            HotReloadReason::UnitModified,
+        ));
     }
     let shoes = installer::load_provenance();
     if shoes.source != "verified-pin"
         || shoes.revision.as_deref() != Some(installer::verified_pin())
     {
-        return Ok(None);
+        return Ok(HotReloadReadiness::Unavailable(
+            HotReloadReason::ShoesSourceUnsupported(shoes),
+        ));
     }
     let drop_ins = systemctl_show_value("DropInPaths")?;
     if !drop_ins.is_empty() && drop_ins != "-" {
-        return Ok(None);
+        return Ok(HotReloadReadiness::Unavailable(
+            HotReloadReason::DropInPresent,
+        ));
     }
     let main_pid = snapshot
         .main_pid
         .context("shoes.service active but MainPID is unavailable")?;
-    if !utils::hot_reload_anchor_ready(main_pid) {
-        return Ok(None);
+    if let Some(reason) = hot_reload_unavailable_reason(
+        snapshot.was_active,
+        true,
+        &shoes,
+        &drop_ins,
+        utils::hot_reload_anchor_ready(main_pid),
+    ) {
+        return Ok(HotReloadReadiness::Unavailable(reason));
     }
     let snapshot = HotReloadSnapshot {
         main_pid,
         listening_ports: listening_ports(main_pid)?,
     };
-    Ok(Some(snapshot))
+    Ok(HotReloadReadiness::Ready(snapshot))
 }
 
 pub fn hot_reload_and_verify(
@@ -563,7 +678,13 @@ mod tests {
             ..Default::default()
         });
         let message = reason.restart_notice();
-        for expected in ["GitHub Release v0.2.7", "固定 pin", "受控重启", "Update Center", "update --method cargo"] {
+        for expected in [
+            "GitHub Release v0.2.7",
+            "固定 pin",
+            "受控重启",
+            "Update Center",
+            "update --method cargo",
+        ] {
             assert!(message.contains(expected), "missing {expected}: {message}");
         }
     }

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise pinned shoes H2MUX over the product's TLS and WebSocket stacks."""
+"""Exercise the selected shoes H2MUX over the product's TLS and WebSocket stacks."""
 
 import concurrent.futures
 import copy
@@ -175,7 +175,7 @@ def run_case(shoes, directory, kind, options, cert, key, origin_port):
                         wait_port(sing_port)
                         through_socks(sing_port, origin_port, b"sing-box half-close")
                         through_socks(sing_port, origin_port, bytes(range(256)) * 4096)
-                        print("PASS sing-box 1.14.2 -> pinned shoes Trojan H2MUX: small/1 MiB half-close")
+                        print("PASS sing-box 1.14.2 -> selected shoes Trojan H2MUX: small/1 MiB half-close")
                     except Exception:
                         print("sing-box data-plane failed (private log retained until fixture cleanup)")
                         raise

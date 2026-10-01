@@ -9,7 +9,7 @@
 
 核心逻辑全部位于 Rust 源码中；`scripts/install.sh` 只负责执行 Rust 前的架构检测、下载、SHA-256 校验与严格解包，原子安装、快捷命令所有权判断和首次部署均由已校验的 Rust 二进制完成。
 
-> 当前稳定版：[`v0.2.0`](https://github.com/Jyanbai/ping-rust/releases/tag/v0.2.0)。本版本聚合 Update Center、Verified Hot Reload、Chain Proxy 2.0、规则路由和受验证范围内的 H2MUX。支持 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks、AnyTLS、VLESS-TLS-Vision、VLESS-WS-TLS、Trojan-TLS、Trojan-REALITY、VMess-WS-TLS、SOCKS5、Snell v3 和 NaiveProxy 十三种受管协议。用户只选择完整协议，不需要理解或手动组合传输层、安全层与内层协议。
+> 当前稳定版：[`v0.2.0`](https://github.com/Jyanbai/ping-rust/releases/tag/v0.2.0)。本版本聚合 Update Center、Verified Hot Reload、Chain Proxy 2.0、规则路由和受验证范围内的 H2MUX。**热重载需要固定 pin 构建；默认一键安装使用 GitHub Release 来源，监听变更使用受控重启。**支持 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks、AnyTLS、VLESS-TLS-Vision、VLESS-WS-TLS、Trojan-TLS、Trojan-REALITY、VMess-WS-TLS、SOCKS5、Snell v3 和 NaiveProxy 十三种受管协议。用户只选择完整协议，不需要理解或手动组合传输层、安全层与内层协议。
 
 完整文档：[Wiki](https://github.com/Jyanbai/ping-rust/wiki) · [快速开始](https://github.com/Jyanbai/ping-rust/wiki/Quick-Start) · [链式代理](https://github.com/Jyanbai/ping-rust/wiki/Chain-Proxy) · [故障排查](https://github.com/Jyanbai/ping-rust/wiki/Troubleshooting)
 
@@ -60,7 +60,7 @@ bash <(curl --proto '=https' --tlsv1.2 -fsSL \
 - systemd unit 限制内核调优、内核模块、控制组、地址族、可执行内存和非原生 ABI；Ubuntu/Debian 验收会实际启动加固后的 shoes
 - 多配置添加、列表、删除、端口冲突保护
 - Chain Proxy 2.0：由 Nodes、Pools、有序多跳 Chains、路由规则和默认路由组合出口；规则可选择 DIRECT、BLOCK、Chain 或多 Chain 轮询
-- Verified Hot Reload：对可观察的监听变更验证 MainPID 与端口，失败恢复旧配置和服务状态
+- Verified Hot Reload（固定 pin 来源）：对可观察的监听变更验证 MainPID 与端口，失败恢复旧配置和服务状态；默认 Release 来源使用受控重启
 - Update Center：管理 ping-rust 更新、固定 shoes pin、安全状态检查与显式 Release 安装；默认拒绝已知降级
 - H2MUX 客户端偏好：在已验证的 VMess/VLESS WebSocket TLS 与 Trojan TLS 范围内提供 sing-box 导出
 - SOCKS5、Snell v3、NaiveProxy 和 Shadowsocks 2022 + ShadowTLS v3 受管配置
@@ -210,7 +210,17 @@ vless://...security=reality...pbk=...&sid=...#VLESS-REALITY-25448
 
 ### Hot Reload
 
-当 shoes 已运行且服务 unit 未被修改时，新增监听、修改监听端口和删除非最后一个节点会尝试 shoes 原生配置热重载。ping-rust 保留聚合配置的原子替换，并用受保护的文件锚点通知固定 shoes 的文件 watcher；只有 MainPID 不变、服务保持 active、预期监听出现且旧监听消失时才算成功。候选配置仍先通过 `shoes --dry-run`。热重载未能确认时，操作失败并恢复旧配置与服务状态，必要时重新启动旧服务。
+热重载要求 shoes 来源为 `verified-pin`，revision 等于 `386b11532424b8665ee3e46340c6236fb3c47595`，服务已运行、unit 内容与加载路径未被修改、没有 drop-in，且受保护的文件锚点已就绪。默认一键安装使用 GitHub Release 来源，因此不启用 Verified Hot Reload；新增监听、修改端口或删除非最后节点时，使用受控重启，并输出原因和切换方法。此路径的 MainPID 改变是预期结果。
+
+在 `prs → 6) 更新 → shoes 内核` 中选择已验证固定 pin，或执行：
+
+```bash
+sudo ping-rust update --method cargo
+```
+
+切换需要 Rust、C linker、Git 与构建依赖，会从源码编译 shoes，耗时取决于 CPU、磁盘和缓存。低于 1 GiB 内存不建议编译；需为编译预留内存、swap 和磁盘空间，实测耗时与峰值见验收记录。安装成功后 provenance 才记录为 `verified-pin`。切回 Release 不会启用热重载；已知降级仍需明确允许。
+
+满足前置条件时，新增监听、修改监听端口和删除非最后节点会尝试 shoes 原生配置热重载。ping-rust 保留聚合配置的原子替换，用文件锚点通知固定 shoes 的 watcher；只有 MainPID 不变、服务保持 active、预期监听出现且旧监听消失时才算成功。候选配置仍先通过 `shoes --dry-run`。已开始的热重载未能确认时，操作失败并恢复旧配置与服务状态，必要时重新启动旧服务。
 
 只改显示名称或公网地址等不影响运行 YAML 的信息无需服务动作。凭据等无法从监听端口证明已生效的修改继续重启 shoes；首次部署仍启动服务，删除最后一个节点仍停止服务。备份恢复、链式代理切换和 shoes 二进制更新保持原有服务处理流程。
 
@@ -250,7 +260,7 @@ Pool 与多 Chain 轮询只表示连接分布，不提供健康检查、自动�
 
 ### H2MUX 客户端偏好
 
-VMess WebSocket TLS、非 Vision VLESS WebSocket TLS 和 Trojan TLS 可在“更改配置”中设置 H2MUX；链式代理的相应节点可独立设置。默认关闭。连接数模式默认 `max_connections=4`、`min_streams=4`、`max_streams=0`、`padding=false`；最大 streams 模式与连接数模式互斥。固定 shoes 服务端自动识别 H2MUX，无需更改服务端 YAML。只修改受管 profile 的客户端偏好时，运行配置不变，服务无需重启或热重载；修改链式节点会更新运行配置并走现有安全重启路径。
+VMess WebSocket TLS、非 Vision VLESS WebSocket TLS 和 Trojan TLS 可在“更改配置”中设置 H2MUX；链式代理的相应节点可独立设置。默认关闭。连接数模式默认 `max_connections=4`、`min_streams=4`、`max_streams=0`、`padding=false`；最大 streams 模式与连接数模式互斥。GitHub Release shoes v0.2.7 与固定 pin 服务端均自动识别 H2MUX，无需更改服务端 YAML；来源矩阵见 `COMPLETION_AUDIT.md`。只修改受管 profile 的客户端偏好时，运行配置不变，服务无需重启或热重载；修改链式节点会更新运行配置并走现有安全重启路径。
 
 sing-box 导出会携带 `multiplex.protocol=h2mux`；固定 shoes 上的 VMess/VLESS WebSocket TLS 和 Trojan TLS 已通过本地 TCP、并发流、half-close 与大 payload 验证，sing-box 1.14.2 已通过导出配置检查及 Trojan H2MUX 数据面测试。Mihomo H2MUX 存在已知兼容问题，开启偏好时拒绝 Mihomo 导出；NekoBox、普通分享 URI 与 QR 仍可用于普通连接，但不携带 H2MUX 设置。VLESS Vision、Shadowsocks、SS2022 + ShadowTLS、Snell v3 及其它协议不提供 H2MUX 开关。H2MUX UDP 尚未验证或启用；Pool、Chain 和路由语义不受该偏好影响。
 

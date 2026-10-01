@@ -41,6 +41,14 @@ fn plan_apply(
     }
 }
 
+fn capture_reload_readiness(snapshot: &service::ServiceSnapshot) -> service::HotReloadReadiness {
+    service::capture_hot_reload_snapshot(snapshot).unwrap_or_else(|error| {
+        service::HotReloadReadiness::Unavailable(service::HotReloadReason::InspectionFailed(
+            format!("{error:#}"),
+        ))
+    })
+}
+
 #[derive(Debug)]
 pub(crate) struct ActivationFailure {
     message: String,
@@ -72,31 +80,31 @@ pub async fn generate_and_activate(request: GenerationRequest) -> Result<Generat
     utils::require_linux_root()?;
     let lock = utils::exclusive_lock(Path::new(utils::LOCK_FILE))?;
     let service_snapshot = service::capture_snapshot()?;
-    let hot_reload_snapshot = service::capture_hot_reload_snapshot(&service_snapshot)
-        .ok()
-        .flatten()
-        .filter(|snapshot| {
-            config::load_state().is_ok_and(|state| {
-                state
-                    .profiles
-                    .iter()
-                    .all(|profile| snapshot.listening_ports.contains(&profile.port))
-            })
-        });
+    let hot_reload_snapshot = capture_reload_readiness(&service_snapshot).filter(|snapshot| {
+        config::load_state().is_ok_and(|state| {
+            state
+                .profiles
+                .iter()
+                .all(|profile| snapshot.listening_ports.contains(&profile.port))
+        })
+    });
     let mut result = config::generate_locked(request, lock).await?;
     let strategy = plan_apply(
         ApplyOperation::AddOrEdit,
         true,
         service_snapshot.was_active(),
         1,
-        hot_reload_snapshot.is_some(),
+        hot_reload_snapshot.is_ready(),
     );
     let activation = if strategy == ApplyStrategy::HotReload {
-        let snapshot = hot_reload_snapshot.expect("hot reload strategy requires a snapshot");
+        let snapshot = hot_reload_snapshot
+            .into_snapshot()
+            .expect("hot reload strategy requires a snapshot");
         let mut expected = snapshot.listening_ports.clone();
         expected.insert(result.profile.port);
         service::hot_reload_and_verify(snapshot, &expected, &BTreeSet::new())
     } else {
+        hot_reload_snapshot.report_controlled_restart(service_snapshot.was_active());
         service::activate_and_verify()
     };
     if let Err(activation) = activation {
@@ -136,30 +144,29 @@ pub async fn update_and_activate(id: Uuid, change: ProfileChange) -> Result<Gene
     } else {
         None
     };
-    let hot_reload_snapshot = observable_port_change
-        .then(|| {
-            service::capture_hot_reload_snapshot(&service_snapshot)
-                .ok()
-                .flatten()
-        })
-        .flatten()
-        .filter(|snapshot| {
+    let hot_reload_snapshot = observable_port_change.then(|| {
+        capture_reload_readiness(&service_snapshot).filter(|snapshot| {
             previous_port.is_some_and(|port| snapshot.listening_ports.contains(&port))
-        });
+        })
+    });
     let mut result = config::update_profile_locked(id, change, lock).await?;
     let strategy = plan_apply(
         ApplyOperation::AddOrEdit,
         result.runtime_config_changed,
         service_snapshot.was_active(),
         1,
-        hot_reload_snapshot.is_some() && observable_port_change,
+        hot_reload_snapshot
+            .as_ref()
+            .is_some_and(service::HotReloadReadiness::is_ready),
     );
     if strategy == ApplyStrategy::NoServiceAction {
         result.finish_update();
         return Ok(result);
     }
     let activation = if strategy == ApplyStrategy::HotReload {
-        let snapshot = hot_reload_snapshot.expect("hot reload strategy requires a snapshot");
+        let snapshot = hot_reload_snapshot
+            .and_then(service::HotReloadReadiness::into_snapshot)
+            .expect("hot reload strategy requires a snapshot");
         let mut expected = snapshot.listening_ports.clone();
         if let Some(previous_port) = previous_port {
             expected.remove(&previous_port);
@@ -171,6 +178,9 @@ pub async fn update_and_activate(id: Uuid, change: ProfileChange) -> Result<Gene
         }
         service::hot_reload_and_verify(snapshot, &expected, &removed)
     } else {
+        if let Some(readiness) = &hot_reload_snapshot {
+            readiness.report_controlled_restart(service_snapshot.was_active());
+        }
         service::activate_and_verify()
     };
     if let Err(activation) = activation {
@@ -201,14 +211,7 @@ pub async fn delete_and_activate(id: Uuid) -> Result<config::ManagedProfile> {
     let lock = utils::exclusive_lock(Path::new(utils::LOCK_FILE))?;
     let service_snapshot = service::capture_snapshot()?;
     let was_active = Path::new(utils::SERVICE_FILE).exists() && service::is_active()?;
-    let hot_reload_snapshot = if was_active {
-        service::capture_hot_reload_snapshot(&service_snapshot)
-            .ok()
-            .flatten()
-    } else {
-        None
-    }
-    .filter(|snapshot| {
+    let hot_reload_snapshot = capture_reload_readiness(&service_snapshot).filter(|snapshot| {
         config::load_state().is_ok_and(|state| {
             state
                 .profiles
@@ -222,19 +225,24 @@ pub async fn delete_and_activate(id: Uuid) -> Result<config::ManagedProfile> {
         true,
         was_active,
         result.remaining_profiles,
-        hot_reload_snapshot.is_some(),
+        hot_reload_snapshot.is_ready(),
     );
     let activation = match strategy {
         ApplyStrategy::NoServiceAction => Ok(()),
         ApplyStrategy::Stop => service::execute(service::ServiceAction::Stop),
         ApplyStrategy::HotReload => {
-            let snapshot = hot_reload_snapshot.expect("hot reload strategy requires a snapshot");
+            let snapshot = hot_reload_snapshot
+                .into_snapshot()
+                .expect("hot reload strategy requires a snapshot");
             let mut expected = snapshot.listening_ports.clone();
             expected.remove(&result.profile.port);
             let removed = BTreeSet::from([result.profile.port]);
             service::hot_reload_and_verify(snapshot, &expected, &removed)
         }
-        ApplyStrategy::Activate => service::activate_and_verify(),
+        ApplyStrategy::Activate => {
+            hot_reload_snapshot.report_controlled_restart(was_active);
+            service::activate_and_verify()
+        }
     };
     if let Err(activation) = activation {
         let _rollback_timer = performance::stage("rollback_restore");
