@@ -156,9 +156,12 @@ async fn github_api_transient_disconnect_retries() {
 
 #[tokio::test]
 async fn github_api_truncated_json_body_retries() {
-    let broken = "HTTP/1.1 200 Fixture\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{".to_owned();
+    let broken =
+        "HTTP/1.1 200 Fixture\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{".to_owned();
     let (url, requests, worker) = fixture(vec![Some(broken), reply(200, "{}", "")]);
-    get_with_policy::<serde_json::Value>(&client(), &url, None, policy()).await.unwrap();
+    get_with_policy::<serde_json::Value>(&client(), &url, None, policy())
+        .await
+        .unwrap();
     worker.join().unwrap();
     assert_eq!(requests.lock().unwrap().len(), 2);
 }
