@@ -606,3 +606,68 @@ H2MUX 在 Release v0.2.7 **可用**，不新增来源拦截。热重载 gating �
 追加：诊断提交 `c6a3bb0` 的来源 run `36823173726` / default-release job `110242959102` 在 2026-10-01 06:08:37 UTC 完整通过，未重现失败；前一审计 head `959b6b4` 的 run `36821753523` 也通过。原失败的底层原因仍**未定位**，不声称已证实 403 或网络瞬断。按用户要求补齐 API 可靠性行为，不能用新增测试推断原失败原因。
 
 测试先行：`d2fa9fd` 的 GitHub API 测试在模块缺失处编译失败；`4e54932` 的 sudo token 传递测试在函数缺失处失败；`1e7a947` 的响应体中断测试在旧实现下失败。实现后 GitHub API 共 6 项通过，另有 sudo 环境变量名字传递测试：可选 GITHUB_TOKEN / GH_TOKEN（非空前者优先）、无认证请求、403/429/5xx 恢复与有界耗尽、404/401/重定向非重试、连接中断和响应体中断恢复、服务端 Retry-After / rate reset 等待上限、错误不包含 token 或原始响应体。API 凭据只发送到 GitHub API HTTPS 同源；资产客户端下载不带认证。CI 相关 bootstrap / self-update / 性能步骤显式传递 Actions token，token 不拼到命令行。超出等待上限会停止并给出 token 提示。未更改 pin、来源 gating 或 VPS 配置。
+
+## v0.2.1 隔离重建后的 VPS 对 VPS 续验收
+
+- 日期：2026-10-01（Asia/Hong_Kong）；Debian 13.4；服务端 prs-test，客户端 HK agent / sing-box 1.14.2；所有服务端 SSH 仍经 ProxyJump HK。本轮未改 Windows / OpenWrt 代理环境。
+- MERGE_SHA：`74b39c86d1065c1fb483c4c7c2f163976f120f2f`。
+- 新 FIX_SHA：`1ba8b951815db7f27f8349ac5dc11387568338c9`。14:28 前采集 head rollup 为 **21/21 completed/success**；REST pull head 一致，legacy status contexts 为空。PR 未合并。
+- 新 head CI：PR [36824220984](https://github.com/Jyanbai/ping-rust/actions/runs/36824220984)、来源 [36824221024](https://github.com/Jyanbai/ping-rust/actions/runs/36824221024)、schema [36824221280](https://github.com/Jyanbai/ping-rust/actions/runs/36824221280)；push CI [36824215394](https://github.com/Jyanbai/ping-rust/actions/runs/36824215394)、schema [36824215800](https://github.com/Jyanbai/ping-rust/actions/runs/36824215800)，均通过。实现 head `8249a7e` 的性能 run [36824109187](https://github.com/Jyanbai/ping-rust/actions/runs/36824109187) 通过；其 CI [36824112746](https://github.com/Jyanbai/ping-rust/actions/runs/36824112746) 的 Ubuntu fmt 检查失败，修正测试格式后新 head 全绿，保留该失败事实。
+- 本地：174 个单元测试 / 3 个诊断测试 / clippy warnings denied / fmt 通过；没有把 Windows 跳过的 Linux 数据测试当作实机证据。
+
+### 构建与身份检查
+
+14:28:44 HKT 清理本任务旧 `/root/prs-acceptance-v021/build-tmp`（此前约 343 MiB）。原始备份和其它软件保留。
+
+新目录 `/root/prs-isolated-1ba8b951815d-142842/source` 实际 `git clone https://github.com/Jyanbai/ping-rust.git`、`git checkout --detach <FIX_SHA>` 并断言 HEAD；新 target `/root/prs-isolated-1ba8b951815d-142842/target` 创建前不存在。取消 `CARGO_BUILD_BUILD_DIR`，设置 `CARGO_BUILD_JOBS=1` 和新 `CARGO_TARGET_DIR`，执行 `cargo build --release --locked`。日志完整出现 Compiling，耗时 **7m 07s**，exit=0；构建结束时间 VPS `2026-10-01T06:36:39.378839228Z`。新产物 SHA-256：`56a306dcded15e0de6e7e5b28bfd47353e4fb160348f23f963e4ee955798806b`，包含 UTF-8 `本次使用受控重启`。
+
+14:36:58–14:37:01 HKT：运行新产物自身 `install-self --install-dir /usr/local/bin --quiet --no-bootstrap`，exit=0；不需要手工 cp / install 回退。安装前后受管 state 一致。sudo 实际解析与 readlink 路径均 `/usr/local/bin/ping-rust`，SHA-256 与构建产物一致，提示字节存在。随后删除旧 `/root/.cargo/bin/ping-rust`；agent cargo bin 不存在，未发现需删除的 cargo prs/sb 自有别名。
+
+**前次 R1 / R2 补充标注：无效测试：被测二进制不是 FIX_SHA 的可验证产物。** 两份旧候选均缺少旧 FIX_SHA 源码里的提示，本轮新产物包含；这支持旧产物问题，但仍不能确定旧产物对应哪个提交或将其认定为 Cargo 缺陷。不是已证实的 secure_path 路径优先级错误。原 R1 请求成功 / R2 失败记录保留，不将其改写为本轮通过。
+
+| 本轮项目 | 时间（HKT） | 状态 | 关键命令 / 脱敏输出摘要 |
+|---|---|---|---|
+| R 身份闸门 | 14:37:13 | 通过 | sudo 路径 / readlink 正确；SHA-256 等于新产物；提示字符串存在。 |
+| R1 Reality | 14:37:14–14:37:20 | 通过 | `export sing-box --profile <NODE_ID> --server <VPS>`；HK agent authenticated loopback SOCKS / sing-box check exit=0 / curl exit=0，约 2 秒；出口 IP 与 VPS 公网 IP 一致。 |
+| R2 新增认证 SOCKS | 14:37:20–14:37:25 | 通过 | `add socks5 --name r2-resume-auth-socks --port 56581 --yes`；PID 2548522 → 2552313；新监听 56581 出现；来源 / 固定 pin / `本次使用受控重启` / Update Center / cargo 切换提示齐全。 |
+| R2 改端口 | 14:37:27–14:37:31 | 通过 | 数字菜单 2 → 新节点 → 更改端口；56581 消失、48007 出现；PID 2552313 → 2552458；原因和切换提示出现。 |
+| R2 删除非最后节点 | 14:37:31–14:37:35 | 通过 | `delete <NODE_ID> --yes`；48007 消失；PID 2552458 → 2552596；受控重启和来源提示出现，原监听保留。 |
+| R3 Release H2MUX | 14:37:35–14:37:49 | 通过 | `add trojan-tls`、菜单启用 H2MUX、`export sing-box`；导出 multiplex protocol=h2mux；仅修改 preference 时 PID 2552742 不变；HK debug 为 outbound multiplex connection，curl exit=0，出口 IP 与 VPS 一致。 |
+| 切换身份闸门 | 14:38:43 | 通过 | 同一 sudo 路径、SHA-256 与新产物一致、提示存在。 |
+
+切换固定 pin 前，只清理本轮 target/release 的 deps / build / incremental / .fingerprint / examples 中间文件以腾出空间，保留新产物供身份核对。14:38:45 启动 `sudo env PATH=<CARGO_PATH> CARGO_BUILD_JOBS=1 CARGO_TARGET_DIR=<NEW_SHOES_TARGET> ping-rust update --method cargo`；固定 shoes pin 不变。以 250 ms 采样整个 update 子进程树的 RSS；结果待完成后追加，不能把启动成功当作切换通过。
+
+### 切换与 P 组实际结果（NaiveProxy 闸门停止）
+
+切换实际结果：exit=0，总耗时 **1549.431 秒（25 分 49 秒）**，cargo 编译日志为 25m 46s；VPS 起止时间 `2026-10-01T06:39:29.324531Z` → `2026-10-01T07:05:18.755114Z`。每 250 ms 采样的 update 子进程树 RSS 峰值 **1,050,284 KiB（约 1,026 MiB）**，属于采样峰值，不声称为内核精确 high-water mark。provenance=verified-pin / version=0.2.8 / revision=`386b11532424b8665ee3e46340c6236fb3c47595` / binary SHA-256=`d21d21ccdbf0e38bceee04c45e31d1aaef253febfcd71d1a5dbb7beaf866b525`；MainPID 2563732 / active，原 TCP 监听全部保留。
+
+编译空间处理均限于任务文件：旧 VPS 回环诊断客户端 `/root/prs-acceptance-v021/reality-diagnostics/sing-box-1.14.2` 约 78 MiB，初次目录断言失败、未删除；只读确认它是普通文件后，15:01 前成功删除。编译末段将本轮下载的 300 个 crate 归档（36,099,669 bytes）临时移到 `/tmp/prs-v021-crate-cache`，解包源码保持；切换结束后 15:06:10 清理已完成的任务 `shoes-target` 并将 **300 个归档全部放回**，临时目录删除，根分区恢复到约 995 MiB 可用。原始环境备份未动。期间三次本机到 HK SSH banner 超时，随后重试恢复；没有将读状态失败混同为后台编译失败。
+
+| 本轮项目 | 时间（HKT） | 状态 | 关键命令 / 脱敏输出摘要 |
+|---|---|---|---|
+| 切换固定 pin | 14:38:45–15:05:17 | 通过 | `update --method cargo` exit=0；指定 pin / version / provenance / active / 原监听核对通过；耗时与采样 RSS 如上。 |
+| P 身份闸门 | 15:06:14 | 通过 | sudo 实际 `/usr/local/bin/ping-rust`；SHA-256=`56a306dcded15e0de6e7e5b28bfd47353e4fb160348f23f963e4ee955798806b`，与新产物一致；提示字符串存在。 |
+| P1 新增认证 SOCKS / 改端口 / 非最后删除 | 15:06:15–15:06:32 | 通过 | `add socks5 --name p1-resume-auth-socks --port 59337 --yes` → 菜单改为 48441 → `delete <NODE_ID> --yes`；MainPID **2563732 全程不变**；59337 出现后消失、48441 出现后删除，原监听保留。 |
+| P2 SS2022 + ShadowTLS v3 | 15:06:32–15:06:43 | 通过 | `add shadowsocks --shadowtls --server-name www.microsoft.com`；sing-box 导出 / HK check exit=0 / 外部 curl exit=0；出口 IP 与 VPS 一致。 |
+| P2 认证 SOCKS5 | 15:06:43–15:06:49 | 通过 | `add socks5`，username/password 非空；HK `curl --socks5-hostname <VPS>:<PORT> --proxy-user <AUTH>`（私有配置）exit=0；出口 IP 与 VPS 一致。 |
+| P2 Hysteria2 UDP | 15:06:50–15:07:01 | 通过 | `add hysteria2`；`ss -lunp` 确认 UDP 35371；HK sing-box check / 外部请求 exit=0；出口 IP 与 VPS 一致。未修改防火墙，不以用户安全组声明代替实际请求。 |
+| P2 NaiveProxy | 15:07:02–15:07:12 | **失败** | `add naiveproxy --self-signed --server-name acceptance.example.invalid` 成功；导出 JSON / HK sing-box check exit=0；客户端实际启动 NaiveProxy 150.0.7871.63，但外部 curl exit=35，约 1.5 秒。debug：`handshake failed; returned -1, SSL error code 1, net_error -213`、`stream failed: cert validity too long`。不是缺少支持 naive 的客户端，不能标成未验证。 |
+| P2 verified-pin H2MUX | — | 未验证 | 脚本安排在 NaiveProxy 之后；失败后停止，未执行；R3 的 Release 请求通过不代替本项。 |
+| P3 Pool / 两 hop Chain / BLOCK / DIRECT / Pool 探针 / 断链失败 | — | 未验证 | P2 闸门后未执行；未启动实机上游。原隔离 CI 记录保留，不代替实机。若续测仍计划两个上游同 VPS，出口 IP 无法区分 hop。 |
+| P4 Update Center / 拒绝 Release 降级 | — | 未验证 | P2 闸门后未执行。 |
+| P5 backup / 修改 / restore / 哈希 | — | 未验证 | P2 闸门后未执行；原始备份保留。 |
+| P6 真实 reboot / 全监听恢复 / Reality 再握手 | — | 未验证 | P2 闸门后未执行；没有 reboot。 |
+| 合并修复 PR、release PR、tag / Release / crates.io、发版后冒烟、最终恢复 | — | 未验证 | 按失败闸门停止；未合并，未推 tag，未发布。 |
+
+### NaiveProxy 初步定位（只读，保留失败实例）
+
+15:12:14–15:12:16 HKT 的只读检查：
+
+1. 二进制身份再次一致，服务 MainPID 2563732 / active / enabled，排除再次使用旧管理二进制。
+2. `openssl x509 -in <CERT_PEM> -noout -startdate -enddate`：原样输出 `notBefore=Jan  1 00:00:00 1975 GMT`、`notAfter=Jan  1 00:00:00 4096 GMT`。
+3. `journalctl -u shoes.service --since '2026-10-01 07:07:45 UTC' --until '2026-10-01 07:08:05 UTC' -o short-iso-precise`：服务端在 `2026-10-01T15:07:54.447127+08:00` 收到 `AlertReceived(CertificateUnknown)`；HK 客户端同秒报告 `cert validity too long`。TCP 已到达服务端，错误发生于证书检查。
+4. 源码 `src/config.rs::write_self_signed_certificate` 调用 `generate_simple_self_signed`，未设置 not_before / not_after；锁定的 rcgen 0.13.2 默认值为 1975-01-01 / 4096-01-01，与实际证书一致。**初步定位为 ping-rust 自签名证书有效期造成的客户端兼容缺陷**；本轮没有验证客户端接受的精确有效期上限，也没有写测试或修复该缺陷。
+5. `find /home/agent/prs-v021-acceptance -maxdepth 1 -type f` 无输出，`pgrep -u agent -x sing-box` 无匹配，UID1000；临时凭据和客户端进程已清理。服务端 Naive 失败实例保持，未替换证书、跳过校验、修改代码或继续验收。
+6. 当前 config SHA-256=`6804c0a081dc62ea6af7eaa1e419db624615a1dc9d7c925aab674eebfce4d571`；state SHA-256=`d73b5bd35e580e30fae0f1b7ae0114125885f82aeda14d7fdac9fcef4efe5861`。
+
+此前 bootstrap run `36821437871` 的具体底层原因仍未定位：stderr 被旧夹具丢弃，后续默认 Release CI 通过不构成历史限流证据。API 可靠性改进已完成并通过新 FIX_SHA CI。P2 Naive **失败保留**，后续等待用户处理。
