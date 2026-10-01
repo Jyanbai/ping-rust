@@ -924,3 +924,60 @@ self-update 前后逐文件 SHA-256 相同：config.yaml=`c8ccaade93786551c8c2b9
 原始 full/config 备份在本机和 prs-test 保留且 SHA-256 一致：full=`6ac24a945996724fff264f3694ad9f1a6847b6b05b171da39e0e0aa8c8b019aa`，config=`038e2a09466b5a7892e8521e49a38abaf3017ab441ddcf1455606e534cca13af`。full包含原两节点（认证SOCKS5与Reality）、配置、unit、管理工具、shoes和watch硬链接/PID；不含shoes provenance，也没有保存原先prs/sb别名或enabled状态。原管理工具hash=`c2323c7da415f984f4c35e0fe48c7b40d631a8b4e86d91520d7883b5873f4424`，原shoes hash=`160202f6744b14ba84b40c014f3754f7811642300df58df81f1399063a202147`。
 
 **最终 purge / 原始环境恢复：未验证**。用户要求恢复中任何不确定处先问；已提出文件/权限按备份还原、移除本任务新增provenance、恢复enabled/active、保持配置硬链接但将旧watch PID更新为新实际PID、不重建无证据的别名、不卸载apt/Rust依赖的具体方案，等待答复。未擅自执行依赖该答复的purge或恢复，也不能提供“恢复后”磁盘值；当前self-update完成后的最后实测可用空间为1,100,791,808 bytes，不冒充恢复后的值。恢复完成后须另行追加实际文件hash、service/listener状态与最终可用空间。
+
+### 原始环境恢复完成（追加 2026-10-01 HKT 实测）
+
+用户随后授权按方案 1 恢复，并要求先查开机与别名证据、由所属流程自动生成 watch PID、验证原节点外部请求，保留构建依赖。以下追加实际执行结果，前述等待确认检查点和历史失败均保留。此次恢复没有编译，没有再次发布或移动 tag。
+
+#### 恢复决策的证据
+
+| 项目 | HKT 时间 | 状态 | 关键命令、证据与实际处理 |
+|---|---|---|---|
+| 历史开机 enabled 状态 | 18:42:37 | 未验证（历史状态） | `journalctl --list-boots` 仅保留两次开机。测试前开机从2026-09-28 19:25:19 CST开始；`journalctl -b <PRETEST_BOOT> -u shoes.service --output=json` 的测试前启动记录在9月29日13:44/13:45 CST，不能证明开机自动启动。按用户兜底规则，依据恢复前服务active，恢复为enabled；当前enabled另行验证通过。 |
+| prs/sb 快捷命令 | 18:42:38 | 通过（按证据恢复） | 检查root及passwd中相关用户的shell历史和rc文件。`/root/.bash_history` 第453行有sb，第462–499行多次prs、第482行prs --version；无历史时间戳，不能证明测试前sb仍存在。旧v0.2.0 `install_self.rs` 的安装逻辑创建所属 `/usr/local/bin/prs -> ping-rust`，清理所属旧sb。恢复后二进制自身执行install-self，恢复prs，sb保持不存在；未创建无证据的shell alias。 |
+| watch PID写入者 | 18:42:38；18:48:46 | 通过 | 查unit的ExecStart/ExecStartPre/ExecStartPost/DropInPaths及systemd、cron和脚本引用；没有找到外部脚本维护证据。旧版源码 `utils::mark_hot_reload_anchor_pid` 经 `service::mark_anchor_after_start` 在正常部署激活时写入；普通service start/restart不写该PID。使用旧管理工具正常新增/删除临时认证节点，自动生成最终PID6556；没有手工改写。 |
+
+#### 执行和验证
+
+| 项目 | HKT 时间 | 状态 | 关键命令与脱敏输出 |
+|---|---|---|---|
+| 最终产品purge | 18:46:47–18:46:48 | 通过 | `sudo ping-rust uninstall --purge` exit=0；随后确认 `/etc/shoes`、`/usr/local/bin/shoes`、shoes unit不存在，服务不active。管理工具随后由备份恢复。 |
+| 恢复原始备份 | 18:46:49 | 通过 | 核对前文full archive SHA-256不变；`tar --overwrite --same-owner --same-permissions -xzf <FULL_BACKUP> -C /`；逐文件hash/mode比对归档。删除备份中没有的任务新增 `shoes-install.json`；原始备份继续保留。 |
+| 旧版安装与正常激活 | 18:46:50–18:46:57 | 通过 | `/usr/local/bin/ping-rust install-self --install-dir /usr/local/bin --no-bootstrap --quiet` 输出ping-rust0.2.0及“管理命令：sudo prs”；产品add临时认证SOCKS5节点restore-runtime-anchor/46713，再delete该节点。旧管理工具自动准备config硬链接并写入MainPID6556；临时监听已消失，配置恢复原字节。 |
+| 文件、权限与监听 | 18:46:58；18:53:42 | 通过 | 归档中的7个持久文件逐个SHA-256、mode、uid/gid核对一致；3个配置目录0700/root:root；config-watch硬链接及0600验证。`systemctl is-enabled/is-active` 为enabled/active，MainPID6556；`ss -H -ltnp` 中shoes端口精确等于原配置53717 Reality、55906认证SOCKS5。 |
+| 原节点HK外部请求 | 18:47:01–18:47:06 | 通过 | 恢复的原Reality节点由产品 `export sing-box` 原样导出；HK agent sing-box1.14.2 `check` exit=0，认证loopback SOCKS上的curl exit=0，curl约1.985秒；出口IP **与VPS公网IP一致**。请求后立即删除私有配置、日志及PID并停止客户端。 |
+| watcher检测 | 18:48:46查询 | 通过（仅检测变更） | `journalctl -u shoes.service --since '2026-10-01 18:47:25'`：远端18:47:38出现 `Configs changed, restarting servers in 3 seconds..`，随后管理工具执行受控重启。证明watcher检测到变更，不声称该次完成自主热重载；未放宽Release来源的gating。 |
+| HK最终凭据清理 | 18:53:43 | 通过 | `id -u`=1000；对两个任务目录递归find json/conf/log/pid文件无匹配，`pgrep -u agent -x sing-box`无匹配。客户端二进制保留。 |
+| 恢复后最终磁盘 | 18:53:42 | 通过（授权豁免） | `df -h /`：20G、已用18G、Avail1.1G、95%；精确可用 **1,096,224,768 bytes**。高于300MiB硬底线，仍低于4GiB；没有删除依赖、apt缓存、Docker、日志或原备份。 |
+
+运行时例外：`.shoes-config-watch-pid` 初始按归档恢复，最终由旧管理工具自动更新为实际MainPID **6556**、mode0600/root:root。其最终内容不应与旧PID备份字节相同，**不计入7个持久文件hash一致的声明**。`.shoes-config-watch` 与原config.yaml仍为同inode硬链接，内容hash一致。
+
+| 恢复文件 | SHA-256 | mode（均root:root） |
+|---|---|---|
+| /etc/shoes/profiles/SOCKS5-55906.yaml | `66768ff98efde67433ea8fc7ec0a974775dd8bec108ecd397a1cb1c4a60aca34` | 0600 |
+| /etc/shoes/profiles/VLESS-REALITY-53717.yaml | `4426b4d239c79d920d5f8ab13bde156bba7f9f43cdc6837551fe12c02fc5080b` | 0600 |
+| /etc/shoes/config.yaml | `7d97b6e53aa56f175e9cb412f97c4c459d08dd4f77e7e23623e3a671bc953a92` | 0600 |
+| /etc/shoes/ping-rust-state.json | `4f02fe2d4718485d242c37b469052b4d1bdc6fd2f8ce9226ad8d5368230cac8f` | 0600 |
+| /etc/systemd/system/shoes.service | `778203bbd519e7d7f57f25f317ea45e74b3b76e85ecc25d6a58fe2399bddf74b` | 0644 |
+| /usr/local/bin/ping-rust | `c2323c7da415f984f4c35e0fe48c7b40d631a8b4e86d91520d7883b5873f4424` | 0755 |
+| /usr/local/bin/shoes | `160202f6744b14ba84b40c014f3754f7811642300df58df81f1399063a202147` | 0755 |
+
+#### 构建依赖保留清单
+
+18:42:39查 `/var/log/apt/history.log`：本任务2026-10-01 11:42:18–11:42:20 CST的依赖安装实际**新装pkg-config:amd64 1.8.1-4**，并**升级sudo** `1.9.16p2-3+deb13u1 → 1.9.16p2-3+deb13u2`。build-essential、git、ca-certificates、curl、python3原已安装，不计为新装；没有卸载或回退。18:48:45用 `dpkg-query -W/-L`、逐文件stat及 `du -s -B1` 记录大小：
+
+| 保留内容/路径 | allocated bytes | 说明 |
+|---|---:|---|
+| pkg-config包所属文件 | 24,576 | Installed-Size29KiB；路径 `/usr/share/doc/pkg-config/{changelog.Debian.gz,changelog.gz,copyright}`、`/usr/share/lintian/overrides/pkg-config`。这是过渡包，不把既有/usr/bin/pkg-config算作新装文件。 |
+| sudo包所属文件 | 6,938,624 | Installed-Size6705KiB；主要路径/usr/bin/sudo、/usr/libexec/sudo、/etc/sudo*、/usr/share/doc/sudo及locale/man文件。仅版本升级，保留系统依赖。 |
+| /root/.rustup | 605,028,352 | Rust工具链根目录；没有删除。 |
+| /root/.rustup/toolchains/stable-x86_64-unknown-linux-gnu | 604,999,680 | rustc1.98.1/cargo1.98.1；安装脚本及初始rustup链接时间支持本任务安装。 |
+| /root/.cargo | 352,288,768 | cargo根目录；缓存是否全由本任务产生未确认，整体保留。 |
+| /root/.cargo/bin | 21,123,072 | rustup及工具链接；旧测试ping-rust残留已在前文清理。 |
+| /root/.cargo/registry | 321,335,296 | 保留，待用户决定。 |
+| /root/.cargo/git | 9,711,616 | 保留，待用户决定。 |
+| /root/prs-acceptance-v021 | 212,992 | 任务临时目录及rustup-init.sh保留；不包含另存的原始环境备份。 |
+
+以上为allocated size，子目录已包含在父目录中，**不能相加**。完整包文件清单和原始脱敏命令记录保存于本机验收资料，不上传凭据。依赖删除由用户决定。prs-test是保留并恢复原环境的机器，不能按最初一次性VPS计划销毁。
+
+最终结论：阶段5两组公开安装/self-update冒烟、正式发布、最终purge、原始环境恢复与HK原节点外部请求均**通过**。PR #21发版证据已在10/10 checks成功后合并，main=`638e905989e816b80f05bbdd39494a22c8c04e9c`，runs `36848619596`/`36848712861`。本追加仅文档，不改变发布源码。原bootstrap run **36821437871底层根因仍未定位**；历史开机enabled状态证据不足；旧无效二进制测试、397天指令错误及当时失败均保留，没有用后续成功覆盖。
