@@ -853,3 +853,74 @@ shoes **未重编译、未替换**：verified-pin / 0.2.8 / revision=`386b115324
 - README/Wiki同步来源、安装、Hot Reload、H2MUX范围及证书迁移；增加上述脱敏VPS实机验收证据。H2MUX在Release与固定pin受验证范围内已可用，未新增来源拒绝行为。
 
 发布状态：源码准备0.2.1；tag、GitHub Release、SHA256SUMS资产、crates.io及发版后冒烟**尚未执行/未验证**。release PR必须全部CI通过后合并；**推tag前停下等待用户确认**。本节Release notes须进入正式Release正文，不能仅依赖自动生成的PR标题列表。
+
+## v0.2.1 正式发布与发版后冒烟（2026-10-01，阶段 5）
+
+本节追加用户确认后的实际结果，保留前文各时间点的失败、未验证和未发布记录。发布顺序按用户最新授权：`cargo publish --dry-run --locked` → tag / GitHub Release → 实机冒烟全部通过 → crates.io。服务端 prs-test（Debian 13.4）不进行编译；客户端仅 HK agent UID 1000，sing-box 1.14.2、自有目录、无 sudo。所有服务器操作由 Windows 发起 SSH，prs-test 和 bero 均经 HK 跳板；本机仅编辑、同步、控制与读取日志。
+
+### 发布源码、远程构建和资产
+
+- PR #18 squash MERGE_SHA：`74b39c86d1065c1fb483c4c7c2f163976f120f2f`。
+- PR #19 squash：`d36c541c55c74ce05dce312fd14f112c67e9b2e2`；实际 FIX_SHA 与证据沿用范围见前文。
+- release PR #20 head：`d9e2ac585985edff0ffa0dc6c55527b7ef83cbe6`，20/20 checks 成功后合并。
+- PR #20 squash / v0.2.1 tag 所指发布源码：`4d11f990b60926dcba43e4dab03fc1af58933c28`，提交标题 `chore: release v0.2.1 (#20)`。发布后追加审计不会移动该 tag。
+- 从本机独立 worktree 的上述 SHA 通过 `remote-sync.cmd ping-rust-v021-publish` 同步 97 个文件到 bero `/home/agent/src/ping-rust-v021-publish`；bero 未执行 git，未上传 `.git`、target 或凭据。
+- bero 正式发布前再次比对 Cargo.toml / Cargo.lock SHA-256 与本机一致：分别为 `127688a058c19517523247fadaff2464c8e7655fff7cd4c56d3d4df052d27fe1` / `26ea6e69f60f9ca217a15655b0e982414c5ce624a53186efa71c67c5cc296114`。
+
+| 项目 | 状态 | 关键命令和实际输出 |
+|---|---|---|
+| 发布前 Cargo dry-run | 通过 | bero `~/bin/job run ping-rust-v021-publish-dryrun cargo publish --dry-run --locked`。`[job] 耗时 66.47s，峰值内存 587424KB，退出码 0`；实际完成 package verification，因 dry-run 不上传。结束共享 target 693 MiB / 725,905,408 bytes，根分区可用 5,941,645,312 bytes。 |
+| v0.2.1 tag / Release workflow | 通过 | 注释 tag 推至上述 release SHA；按要求执行 `gh run watch 36845173927 --interval 30 --exit-status`。run `36845173927` completed/success，aarch64、x86_64、Publish GitHub Release 三个 job 均 success。 |
+| Release 资产 / SHA256SUMS | 通过 | 三个资产均存在；Release job 的 `sha256sum --check` 显示两个归档均 OK，与 GitHub asset API digest 相符。实际 VPS 默认安装及指定旧版本安装各自还执行了产品内 SHA-256 校验。 |
+| 正式 crates.io 发布 | 通过 | 仅在冒烟全部通过后，从 bero 同一源码启动 job `ping-rust-v021-publish`，执行 `cargo publish --locked`。日志 `Uploaded` / `Published ping-rust v0.2.1 at registry crates-io`；`[job] 耗时 10.04s，峰值内存 401196KB，退出码 0`。结束共享 target 756 MiB / 792,039,424 bytes，根分区可用 5,870,080,000 bytes。 |
+| crates.io 公共 API 核对 | 通过 | `GET /api/v1/crates/ping-rust/0.2.1` 返回 crate=ping-rust，num=0.2.1，yanked=false，created_at=2026-10-01T10:13:30.391161Z，checksum=`a68d7c6a5711815110049421776669a4fe7a2205b22dad551c1e9846b9e347f7`。 |
+
+Release：`https://github.com/Jyanbai/ping-rust/releases/tag/v0.2.1`。crates.io：`https://crates.io/crates/ping-rust/0.2.1`。正式 Release 正文已补充 Pool 探针、受控重启来源说明、SC-081v3 时间表、v0.2.0 Naive 测试证书重新生成迁移说明和实机证据；不只使用自动生成的 PR 标题。
+
+| Release 资产 | SHA-256 |
+|---|---|
+| ping-rust-aarch64-unknown-linux-musl.tar.gz | `85721f6222087995c90a4c3ee58c1421993c215bbd228545a17256f8e7d7075f` |
+| ping-rust-x86_64-unknown-linux-musl.tar.gz | `b9544aa5c43f13aa9680cea9a0b8c6b1a55af5884bbd86039070e6a7c82941a7` |
+| SHA256SUMS | `0348bbbc22251fa26241782987ed1ff459ec486fa542daba122370e8febf522c` |
+
+crates.io 凭据来自本机既有 Cargo credentials；只经 SSH/SFTP 写入 bero 专用 0600 临时文件，发布进程读取后立即删除。token 未输出、未进入仓库或命令参数；发布结束确认临时文件不存在。启动控制器曾因本机 JSON 默认编码和未解析 bero ProxyJump 失败，均发生在正式发布任务启动前；修正仅限忽略目录内控制器，没有重试已经成功的发布，没有改变产品源码或构建设置。
+
+### prs-test 磁盘豁免与清理
+
+新的 AGENTS.md 4 GiB 门槛曾使冒烟暂停。用户明确收窄豁免：仅 prs-test 阶段 5 部署、冒烟、purge 和恢复；禁止编译；可用空间低于 **314,572,800 bytes（300 MiB）立即停止**。bero / HK 继续严格遵守 4 GiB。安装和 self-update 后台启动时设置磁盘守护，每 0.5 秒检查硬底线，低于底线终止子进程，exit=75；实际均未触线。
+
+17:57:22 清理前可用 720,822,272 bytes。18:01:02 删除前逐个报告并记录以下路径及 allocated size；仅删除前文审计确认属于本 goal 的三个隔离目录：
+
+| 删除路径 | allocated bytes |
+|---|---:|
+| /root/prs-isolated-cf539fe91280-155613 | 9,728,000 |
+| /root/prs-isolated-1ba8b951815d-142842 | 9,572,352 |
+| /root/prs-isolated-9a9b273feaa5-163938 | 361,742,336 |
+
+清理后可用 **1,101,860,864 bytes**，仍低于 4 GiB，在授权豁免下继续。`/root/.cargo/registry`（321,335,296 bytes）和 `/root/.cargo/git`（9,711,616 bytes）尚未确认全部为本任务创建，**没有删除**。Docker、apt 缓存、系统日志、其他服务数据和原始环境备份均未用于腾空间。
+
+### 公开安装与 self-update 实机冒烟
+
+以下时间为 HKT 本机记录器；VPS/HK 日志各自保留远端时间，两者约比本机快 43 秒。所有测试节点带认证；临时 sing-box 入站仅 127.0.0.1 且带用户名/密码。外部请求不在本机运行。
+
+| 项目 | HKT 时间 | 状态 | 关键命令与脱敏输出 |
+|---|---|---|---|
+| 首轮产品 purge | 18:03:36–18:03:39 | 通过 | `sudo ping-rust uninstall --purge` exit=0；确认 /etc/shoes、shoes 二进制和 unit 均不存在，服务非 active。产品卸载的是 shoes，管理工具仍留在 /usr/local/bin，随后由公开 install-self 覆盖；不声称 purge 自动删除管理工具。 |
+| 默认一键安装 / 零输入部署 | 18:03:40–18:05:04 | 通过 | 下载公开 main 的 scripts/install.sh，无版本参数执行 `bash <SCRIPT>`，未提供部署输入。日志 `SHA-256 校验通过`、`安装成功：ping-rust 0.2.1`、`首次安装：自动部署 VLESS-REALITY`、shoes v0.2.7 GitHub Release、服务启动。后台 elapsed=7.504s / exit=0；sudo 实际路径 /usr/local/bin/ping-rust，SHA-256=`32a83e30608d3776d53376e5a9cc0c7d3aaee50ab58acf50abe310675ec8e5e3`。 |
+| 默认安装 HK Reality | 18:05:39–18:05:44 | 通过 | 产品 `export sing-box` → HK agent `sing-box check` exit=0 → 认证 SOCKS 上 curl exit=0，约 2.047s；出口 IP **与 VPS 公网 IP 一致**。service enabled/active，MainPID4427，监听34930。 |
+| 新增节点受控重启提示 | 18:05:45–18:05:49 | 通过 | `sudo ping-rust add socks5 --name stage5-default-auth --port 56897 --yes`，生成认证非空；实际提示 `当前 shoes 来源为 GitHub Release v0.2.7…本次使用受控重启`；MainPID **4427 → 4634**，ss确认新56897与Reality34930监听，service保持active。未切换或编译shoes。 |
+| 第二轮 purge / 指定旧版安装 | 18:06:20–18:07:47 | 通过 | 再次 `uninstall --purge` 并验证清理；公开脚本 `--version v0.2.0`。SHA-256校验、版本0.2.0、零输入Reality、shoes v0.2.7；elapsed=7.005s / exit=0，enabled/active，MainPID4977，监听57536。 |
+| 旧版 HK Reality 基线 | 18:07:48–18:07:54 | 通过 | 产品原样导出；HK check/curl exit=0，约1.969s，出口 IP与VPS一致。 |
+| 默认 self-update | 18:08:25–18:09:39 | 通过 | 不指定版本，执行 `sudo ping-rust self-update`，实际 `0.2.0 → 0.2.1`、路径/usr/local/bin/ping-rust，elapsed=1.502s / exit=0。配置树全部逐文件hash一致；MainPID **4977 → 4977**，service enabled/active，监听57536保持。 |
+| 更新后 HK Reality | 18:09:56–18:10:02 | 通过 | 再次产品导出；HK check/curl exit=0，约1.875s，出口 IP与VPS一致。两组冒烟均完成后才启动crates.io上传。 |
+| HK测试凭据与进程清理 | 18:14:08–18:14:09 | 通过 | 删除前报告 reality-private.json 689 bytes、curl-private.conf 176 bytes，随后删除；两个任务目录find无json/conf/log/pid残留，pgrep agent sing-box无匹配；客户端二进制保留。HK根分区可用9,720,250,368 bytes。 |
+
+self-update 前后逐文件 SHA-256 相同：config.yaml=`c8ccaade93786551c8c2b9c8e290717d8a0460448aebde25defec291e2d779a2`，ping-rust-state.json=`1e3592398f1f1967cd85be3c72316cf5649a02dd263f964bd4859045109feeae`，profiles/VLESS-REALITY-57536.yaml=`2ef0cea3439ca7f72e507d9474e677530c7dfd08d24204880610044ff4324910`。
+
+实测中 SSH 偶发 banner timeout，仅重试连接或读取；未重复成功的 install / self-update / publish。VPS 原有 `sudo: unable to resolve host` 警告仍存在，相关命令 exit=0，未擅改hostname/DNS。没有新的冒烟失败，因此没有触发降级 Release 为 pre-release 或删除 tag。已核实默认安装使用 `releases/latest/download`，v0.2.0 self-update 使用 API `releases/latest`，用户指定的失败处理分支适用于该实现，但本轮没有实际执行该失败分支。
+
+### 原始环境恢复检查点
+
+原始 full/config 备份在本机和 prs-test 保留且 SHA-256 一致：full=`6ac24a945996724fff264f3694ad9f1a6847b6b05b171da39e0e0aa8c8b019aa`，config=`038e2a09466b5a7892e8521e49a38abaf3017ab441ddcf1455606e534cca13af`。full包含原两节点（认证SOCKS5与Reality）、配置、unit、管理工具、shoes和watch硬链接/PID；不含shoes provenance，也没有保存原先prs/sb别名或enabled状态。原管理工具hash=`c2323c7da415f984f4c35e0fe48c7b40d631a8b4e86d91520d7883b5873f4424`，原shoes hash=`160202f6744b14ba84b40c014f3754f7811642300df58df81f1399063a202147`。
+
+**最终 purge / 原始环境恢复：未验证**。用户要求恢复中任何不确定处先问；已提出文件/权限按备份还原、移除本任务新增provenance、恢复enabled/active、保持配置硬链接但将旧watch PID更新为新实际PID、不重建无证据的别名、不卸载apt/Rust依赖的具体方案，等待答复。未擅自执行依赖该答复的purge或恢复，也不能提供“恢复后”磁盘值；当前self-update完成后的最后实测可用空间为1,100,791,808 bytes，不冒充恢复后的值。恢复完成后须另行追加实际文件hash、service/listener状态与最终可用空间。
