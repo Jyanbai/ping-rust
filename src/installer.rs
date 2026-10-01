@@ -200,18 +200,7 @@ struct GithubRelease {
 }
 
 pub async fn latest_release_tag() -> Result<String> {
-    let client = Client::builder()
-        .user_agent(concat!("ping-rust/", env!("CARGO_PKG_VERSION")))
-        .https_only(true)
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(20))
-        .build()?;
-    Ok(client
-        .get(LATEST_RELEASE_API)
-        .send()
-        .await?
-        .error_for_status()?
-        .json::<GithubRelease>()
+    Ok(crate::github_api::get::<GithubRelease>(LATEST_RELEASE_API)
         .await?
         .tag_name)
 }
@@ -323,16 +312,9 @@ async fn install_release(destination: &Path, allow_downgrade: bool) -> Result<In
 
     let release = {
         let _timer = performance::stage("shoes_release_metadata");
-        client
-            .get(LATEST_RELEASE_API)
-            .send()
+        crate::github_api::get::<GithubRelease>(LATEST_RELEASE_API)
             .await
             .context("请求 shoes 最新 Release 失败")?
-            .error_for_status()
-            .context("GitHub Release API 返回错误")?
-            .json::<GithubRelease>()
-            .await
-            .context("解析 GitHub Release 信息失败")?
     };
 
     let known = load_provenance();

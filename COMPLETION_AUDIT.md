@@ -602,3 +602,7 @@ H2MUX 在 Release v0.2.7 **可用**，不新增来源拦截。热重载 gating �
 两份候选二进制相同，**没有证据证明 secure_path 选择了另一份旧二进制**；旧构建产物复用仍是待隔离重建验证的怀疑。前述 R1/R2 原记录保留：它们不能用于证明 FIX_SHA 的实机验收，因为实际二进制未通过身份检查；R2 提示缺失的失败不会改写为通过。当前 service active / MainPID 2548522，config/state 哈希仍与前述失败后的记录一致。
 
 2026-10-01 本次取回 run `36821437871` / job `110237660177` 原始日志，失败原文：`2026-10-01T05:47:38.1888833Z AssertionError: ping-rust bootstrap failed; credential-bearing output suppressed`。原日志没有底层 stderr，无法追溯其具体 HTTP 状态或网络原因。先写脱敏诊断测试，运行时因诊断模块尚未实现而失败；实现后 3 项通过。夹具仅输出白名单错误阶段和 HTTP 状态，不输出任意 stdout/stderr 或凭据；准备在 CI 重现以收集根因证据，尚未认定为限流。
+
+追加：诊断提交 `c6a3bb0` 的来源 run `36823173726` / default-release job `110242959102` 在 2026-10-01 06:08:37 UTC 完整通过，未重现失败；前一审计 head `959b6b4` 的 run `36821753523` 也通过。原失败的底层原因仍**未定位**，不声称已证实 403 或网络瞬断。按用户要求补齐 API 可靠性行为，不能用新增测试推断原失败原因。
+
+测试先行：`d2fa9fd` 的 GitHub API 测试在模块缺失处编译失败；`4e54932` 的 sudo token 传递测试在函数缺失处失败；`1e7a947` 的响应体中断测试在旧实现下失败。实现后 GitHub API 共 6 项通过，另有 sudo 环境变量名字传递测试：可选 GITHUB_TOKEN / GH_TOKEN（非空前者优先）、无认证请求、403/429/5xx 恢复与有界耗尽、404/401/重定向非重试、连接中断和响应体中断恢复、服务端 Retry-After / rate reset 等待上限、错误不包含 token 或原始响应体。API 凭据只发送到 GitHub API HTTPS 同源；资产客户端下载不带认证。CI 相关 bootstrap / self-update / 性能步骤显式传递 Actions token，token 不拼到命令行。超出等待上限会停止并给出 token 提示。未更改 pin、来源 gating 或 VPS 配置。

@@ -137,6 +137,8 @@ jobs:
           fi
 
       - name: Verify published one-click installer
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
@@ -184,7 +186,7 @@ jobs:
           bootstrap_dir="${RUNNER_TEMP}/ping-rust-bootstrap"
           bootstrap_output="${RUNNER_TEMP}/ping-rust-bootstrap-output.txt"
           mkdir -p "${bootstrap_dir}"
-          bash scripts/install.sh \
+          sudo --preserve-env=GITHUB_TOKEN bash scripts/install.sh \
             --version "${GITHUB_REF_NAME}" \
             --install-dir "${bootstrap_dir}" \
             > "${bootstrap_output}"

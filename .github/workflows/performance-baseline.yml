@@ -19,6 +19,9 @@ on:
 permissions:
   contents: read
 
+env:
+  GITHUB_TOKEN: ${{ github.token }}
+
 concurrency:
   group: performance-baseline-${{ github.ref }}
   cancel-in-progress: false
@@ -65,7 +68,7 @@ jobs:
           test ! -e /usr/local/bin/shoes
           test ! -e /etc/shoes
           test ! -e /etc/systemd/system/shoes.service
-          sudo env \
+          sudo --preserve-env=GITHUB_TOKEN env \
             PING_RUST_PERFORMANCE_E2E=1 \
             PING_RUST_PERFORMANCE_BIN="$PING_RUST_BIN" \
             PING_RUST_PERFORMANCE_EXPECT="$GITHUB_WORKSPACE/tests/performance_change.exp" \
@@ -227,7 +230,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          docker exec ping-rust-performance-debian bash -lc '
+          docker exec --env GITHUB_TOKEN ping-rust-performance-debian bash -lc '
             set -euo pipefail
             runner="$(cat /tmp/performance-runner-path)"
             test ! -e /usr/local/bin/shoes

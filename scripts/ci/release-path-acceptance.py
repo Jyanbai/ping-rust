@@ -21,7 +21,7 @@ BIN = os.environ["PING_RUST_BIN"]
 
 
 def run(*args):
-    result = subprocess.run([BIN, *args], capture_output=True, text=True, timeout=180)
+    result = subprocess.run([BIN, *args], capture_output=True, text=True, timeout=360)
     assert result.returncode == 0, f"ping-rust {args[0]} failed (exit={result.returncode}): {failure_summary(result.stderr)}"
     return result.stdout, result.stderr
 

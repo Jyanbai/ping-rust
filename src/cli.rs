@@ -1312,48 +1312,33 @@ pub async fn print_update_status() -> Result<()> {
         sha: String,
     }
 
-    let client = reqwest::Client::builder()
-        .user_agent(concat!("ping-rust/", env!("CARGO_PKG_VERSION")))
-        .https_only(true)
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .timeout(std::time::Duration::from_secs(20))
-        .build()?;
     let ping_latest = async {
         Ok::<_, anyhow::Error>(
-            client
-                .get("https://api.github.com/repos/Jyanbai/ping-rust/releases/latest")
-                .send()
-                .await?
-                .error_for_status()?
-                .json::<ReleaseTag>()
-                .await?
-                .tag_name,
+            crate::github_api::get::<ReleaseTag>(
+                "https://api.github.com/repos/Jyanbai/ping-rust/releases/latest",
+            )
+            .await?
+            .tag_name,
         )
     }
     .await;
     let shoes_latest = async {
         Ok::<_, anyhow::Error>(
-            client
-                .get("https://api.github.com/repos/cfal/shoes/releases/latest")
-                .send()
-                .await?
-                .error_for_status()?
-                .json::<ReleaseTag>()
-                .await?
-                .tag_name,
+            crate::github_api::get::<ReleaseTag>(
+                "https://api.github.com/repos/cfal/shoes/releases/latest",
+            )
+            .await?
+            .tag_name,
         )
     }
     .await;
     let upstream = async {
         Ok::<_, anyhow::Error>(
-            client
-                .get("https://api.github.com/repos/cfal/shoes/commits/master")
-                .send()
-                .await?
-                .error_for_status()?
-                .json::<CommitSha>()
-                .await?
-                .sha,
+            crate::github_api::get::<CommitSha>(
+                "https://api.github.com/repos/cfal/shoes/commits/master",
+            )
+            .await?
+            .sha,
         )
     }
     .await;

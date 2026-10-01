@@ -35,7 +35,9 @@ jobs:
           echo "a684484d7477d1437282ee411f4d131d0340aaad60a7868841ebd5d87dd8a0c6  $RUNNER_TEMP/sing-box.tar.gz" | sha256sum --check
           tar -xzf "$RUNNER_TEMP/sing-box.tar.gz" -C "$RUNNER_TEMP"
       - name: Test default Release lifecycle and H2MUX
-        run: sudo env CI=true PING_RUST_BIN="$PWD/target/debug/ping-rust" PING_RUST_SING_BOX_BIN="$RUNNER_TEMP/sing-box-1.14.2-linux-amd64/sing-box" /usr/bin/python3 scripts/ci/release-path-acceptance.py
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: sudo --preserve-env=GITHUB_TOKEN env CI=true PING_RUST_BIN="$PWD/target/debug/ping-rust" PING_RUST_SING_BOX_BIN="$RUNNER_TEMP/sing-box-1.14.2-linux-amd64/sing-box" /usr/bin/python3 scripts/ci/release-path-acceptance.py
   compare:
     name: Source matrix (${{ matrix.source }})
     runs-on: ubuntu-24.04

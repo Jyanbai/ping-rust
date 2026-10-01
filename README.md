@@ -497,7 +497,7 @@ sudo /usr/local/bin/shoes --dry-run /etc/shoes/config.yaml
 - AnyTLS 失败：确认选择的 TLS/Reality 模式、SNI、密码与证书校验设置一致；AnyTLS+Reality 请使用 sing-box 导出。
 - 链式节点显示端口可达但不能使用：进入 `9) 其他 → 1) 链式代理 → 7) 测试节点 / Chain → 1) 测试节点`；新版测试会验证密码/UUID、TLS/Reality 握手和真实 HTTP 出口，不再只测 TCP 端口。
 - `systemctl` 不存在：当前系统不是 systemd 环境，服务管理功能无法使用。
-- GitHub API 限流：稍后重试，或使用 `install --method cargo`。
+- GitHub API 请求支持可选 `GITHUB_TOKEN` 或 `GH_TOKEN`（前者优先，空值忽略）。使用 sudo 时可执行 `sudo --preserve-env=GITHUB_TOKEN,GH_TOKEN ping-rust ...`；token 仅发送到 `api.github.com`，不会用于 Release 资产下载。403、429、5xx 与连接失败最多尝试 3 次并退避；尊重服务端等待提示，超过 120 秒等待上限则停止并明确报错。历史 CI 缺少底层输出时不能据此判定为限流。
 - 自更新提示权限不足：若当前程序位于 `/usr/local/bin`，改用 `sudo ping-rust self-update`；不要手工覆盖正在更新的文件。
 - cargo 安装版本较旧：GitHub Release 与 crates.io 的发布时间可能不同，优先选择 Release。
 - cargo 编译很慢：低内存 VPS 上源码模式可能需要数十分钟；这是回退通道，默认部署应优先使用 Release。
