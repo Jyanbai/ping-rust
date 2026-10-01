@@ -34,6 +34,9 @@ mod transaction;
 mod validation;
 
 #[cfg(test)]
+mod naive_certificate_tests;
+
+#[cfg(test)]
 use commit::{
     aggregate_profile_documents, commit_managed_with_state_writer, is_managed_profile_file_name,
 };
@@ -2667,7 +2670,7 @@ mod tests {
         }
     }
 
-    fn request(protocol: Protocol, output: PathBuf) -> GenerationRequest {
+    pub(super) fn request(protocol: Protocol, output: PathBuf) -> GenerationRequest {
         GenerationRequest {
             name: None,
             protocol,

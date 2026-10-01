@@ -2055,6 +2055,14 @@ mod tests {
     }
 
     #[test]
+    fn parses_naiveproxy_certificate_regeneration() {
+        assert!(
+            Cli::try_parse_from(["ping-rust", "regenerate-test-certificate", "legacy-naive"])
+                .is_ok()
+        );
+    }
+
+    #[test]
     fn parses_naiveproxy_quick_and_generate_tls_modes() {
         let cli = Cli::try_parse_from([
             "prs",
