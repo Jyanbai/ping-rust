@@ -683,3 +683,76 @@ H2MUX 在 Release v0.2.7 **可用**，不新增来源拦截。热重载 gating �
 本机 Windows 验证：`cargo test --locked` 的 **179 个单元测试通过**；`cargo clippy --locked --all-targets -- -D warnings`、`cargo fmt --check`、`git diff --check` 通过；Python 安全诊断 4 项通过。Linux systemd acceptance 和新的实机验收此时均 **未验证**，等待新 PR head CI 和部署。
 
 bootstrap 夹具现在保留子进程完整 stderr 到仅当前 runner root 可读的 private 目录；失败 artifact 只上传 redacted 目录中的逐行白名单诊断（时间、操作、退出码、已知错误和 HTTP 状态），未知内容被抑制。不会把未知 stderr、凭据、URL 或地址上传。超时也保存已捕获 stderr。默认 Release CI 新增 NaiveProxy 生命周期验证，包含旧 metadata 迁移、实际证书 397 天、dry-run 拒绝、受控重启和激活失败的文件/证书回滚。
+
+### NaiveProxy 397 天修复后的实机续验收（失败闸门停止）
+
+日期 **2026-10-01，HKT**；服务端 prs-test，Debian 13.4；客户端仅 HK agent UID 1000、其自有目录、官方 sing-box 1.14.2（with_naive_outbound，NaiveProxy 150.0.7871.63），未使用 sudo。所有本机到 prs-test 的连接经 ProxyJump HK；未修改 Windows / OpenWrt 代理。
+
+受测 FIX_SHA=`cf539fe91280c02223bf075e6c504d08e6006c0b`。测试提交 `6ac2f92` 在实现前；修复提交 `cf539fe`；Wiki 对应文档提交 `9ab751f`。15:56 前再次核对该 PR head：**25/25 检查 COMPLETED/SUCCESS**。run ID：`36832101168`（性能）、`36832101194` / `36832105355`（依赖安全）、`36832101241` / `36832105415`（PR / push CI）、`36832101645` / `36832105741`（schema）、`36832105347`（来源矩阵及默认 Release systemd acceptance）。默认 Release acceptance 实际通过新证书生命周期、dry-run 拒绝和重启失败回滚。它不代替本轮 HK 外部连接。
+
+#### 沿用 R 组证据的范围
+
+命令 `git diff --stat 1ba8b95..cf539fe91280c02223bf075e6c504d08e6006c0b` 的实际输出：
+
+```text
+ .github/workflows/shoes-source-matrix.yml  |  10 +-
+ COMPLETION_AUDIT.md                        |  77 +++++++++++
+ Cargo.lock                                 |   1 +
+ Cargo.toml                                 |   1 +
+ README.md                                  |   4 +
+ scripts/ci/acceptance_diagnostics.py       |  21 +++
+ scripts/ci/naive_certificate_acceptance.py |  83 +++++++++++
+ scripts/ci/release-path-acceptance.py      |  16 ++-
+ scripts/ci/test_acceptance_diagnostics.py  |  16 ++-
+ src/cli.rs                                 |  56 +++++++-
+ src/client.rs                              |  14 ++
+ src/config.rs                              | 108 +++++++++++----
+ src/config/naive_certificate.rs            |  83 +++++++++++
+ src/config/naive_certificate_tests.rs      | 212 +++++++++++++++++++++++++++++
+ src/config/presets.rs                      |   1 +
+ src/config/presets/anytls.rs               |   1 +
+ src/config/presets/hysteria2.rs            |   1 +
+ src/config/presets/reality.rs              |   1 +
+ src/config/presets/shadowsocks.rs          |   2 +
+ src/config/presets/snell.rs                |   1 +
+ src/config/presets/socks5.rs               |   1 +
+ src/config/presets/tls.rs                  |  17 ++-
+ src/config/presets/trojan_reality.rs       |   1 +
+ src/config/presets/tuic.rs                 |   1 +
+ src/menu.rs                                |  12 +-
+ 25 files changed, 711 insertions(+), 30 deletions(-)
+```
+
+没有改动 service.rs、deployment.rs、installer.rs、install_self.rs 或热重载 gating / apply strategy；config.rs 的事务改动仅为 NaiveProxy 证书生成和元数据，复用现有服务激活路径。因此 **R1–R3 和固定 pin 切换证据来自 `1ba8b951815db7f27f8349ac5dc11387568338c9`，按用户条件沿用**，不声称在 cf539fe 上重跑 R 或重新编译 shoes。新 head 默认 Release 路径由上述 CI acceptance 覆盖。
+
+#### 隔离构建、身份与实际结果
+
+15:56:33 启动全新 clone `/root/prs-isolated-cf539fe91280-155613/source`，checkout 指定 FIX_SHA，使用全新 target、`CARGO_BUILD_JOBS=1` 并取消 CARGO_BUILD_BUILD_DIR，执行 `cargo build --release --locked`。实际日志为 `Finished release profile in 7m 01s`、exit=0；新构建产物 SHA-256=`224163c50f81daa2a8dd0c49217bf00abfa962b1cbe625408d2dc00db96406fb`。构建后台启动时旧退出码标记尚存在，15:57:06 在确认新产物不存在后移除该旧标记；成功判断使用新完成的退出码及新产物，不使用旧标记。SSH banner 偶发超时仅重试连接，不重复已经提交的修改。
+
+16:05:24 使用**该新产物自身** `install-self --install-dir /usr/local/bin --quiet --no-bootstrap`，exit=0；sudo 实际解析和 readlink 结果均为 `/usr/local/bin/ping-rust`，hash 与新构建一致；同时包含“本次使用受控重启”和本次新增专属字符串“NaiveProxy 测试证书已重新生成（397 天）”。install-self 前后 state 完全一致；/root/.cargo/bin/ping-rust 已在此前删除，agent cargo bin 不存在残留，本轮没有新增删除。P1 开始、Naive 迁移开始时再次通过相同身份闸门。
+
+shoes **未重编译、未替换**：verified-pin / 0.2.8 / revision=`386b11532424b8665ee3e46340c6236fb3c47595`，SHA-256=`d21d21ccdbf0e38bceee04c45e31d1aaef253febfcd71d1a5dbb7beaf866b525`。
+
+| 本轮项目 | HKT 时间 | 状态 | 关键命令与脱敏输出摘要 |
+|---|---|---|---|
+| HK 客户端身份 | 16:03:06 | 通过 | `id -u`=1000；`sing-box version`=1.14.2，with_naive_outbound；binary SHA-256=`fc9c6e6ab345f045b16a0ed10d1ff28d68e8e56e7749fca30738d1406e98d7b8`，与此前验证的官方产物一致。 |
+| 新构建及 install-self 身份 | 16:05:23–16:05:26 | 通过 | 上述 sudo 路径 / 新产物 hash / 专属字符串一致；管理 state 保持；shoes pin 与 hash 保持。 |
+| P1 热重载新增、改端口、删除非最后节点 | 16:06:03–16:06:20 | 通过 | `add socks5 --name p1-naive397-auth-socks --port 57531 --yes`；认证字段非空；数字菜单改至 55837；`delete <NODE_ID> --yes`。各次 `systemctl show MainPID` 均 **2563732**；`ss -ltnp` 确認 57531 出现后消失，55837 出现后删除，其余监听保持。 |
+| P2-Naive 旧证书识别 | 16:06:21–16:06:23 | 通过 | `info p2-resume-naiveproxy`、`status` 均给出“旧证书缺少有效期元数据”“需要重新生成”；旧实际证书为 1975/4096。 |
+| P2-Naive 重新生成与有效期 | 16:06:24–16:06:28 | 通过 | `regenerate-test-certificate p2-resume-naiveproxy` exit=0，“受控重启已完成”；PID **2563732 → 2568534**；旧 cert/key 被移除。`openssl x509 -noout -startdate -enddate`：`notBefore=Oct  1 07:07:07 2026 GMT`、`notAfter=Nov  2 07:07:07 2027 GMT`；实际 DER 与元数据一致，差值恰好 **397 天**，valid_now=true。 |
+| P2-Naive 迁移后 HK 外部请求 | 16:06:29–16:06:34 | **失败** | 导出成功，HK `sing-box check` exit=0；带认证 loopback SOCKS 的 curl exit=**35**，约 **1.672 秒**。客户端 debug：`handshake failed; returned -1, SSL error code 1, net_error -213`、`stream failed: cert validity too long`。服务端同秒 `AlertReceived(CertificateUnknown)`。出口 IP **未验证**，请求未成功。 |
+| P2-Naive 新建 | — | 未验证 | 前一项失败后停止，未添加新节点。 |
+| P2 SS2022 + ShadowTLS / 认证 SOCKS / Hysteria2 / H2MUX 重跑 | — | 未验证 | 此新 FIX_SHA 未执行；此前 1ba8b95 的三项成功记录保留，不冒充本轮重跑；H2MUX 此前也未验证。 |
+| P3 Pool / 两跳 Chain / BLOCK / DIRECT / 全节点探针 / 断链失败 | — | 未验证 | 失败闸门后未执行；未启动上游或修改 Chain。 |
+| P4 Update Center、P5 backup/restore、P6 reboot | — | 未验证 | 失败闸门后未执行。未 reboot。 |
+| 阶段 4 合并及发版准备、阶段 5 发布和冒烟 / 恢复 | — | 未验证 | PR #19 未合并；未建 release PR，未推 tag，未发布 Release 或 crates.io。原始环境备份保留。 |
+
+#### 失败后的只读核对（没有绕过性修改）
+
+16:11:35–16:11:37 HKT：`openssl s_client -connect 127.0.0.1:49185 -servername acceptance.example.invalid -showcerts` 获取 **shoes 实际提供的证书**；与磁盘证书 `openssl x509 -noout -dates -fingerprint -sha256` 以及 `export sing-box` 嵌入的公开证书 SHA-256 三方一致，均为本轮新生成的 397 天证书。排除了仍提供/导出旧超长证书，不能以“没刷新旧证书”解释这次错误。没有改成更短期限、回拨 not_before、insecure、跳过校验或换客户端。
+
+失败后服务保留 active/enabled，MainPID=2568534，全部原测试监听存在；config SHA-256=`6ddc532bad6eb14403db07b18d51a1357e73a94f172fe5730ec1c7f833b3c020`，state SHA-256=`c2471ba7d47883a169902f8a4d9e4f46c2b1beae78cc83699bde1fa68cfd29d5`。HK 临时私有文件与 sing-box 进程已清理（`find`、`pgrep` 均无匹配），客户端二进制保留。VPS 的新证书与失败实例保留，原始环境备份不动。
+
+**结论**：按指定 397 天规则的生成、迁移和事务验证已通过；当前实机 Naive 客户端仍拒绝该有效期，本轮外部验收失败，不能发版。这次仍是 `cert validity too long`，没有获得“证书不受信任”这一新错误，客户端信任流程仍 **未验证**。
+
+只读上游源码辅助证据：2026-10-01 读取 SagerNet/naiveproxy 的固定 revision `2be061b6c2e9b316f75ec1e329e345406cd4c62d`，`src/net/cert/cert_verify_proc.cc` 的 `HasTooLongValidity` 对 not_before ≥ **2026-03-15** 的证书返回 `validity_duration > base::Days(200)`（2027-03-15 起还有 100 天规则，2029-03-15 起 47 天）。本轮证书 not_before 为 2026-10-01，397 天超过该源码阈值，与错误一致。该源码不是本轮 Naive 二进制完整构建追溯；**精确客户端接受边界和 ≤200 天是否可连接均未实测**。不据此擅自把用户指定的 397 天改成其它值。需用户处理此次有效期要求与当前客户端策略的冲突，按闸门停止。
