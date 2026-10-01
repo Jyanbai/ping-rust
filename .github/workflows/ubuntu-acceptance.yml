@@ -15,6 +15,7 @@ permissions:
   contents: read
 
 env:
+  GITHUB_TOKEN: ${{ github.token }}
   PUBLIC_VERSION: 0.1.15
   SHOES_ARCHIVE_SHA256: e60ccde92490624d9ff399dd58e69d4d6943b33c5cc4f0b0d1509b0c644fbc2a
   SHOES_URL: https://github.com/cfal/shoes/releases/download/v0.2.7/shoes-x86_64-unknown-linux-musl.tar.gz
@@ -165,7 +166,7 @@ jobs:
           started_at="$(date +%s)"
 
           bootstrap_output="$RUNNER_TEMP/reality-bootstrap.txt"
-          sudo "$PING_RUST" bootstrap | sudo tee "$bootstrap_output" >/dev/null \
+          sudo --preserve-env=GITHUB_TOKEN "$PING_RUST" bootstrap | sudo tee "$bootstrap_output" >/dev/null \
             || { echo 'bootstrap command failed' >&2; exit 1; }
           ! sudo grep -Eq '选择协议|输入端口' "$bootstrap_output" \
             || { echo 'bootstrap prompted unexpectedly' >&2; exit 1; }
@@ -1268,7 +1269,7 @@ jobs:
           sudo tar -tzf "$backup" | grep -q 'shoes/profiles/HYSTERIA2-'
           sudo "$PING_RUST" restore "$backup"
           sudo test -s "/etc/shoes/profiles/VLESS-REALITY-${REALITY_PORT}.yaml"
-          sudo "$PING_RUST" update --method release --allow-downgrade
+          sudo --preserve-env=GITHUB_TOKEN "$PING_RUST" update --method release --allow-downgrade
           sudo "$PING_RUST" service restart
           sudo "$PING_RUST" service status
           sudo "$PING_RUST" logs --lines 20
@@ -1419,7 +1420,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          docker exec ping-rust-debian bash -lc '
+          docker exec --env GITHUB_TOKEN ping-rust-debian bash -lc '
             set -euo pipefail
             output=/tmp/reality-bootstrap.txt
             /opt/ping-rust-current/bin/ping-rust bootstrap | tee "$output"

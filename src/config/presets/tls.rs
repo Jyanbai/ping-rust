@@ -18,7 +18,21 @@ pub(super) fn finish(
     protocol: InnerProtocol,
     credentials: Credentials,
 ) -> Result<GeneratedPreset> {
-    let (certificate, certificate_key) = resolve_certificate(request, parent, profile_id)?;
+    let (certificate, certificate_key, naive_certificate_validity) =
+        if request.protocol == super::Protocol::NaiveProxy && request.certificate.is_none() {
+            let suffix = &profile_id.simple().to_string()[..8];
+            let cert = parent.join(format!("cert-{suffix}.pem"));
+            let key = parent.join(format!("key-{suffix}.pem"));
+            let validity = super::super::naive_certificate::write_test_certificate(
+                &request.server_name,
+                &cert,
+                &key,
+            )?;
+            (cert, key, Some(validity))
+        } else {
+            let (cert, key) = resolve_certificate(request, parent, profile_id)?;
+            (cert, key, None)
+        };
     let mut tls_targets = BTreeMap::new();
     tls_targets.insert(
         request.server_name.clone(),
@@ -45,6 +59,7 @@ pub(super) fn finish(
         credentials,
         certificate_path: Some(certificate),
         certificate_key_path: Some(certificate_key),
+        naive_certificate_validity,
     })
 }
 

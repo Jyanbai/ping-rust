@@ -81,6 +81,7 @@ enum ChangeAction {
     NaiveFallback,
     NaiveCertificate,
     NaiveServerName,
+    RegenerateNaiveCertificate,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -325,6 +326,9 @@ async fn change_config_menu() -> Result<()> {
             actions.push((ChangeAction::UdpEnabled, "更改 NaiveProxy UDP-over-TCP"));
             actions.push((ChangeAction::NaiveFallback, "更改 fallback 路径"));
             actions.push((ChangeAction::NaiveCertificate, "更改 TLS 证书"));
+            if profile.self_signed_certificate {
+                actions.push((ChangeAction::RegenerateNaiveCertificate, "重新生成测试证书"));
+            }
         }
         Protocol::AnyTls => {
             actions.push((ChangeAction::AnyTlsUserPassword, "更改用户密码"));
@@ -600,6 +604,9 @@ async fn change_config_menu() -> Result<()> {
                     .default(username.clone())
                     .interact_text()?,
             )
+        }
+        ChangeAction::RegenerateNaiveCertificate => {
+            return cli::regenerate_test_certificate(profile.id).await;
         }
         ChangeAction::NaiveServerName => ProfileChange::NaiveServerName(
             Input::<String>::with_theme(&ColorfulTheme::default())
@@ -1627,7 +1634,7 @@ fn service_menu() -> Result<()> {
         5 => ServiceAction::Disable,
         _ => unreachable!("服务菜单编号已验证"),
     };
-    service::execute(action)
+    cli::execute_service(action)
 }
 
 fn uninstall_menu() -> Result<()> {
@@ -1743,6 +1750,7 @@ mod tests {
             certificate_path: None,
             certificate_key_path: None,
             self_signed_certificate: false,
+            naive_certificate_validity: None,
         };
 
         assert_eq!(select_profile(&[profile]).unwrap(), Some(0));
@@ -1773,6 +1781,7 @@ mod tests {
             certificate_path: None,
             certificate_key_path: None,
             self_signed_certificate: false,
+            naive_certificate_validity: None,
         };
 
         let (uri, warning) = share_uri_for_view(&profile);
@@ -1829,6 +1838,7 @@ mod tests {
             certificate_path: None,
             certificate_key_path: None,
             self_signed_certificate: false,
+            naive_certificate_validity: None,
         };
         assert_eq!(profile.display_name(), "VLESS-REALITY-53453");
         assert_eq!(profile.config_file_name(), "VLESS-REALITY-53453.yaml");

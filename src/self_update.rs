@@ -64,7 +64,7 @@ pub async fn update(requested: Option<&str>, force: bool) -> Result<UpdateReport
         .timeout(Duration::from_secs(300))
         .build()
         .context("创建自更新 HTTP 客户端失败")?;
-    let release = fetch_release(&client, requested.as_ref().map(|(tag, _)| tag)).await?;
+    let release = fetch_release(requested.as_ref().map(|(tag, _)| tag)).await?;
     let available = release_version(&release.tag_name)?;
     if let Some((tag, expected)) = &requested {
         if &available != expected {
@@ -138,21 +138,14 @@ pub async fn update(requested: Option<&str>, force: bool) -> Result<UpdateReport
     })
 }
 
-async fn fetch_release(client: &Client, tag: Option<&String>) -> Result<GithubRelease> {
+async fn fetch_release(tag: Option<&String>) -> Result<GithubRelease> {
     let url = match tag {
         Some(tag) => format!("{RELEASES_API}/tags/{tag}"),
         None => format!("{RELEASES_API}/latest"),
     };
-    client
-        .get(url)
-        .send()
+    crate::github_api::get(&url)
         .await
-        .context("请求 ping-rust GitHub Release 失败")?
-        .error_for_status()
-        .context("GitHub Release API 返回错误")?
-        .json::<GithubRelease>()
-        .await
-        .context("解析 ping-rust GitHub Release 失败")
+        .context("请求 ping-rust GitHub Release 失败")
 }
 
 fn normalize_tag(value: &str) -> Result<(String, Version)> {

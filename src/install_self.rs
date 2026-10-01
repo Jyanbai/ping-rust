@@ -94,18 +94,25 @@ pub fn install(install_dir: &Path, quiet: bool) -> Result<InstallReport> {
 pub fn run_bootstrap_as_root(binary: &Path) -> Result<()> {
     let sudo = utils::command_path("sudo")
         .context("自动部署 VLESS-REALITY 需要 root 权限，但系统没有 sudo；请以 root 运行。")?;
-    let status = Command::new(sudo)
+    let status = bootstrap_command(binary, &sudo)
+        .status()
+        .context("无法通过 sudo 启动默认 VLESS-REALITY 部署")?;
+    if !status.success() {
+        bail!("默认 VLESS-REALITY 部署失败（{status}）")
+    }
+    Ok(())
+}
+
+fn bootstrap_command(binary: &Path, sudo: &Path) -> Command {
+    let mut command = Command::new(sudo);
+    command
+        .arg("--preserve-env=GITHUB_TOKEN,GH_TOKEN")
         .arg(binary)
         .arg("bootstrap")
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .context("无法通过 sudo 启动默认 VLESS-REALITY 部署")?;
-    if !status.success() {
-        bail!("默认 VLESS-REALITY 部署失败（{status}）");
-    }
-    Ok(())
+        .stderr(Stdio::inherit());
+    command
 }
 
 fn validate_install_dir(path: &Path) -> Result<()> {
@@ -247,6 +254,27 @@ fn executable_mode(_path: &Path) -> Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn root_bootstrap_preserves_only_github_token_names() {
+        let command = bootstrap_command(
+            Path::new("/usr/local/bin/ping-rust"),
+            Path::new("/usr/bin/sudo"),
+        );
+        let args: Vec<_> = command
+            .get_args()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "--preserve-env=GITHUB_TOKEN,GH_TOKEN",
+                "/usr/local/bin/ping-rust",
+                "bootstrap"
+            ]
+        );
+        assert!(command.get_envs().next().is_none());
+    }
 
     #[cfg(unix)]
     #[test]

@@ -39,6 +39,7 @@ pub(super) struct GeneratedPreset {
     pub credentials: Credentials,
     pub certificate_path: Option<PathBuf>,
     pub certificate_key_path: Option<PathBuf>,
+    pub naive_certificate_validity: Option<super::NaiveCertificateValidity>,
 }
 
 const PRESETS: &[PresetDescriptor] = &[

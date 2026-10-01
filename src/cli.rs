@@ -62,6 +62,13 @@ pub enum Command {
         #[arg(value_enum)]
         action: ServiceAction,
     },
+    /// 查看服务状态并检查 NaiveProxy 测试证书有效期
+    Status,
+    /// 重新生成 NaiveProxy 自签测试证书（dry-run、事务和受控重启）
+    RegenerateTestCertificate {
+        /// 配置名称或 UUID；只有一个配置时可省略
+        profile: Option<String>,
+    },
     /// 查看安装、配置和服务信息
     #[command(alias = "i")]
     Info {
@@ -506,7 +513,13 @@ pub async fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Command::Add(args) => run_add(args).await,
-        Command::Service { action } => service::execute(action),
+        Command::Service { action } => execute_service(action),
+        Command::Status => execute_service(ServiceAction::Status),
+        Command::RegenerateTestCertificate { profile } => {
+            let state = config::load_state()?;
+            let id = client::select_profile(&state.profiles, profile.as_deref())?.id;
+            regenerate_test_certificate(id).await
+        }
         Command::Logs { lines } => service::logs(lines),
         Command::Info { profile } => show_info(profile.as_deref()).await,
         Command::Url {
@@ -1034,6 +1047,7 @@ fn profile_details_lines(profile: &config::ManagedProfile, share_uri: Option<&st
             ));
             if profile.self_signed_certificate {
                 lines.push("警告：测试模式，需要客户端信任该证书。".to_owned());
+                lines.extend(profile.naive_certificate_details());
             }
         }
         config::Credentials::AnyTls {
@@ -1312,48 +1326,33 @@ pub async fn print_update_status() -> Result<()> {
         sha: String,
     }
 
-    let client = reqwest::Client::builder()
-        .user_agent(concat!("ping-rust/", env!("CARGO_PKG_VERSION")))
-        .https_only(true)
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .timeout(std::time::Duration::from_secs(20))
-        .build()?;
     let ping_latest = async {
         Ok::<_, anyhow::Error>(
-            client
-                .get("https://api.github.com/repos/Jyanbai/ping-rust/releases/latest")
-                .send()
-                .await?
-                .error_for_status()?
-                .json::<ReleaseTag>()
-                .await?
-                .tag_name,
+            crate::github_api::get::<ReleaseTag>(
+                "https://api.github.com/repos/Jyanbai/ping-rust/releases/latest",
+            )
+            .await?
+            .tag_name,
         )
     }
     .await;
     let shoes_latest = async {
         Ok::<_, anyhow::Error>(
-            client
-                .get("https://api.github.com/repos/cfal/shoes/releases/latest")
-                .send()
-                .await?
-                .error_for_status()?
-                .json::<ReleaseTag>()
-                .await?
-                .tag_name,
+            crate::github_api::get::<ReleaseTag>(
+                "https://api.github.com/repos/cfal/shoes/releases/latest",
+            )
+            .await?
+            .tag_name,
         )
     }
     .await;
     let upstream = async {
         Ok::<_, anyhow::Error>(
-            client
-                .get("https://api.github.com/repos/cfal/shoes/commits/master")
-                .send()
-                .await?
-                .error_for_status()?
-                .json::<CommitSha>()
-                .await?
-                .sha,
+            crate::github_api::get::<CommitSha>(
+                "https://api.github.com/repos/cfal/shoes/commits/master",
+            )
+            .await?
+            .sha,
         )
     }
     .await;
@@ -1423,6 +1422,28 @@ pub async fn print_update_status() -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn execute_service(action: ServiceAction) -> Result<()> {
+    if matches!(action, ServiceAction::Status) && Path::new(crate::utils::STATE_FILE).exists() {
+        let state = config::load_state().context("读取测试证书状态失败")?;
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        for profile in &state.profiles {
+            if let Some(warning) = profile.naive_certificate_warning(now) {
+                eprintln!("{}：{warning}", profile.name);
+            }
+        }
+    }
+    service::execute(action)
+}
+
+pub(crate) async fn regenerate_test_certificate(id: Uuid) -> Result<()> {
+    let result =
+        deployment::update_and_activate(id, config::ProfileChange::RegenerateNaiveCertificate)
+            .await?;
+    println!("NaiveProxy 测试证书已重新生成；受控重启已完成。");
+    print_profile_details_with_qr(&result.profile, None);
+    Ok(())
+}
+
 pub async fn show_info(selector: Option<&str>) -> Result<()> {
     let version = installer::installed_version()
         .await
@@ -1446,6 +1467,9 @@ pub async fn show_info(selector: Option<&str>) -> Result<()> {
             };
             println!("配置数量：{}", profiles.len());
             for profile in profiles {
+                for line in profile.naive_certificate_details() {
+                    println!("  {line}");
+                }
                 println!(
                     "- {} | {} | 0.0.0.0:{} | {} | {}",
                     profile.id,
@@ -2070,6 +2094,14 @@ mod tests {
     }
 
     #[test]
+    fn parses_naiveproxy_certificate_regeneration() {
+        assert!(
+            Cli::try_parse_from(["ping-rust", "regenerate-test-certificate", "legacy-naive"])
+                .is_ok()
+        );
+    }
+
+    #[test]
     fn parses_naiveproxy_quick_and_generate_tls_modes() {
         let cli = Cli::try_parse_from([
             "prs",
@@ -2124,6 +2156,7 @@ mod tests {
             certificate_path: None,
             certificate_key_path: None,
             self_signed_certificate: false,
+            naive_certificate_validity: None,
         };
         let output = profile_details_text(&profile, Some("ss://import-link"));
         for expected in [
@@ -2174,6 +2207,7 @@ mod tests {
             certificate_path: None,
             certificate_key_path: None,
             self_signed_certificate: false,
+            naive_certificate_validity: None,
         };
         let output = profile_details_text(&profile, None);
         for expected in [
@@ -2211,6 +2245,7 @@ mod tests {
             certificate_path: None,
             certificate_key_path: None,
             self_signed_certificate: false,
+            naive_certificate_validity: None,
         };
         let output = profile_details_with_qr_text(
             &profile,
@@ -2280,6 +2315,7 @@ mod tests {
             certificate_path: None,
             certificate_key_path: None,
             self_signed_certificate: false,
+            naive_certificate_validity: None,
         };
         let reality_uri = client::share_uri(&reality, "203.0.113.8").unwrap();
         let reality_output = profile_details_text(&reality, Some(&reality_uri));
@@ -2309,6 +2345,7 @@ mod tests {
             certificate_path: None,
             certificate_key_path: None,
             self_signed_certificate: true,
+            naive_certificate_validity: None,
         };
         let hysteria2_uri = client::share_uri(&hysteria2, "203.0.113.8").unwrap();
         let hysteria2_output = profile_details_text(&hysteria2, Some(&hysteria2_uri));
@@ -2338,6 +2375,7 @@ mod tests {
             certificate_path: None,
             certificate_key_path: None,
             self_signed_certificate: true,
+            naive_certificate_validity: None,
         };
         let tuic_uri = client::share_uri(&tuic, "203.0.113.8").unwrap();
         let tuic_output = profile_details_text(&tuic, Some(&tuic_uri));
@@ -2370,6 +2408,7 @@ mod tests {
             certificate_path: None,
             certificate_key_path: None,
             self_signed_certificate: true,
+            naive_certificate_validity: None,
         };
         let anytls_uri = client::share_uri(&anytls, "203.0.113.8").unwrap();
         let anytls_output = profile_details_text(&anytls, Some(&anytls_uri));
