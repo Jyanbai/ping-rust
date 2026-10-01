@@ -93,6 +93,7 @@ def main():
     assert "首次安装：自动部署 VLESS-REALITY" in output
     assert "选择协议" not in output and "输入端口" not in output
     before = pid()
+    assert subprocess.run(["systemctl", "is-enabled", "--quiet", "shoes.service"]).returncode == 0
     provenance = json.loads(Path("/var/lib/ping-rust/shoes-install.json").read_text())
     assert provenance["source"] == "github-release" and provenance["release_tag"] == "v0.2.7"
     reality = state()["profiles"][0]

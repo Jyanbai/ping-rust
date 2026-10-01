@@ -4,16 +4,16 @@
 
 下表只引用仓库中实际存在的测试或 workflow；本地未运行的验收不会标成通过。
 
-| 功能 | 验证方式 | 具体证据 |
-|---|---|---|
-| 13 种协议配置与 schema | CI 容器 / shoes `--dry-run` | `.github/workflows/shoes-schema.yml` 的 `Dry-run every checked-in example`、`scripts/ci/validate-shoes-schema.sh` |
-| Verified Hot Reload | CI systemd acceptance、单元测试 | `.github/workflows/ubuntu-acceptance.yml` 热重载步骤；`service::tests::hot_reload_requires_same_pid_and_exact_listener_delta` |
-| Chain Proxy 2.0 Nodes/Pools/Chains/规则 | CI systemd acceptance、单元测试 | `.github/workflows/chain-systemd.yml` 的 `chain_systemd_acceptance`；`tests/chain_v2_e2e.rs`；`chain_proxy::state::tests::*` |
-| Pool 内全部节点手动探针 | 单元测试、CI systemd acceptance 通过 | `chain_proxy::tests::pool_probe_summary_reports_success_and_failure`、`chain_proxy::tests::pool_probe_reports_missing_member_without_network`；`.github/workflows/chain-systemd.yml` 的 `chain_systemd_acceptance` mixed Pool stage 对在线节点严格断言 `namespace-two: 可用[^\r\n]*ms`，Ubuntu/Debian [run 36713152604](https://github.com/Jyanbai/ping-rust/actions/runs/36713152604) 通过 |
-| Update Center 与降级保护 | 单元测试 | `cli::tests::update_status_comparison_is_fail_soft_and_drift_is_explicit`；`installer::tests::known_release_downgrade_is_blocked_unless_explicitly_allowed` |
-| H2MUX | CI 容器、单元测试 | `.github/workflows/shoes-schema.yml` 的 sing-box 检查与 watcher probe；`client::tests::h2mux_exports_only_valid_sing_box_preferences` |
-| SOCKS5、Snell v3、NaiveProxy、SS2022+ShadowTLS v3 | CI systemd acceptance、单元测试 | `.github/workflows/ubuntu-acceptance.yml` 的 `Verify prs numeric PTY flow for all protocol presets`；`config::tests::socks5_generation_round_trip_and_edits_preserve_exact_auth_and_udp_state`、`config::tests::snell_v3_yaml_matches_fixed_shoes_schema`、`config::tests::naiveproxy_generates_tls_h2_inner_auth_and_random_credentials`、`config::tests::shadowtls_v3_generates_nested_tcp_only_shadowsocks` |
-| 实机 VPS v0.2.0 全量清单 | 失败（最新为第 2 项闸门） | 2026-10-01，首次 Reality 外部失败记录保留；追加定位为大陆 OpenWrt/Passwall2 测试路径问题，用户授权临时直连例外后同配置外部请求通过。随后新增认证 SOCKS5 节点使 MainPID 改变，Hot Reload 失败；改端口/删除和第 3–8 项未验证，停止发版。详见“v0.2.x 实机 VPS 验收”。 |
+| 功能 | 适用 shoes 来源 | 验证方式 | 具体证据 |
+|---|---|---|---|
+| 13 种协议配置与 schema | github-release v0.2.7 / verified-pin；历史证据按条目版本 | CI 容器 / shoes `--dry-run` | `.github/workflows/shoes-schema.yml` 的 `Dry-run every checked-in example`、`scripts/ci/validate-shoes-schema.sh` |
+| Verified Hot Reload | verified-pin（固定 revision） | CI systemd acceptance、单元测试 | `.github/workflows/ubuntu-acceptance.yml` 热重载步骤；`service::tests::hot_reload_requires_same_pid_and_exact_listener_delta` |
+| Chain Proxy 2.0 Nodes/Pools/Chains/规则 | github-release v0.2.7 / verified-pin；历史证据按条目版本 | CI systemd acceptance、单元测试 | `.github/workflows/chain-systemd.yml` 的 `chain_systemd_acceptance`；`tests/chain_v2_e2e.rs`；`chain_proxy::state::tests::*` |
+| Pool 内全部节点手动探针 | github-release v0.2.7 / verified-pin；历史证据按条目版本 | 单元测试、CI systemd acceptance 通过 | `chain_proxy::tests::pool_probe_summary_reports_success_and_failure`、`chain_proxy::tests::pool_probe_reports_missing_member_without_network`；`.github/workflows/chain-systemd.yml` 的 `chain_systemd_acceptance` mixed Pool stage 对在线节点严格断言 `namespace-two: 可用[^\r\n]*ms`，Ubuntu/Debian [run 36713152604](https://github.com/Jyanbai/ping-rust/actions/runs/36713152604) 通过 |
+| Update Center 与降级保护 | github-release v0.2.7 / verified-pin；历史证据按条目版本 | 单元测试 | `cli::tests::update_status_comparison_is_fail_soft_and_drift_is_explicit`；`installer::tests::known_release_downgrade_is_blocked_unless_explicitly_allowed` |
+| H2MUX | github-release v0.2.7 / verified-pin；历史证据按条目版本 | CI 容器、单元测试 | `.github/workflows/shoes-schema.yml` 的 sing-box 检查与 watcher probe；`client::tests::h2mux_exports_only_valid_sing_box_preferences` |
+| SOCKS5、Snell v3、NaiveProxy、SS2022+ShadowTLS v3 | github-release v0.2.7 / verified-pin；历史证据按条目版本 | CI systemd acceptance、单元测试 | `.github/workflows/ubuntu-acceptance.yml` 的 `Verify prs numeric PTY flow for all protocol presets`；`config::tests::socks5_generation_round_trip_and_edits_preserve_exact_auth_and_udp_state`、`config::tests::snell_v3_yaml_matches_fixed_shoes_schema`、`config::tests::naiveproxy_generates_tls_h2_inner_auth_and_random_credentials`、`config::tests::shadowtls_v3_generates_nested_tcp_only_shadowsocks` |
+| 实机 VPS v0.2.0 全量清单 | 历史测试 github-release v0.2.7 | 失败（最新为第 2 项闸门） | 2026-10-01，首次 Reality 外部失败记录保留；追加定位为大陆 OpenWrt/Passwall2 测试路径问题，用户授权临时直连例外后同配置外部请求通过。随后新增认证 SOCKS5 节点使 MainPID 改变，Hot Reload 失败；改端口/删除和第 3–8 项未验证，停止发版。详见“v0.2.x 实机 VPS 验收”。 |
 
 ### 证据边界
 
@@ -493,3 +493,36 @@ filename。Mihomo/Clash Meta 仅对 AES-128-GCM 提供无损 v3 导出；sing-bo
 Snell 三种 cipher、UDP true/false、聚合 dry-run 和 Ubuntu 第 12 项菜单验收；SOCKS5 第 11 项及随机用户名
 行为保持不变。
 
+## v0.2.1 来源兼容矩阵（隔离 CI）
+
+- 日期：2026-10-01；Ubuntu 24.04 GitHub hosted runner；未更改 prs-test。
+- 测试提交：`c39c920`；[schema run 36819363691](https://github.com/Jyanbai/ping-rust/actions/runs/36819363691) 的两个 source-matrix job **通过**。原 dry-run job 因先提交的回归测试尚未实现而失败，整体 run 为失败；不把整体 run 写为成功。
+- 默认 Release 实际 tag：`v0.2.7`，从官方 latest API 读取；musl 资产 SHA-256 校验通过。此二进制不支持 `--version`，以已校验的官方资产识别。
+- verified-pin：`386b11532424b8665ee3e46340c6236fb3c47595`；构建时断言 runtime pin 一致，实际版本 shoes 0.2.8。
+- 官方 sing-box 1.14.2 压缩包 SHA-256 校验通过；SOCKS 入口和上游均使用运行时生成的认证凭据。
+- 命令：`cargo build --locked`；`python3 scripts/ci/shoes-source-matrix.py --source <SOURCE> --output <TEMP>`；`ping-rust generate <PROTOCOL> --output <TEMP>`；`shoes --dry-run <TEMP>`。
+
+| 功能 | Release v0.2.7 路径 | verified-pin 路径 | 范围 / 输出摘要 |
+|---|---|---|---|
+| VLESS Reality Vision | 可用 | 可用 | 生成与 dry-run exit=0；不代表外部连接通过 |
+| Hysteria2 | 可用 | 可用 | 生成与 dry-run exit=0；不代表外部连接通过 |
+| TUIC v5 | 可用 | 可用 | 生成与 dry-run exit=0；不代表外部连接通过 |
+| Shadowsocks 2022 | 可用 | 可用 | 生成与 dry-run exit=0；不代表外部连接通过 |
+| AnyTLS TLS | 可用 | 可用 | 生成与 dry-run exit=0；不代表外部连接通过 |
+| VLESS TLS Vision | 可用 | 可用 | 生成与 dry-run exit=0；不代表外部连接通过 |
+| VLESS WS TLS | 可用 | 可用 | 生成与 dry-run exit=0；不代表外部连接通过 |
+| Trojan TLS | 可用 | 可用 | 生成与 dry-run exit=0；不代表外部连接通过 |
+| Trojan Reality | 可用 | 可用 | 生成与 dry-run exit=0；不代表外部连接通过 |
+| VMess WS TLS | 可用 | 可用 | 生成与 dry-run exit=0；不代表外部连接通过 |
+| Snell v3 | 可用 | 可用 | 生成与 dry-run exit=0；不代表外部连接通过 |
+| 认证 SOCKS5 | 可用 | 可用 | 生成与 dry-run exit=0；不代表外部连接通过 |
+| NaiveProxy 自签名 | 可用 | 可用 | 生成与 dry-run exit=0；不代表外部连接通过 |
+| SS2022 + ShadowTLS v3 | 可用 | 可用 | 生成与 dry-run exit=0；不代表外部连接通过 |
+| Chain 2.0 | 可用 | 可用 | 认证双 SS hop、Pool、BLOCK、DIRECT、默认 Chain 数据通过；停上游后 DIRECT 仍通过，默认 Chain 失败，无直连回退 |
+| H2MUX | 可用 | 可用 | VMess/VLESS WS TLS、Trojan TLS 小 payload / 1 MiB half-close / 12 并发流；VMess 双 hop；sing-box Trojan 数据通过 |
+
+H2MUX 在 Release v0.2.7 **可用**，不新增来源拦截。热重载 gating 保持固定 pin 限制。矩阵夹具此前两次失败保留：run `36818878517` 对不支持的 `shoes --version` 用法失败；run `36819105934` 的 Chain `localhost` 路径失败，未作为产品失败结论。改用明确的 IPv4 回环目标后，第三次矩阵的数据测试通过。
+
+### 修复测试顺序
+
+`484ce81` 先添加五类前置原因和 Release 回退提示测试；本地 `cargo test --locked hot_reload_reason` 在未实现符号处失败（exit=1）。实现后 `cargo test --locked hot_reload` 7/7 通过；`cargo test --locked --all-targets` 的 167 个单元测试通过。本地 Linux/systemd 数据测试未执行，跳过不作为实机证据。`cargo clippy --locked --all-targets --all-features -- -D warnings` 通过。FIX_SHA 和实机 R/P 验收尚未完成；未合并、未推 tag、未发布。
