@@ -13,13 +13,57 @@
 | Update Center 与降级保护 | 单元测试 | `cli::tests::update_status_comparison_is_fail_soft_and_drift_is_explicit`；`installer::tests::known_release_downgrade_is_blocked_unless_explicitly_allowed` |
 | H2MUX | CI 容器、单元测试 | `.github/workflows/shoes-schema.yml` 的 sing-box 检查与 watcher probe；`client::tests::h2mux_exports_only_valid_sing_box_preferences` |
 | SOCKS5、Snell v3、NaiveProxy、SS2022+ShadowTLS v3 | CI systemd acceptance、单元测试 | `.github/workflows/ubuntu-acceptance.yml` 的 `Verify prs numeric PTY flow for all protocol presets`；`config::tests::socks5_generation_round_trip_and_edits_preserve_exact_auth_and_udp_state`、`config::tests::snell_v3_yaml_matches_fixed_shoes_schema`、`config::tests::naiveproxy_generates_tls_h2_inner_auth_and_random_credentials`、`config::tests::shadowtls_v3_generates_nested_tcp_only_shadowsocks` |
-| 实机 VPS v0.2.0 全量清单 | 未验证 | 本任务未获得 SSH 测试 VPS，未新增实机结论 |
+| 实机 VPS v0.2.0 全量清单 | 失败（第 1 项闸门） | 2026-10-01，MERGE_SHA 零输入部署成功，但 Windows sing-box 外部 Reality 请求失败；第 2–8 项未验证，停止发版。详见“v0.2.x 实机 VPS 验收”。 |
 
 ### 证据边界
 
 本文早期 Milestone 保留历史版本记录；每条 Debian/Ubuntu VPS 记录适用其标题和条目中注明的 ping-rust、shoes 版本，不可外推为 v0.2.0。本文新增代码的门禁结果只在实际运行后记录。
 
 本 PR 的历史运行记录：本地三项 Rust 门禁通过（160 个单元测试）；[CI run 36703040410](https://github.com/Jyanbai/ping-rust/actions/runs/36703040410)、[shoes schema run 36703040429](https://github.com/Jyanbai/ping-rust/actions/runs/36703040429)、[Ubuntu/Debian Chain systemd run 36703814702](https://github.com/Jyanbai/ping-rust/actions/runs/36703814702)、[Ubuntu/Debian acceptance run 36700674910](https://github.com/Jyanbai/ping-rust/actions/runs/36700674910) 和[upstream drift run 36700674699](https://github.com/Jyanbai/ping-rust/actions/runs/36700674699) 已成功。这些 run 均早于本次严格在线 Pool 断言。当前本地 `cargo fmt --all -- --check`、`cargo clippy --locked --all-targets --all-features -- -D warnings`、`cargo test --locked --all-targets` 已通过（161 个单元测试）；严格在线 Pool 断言在 [Ubuntu/Debian Chain run 36713152604](https://github.com/Jyanbai/ping-rust/actions/runs/36713152604) 通过。旧版 upstream drift run 的整体成功不代表 ping-rust 的 systemd 热重载流程经过 upstream shoes 验证。
+
+## v0.2.x 实机 VPS 验收
+
+- 记录日期：2026-10-01（Asia/Hong_Kong）。
+- 测试对象 / MERGE_SHA：`74b39c86d1065c1fb483c4c7c2f163976f120f2f`。
+- [PR #18](https://github.com/Jyanbai/ping-rust/pull/18) 于 2026-10-01 10:56:53 +08:00 squash 合并；提交标题为 `feat: add chain pool probes and sync v0.2.0 docs (#18)`。
+- 合并前 head：`c5bbc0632d5cbaf26c3bc4bdcb9a0bd5a89fbcac`；GitHub API 返回该 head 的 14/14 check runs 均为 completed/success，legacy commit status contexts 为 0。
+- 合并前成功 runs：CI [36714079418](https://github.com/Jyanbai/ping-rust/actions/runs/36714079418)、[36714086358](https://github.com/Jyanbai/ping-rust/actions/runs/36714086358)，schema [36714086309](https://github.com/Jyanbai/ping-rust/actions/runs/36714086309)，Chain systemd [36714217716](https://github.com/Jyanbai/ping-rust/actions/runs/36714217716)，upstream drift [36714222657](https://github.com/Jyanbai/ping-rust/actions/runs/36714222657)。这些均为 CI 证据。
+- 合并后的四个 runs 均已 completed/success：CI [36808215481](https://github.com/Jyanbai/ping-rust/actions/runs/36808215481)、schema [36808215545](https://github.com/Jyanbai/ping-rust/actions/runs/36808215545)、Chain systemd [36808215360](https://github.com/Jyanbai/ping-rust/actions/runs/36808215360)、Ubuntu acceptance [36808215327](https://github.com/Jyanbai/ping-rust/actions/runs/36808215327)。这些均为 CI 证据，不是 prs-test 实机验收。
+- VPS 系统版本 / 架构：Debian GNU/Linux 13 (trixie)，`DEBIAN_VERSION_FULL=13.7`；x86_64；systemd 257；1 vCPU；1913 MiB RAM；1024 MiB swap。`timedatectl show -p NTPSynchronized` 返回 `yes`。
+- SSH 前置：通过。初始 `ssh prs-test` 因别名尚未配置而返回 255；用户补充测试主机与 PPK 登录方式后，已在仓库之外配置本机 `prs-test`，实际 `ssh prs-test 'id -u'` 返回 `0`。主机地址和密钥不进入仓库记录。
+- 初始基线：`/etc/shoes`、`/etc/systemd/system/shoes.service`、`/usr/local/bin/shoes`、`/usr/local/bin/ping-rust`、`/root/.cargo/bin/ping-rust` 均不存在，`shoes.service` 为 inactive；尚无 Rust 工具链。此基线不代表系统没有其它软件或服务。
+- 构建前置：`apt-get update` 与 `apt-get install -y --no-install-recommends build-essential pkg-config git ca-certificates curl sudo python3` 成功；最小 rustup 工具链实际返回 `rustc 1.98.1`、`cargo 1.98.1`。
+- 源码安装首次尝试：指定 MERGE_SHA 的 `cargo install --git ... --rev ... --locked` 实际退出 101，输出 `failed to write .../lib.rmeta: No space left on device (os error 28)`；`df -h / /tmp` 显示根磁盘仍有 2.3 GiB 可用，而 `/tmp` 为 957 MiB tmpfs 且已满。保留失败日志后，仅将本次 Cargo 临时目录迁至私有验收目录，并设置 `TMPDIR` / `CARGO_BUILD_BUILD_DIR` 后重试相同命令；重试在 4m00s 完成，退出 0，版本为 `ping-rust 0.2.0`。随后 `ping-rust install-self --install-dir /usr/local/bin --quiet --no-bootstrap` 将本次编译结果安装到 sudo PATH，未提前部署节点。
+- 本机客户端前置：通过。已从 SagerNet/sing-box 官方 Release `v1.14.2` 下载 `sing-box-1.14.2-windows-amd64.zip`，与 GitHub asset digest 比对 SHA-256 一致；实际执行 `sing-box.exe version` 返回 `sing-box version 1.14.2`、`windows/amd64`，tags 包含 `with_quic`、`with_utls`、`with_naive_outbound`。文件仅存于本地忽略的 `target/` 目录。版本与构建特性输出不替代协议连接验收。
+- shoes pin 保持 `386b11532424b8665ee3e46340c6236fb3c47595`。
+
+下表区分实际执行项与因闸门而未执行项。第 1 项部署阶段无需协议、端口或凭据输入；出现正常管理菜单后只输入 `0` 退出。节点凭据由产品自动生成；Windows 本地 sing-box 的 loopback mixed/SOCKS5 入口也配置用户名和随机密码。任何密钥、认证参数、分享链接和主机地址均不写入本记录。
+
+| 项目 | 状态 | 关键命令 / 脱敏输出摘要 / 未验证原因 |
+|---|---|---|
+| 1. 零输入 Reality 部署、外部握手与出口 | 失败 | 实际 `cargo install --git https://github.com/Jyanbai/ping-rust.git --rev 74b39c86d1065c1fb483c4c7c2f163976f120f2f --locked` 成功后执行 `sudo ping-rust`：出现首次自动部署提示和分享链接，退出 0；shoes 来源为 GitHub Release v0.2.7，服务 enabled/active，MainPID `1348455`；`ss -ltnp` 确认 Reality TCP `32352` 监听。`sudo ping-rust export sing-box --profile <NODE_ID> --server <VPS_ADDRESS> --output <PRIVATE_CONFIG>` 后，Windows `sing-box.exe check -c <PRIVATE_CONFIG>` 退出 0，`sing-box.exe run -c <PRIVATE_CONFIG>` 正常启动。实际 `curl.exe --noproxy '' --socks5-hostname 127.0.0.1:<LOCAL_PORT> --proxy-user <AUTH> --fail --silent --show-error --max-time 30 https://api.ipify.org` 退出 97：`cannot complete SOCKS5 connection to api.ipify.org. (1)`；客户端 VLESS outbound 日志为 `15.0s ... context deadline exceeded`。Reality 外部请求失败；未取得出口 IP，出口一致性为未验证。 |
+| 2. Hot Reload：新增 / 修改端口 / 删除非最后 SOCKS5 节点 | 未验证 | 第 1 项失败后按闸门停止。未执行新增、改端口或删除，也没有相应前后 PID/监听证据。原计划使用带认证的 `sudo ping-rust add socks5 --port <PORT> --yes`、菜单端口修改、`sudo ping-rust delete <NODE_ID> --yes`，每步前后记录 `systemctl show shoes.service -p MainPID --value` 和 `ss -ltnp`。 |
+| 3a. SS2022 + ShadowTLS v3 | 未验证 | 因第 1 项闸门停止；未执行 `sudo ping-rust add shadowsocks --shadowtls --yes`、sing-box 导出或本机外部请求。 |
+| 3b. 带认证 SOCKS5 | 未验证 | 因第 1 项闸门停止；未生成服务器 SOCKS5 节点或执行 `curl --socks5-hostname <VPS_ADDRESS>:<PORT> --proxy-user <AUTH> <TEST_URL>`。Reality 测试使用的本机带认证入口不替代此项 VPS SOCKS5 验收。 |
+| 3c. Hysteria2 | 未验证 | 因第 1 项闸门停止；未执行 `sudo ping-rust add hysteria2 --yes`、UDP 放行或外部连接，无法判断安全组是否允许 UDP。 |
+| 3d. NaiveProxy | 未验证 | 因第 1 项闸门停止；本机官方 sing-box 1.14.2 声明 `with_naive_outbound`，但未部署 Naive 节点或执行外部请求。未以“缺少支持 Naive 的构建”为由跳过测试。 |
+| 4. Chain Proxy 2.0 与 Pool 探针 | 未验证 | 因第 1 项闸门停止；未启动 loopback Shadowsocks 上游，未创建 Pool / 两跳 Chain / BLOCK 域名 / DIRECT CIDR / 默认 Chain，也未执行外部路由请求、停上游、菜单“测试 Pool 内全部节点”或断链失败检查。规划中的两个上游位于同一 VPS，出口 IP 无法区分路径，恢复验收后必须以真实上游/路由或故障注入证据确认。 |
+| 5. Update Center 与降级拒绝 | 未验证 | 因第 1 项闸门停止；未执行菜单 `6 → 3` 状态检查或较旧 shoes Release 降级拒绝。MERGE_SHA 的 shoes `update` CLI 没有 `--version` 参数，恢复验收后必须使用真实支持的入口，不能伪造指定版本运行。 |
+| 6. 备份、修改与恢复 | 未验证 | 因第 1 项闸门停止；未执行 `sudo ping-rust backup <ARCHIVE>`、配置修改、`sudo ping-rust restore <ARCHIVE>` 或配置哈希对比。 |
+| 7. 真实重启 | 未验证 | 因第 1 项闸门停止；未执行 `sudo reboot`，也没有 reboot 后 boot ID、enabled/active、监听恢复或 Reality 重连证据。 |
+| 8. 卸载清理 | 未验证 | 因第 1 项闸门停止；未执行 `sudo ping-rust uninstall --purge` 或清理验证。保留当前测试实例供定位。 |
+
+### 失败后的只读初步定位
+
+- Windows 到 Reality TCP `32352` 的 socket 连接成功，说明测试时 TCP 可达；不能据此认定 Reality 握手成功。
+- Windows 客户端日志确实走 `outbound/vless[reality-default]`，在约 15 秒后返回 `context deadline exceeded`；没有直连出口成功的结论。
+- 服务端 `journalctl -u shoes.service --no-pager -n 60` 只取得 systemd 启动、`Starting 1 server(s)..` 和 `Starting REALITY+Vision TCP server at <REDACTED>:32352`，未取得足以定位握手失败阶段的日志。
+- 在内存中核对导出数据：outbound 类型为 `vless`、flow 为 `xtls-rprx-vision`；目标地址与 SSH 测试主机一致，端口与 profile 一致，UUID / SNI / Reality public key / short ID 与 profile 均一致。不输出这些值。
+- VPS 对所选 Reality fallback 的只读 HTTPS HEAD 检查成功，curl 退出 0，首个 HTTP 状态为 `HTTP/2 103`。
+- VPS 的 `NTPSynchronized=yes`；与 Windows 客户端比较的估计时钟差为 VPS 快约 43.7 秒（查询往返约 0.24 秒）。此观察尚未证明故障由时钟导致。
+- 未更换 shoes、未改变 pin、节点参数或系统时钟，未执行后续验收。根因未确定；须继续检查 Reality 握手阶段、网络路径和运行环境。
+
+发布闸门：实机第 1 项失败，已停止，等待用户处理。当前未创建 `release/v0.2.1` PR、未推 `v0.2.1` tag、未发布 GitHub Release 或 crates.io；阶段 4 的默认安装 / v0.2.0 升级 / 最终 purge 均为未验证。本记录供失败报告和后续定位，不代表发版验收完成。
 
 ## Goal 4：H2MUX
 
