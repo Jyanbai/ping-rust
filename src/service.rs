@@ -495,6 +495,79 @@ fn ensure_systemctl() -> Result<()> {
 mod tests {
     use super::*;
 
+    fn pin_provenance() -> installer::ShoesProvenance {
+        installer::ShoesProvenance {
+            source: "verified-pin".into(),
+            revision: Some(installer::verified_pin().into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn hot_reload_reason_service_not_running() {
+        assert_eq!(
+            hot_reload_unavailable_reason(false, true, &pin_provenance(), "", true),
+            Some(HotReloadReason::ServiceNotRunning)
+        );
+    }
+
+    #[test]
+    fn hot_reload_reason_modified_unit() {
+        assert_eq!(
+            hot_reload_unavailable_reason(true, false, &pin_provenance(), "", true),
+            Some(HotReloadReason::UnitModified)
+        );
+    }
+
+    #[test]
+    fn hot_reload_reason_release_and_wrong_pin_remain_ineligible() {
+        let release = installer::ShoesProvenance {
+            source: "github-release".into(),
+            release_tag: Some("v0.2.7".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            hot_reload_unavailable_reason(true, true, &release, "", true),
+            Some(HotReloadReason::ShoesSourceUnsupported(release))
+        );
+        let mut wrong_pin = pin_provenance();
+        wrong_pin.revision = Some("different-revision".into());
+        assert!(matches!(
+            hot_reload_unavailable_reason(true, true, &wrong_pin, "", true),
+            Some(HotReloadReason::ShoesSourceUnsupported(_))
+        ));
+    }
+
+    #[test]
+    fn hot_reload_reason_drop_in() {
+        assert_eq!(
+            hot_reload_unavailable_reason(true, true, &pin_provenance(), "override.conf", true),
+            Some(HotReloadReason::DropInPresent)
+        );
+    }
+
+    #[test]
+    fn hot_reload_reason_anchor_not_ready() {
+        assert_eq!(
+            hot_reload_unavailable_reason(true, true, &pin_provenance(), "", false),
+            Some(HotReloadReason::AnchorNotReady)
+        );
+        assert!(hot_reload_unavailable_reason(true, true, &pin_provenance(), "-", true).is_none());
+    }
+
+    #[test]
+    fn hot_reload_release_fallback_explains_source_and_switch() {
+        let reason = HotReloadReason::ShoesSourceUnsupported(installer::ShoesProvenance {
+            source: "github-release".into(),
+            release_tag: Some("v0.2.7".into()),
+            ..Default::default()
+        });
+        let message = reason.restart_notice();
+        for expected in ["GitHub Release v0.2.7", "固定 pin", "受控重启", "Update Center", "update --method cargo"] {
+            assert!(message.contains(expected), "missing {expected}: {message}");
+        }
+    }
+
     #[test]
     fn unit_uses_expected_paths_and_hardening() {
         let unit = unit_contents();
