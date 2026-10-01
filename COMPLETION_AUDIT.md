@@ -823,3 +823,33 @@ shoes **未重编译、未替换**：verified-pin / 0.2.8 / revision=`386b115324
 | 公开v0.2.1安装、旧版self-update、最终purge及原始环境恢复 | — | 未验证 | 尚未发布、尚未进入用户确认后的阶段5；不提前purge或恢复原始环境。原始备份完整保留，VPS测试实例保持enabled/active。 |
 
 验收后config SHA-256=`f52442fb9f287abdfb3141bde6d54efc26611518922ba8db7c4768c4ac6d4744`，state SHA-256=`dc831270f83908c102597b2f86ca84ce8adb5e6c565cfb939c54997c61deb50d`。本轮没有新的失败；证书信任与199天外部连接仅实证于上列固定版本客户端，不外推其它构建或未来阶段的实机接受边界。R/P验收闸门已满足，接下来允许准备合并及release PR；**v0.2.1 tag、GitHub Release、crates.io和发版后冒烟仍未执行，推tag前须停下等待用户确认**。
+
+## v0.2.1 实机验收（VPS 对 VPS）与发版准备
+
+2026-10-01，HKT；prs-test Debian13.4 → HK agent sing-box1.14.2。MERGE_SHA=`74b39c86d1065c1fb483c4c7c2f163976f120f2f`，实际Naive续验收FIX_SHA=`9a9b273feaa5f8d0bcaa3135ad0bdf3292922315`。详细逐项命令、时间戳、脱敏输出及历史失败见紧邻的SC-081v3实机记录。
+
+| 阶段3项目 | 状态 | 证据来源及范围 |
+|---|---|---|
+| R1 Reality / R2 Release受控重启 / R3 H2MUX | 通过（沿用） | 1ba8b95；旧二进制误用的无效测试记录仍保留，不作为通过证据。 |
+| 固定 pin 切换 | 通过（沿用） | 1ba8b95；pin386b1153未改，后续仅复用已编译shoes。 |
+| P1监听热重载新增/改端口/删除 | 通过（沿用） | cf539fe；MainPID2563732保持，真实监听变化。 |
+| P2 Naive迁移/新建及SS2022+ShadowTLS、认证SOCKS5、HY2 UDP、H2MUX | 通过 | 9a9b273；199天实际证书、HK外部请求全部成功，出口IP与VPS一致。 |
+| P3 Chain/Pool/BLOCK/DIRECT/探针/断链失败 | 通过 | 9a9b273；同VPS两上游，出口IP无法区分hop。 |
+| P4更新查询与拒绝降级 | 通过 | 9a9b273；不加allow-downgrade被拒绝，来源保持。 |
+| P5备份恢复 | 通过 | 9a9b273；配置树逐文件SHA-256一致，服务状态保持。 |
+| P6真实重启/全监听/Reality | 通过 | 9a9b273；bootID改变、enabled/active、监听恢复、HK请求成功。 |
+| 公开v0.2.1安装/旧版self-update/最终purge及原始环境恢复 | 未验证 | 待用户确认并完成tag、Release、crates.io后执行阶段5；原始备份保留。 |
+
+修复PR #19在最新审计head `15f651b3879d2d0f997bef278e16c7cabcefe8dc` 的18/18 checks均COMPLETED/SUCCESS后squash合并，main=`d36c541c55c74ce05dce312fd14f112c67e9b2e2`。run ID：`36840303922`、`36840309245`、`36840309281`、`36840309300`、`36840309669`。15f651b仅追加审计，受测程序仍为9a9b273；此前24项CI证据及实际diffstat保留。Wiki SC-081v3文档提交44dddf6。release/v0.2.1从此main建立，沿用v0.2.0的`chore: release`方式，仅升级package/lock版本并更新文档。
+
+### v0.2.1 Release notes
+
+- 新增Pool内全部节点手动探针，逐项报告可用/失败及耗时；Pool和多Chain轮询不是健康感知故障切换。
+- 热重载条件不满足时明确显示原因和受控重启提示；默认一键安装使用GitHub Release，固定pin构建才启用热重载。shoes生产pin保持不变。
+- NaiveProxy自签测试证书按CA/B Forum Ballot SC-081v3时间表与notBefore生成199/99/46天（更早397天），预留1天余量；期限逐步缩短，2029年起约每6周需要重新生成。生产环境应使用受信任证书。
+- 添加/查看显示证书期限与到期日，status在剩余不足期限1/3或过期时告警；菜单/CLI重新生成经过dry-run、原子提交、受控重启和失败回滚。
+- **v0.2.0迁移**：旧NaiveProxy自签测试证书有效期过长，与Chromium系客户端不兼容；缺少元数据或期限超过发行阶段上限的证书需要执行`sudo prs regenerate-test-certificate <配置名称>`，然后重新导出并信任新证书。不会自动替换现有证书。
+- GitHub API支持可选GITHUB_TOKEN/GH_TOKEN及有限退避重试；bootstrap保留stderr，失败artifact上传脱敏诊断。原36821437871根因仍“未定位”。
+- README/Wiki同步来源、安装、Hot Reload、H2MUX范围及证书迁移；增加上述脱敏VPS实机验收证据。H2MUX在Release与固定pin受验证范围内已可用，未新增来源拒绝行为。
+
+发布状态：源码准备0.2.1；tag、GitHub Release、SHA256SUMS资产、crates.io及发版后冒烟**尚未执行/未验证**。release PR必须全部CI通过后合并；**推tag前停下等待用户确认**。本节Release notes须进入正式Release正文，不能仅依赖自动生成的PR标题列表。
