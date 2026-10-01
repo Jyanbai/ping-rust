@@ -526,3 +526,57 @@ H2MUX 在 Release v0.2.7 **可用**，不新增来源拦截。热重载 gating �
 ### 修复测试顺序
 
 `484ce81` 先添加五类前置原因和 Release 回退提示测试；本地 `cargo test --locked hot_reload_reason` 在未实现符号处失败（exit=1）。实现后 `cargo test --locked hot_reload` 7/7 通过；`cargo test --locked --all-targets` 的 167 个单元测试通过。本地 Linux/systemd 数据测试未执行，跳过不作为实机证据。`cargo clippy --locked --all-targets --all-features -- -D warnings` 通过。FIX_SHA 和实机 R/P 验收尚未完成；未合并、未推 tag、未发布。
+
+## v0.2.1 实机验收（VPS 对 VPS，R2 闸门停止）
+
+本节追加新验收，不改写前述 Reality/Hot Reload 失败记录。测试 VPS 为非一次性机器，最终恢复仍待后续授权流程；原始配置备份保留。
+
+### 目标与前置证据
+
+- 日期：2026-10-01（Asia/Hong_Kong）；服务端实际 `/etc/debian_version` 为 **13.4**。客户端 HK 以 agent 身份运行（UID 1000），无 sudo；所有服务端 SSH 连接均经 ProxyJump HK。Windows 未运行代理客户端，未继续修改 OpenWrt。
+- MERGE_SHA：`74b39c86d1065c1fb483c4c7c2f163976f120f2f`。
+- 修复 [PR #19](https://github.com/Jyanbai/ping-rust/pull/19)，本次安装请求的 FIX_SHA：`bc56d62dcafc64a953be0ab91a0b1d8374539900`。13:37 本机采集的 GitHub head check rollup 为 23/23 completed/success。
+- 成功 CI：PR CI [36820112370](https://github.com/Jyanbai/ping-rust/actions/runs/36820112370)，schema [36820112711](https://github.com/Jyanbai/ping-rust/actions/runs/36820112711)，来源矩阵 / 默认 Release acceptance [36820112476](https://github.com/Jyanbai/ping-rust/actions/runs/36820112476)；push CI [36820072298](https://github.com/Jyanbai/ping-rust/actions/runs/36820072298)，schema [36820072607](https://github.com/Jyanbai/ping-rust/actions/runs/36820072607)，性能基线 [36820072288](https://github.com/Jyanbai/ping-rust/actions/runs/36820072288) 重跑后通过。性能基线首次 Debian cold_install 失败，日志未公开具体 stderr，初次原因未定位；不抹去初次失败。
+- 默认 Release systemd acceptance 实际覆盖零输入部署、认证 SOCKS 新增/改端口/非最后删除的受控重启与原因提示，以及菜单 H2MUX preference / sing-box 导出 / small 与 1 MiB half-close 数据；均通过。CI 证据不替代实机结果。
+- Wiki 实际已更新提交 `7df6130`：Home、Installation、Operations、Protocols、Troubleshooting；明确固定 pin、默认 Release 重启、切换方式及源码编译时间/内存代价。
+- 客户端 sing-box 1.14.2 官方资产与二进制 SHA-256 已核对；实际 `version` 输出含 with_quic / with_utls / with_naive_outbound。支持标志不代表协议实机通过。
+
+### 阶段 0 / 安装记录
+
+| 项目 | 时间（本机 HKT） | 状态 | 关键命令 / 脱敏输出摘要 |
+|---|---|---|---|
+| 撤销临时 OpenWrt 直连例外 | 阶段 0 既有记录 | 通过 | 仅删除测试 VPS 的运行时集合成员；`nft get element inet passwall2 psw2_direct '{ <VPS_IPV4> }'` 随后非零，成员不存在；其它规则未修改。 |
+| Windows 测试客户端和私有配置清理 | 阶段 0 既有记录 | 通过 | 运行中测试客户端 0；删除 10 个含凭据的本地测试文件；原始备份目录保留。 |
+| SSH ProxyJump / HK agent | 13:33:32 | 通过 | `ssh prs-test` 使用 ProxyJump HK；HK `id -u` 为 1000；sing-box version 为 1.14.2；curl / python3 可用。 |
+| 服务基线 | 13:30:14 | 通过 | `systemctl show shoes.service -p MainPID -p ActiveState`：2546772 / active；来源 github-release v0.2.7。TCP 48662、38231。系统空间 746 MiB、RAM 1964 MiB、swap 3071 MiB；未清理其它软件。 |
+| FIX_SHA 安装命令 | 13:38:08–13:40:33 | 通过（命令退出）；产物对应关系未验证 | `cargo install --git https://github.com/Jyanbai/ping-rust.git --rev <FIX_SHA> --locked` exit=0；`install-self --install-dir /usr/local/bin --quiet --no-bootstrap` exit=0。复用此前测试 build-dir，CARGO_BUILD_JOBS=1；构建仅 2.35 秒。安装后 MainPID、config/state 哈希与基线相同。后续只读检查发现产物缺少修复提示，不能把 exit=0 当作已验证 FIX_SHA 产物。 |
+
+### R / P 实机结果
+
+| 项目 | 时间（本机 HKT） | 状态 | 命令 / 脱敏输出与范围 |
+|---|---|---|---|
+| R1：HK Reality 请求 | 13:41:20–13:41:25 | 通过（请求）；FIX_SHA 产物对应关系未验证 | 服务端 `ping-rust export sing-box --profile <NODE_ID> --server <VPS>`；HK sing-box check exit=0，认证 loopback SOCKS + `curl --config <PRIVATE_CONFIG>` exit=0，请求约 1.8 秒；出口 IP 与 VPS 公网 IP 一致。未打印出口地址。 |
+| R2：新增认证 SOCKS5 | 13:41:25–13:41:30 | **失败** | `sudo ping-rust add socks5 --name r2-auth-socks --port 55081 --yes` exit=0；认证字段非空。PID 2546772 → 2548522，TCP 55081 出现，48662 / 38231 保留，服务 active。受控重启行为正确，但 stdout/stderr 均没有 GitHub Release 来源 / 固定 pin / 受控重启 / 切换方法提示，违反 R2 要求。 |
+| R2：改端口 / 删除非最后节点 | — | 未验证 | 新增步骤失败后按闸门停止；未执行。 |
+| R3：Release H2MUX | — | 未验证 | R2 闸门后未执行；隔离 CI 数据通过，不借用为实机结果。 |
+| 切换 verified-pin / 编译耗时与内存峰值 | — | 未验证 | 未执行 `update --method cargo`。pin 保持原值。 |
+| P1：热重载新增/改端口/删除 | — | 未验证 | R2 闸门后未执行。 |
+| P2：SS2022+ShadowTLS、认证 SOCKS、Hysteria2 UDP、H2MUX、NaiveProxy | — | 未验证 | R2 闸门后未执行；不能以客户端构建标志替代数据面验收。 |
+| P3：Pool / 双 hop Chain / BLOCK / DIRECT / 默认 Chain / 故障探针 / 断链失败 | — | 未验证 | 实机未执行；来源矩阵为隔离 CI 证据。计划两个上游同 VPS，出口 IP 本身不能区分是否经 Chain。 |
+| P4：Update Center 状态与拒绝降级 | — | 未验证 | R2 闸门后未执行。 |
+| P5：backup / 修改 / restore / 哈希一致 | — | 未验证 | R2 闸门后未执行；原始备份保留。 |
+| P6：真实重启与 Reality 再握手 | — | 未验证 | 未执行 reboot。 |
+| 合并、v0.2.1 tag / Release / crates.io、发版后冒烟与最终恢复 | — | 未验证 | 修复 PR 未合并；未创建 release PR；未推 tag / 发布；停止等待用户处理。 |
+
+### R2 初步定位（只读，未修正环境 / 未重测）
+
+13:42:40–13:44:00 采集：
+
+1. `sudo sh -c 'command -v ping-rust; readlink -f ...; sha256sum ...'` 实际使用 `/usr/local/bin/ping-rust`；它与 `/root/.cargo/bin/ping-rust` 哈希相同：`a3131804c611815126dcfff4c1623c632598ca34a346c4fd777d0545d8267726`。排除 sudo 选择了另一路径的二进制这一解释。
+2. `/root/.cargo/.crates2.json` 声称安装 revision 为 FIX_SHA；Git checkout HEAD 也确认为 FIX_SHA，`src/service.rs` 包含两条修复提示字符串。
+3. Python 按 UTF-8 字节检查实际两份二进制：`has_restart_notice=false`、`has_release_reason=false`。说明安装元数据与实际提示内容不吻合；**FIX_SHA 二进制来源尚未验证**。
+4. 安装日志没有 Compiling 阶段，`Finished release ... in 2.35s`；设置的 `CARGO_BUILD_BUILD_DIR` 复用了 MERGE_SHA 验收时的目录。初步怀疑旧构建产物复用；尚未隔离 build-dir 重建，未确认为 Cargo 缺陷或 ping-rust 缺陷。
+5. 来源仍是 github-release v0.2.7，unit 路径正确、DropInPaths 为空，服务 active。追加节点保持原状，未继续删除、修改、切换内核或重启机器。
+6. 实际 config SHA-256：`56882c35a952aefca474f19f1c8f2c19a81cf96a9b2ef5e1f8805098c9aa60d8`；state SHA-256：`9b4dfb8eac131d1cfd0e261d81394cb69a9ca41ebd2403de1d3c268805277871`。
+
+本轮 R2 **失败保留**。下一步候选为使用全新的隔离 build-dir 重建同一 FIX_SHA，核对实际修复符号后从 R1 重验；此步骤尚未执行，等待用户决定。
