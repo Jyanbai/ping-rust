@@ -14,6 +14,7 @@
 | H2MUX | github-release v0.2.7 / verified-pin；历史证据按条目版本 | CI 容器、单元测试 | `.github/workflows/shoes-schema.yml` 的 sing-box 检查与 watcher probe；`client::tests::h2mux_exports_only_valid_sing_box_preferences` |
 | SOCKS5、Snell v3、NaiveProxy、SS2022+ShadowTLS v3 | github-release v0.2.7 / verified-pin；历史证据按条目版本 | CI systemd acceptance、单元测试 | `.github/workflows/ubuntu-acceptance.yml` 的 `Verify prs numeric PTY flow for all protocol presets`；`config::tests::socks5_generation_round_trip_and_edits_preserve_exact_auth_and_udp_state`、`config::tests::snell_v3_yaml_matches_fixed_shoes_schema`、`config::tests::naiveproxy_generates_tls_h2_inner_auth_and_random_credentials`、`config::tests::shadowtls_v3_generates_nested_tcp_only_shadowsocks` |
 | 实机 VPS v0.2.0 全量清单 | 历史测试 github-release v0.2.7 | 失败（最新为第 2 项闸门） | 2026-10-01，首次 Reality 外部失败记录保留；追加定位为大陆 OpenWrt/Passwall2 测试路径问题，用户授权临时直连例外后同配置外部请求通过。随后新增认证 SOCKS5 节点使 MainPID 改变，Hot Reload 失败；改端口/删除和第 3–8 项未验证，停止发版。详见“v0.2.x 实机 VPS 验收”。 |
+| 实机 VPS 续验收（v0.2.1 候选） | github-release v0.2.7 / verified-pin | R1–R3、固定 pin 切换、P1–P6 通过 | 2026-10-01；R 组及切换沿用 1ba8b95，P1 沿用 cf539fe；9a9b273 上实测 Naive 397→199 天迁移、新建及其余 P2、P3–P6。历史失败不改写；公开发布、安装与自更新冒烟仍未验证。见文末 SC-081v3 实机记录。 |
 
 ### 证据边界
 
@@ -764,3 +765,61 @@ shoes **未重编译、未替换**：verified-pin / 0.2.8 / revision=`386b115324
 测试提交 `ab2fe88` 先于行为修复：实际运行 `cargo test --locked naive_sc081_phase_boundaries -- --nocapture`，在 2026-03-15 边界失败（397 天 vs 199 天）；旧 profile / 397 天识别测试及缩放提醒测试也实际失败。边界测试注入时间，并用实际生成证书 DER 验证 2026、2027、2029 各阶段切换前 1 秒、整点和后 1 秒，不依赖系统时钟决定案例。生产生成器将 now 减 1 小时作为 notBefore，以 **notBefore 所在阶段**选择最大期限减 1 天：199 / 99 / 46 天，更早逻辑为 397 天。单一时间表注明官方来源与客户端实测约束；元数据缺失或超过证书自身发行阶段上限时提示重新生成，剩余不足自身有效期 1/3 时告警。
 
 本机 181 个单元测试通过；Clippy / fmt / diff-check 通过。Linux CI 和新 head 的实机 Naive 迁移尚未验证。改动仅涉及证书生成/判断/显示、证书测试夹具和文档；服务、安装及热重载相关逻辑没有改动，待锁定新 FIX_SHA 后附上 `git diff --stat cf539fe..<新 FIX_SHA>`。按本轮授权，R 组及固定 pin 切换证据沿用 1ba8b95，P1 沿用 cf539fe，不冒充本次新 head 实测。
+
+### SC-081v3 实机续验收（2026-10-01，HKT）
+
+本节追加新结果，保留前文全部失败。上一轮 397 天来自用户按旧规则给出的指令，属于指令错误，不是实现错误。原 bootstrap run `36821437871` 的底层根因仍为 **未定位**。
+
+服务端 prs-test：Debian **13.4**，kernel `6.19.9-x64v3-xanmod1`；所有 SSH 经 ProxyJump HK。客户端仅 HK agent UID1000、自有目录、无 sudo，官方 sing-box **1.14.2**（with_naive_outbound / quic / utls，NaiveProxy **150.0.7871.63**）。未修改 Windows / OpenWrt 代理。MERGE_SHA=`74b39c86d1065c1fb483c4c7c2f163976f120f2f`；本轮实际构建及验收 FIX_SHA=`9a9b273feaa5f8d0bcaa3135ad0bdf3292922315`。
+
+该 head 的 **24/24 checks COMPLETED/SUCCESS**，CI run ID：`36837019805`、`36837019828`、`36837020052`、`36837025306`、`36837025334`、`36837025382`、`36837025836`。默认 Release systemd acceptance 覆盖按发行阶段生成的实际 DER、旧 metadata 迁移、dry-run 拒绝及受控重启失败回滚；实机请求证据另列如下，不以 CI 代替。
+
+#### 证据沿用与实际 diff
+
+`git diff --stat cf539fe..9a9b273feaa5f8d0bcaa3135ad0bdf3292922315`：
+
+```text
+ COMPLETION_AUDIT.md                        |  81 +++++++++++++++++
+ README.md                                  |   4 +-
+ scripts/ci/naive_certificate_acceptance.py |   9 +-
+ src/cli.rs                                 |   2 +-
+ src/config/naive_certificate.rs            |  54 +++++++++--
+ src/config/naive_certificate_tests.rs      | 139 +++++++++++++++++++++++++++--
+ 6 files changed, 272 insertions(+), 17 deletions(-)
+```
+
+改动限于证书相关代码、对应夹具及文档；没有改变 service.rs、deployment.rs、installer.rs、install_self.rs 或热重载逻辑。按用户条件，**R1–R3、固定 pin 切换证据来自 `1ba8b951815db7f27f8349ac5dc11387568338c9`；P1 证据来自 `cf539fe91280c02223bf075e6c504d08e6006c0b`**，均沿用且未重跑。R/pin/P1 的命令、MainPID 和结果在前文原记录中。本节后续审计提交仅追加证据，不改变受测程序。
+
+#### 隔离构建与二进制身份
+
+16:39:43 启动全新 clone `/root/prs-isolated-9a9b273feaa5-163938/source`，checkout FIX_SHA；全新 CARGO_TARGET_DIR=`/root/prs-isolated-9a9b273feaa5-163938/target`，unset CARGO_BUILD_BUILD_DIR、CARGO_BUILD_JOBS=1，`cargo build --release --locked`。日志实际为 `Finished release profile in 7m 05s`，exit=0。新产物 SHA-256=`ec2a2e5bed0e2d677e504473b68668ebf32a6e09680c0fe4cc628a13cc590669`。
+
+16:48:01 执行**新产物自身** `install-self --install-dir /usr/local/bin --quiet --no-bootstrap`，exit=0。`sudo sh -c 'command -v ping-rust'` 及解析后的路径均为 `/usr/local/bin/ping-rust`，hash 与隔离产物一致；包含“本次使用受控重启”及专属字符串“NaiveProxy 测试证书采用 SC-081v3 时间表”。install-self 前后 state 完全一致。root cargo bin 已在此前清理，agent cargo bin 无残留，本轮没有新删除。P2、P3、P4/P5、P6 前后及16:57:08 再次通过相同身份闸门。
+
+shoes **未重编译、未替换**：verified-pin / 0.2.8 / revision=`386b11532424b8665ee3e46340c6236fb3c47595`，SHA-256=`d21d21ccdbf0e38bceee04c45e31d1aaef253febfcd71d1a5dbb7beaf866b525`。HK binary SHA-256=`fc9c6e6ab345f045b16a0ed10d1ff28d68e8e56e7749fca30738d1406e98d7b8`，与此前核对的官方产物一致。
+
+#### 实际命令、时间与脱敏结果
+
+时间取本机记录器 HKT；远端命令/debug 也保留各自时间戳。本次 VPS 与 HK 的 UTC 时间相近，两者比本机记录器约快43秒；没有改时钟，不能把本机时刻直接当作远端 journal 时刻。
+
+| 项目 | HKT 时间 | 状态 | 命令及输出摘要 |
+|---|---|---|---|
+| 397 天旧证书识别 | 16:48:29–16:48:31 | 通过 | `info p2-resume-naiveproxy`、`status` 均输出“超过其 notBefore 所在阶段的 SC-081v3 上限”“重新生成”；`openssl x509 -noout -startdate -enddate` 仍为 2026-10-01 07:07:07 UTC → 2027-11-02 07:07:07 UTC，397 天。 |
+| P2-Naive 重新生成 | 16:48:31–16:48:36 | 通过 | `regenerate-test-certificate p2-resume-naiveproxy` exit=0，“受控重启已完成”；MainPID **2568534 → 2572230**；实际证书与 metadata 一致，notBefore=2026-10-01 07:49:15 UTC，notAfter=2027-04-18 07:49:15 UTC，恰好 **199 天**，valid_now=true；旧 cert/key 删除。 |
+| P2-Naive 迁移后的外部请求 | 16:48:36–16:48:42 | 通过 | `export sing-box`，HK `sing-box check` exit=0；认证 loopback SOCKS 上的 `curl --config <PRIVATE_CONFIG>` exit=0，约1.94秒；Naive debug `protocol: h2, status: 200`；出口 IP 与 VPS 公网 IP **一致**。使用产品导出中的公开证书信任，没有修改导出配置以跳过证书校验。 |
+| P2-Naive 新建 | 16:48:42–16:48:53 | 通过 | `add naiveproxy --name p2-sc081-new --port 36737 --server-address <VPS> --server-name acceptance.example.invalid --self-signed --yes`；显示199天及UTC到期日，metadata差值199天；HK导出配置check和curl exit=0，约2.06秒，h2/status200；出口 IP 与 VPS一致。 |
+| P2 SS2022 + ShadowTLS v3 | 16:48:54–16:48:59 | 通过 | 现存 `p2-resume-shadowsocks` 的 `export sing-box`；HK check/curl exit=0，约1.88秒，出口 IP 与 VPS一致。 |
+| P2 认证 SOCKS5 | 16:49:01 | 通过 | username/password 非空；HK `curl --socks5-hostname <VPS>:<PORT> --proxy-user <AUTH>`（私有配置）exit=0，出口 IP 与 VPS一致。 |
+| P2 Hysteria2 UDP | 16:49:03–16:49:08 | 通过 | 现存 `p2-resume-hysteria2` 导出；HK check/curl exit=0，约1.80秒；UDP服务端35371实际可用，出口 IP 与 VPS一致。 |
+| P2 Trojan-TLS H2MUX 数据面 | 16:49:09–16:49:15 | 通过 | 现存 `r3-h2mux-resume` 导出明确 `multiplex.protocol=h2mux`；HK check/curl exit=0，约1.78秒；debug `outbound multiplex connection`，出口 IP 与 VPS一致。 |
+| P3 拓扑与路由 | 16:49:51–16:50:49 | 通过 | 先 `backup`；为满足全局Chain的QUIC防绕过限制，通过产品删除任务自身Hysteria2节点。用固定pin shoes 启动两个认证SS2022 loopback上游49347/54193；数字菜单导入、建双成员Pool及两hop Chain；规则example.com→BLOCK、127.0.0.1/32→DIRECT、默认→Chain，启用。HK BLOCK请求exit=97；DIRECT到loopback HTTP origin exit=0；默认Chain到ipify exit=0，出口 IP 与 VPS一致。 |
+| P3 Pool 探针 | 16:50:49–16:50:52 | 通过 | `kill <SECOND_UPSTREAM_PID>`；菜单“测试 Pool 内全部节点”实际输出 `p3-loopback-ss-1: 可用 (14 ms)`、`p3-loopback-ss-2: 失败 (...87 ms)`。 |
+| P3 断链不直连 | 16:50:52–16:51:04 | 通过 | 再停止第一个上游；HK默认请求exit=97、SOCKS EOF；同配置的DIRECT HTTP请求仍exit=0，证明服务及直连规则仍可用。两个上游在同一台VPS，**出口 IP 无法区分跳数**，不声称IP能够证明每一hop。 |
+| P3 清理与恢复 | 16:51:04–16:51:13 | 通过 | 恢复默认DIRECT并禁用Chain，停止任务上游/origin；产品 `restore <P3_BACKUP>` 恢复完整测试配置及Hysteria2，MainPID2573276/active。未留下临时路由供重启依赖。 |
+| P4 Update Center | 16:51:52–16:51:58 | 通过 | 菜单状态查询成功：manager0.2.0、shoes verified-pin0.2.8、Release v0.2.7、upstream drift detected；`update --method release` 未加allow-downgrade，exit=1：“检测到 GitHub Release v0.2.7 低于当前已知 shoes 0.2.8…--allow-downgrade”；provenance完全不变。 |
+| P5 backup / 修改 / restore | 16:51:58–16:52:06 | 通过 | `backup <P5_BACKUP>`→`add socks5 --name p5-backup-change --port 34511 --yes`→`restore <P5_BACKUP>`；中途配置树hash确实改变，恢复后 `/etc/shoes` 全部文件SHA-256逐项相等，服务enabled/active，PID2573276→2573519。添加时实际提示“热重载文件锚点未就绪；本次使用受控重启”，原样记录；本项检查配置/状态恢复，不冒充P1热重载。 |
+| P6 真实重启 | 16:52:23–16:55:02 | 通过 | `sudo reboot`；等待中出现 Connection refused、No route to host、SSH banner timeout，约149秒后恢复SSH。boot ID确实改变；sudo身份hash/字符串保持；MainPID **579**，enabled/active。TCP33491/36737/38231/39353/46709/48662/49185/55081及UDP35371全部恢复。HK Reality check/curl exit=0，约2.05秒，出口 IP 与 VPS一致；整组完成耗时156.985秒。 |
+| HK 临时凭据及进程清理 | 16:57:10 | 通过 | `id -u`=1000；`find <HK_RUNTIME> -maxdepth 1 -type f`、`pgrep -u agent -x sing-box` 无匹配；每次请求finally清理配置和日志，二进制保留。 |
+| 公开v0.2.1安装、旧版self-update、最终purge及原始环境恢复 | — | 未验证 | 尚未发布、尚未进入用户确认后的阶段5；不提前purge或恢复原始环境。原始备份完整保留，VPS测试实例保持enabled/active。 |
+
+验收后config SHA-256=`f52442fb9f287abdfb3141bde6d54efc26611518922ba8db7c4768c4ac6d4744`，state SHA-256=`dc831270f83908c102597b2f86ca84ce8adb5e6c565cfb939c54997c61deb50d`。本轮没有新的失败；证书信任与199天外部连接仅实证于上列固定版本客户端，不外推其它构建或未来阶段的实机接受边界。R/P验收闸门已满足，接下来允许准备合并及release PR；**v0.2.1 tag、GitHub Release、crates.io和发版后冒烟仍未执行，推tag前须停下等待用户确认**。
