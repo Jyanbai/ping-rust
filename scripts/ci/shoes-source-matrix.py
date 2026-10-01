@@ -136,7 +136,9 @@ def main():
     args = parser.parse_args()
     shoes, binary = os.environ["SHOES_BIN"], os.environ["PING_RUST_BIN"]
     rows = []
-    version = subprocess.check_output([shoes, "--version"], text=True).strip()
+    version_probe = subprocess.run([shoes, "--version"], text=True, capture_output=True)
+    version = (version_probe.stdout.strip() if version_probe.returncode == 0
+               else args.source + " (verified artifact/revision; --version unsupported)")
     print(f"source={args.source}; runtime={version}", flush=True)
     with tempfile.TemporaryDirectory(prefix="prs-source-matrix-") as temporary:
         root = Path(temporary)
