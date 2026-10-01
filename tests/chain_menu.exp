@@ -91,6 +91,26 @@ switch -- $action {
         send_choice $argument
         expect_or_fail {节点可用} "full proxy test result"
     }
+    pool_create {
+        send_choice 2
+        expect_or_fail {Pool 管理} "pool menu"
+        send_choice 1
+        expect_or_fail {Pool 名称} "pool name prompt"
+        send_choice "acceptance-pool"
+        expect_or_fail {成员编号} "pool member prompt"
+        send_choice "1,2"
+        expect_or_fail {Pool 管理} "pool created"
+        send_choice 0
+    }
+    pool_test {
+        send_choice 7
+        expect_or_fail {测试 Pool 内全部节点} "test menu"
+        send_choice 3
+        expect_or_fail {选择 Pool} "pool selector"
+        send_choice 1
+        expect_or_fail {namespace-one: 失败[^\r\n]*ms} "offline Pool member"
+        expect_or_fail {namespace-two: 可用[^\r\n]*ms} "online Pool member"
+    }
     delete {
         if {![string is integer -strict $argument] || $argument < 1} {
             puts stderr "delete action requires a positive node index"
@@ -128,7 +148,7 @@ switch -- $action {
     }
 }
 
-if {$action ni {enable disable set_direct}} {
+if {$action ni {enable disable set_direct pool_test}} {
     expect_or_fail {Chain Proxy 2.0} "return to chain menu"
 }
 send_choice 0

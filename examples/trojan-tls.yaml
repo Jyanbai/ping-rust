@@ -1,0 +1,12 @@
+# 示例凭据均为假值；证书路径由部署环境提供。
+- address: 0.0.0.0:443
+  protocol:
+    type: tls
+    tls_targets:
+      trojan.example.com:
+        cert: /etc/shoes/server.pem
+        key: /etc/shoes/server-key.pem
+        alpn_protocols: [h2, http/1.1]
+        protocol:
+          type: trojan
+          password: replace-with-trojan-password

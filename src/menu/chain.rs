@@ -42,7 +42,12 @@ pub(super) async fn menu() -> Result<()> {
 async fn test_menu(state: &ChainProxyState) -> Result<()> {
     match select_keyed(
         "测试",
-        &[(1, "测试节点"), (2, "测试完整 Chain"), (0, "返回")],
+        &[
+            (1, "测试节点"),
+            (2, "测试完整 Chain"),
+            (3, "测试 Pool 内全部节点"),
+            (0, "返回"),
+        ],
     )? {
         0 => Ok(()),
         1 => test_chain_node().await,
@@ -54,6 +59,31 @@ async fn test_menu(state: &ChainProxyState) -> Result<()> {
                 crate::chain_proxy::test_chain(state, id, std::time::Duration::from_secs(10))
                     .await?;
             println!("完整 Chain 测试通过（{} ms）", elapsed.as_millis());
+            Ok(())
+        }
+        3 => {
+            if state.pools.is_empty() {
+                println!("尚未创建 Pool");
+                return Ok(());
+            }
+            let labels = state
+                .pools
+                .iter()
+                .map(|pool| pool.name.as_str())
+                .collect::<Vec<_>>();
+            let Some(index) = select_numbered("选择 Pool", &labels)? else {
+                return Ok(());
+            };
+            let pool = &state.pools[index];
+            println!(
+                "正在逐个测试 Pool {} 的 {} 个节点...",
+                pool.name,
+                pool.members.len()
+            );
+            let results =
+                crate::chain_proxy::test_pool(state, pool.id, std::time::Duration::from_secs(10))
+                    .await?;
+            println!("{}", crate::chain_proxy::pool_probe_summary(&results));
             Ok(())
         }
         _ => unreachable!(),

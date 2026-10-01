@@ -56,6 +56,23 @@ jobs:
           grep -F "$SHOES_VERSION" <<<"$shoes_version"
       - name: Build ping-rust
         run: cargo build --locked
+      - name: Dry-run every checked-in example
+        env:
+          PING_RUST_SHOES_E2E_BIN: /usr/local/bin/shoes
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /etc/shoes
+          sudo openssl req -x509 -newkey rsa:2048 -nodes \
+            -keyout /etc/shoes/server-key.pem -out /etc/shoes/server.pem \
+            -days 1 -subj '/CN=example.invalid' >/dev/null 2>&1
+          sudo chmod 0600 /etc/shoes/server-key.pem
+          sudo cp /etc/shoes/server.pem /etc/shoes/cert.pem
+          sudo cp /etc/shoes/server-key.pem /etc/shoes/key.pem
+          for example in examples/*.yaml; do
+            echo "--dry-run $example"
+            sudo shoes --dry-run "$example"
+          done
       - name: Check H2MUX exports with sing-box 1.14.2
         shell: bash
         run: |

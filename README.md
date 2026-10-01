@@ -59,12 +59,23 @@ bash <(curl --proto '=https' --tlsv1.2 -fsSL \
 - 在同目录候选文件上调用 `shoes --dry-run`，通过后才原子提交并启用 systemd 服务
 - systemd unit 限制内核调优、内核模块、控制组、地址族、可执行内存和非原生 ABI；Ubuntu/Debian 验收会实际启动加固后的 shoes
 - 多配置添加、列表、删除、端口冲突保护
-- 全局链式代理：从分享链接导入受支持的上游节点，选择、启停、测试和删除；启用后所有受管入站经当前节点转发
+- Chain Proxy 2.0：由 Nodes、Pools、有序多跳 Chains、路由规则和默认路由组合出口；规则可选择 DIRECT、BLOCK、Chain 或多 Chain 轮询
+- Verified Hot Reload：对可观察的监听变更验证 MainPID 与端口，失败恢复旧配置和服务状态
+- Update Center：管理 ping-rust 更新、固定 shoes pin、安全状态检查与显式 Release 安装；默认拒绝已知降级
+- H2MUX 客户端偏好：在已验证的 VMess/VLESS WebSocket TLS 与 Trojan TLS 范围内提供 sing-box 导出
+- SOCKS5、Snell v3、NaiveProxy 和 Shadowsocks 2022 + ShadowTLS v3 受管配置
 - 跨进程配置锁、配置/sidecar 精确回滚，更新与恢复保留服务原运行状态
 - 服务启停、重启、状态、journalctl 日志、更新与卸载
 - BBR、TCP/UDP 端口检查、敏感配置备份与安全恢复
 - 导出 Clash Meta、sing-box 和 Nekobox 分享链接
 - Rust 原生更新 ping-rust 自身：GitHub Release + `SHA256SUMS` 双重校验、版本探针、原子替换与失败回滚
+
+### 协议分级
+
+| 标签 | 协议或功能 | 说明 |
+|---|---|---|
+| 稳定 | VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks、AnyTLS、VLESS-TLS-Vision、VLESS-WS-TLS、Trojan-TLS、Trojan-REALITY、VMess-WS-TLS、SOCKS5、Shadowsocks 2022 + ShadowTLS v3 | 受管部署及对应范围的 CI 验收 |
+| 实验性 | Snell v3、NaiveProxy、H2MUX 客户端偏好 | 导出面受限，已验证的客户端兼容范围较窄；使用前核对下文各协议限制 |
 
 ## 支持环境
 
@@ -227,11 +238,11 @@ vless://...security=reality...pbk=...&sid=...#VLESS-REALITY-25448
 
 配置按 **Nodes → Pools → Chains → Routing Rules → Default Route** 组合。Chain 可以包含有序的多跳；Pool 在某一 hop 内轮询节点；多条完整 Chain 可以通过 whole-chain round-robin 轮询。规则支持 IPv4/IPv6 CIDR、精确主机名和通配主机名，并提供 DIRECT、BLOCK、Chain 和多 Chain 轮询目标。默认路由覆盖未匹配规则的 IPv4 与 IPv6 流量。
 
-Pool 与多 Chain 轮询只表示连接分布，不提供健康检查、自动故障切换或延迟选择。
+Pool 与多 Chain 轮询只表示连接分布，不提供健康检查、自动故障切换或延迟选择。可在 `9) 其他 → 1) 链式代理 → 7) 测试节点 / Chain → 3) 测试 Pool 内全部节点` 手动逐个排查。
 
-第一版支持 SOCKS5、HTTP/HTTPS、Shadowsocks、VLESS TCP/TLS/Reality/WebSocket、Trojan TLS/WebSocket，以及由 ping-rust 生成的 VMess WebSocket TLS 分享链接。由于当前 shoes 内核没有对应客户端实现，Hysteria2、TUIC、WireGuard/WARP 不能作为链式出口；ping-rust 会返回明确错误，不生成近似配置。HTTP、SOCKS5 和 Trojan 出口不支持 UDP-over-TCP，启用或切换时会再次警告；相关 UDP 请求会失败，不会自动回退直连。
+当前支持 SOCKS5、HTTP/HTTPS、Shadowsocks、VLESS TCP/TLS/Reality/WebSocket、Trojan TLS/WebSocket，以及由 ping-rust 生成的 VMess WebSocket TLS 分享链接。由于当前 shoes 内核没有对应客户端实现，Hysteria2、TUIC、WireGuard/WARP 不能作为链式出口；ping-rust 会返回明确错误，不生成近似配置。HTTP、SOCKS5 和 Trojan 出口不支持 UDP-over-TCP，启用或切换时会再次警告；相关 UDP 请求会失败，不会自动回退直连。
 
-“测试节点 / Chain”严格复用临时 shoes SOCKS5 入口执行完整代理请求；Chain 测试会验证所有有序 hop，而不是逐节点测试的集合。测试进程和权限为 `0600` 的临时配置随后立即删除。它不会修改当前出口或线上 systemd 服务。
+“测试节点 / Chain”严格复用临时 shoes SOCKS5 入口执行完整代理请求；Chain 测试会验证所有有序 hop，而不是逐节点测试的集合。Pool 手动测试按成员顺序输出每个节点的可用性、失败原因和耗时，不改变在线路由。测试进程和权限为 `0600` 的临时配置随后立即删除。它不会修改当前出口或线上 systemd 服务。
 
 新建 v2 状态的默认路由是 DIRECT；在节点管理中“选择出口”会创建或更新单跳默认 Chain，兼容旧版操作习惯。旧版 `active_node` 状态在内存中迁移为单跳 Chain，保留原启用状态与出口；仅读取状态不会改写文件。仍被 Pool、Chain、规则或默认路由引用的对象不能删除。固定 shoes 0.2.8 的 Hysteria2/TUIC UDP 服务端路径会忽略 client chain 并直接创建 UDP socket，因此存在这些入站时会拒绝启用全局链式代理。节点凭据保存在权限为 `0600` 的管理状态和配置文件中，备份同样包含这些敏感信息。
 
@@ -407,7 +418,7 @@ sudo ping-rust self-update
 `update` 只更新 shoes 内核；`self-update` 更新 ping-rust 本身。已知较低的 GitHub Release 默认会被拒绝，只有明确使用 `--allow-downgrade` 才会允许：
 
 ```bash
-sudo ping-rust self-update --version v0.1.15
+sudo ping-rust self-update --version v0.2.0
 sudo ping-rust update --method release --allow-downgrade
 ```
 
@@ -474,7 +485,7 @@ sudo /usr/local/bin/shoes --dry-run /etc/shoes/config.yaml
 - Hysteria2/TUIC 失败：确认 UDP 端口已放行，并检查证书域名。
 - Shadowsocks 2022 导入失败：确认客户端 cipher 使用标准名称，且 Base64 密钥解码长度与 AES-128（16 字节）或 AES-256/ChaCha20（32 字节）一致。
 - AnyTLS 失败：确认选择的 TLS/Reality 模式、SNI、密码与证书校验设置一致；AnyTLS+Reality 请使用 sing-box 导出。
-- 链式节点显示端口可达但不能使用：进入 `9) 其他 → 1) 链式代理 → 4) 测试节点（完整代理）`；新版测试会验证密码/UUID、TLS/Reality 握手和真实 HTTP 出口，不再只测 TCP 端口。
+- 链式节点显示端口可达但不能使用：进入 `9) 其他 → 1) 链式代理 → 7) 测试节点 / Chain → 1) 测试节点`；新版测试会验证密码/UUID、TLS/Reality 握手和真实 HTTP 出口，不再只测 TCP 端口。
 - `systemctl` 不存在：当前系统不是 systemd 环境，服务管理功能无法使用。
 - GitHub API 限流：稍后重试，或使用 `install --method cargo`。
 - 自更新提示权限不足：若当前程序位于 `/usr/local/bin`，改用 `sudo ping-rust self-update`；不要手工覆盖正在更新的文件。
@@ -483,94 +494,111 @@ sudo /usr/local/bin/shoes --dry-run /etc/shoes/config.yaml
 
 ## 开发与验证
 
-```bash
-cargo fmt --all -- --check
-cargo test --locked --all-targets
-cargo clippy --locked --all-targets --all-features -- -D warnings
-cargo build --release
-cargo doc --no-deps
-```
-
-本仓库开发阶段已完成：
-
-- Rust 单元测试覆盖密钥/YAML、归档解包、原子写入、systemd unit、端口检查、客户端三格式和恢复路径安全。
-- 自更新单元测试覆盖版本、架构、checksum 重复/缺失和严格单文件归档；Release job 还会真实执行一次强制自更新并复核版本。
-- `shoes-schema.yml` 固定 cfal/shoes commit `386b11532424b8665ee3e46340c6236fb3c47595`（0.2.8），对全部预设联合配置、全部六种 Shadowsocks cipher、Snell v3 三种 cipher 与 UDP 开关、SOCKS5 auth/no-auth 与 UDP 开关、Reality+AnyTLS 执行真实 `shoes --dry-run`，并启动聚合配置检查监听和 SOCKS5 TCP CONNECT。
-- 通过 cargo-zigbuild + Zig 生成 x86_64/aarch64 Linux GNU release ELF，最高 GLIBC 需求为 2.34，覆盖 Rocky/Alma 9 及更新的目标发行版基线。
-- CI 覆盖 Ubuntu 22.04/24.04，并在 Debian 12、Rocky Linux 9、AlmaLinux 9 容器中执行锁定依赖测试和 release 构建；shoes schema 作业实际启动聚合监听。Ubuntu 24.04 acceptance 覆盖完整 root/systemd/PTY/回滚/导出流程，并通过第 11、12 项菜单分别部署 SOCKS5 与 Snell v3；Debian 12 systemd acceptance 同时覆盖零输入部署、严格 `--plain` 输出、多用户 AnyTLS 无损导出拒绝、激活失败回滚和加固 unit 启动。
-- 独立链式代理验收在 Ubuntu 24.04 主机和 Debian 12 特权 systemd 容器中运行，使用真实 PTY 菜单、两条隔离 Shadowsocks 出口和 HTTP 源地址核验覆盖完整生命周期与无直连回退。
-- 独立 `security-audit.yml` 固定 `cargo-audit 0.22.2`，每周、手动以及
-  `Cargo.toml`/`Cargo.lock` 变更时扫描提交的锁定依赖，并对漏洞、unmaintained、unsound
-  或 yanked warning fail-closed。当前本地扫描未报告安全公告。
-- 独立、非发布阻塞的 `performance-baseline.yml` 每周或手动在 Ubuntu 24.04 主机与
-  Debian 12 特权 systemd 容器中测量 Stage-0 安装、冷安装、配置修改、热添加和激活失败
-  回滚，记录总耗时、峰值 RSS、受管文件磁盘占用及下载、生成、真实
-  `shoes --dry-run`、提交、systemd 激活等分阶段耗时。报告只包含环境与数值，不记录公网
-  地址、UUID、密码、私钥或分享链接。共享 runner 与网络抖动较大，因此当前只建立可比较
-  基线，不宣称任意 VPS 都能满足固定五秒 SLA，也不会为加速而跳过生产 dry-run。
-- 在一台干净代理环境的 Debian 12 x86_64 VPS 上完成原生安装与运行验收：Release 路径约 2 秒完成 shoes v0.2.7 musl 安装，三协议同时通过 dry-run 并由 systemd 启动，外部 Reality 客户端的代理出口与 VPS 公网 IP 一致。
-- 实机完成 9 份客户端导出解析、BBR、端口检查、日志、备份恢复、inactive 状态保持和 Release 更新；详细证据见完成度审计。
-- 在 Ubuntu 24.04.3 x86_64 VPS 上从干净基线完成 crates.io、Git 固定提交与一键 Release 三种安装入口；Reality 从 shoes 安装到 systemd active/listening 用时约 2 秒，三协议、9 份客户端导出、备份恢复、更新、数字菜单、逐配置删除和卸载均通过。
-- Ubuntu VPS 真实重启后 shoes 自动恢复为 enabled/active，Reality TCP 443、Hysteria2 UDP 8443、TUIC UDP 9443 均恢复监听；官方 sing-box 客户端在重启前后两次完成公网 Reality 握手，代理出口均为该 VPS。
-
-逐项需求、修复记录、ELF 哈希和外部验收边界见 [COMPLETION_AUDIT.md](COMPLETION_AUDIT.md)。
-
-全新 Ubuntu 24.04 x86_64 VPS 已完成以下实机验收：
-
-1. `cargo install --path . --locked`。
-2. Release 与 cargo 两种 shoes 安装方式各测试一次。
-3. 三种协议分别生成、启动，并从外部客户端连接。
-4. 重启 VPS，确认 `shoes.service` 自动启动。
-5. 验证更新、日志、BBR、备份恢复、删除和卸载。
-
-上述清单已全部通过。测试结束后执行 `uninstall --purge`，并移除测试目录、导出文件、备份和回滚目录；测试期间安装的 Ubuntu 官方构建依赖与 Rust 工具链保留，便于后续源码测试。
-
-## 截图建议
-
-发布 README 时建议补充三张终端截图：
-
-1. 主数字菜单全景。
-2. Reality 生成完成画面（必须遮盖私钥、UUID 和 short ID）。
-3. `systemctl status shoes` 与客户端连通性测试。
+本地门禁：`cargo fmt --all -- --check`、`cargo clippy --locked --all-targets --all-features -- -D warnings`、`cargo test --locked --all-targets`。CI、systemd acceptance、实机 VPS 与未验证范围的逐项证据见 [COMPLETION_AUDIT.md](COMPLETION_AUDIT.md)。
 
 ## 仓库结构
 
 ```text
 ping-rust/
-├── Cargo.toml
-├── Cargo.lock
-├── README.md
-├── LICENSE
-├── .gitignore
-├── src/
-│   ├── main.rs
-│   ├── cli.rs
-│   ├── menu.rs
-│   ├── installer.rs
-│   ├── config.rs
-│   ├── config/
-│   │   ├── presets.rs
-│   │   ├── presets/       # 各受管协议的服务端与凭据生成
-│   │   ├── schema.rs      # shoes YAML schema
-│   │   ├── validation.rs
-│   │   ├── transaction.rs # 配置、状态、节点与凭据回滚
-│   │   └── commit.rs      # 节点聚合与原子提交
-│   ├── performance.rs     # opt-in 无敏感信息阶段计时
-│   ├── service.rs
-│   ├── client.rs
-│   ├── operations.rs
-│   ├── self_update.rs
-│   └── utils.rs
+├── .github/
+│   ├── workflows/
+│   │   ├── chain-systemd.yml
+│   │   ├── ci.yml
+│   │   ├── performance-baseline.yml
+│   │   ├── release.yml
+│   │   ├── security-audit.yml
+│   │   ├── shoes-schema.yml
+│   │   ├── shoes-upstream-drift.yml
+│   │   └── ubuntu-acceptance.yml
+│   └── dependabot.yml
+├── docs/
+│   └── SHOES_PIN_UPGRADE.md
 ├── examples/
-│   ├── reality.yaml
+│   ├── anytls.yaml
+│   ├── chain-e2e-client.yaml
+│   ├── chain-e2e-downstream.yaml
+│   ├── chain-e2e-upstream.yaml
+│   ├── chain-proxy.yaml
 │   ├── hysteria2.yaml
-│   ├── tuic.yaml
+│   ├── naiveproxy-self-signed.yaml
+│   ├── reality.yaml
 │   ├── shadowsocks.yaml
-│   └── anytls.yaml
+│   ├── snell.yaml
+│   ├── socks5-no-auth.yaml
+│   ├── socks5-no-udp.yaml
+│   ├── socks5.yaml
+│   ├── ss2022-shadowtls-v3.yaml
+│   ├── trojan-reality.yaml
+│   ├── trojan-tls.yaml
+│   ├── tuic.yaml
+│   ├── vless-tls-vision.yaml
+│   ├── vless-ws-tls.yaml
+│   └── vmess-ws-tls.yaml
+├── scripts/
+│   ├── ci/
+│   │   ├── validate-h2mux.py
+│   │   └── validate-shoes-schema.sh
+│   └── install.sh
+├── src/
+│   ├── chain_proxy/
+│   │   └── state.rs
+│   ├── config/
+│   │   ├── presets/
+│   │   │   ├── anytls.rs
+│   │   │   ├── hysteria2.rs
+│   │   │   ├── naiveproxy.rs
+│   │   │   ├── reality.rs
+│   │   │   ├── shadowsocks.rs
+│   │   │   ├── snell.rs
+│   │   │   ├── socks5.rs
+│   │   │   ├── tls.rs
+│   │   │   ├── trojan_reality.rs
+│   │   │   ├── trojan_tls.rs
+│   │   │   ├── tuic.rs
+│   │   │   ├── vless_tls_vision.rs
+│   │   │   ├── vless_ws_tls.rs
+│   │   │   └── vmess_ws_tls.rs
+│   │   ├── commit.rs
+│   │   ├── presets.rs
+│   │   ├── routing.rs
+│   │   ├── schema.rs
+│   │   ├── transaction.rs
+│   │   └── validation.rs
+│   ├── menu/
+│   │   └── chain.rs
+│   ├── chain_proxy.rs
+│   ├── cli.rs
+│   ├── client.rs
+│   ├── config.rs
+│   ├── deployment.rs
+│   ├── fast_add.rs
+│   ├── h2mux.rs
+│   ├── install_self.rs
+│   ├── installer.rs
+│   ├── main.rs
+│   ├── menu.rs
+│   ├── operations.rs
+│   ├── performance.rs
+│   ├── self_update.rs
+│   ├── service.rs
+│   └── utils.rs
 ├── systemd/
 │   └── ping-rust.service
-└── scripts/
-    └── install.sh
+├── tests/
+│   ├── chain_menu.exp
+│   ├── chain_proxy_e2e.rs
+│   ├── chain_systemd_e2e.rs
+│   ├── chain_v2_e2e.rs
+│   ├── performance_baseline.rs
+│   └── performance_change.exp
+├── .gitattributes
+├── .gitignore
+├── Cargo.lock
+├── Cargo.toml
+├── COMPLETION_AUDIT.md
+├── LICENSE
+├── README.md
+└── SOURCE_SNAPSHOT.md
 ```
 
 ## 项目仓库
@@ -580,3 +608,8 @@ ping-rust/
 ## 许可证
 
 [MIT License](LICENSE)
+
+
+
+
+

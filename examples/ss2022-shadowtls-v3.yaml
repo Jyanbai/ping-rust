@@ -1,0 +1,16 @@
+# 示例凭据均为假值；仅用于 shoes --dry-run。
+- address: 0.0.0.0:443
+  protocol:
+    type: tls
+    shadowtls_targets:
+      proxy.example.com:
+        password: replace-with-shadowtls-password
+        handshake:
+          address: www.cloudflare.com:443
+        protocol:
+          type: shadowsocks
+          cipher: 2022-blake3-aes-256-gcm
+          password: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+          udp_enabled: false
+  rules:
+    - allow-all-direct
