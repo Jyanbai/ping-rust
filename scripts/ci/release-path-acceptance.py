@@ -11,7 +11,7 @@ import threading
 from pathlib import Path
 
 import pexpect
-from acceptance_diagnostics import failure_summary
+from acceptance_diagnostics import failure_summary, preserve_failure_stderr
 
 spec = importlib.util.spec_from_file_location("h2mux_fixture", Path(__file__).with_name("validate-h2mux.py"))
 h2 = importlib.util.module_from_spec(spec)
@@ -21,7 +21,17 @@ BIN = os.environ["PING_RUST_BIN"]
 
 
 def run(*args):
-    result = subprocess.run([BIN, *args], capture_output=True, text=True, timeout=360)
+    diagnostics = os.environ.get("PING_RUST_DIAGNOSTICS_DIR", "/tmp/prs-release-diagnostics")
+    try:
+        result = subprocess.run([BIN, *args], capture_output=True, text=True, timeout=360)
+    except subprocess.TimeoutExpired as error:
+        stderr = error.stderr or b""
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode("utf-8", errors="replace")
+        preserve_failure_stderr(diagnostics, args[0], stderr, "timeout")
+        raise AssertionError(f"ping-rust {args[0]} timed out; stderr captured privately") from None
+    if result.returncode:
+        preserve_failure_stderr(diagnostics, args[0], result.stderr, result.returncode)
     assert result.returncode == 0, f"ping-rust {args[0]} failed (exit={result.returncode}): {failure_summary(result.stderr)}"
     return result.stdout, result.stderr
 
@@ -150,6 +160,8 @@ def main():
                 done.set()
                 worker.join(timeout=2)
     print("PASS github-release v0.2.7 H2MUX preference/export/sing-box 1.14.2 data: small and 1MiB half-close")
+    from naive_certificate_acceptance import verify_naive_certificate_lifecycle
+    verify_naive_certificate_lifecycle(BIN, run, state, pid, h2.free_port)
     run("uninstall", "--purge")
 
 

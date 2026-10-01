@@ -31,6 +31,7 @@ pub(super) fn generate(
         request.options.quic_endpoints,
     );
     Ok(GeneratedPreset {
+        naive_certificate_validity: None,
         server,
         credentials: Credentials::Tuic {
             user_id,

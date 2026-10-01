@@ -12,8 +12,8 @@ class FailureDiagnosticsTest(unittest.TestCase):
         stderr = f"Error: GitHub API 网络请求失败\nHTTP status 403\nprivate credential: {private}\n"
         with tempfile.TemporaryDirectory() as root:
             preserve_failure_stderr(Path(root), "bootstrap", stderr, 1)
-            self.assertEqual((Path(root) / "private" / "bootstrap.stderr").read_text(), stderr)
-            artifact = (Path(root) / "redacted" / "bootstrap.stderr.log").read_text()
+            self.assertEqual((Path(root) / "private" / "bootstrap.stderr").read_text(encoding="utf-8"), stderr)
+            artifact = (Path(root) / "redacted" / "bootstrap.stderr.log").read_text(encoding="utf-8")
             self.assertIn("GitHub API 网络请求失败", artifact)
             self.assertIn("HTTP 403", artifact)
             self.assertIn("line 3", artifact)

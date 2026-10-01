@@ -671,3 +671,15 @@ H2MUX 在 Release v0.2.7 **可用**，不新增来源拦截。热重载 gating �
 6. 当前 config SHA-256=`6804c0a081dc62ea6af7eaa1e419db624615a1dc9d7c925aab674eebfce4d571`；state SHA-256=`d73b5bd35e580e30fae0f1b7ae0114125885f82aeda14d7fdac9fcef4efe5861`。
 
 此前 bootstrap run `36821437871` 的具体底层原因仍未定位：stderr 被旧夹具丢弃，后续默认 Release CI 通过不构成历史限流证据。API 可靠性改进已完成并通过新 FIX_SHA CI。P2 Naive **失败保留**，后续等待用户处理。
+
+### NaiveProxy 有效期修复：测试先行（2026-10-01，HKT）
+
+历史 P2 NaiveProxy 失败记录保持原样。原 bootstrap run `36821437871` 的根因仍为 **未定位**；旧夹具丢失 stderr，无法恢复历史底层错误，不能推断为 GitHub API 限流。
+
+本轮先运行 `cargo test naive_test_certificate_actual_der -- --nocapture` 和 `cargo test parses_naiveproxy_certificate_regeneration -- --nocapture`：两项均实际失败，分别为 `not_before must tolerate one hour of skew` 和不存在重新生成 CLI 操作。测试直接读取生成证书 DER 的 validity，未引入 X.509 解析依赖。随后补充旧 profile / 30 天边界 / 过期识别以及证书重新生成事务的回滚测试。
+
+实现只改变 NaiveProxy 自签测试模式：显式设定当前时间减 1 小时、加 397 天；到期元数据随 profile 原子保存，旧自签 NaiveProxy 缺少元数据时提示重新生成。菜单和 CLI 复用现有 update-and-activate 流程（候选 dry-run、原子提交、受控重启、激活失败恢复服务和旧证书），没有变更热重载 gating。`time` 已是 rcgen 的锁定间接依赖，此处仅直接声明以设置时间；未增加 X.509 解析库。其它协议默认有效期实际单元测试仍为 1975/4096。
+
+本机 Windows 验证：`cargo test --locked` 的 **179 个单元测试通过**；`cargo clippy --locked --all-targets -- -D warnings`、`cargo fmt --check`、`git diff --check` 通过；Python 安全诊断 4 项通过。Linux systemd acceptance 和新的实机验收此时均 **未验证**，等待新 PR head CI 和部署。
+
+bootstrap 夹具现在保留子进程完整 stderr 到仅当前 runner root 可读的 private 目录；失败 artifact 只上传 redacted 目录中的逐行白名单诊断（时间、操作、退出码、已知错误和 HTTP 状态），未知内容被抑制。不会把未知 stderr、凭据、URL 或地址上传。超时也保存已捕获 stderr。默认 Release CI 新增 NaiveProxy 生命周期验证，包含旧 metadata 迁移、实际证书 397 天、dry-run 拒绝、受控重启和激活失败的文件/证书回滚。

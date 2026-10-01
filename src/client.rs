@@ -936,6 +936,7 @@ mod tests {
             certificate_path: None,
             certificate_key_path: None,
             self_signed_certificate: false,
+            naive_certificate_validity: None,
         }
     }
 
@@ -1071,6 +1072,7 @@ mod tests {
                 certificate_path: None,
                 certificate_key_path: None,
                 self_signed_certificate,
+                naive_certificate_validity: None,
             };
         let profiles = [
             base(
@@ -1238,6 +1240,7 @@ mod tests {
             certificate_path: None,
             certificate_key_path: None,
             self_signed_certificate: true,
+            naive_certificate_validity: None,
         };
         let clash = render(&profile, ClientFormat::ClashMeta, "203.0.113.2").unwrap();
         let sing_box = render(&profile, ClientFormat::SingBox, "203.0.113.2").unwrap();
@@ -1261,6 +1264,7 @@ mod tests {
             certificate_path: None,
             certificate_key_path: None,
             self_signed_certificate: true,
+            naive_certificate_validity: None,
         };
         let tuic = ManagedProfile {
             h2mux: Default::default(),
@@ -1278,6 +1282,7 @@ mod tests {
             certificate_path: None,
             certificate_key_path: None,
             self_signed_certificate: true,
+            naive_certificate_validity: None,
         };
         for uri in [
             share_uri(&hysteria2, "203.0.113.2").unwrap(),
@@ -1312,6 +1317,7 @@ mod tests {
             certificate_path: None,
             certificate_key_path: None,
             self_signed_certificate: false,
+            naive_certificate_validity: None,
         };
         let clash = render(&profile, ClientFormat::ClashMeta, "203.0.113.3").unwrap();
         let sing_box = render(&profile, ClientFormat::SingBox, "203.0.113.3").unwrap();
@@ -1336,6 +1342,7 @@ mod tests {
             certificate_path: None,
             certificate_key_path: None,
             self_signed_certificate: false,
+            naive_certificate_validity: None,
         };
         let clash = render(&profile, ClientFormat::ClashMeta, "203.0.113.4").unwrap();
         let sing_box = render(&profile, ClientFormat::SingBox, "203.0.113.4").unwrap();
@@ -1368,6 +1375,7 @@ mod tests {
             certificate_path: None,
             certificate_key_path: None,
             self_signed_certificate: false,
+            naive_certificate_validity: None,
         };
         let value: Value =
             serde_json::from_str(&render(&profile, ClientFormat::SingBox, "203.0.113.9").unwrap())
@@ -1416,6 +1424,7 @@ mod tests {
             certificate_path: Some(cert),
             certificate_key_path: Some(key),
             self_signed_certificate: true,
+            naive_certificate_validity: None,
         };
         let exported = render(&profile, ClientFormat::SingBox, "203.0.113.9").unwrap();
         assert!(exported.contains("PUBLIC-CERT"));
@@ -1444,6 +1453,7 @@ mod tests {
             certificate_path: None,
             certificate_key_path: None,
             self_signed_certificate: false,
+            naive_certificate_validity: None,
         };
         let clash = render(&profile, ClientFormat::ClashMeta, "203.0.113.4").unwrap();
         assert!(clash.contains("plugin: shadow-tls"));
@@ -1480,6 +1490,7 @@ mod tests {
             certificate_path: None,
             certificate_key_path: None,
             self_signed_certificate: false,
+            naive_certificate_validity: None,
         };
 
         let compatible = profile(SnellCipher::Aes128Gcm);
@@ -1525,6 +1536,7 @@ mod tests {
             certificate_path: Some("/etc/shoes/server.pem".into()),
             certificate_key_path: Some("/etc/shoes/server-private.pem".into()),
             self_signed_certificate: true,
+            naive_certificate_validity: None,
         }
     }
 
@@ -1596,6 +1608,7 @@ mod tests {
             certificate_path: None,
             certificate_key_path: None,
             self_signed_certificate: false,
+            naive_certificate_validity: None,
         };
         let uri = share_uri(&profile, "2001:db8::1").unwrap();
         assert!(uri.starts_with("socks5://"));
@@ -1650,6 +1663,7 @@ mod tests {
             certificate_path: None,
             certificate_key_path: None,
             self_signed_certificate: false,
+            naive_certificate_validity: None,
         };
 
         let uri = share_uri(&profile, "203.0.113.8").unwrap();

@@ -27,6 +27,8 @@ use crate::{
 };
 
 mod commit;
+mod naive_certificate;
+pub use naive_certificate::NaiveCertificateValidity;
 mod presets;
 mod routing;
 mod schema;
@@ -422,6 +424,7 @@ pub enum ProfileChange {
     NaivePassword(String),
     NaiveServerName(String),
     NaiveCertificate { certificate: PathBuf, key: PathBuf },
+    RegenerateNaiveCertificate,
     NaivePadding(bool),
     NaiveUdpEnabled(bool),
     NaiveFallback(Option<String>),
@@ -586,6 +589,8 @@ pub struct ManagedProfile {
     pub certificate_path: Option<PathBuf>,
     pub certificate_key_path: Option<PathBuf>,
     pub self_signed_certificate: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub naive_certificate_validity: Option<NaiveCertificateValidity>,
     #[serde(default, skip_serializing_if = "H2MuxOptions::is_disabled")]
     pub h2mux: H2MuxOptions,
 }
@@ -871,6 +876,7 @@ async fn generate_inner_with_lock(
         credentials,
         certificate_path,
         certificate_key_path,
+        naive_certificate_validity,
     } = generated;
 
     let profile = ManagedProfile {
@@ -883,6 +889,7 @@ async fn generate_inner_with_lock(
         certificate_path: certificate_path.clone(),
         certificate_key_path: certificate_key_path.clone(),
         self_signed_certificate: self_signed,
+        naive_certificate_validity,
     };
     let mut credential_cleanup = CredentialCleanup::new(
         self_signed,
@@ -1006,6 +1013,13 @@ pub(crate) async fn update_profile_locked(
         ProfileChange::NaiveUsername(username) => validate_naive_component("用户名", username)?,
         ProfileChange::NaivePassword(password) => validate_naive_component("密码", password)?,
         ProfileChange::NaiveServerName(server_name) => validate_server_name(server_name)?,
+        ProfileChange::RegenerateNaiveCertificate => {
+            if !state.profiles[index].self_signed_certificate
+                || state.profiles[index].protocol() != Protocol::NaiveProxy
+            {
+                bail!("只有 NaiveProxy 自签测试节点支持重新生成测试证书");
+            }
+        }
         ProfileChange::NaiveCertificate { certificate, key } => {
             if !certificate.is_file() || !key.is_file() {
                 bail!("指定的证书或私钥文件不存在");
@@ -1024,7 +1038,9 @@ pub(crate) async fn update_profile_locked(
     let retire_owned_certificate = state.profiles[index].self_signed_certificate
         && matches!(
             &change,
-            ProfileChange::NaiveCertificate { .. } | ProfileChange::NaiveServerName(_)
+            ProfileChange::NaiveCertificate { .. }
+                | ProfileChange::NaiveServerName(_)
+                | ProfileChange::RegenerateNaiveCertificate
         );
     let retired_certificate = retire_owned_certificate
         .then(|| state.profiles[index].certificate_path.clone())
@@ -1040,30 +1056,19 @@ pub(crate) async fn update_profile_locked(
         generated_certificate_key: None,
     };
     let regenerate_naive_certificate = state.profiles[index].self_signed_certificate
-        && matches!(&change, ProfileChange::NaiveServerName(_));
+        && matches!(
+            &change,
+            ProfileChange::NaiveServerName(_) | ProfileChange::RegenerateNaiveCertificate
+        );
     apply_profile_change(&mut servers[index], &mut state.profiles[index], change)?;
     let mut generated_cleanup = None;
     if regenerate_naive_certificate {
-        let new_name = state.profiles[index].server_name().to_owned();
-        let suffix = &Uuid::new_v4().simple().to_string()[..8];
-        let cert = Path::new(utils::CONFIG_DIR).join(format!("cert-{suffix}.pem"));
-        let key = Path::new(utils::CONFIG_DIR).join(format!("key-{suffix}.pem"));
-        write_self_signed_certificate(&new_name, &cert, &key)?;
-        let cleanup = CredentialCleanup::new(true, Some(&cert), Some(&key));
-        let ServerProtocol::Tls { tls_targets, .. } = &mut servers[index].protocol else {
-            bail!("NaiveProxy TLS 配置不一致");
-        };
-        let target = tls_targets
-            .values_mut()
-            .next()
-            .context("NaiveProxy 缺少 TLS 目标")?;
-        target.cert = cert.to_string_lossy().into_owned();
-        target.key = key.to_string_lossy().into_owned();
-        state.profiles[index].certificate_path = Some(cert.clone());
-        state.profiles[index].certificate_key_path = Some(key.clone());
-        rollback.generated_certificate = Some(cert);
-        rollback.generated_certificate_key = Some(key);
-        generated_cleanup = Some(cleanup);
+        generated_cleanup = Some(regenerate_naive_test_certificate(
+            &mut servers[index],
+            &mut state.profiles[index],
+            Path::new(utils::CONFIG_DIR),
+            &mut rollback,
+        )?);
     }
     let profile = state.profiles[index].clone();
     let yaml = serde_yaml::to_string(&servers).context("序列化更新后 shoes YAML 失败")?;
@@ -1406,6 +1411,11 @@ fn apply_profile_change(
             tls_targets.insert(new_name.clone(), target);
             *server_name = new_name;
         }
+        ProfileChange::RegenerateNaiveCertificate => {
+            if !profile.self_signed_certificate || profile.protocol() != Protocol::NaiveProxy {
+                bail!("只有 NaiveProxy 自签测试节点支持重新生成测试证书");
+            }
+        }
         ProfileChange::NaiveCertificate { certificate, key } => {
             let (server, profile_credentials) = (&mut server.protocol, &mut profile.credentials);
             let Credentials::NaiveProxy { .. } = profile_credentials else {
@@ -1423,6 +1433,7 @@ fn apply_profile_change(
             profile.certificate_path = Some(certificate);
             profile.certificate_key_path = Some(key);
             profile.self_signed_certificate = false;
+            profile.naive_certificate_validity = None;
         }
         ProfileChange::NaivePadding(enabled) => {
             let (server, Credentials::NaiveProxy { padding: state, .. }) =
@@ -2354,6 +2365,37 @@ fn write_self_signed_certificate(server_name: &str, cert: &Path, key: &Path) -> 
     Ok(())
 }
 
+fn regenerate_naive_test_certificate(
+    server: &mut ServerConfig,
+    profile: &mut ManagedProfile,
+    parent: &Path,
+    rollback: &mut ManagedRollback,
+) -> Result<CredentialCleanup> {
+    if !profile.self_signed_certificate || profile.protocol() != Protocol::NaiveProxy {
+        bail!("只有 NaiveProxy 自签测试节点支持重新生成测试证书");
+    }
+    let suffix = Uuid::new_v4().simple().to_string();
+    let cert = parent.join(format!("cert-{}.pem", &suffix[..8]));
+    let key = parent.join(format!("key-{}.pem", &suffix[..8]));
+    let validity = naive_certificate::write_test_certificate(profile.server_name(), &cert, &key)?;
+    let cleanup = CredentialCleanup::new(true, Some(&cert), Some(&key));
+    let ServerProtocol::Tls { tls_targets, .. } = &mut server.protocol else {
+        bail!("NaiveProxy TLS 配置不一致");
+    };
+    let target = tls_targets
+        .values_mut()
+        .next()
+        .context("NaiveProxy 缺少 TLS 目标")?;
+    target.cert = cert.to_string_lossy().into_owned();
+    target.key = key.to_string_lossy().into_owned();
+    profile.certificate_path = Some(cert.clone());
+    profile.certificate_key_path = Some(key.clone());
+    profile.naive_certificate_validity = Some(validity);
+    rollback.generated_certificate = Some(cert);
+    rollback.generated_certificate_key = Some(key);
+    Ok(cleanup)
+}
+
 pub struct RealityKeyPair {
     pub private_key: String,
     pub public_key: String,
@@ -2781,6 +2823,7 @@ mod tests {
             certificate_path: None,
             certificate_key_path: None,
             self_signed_certificate: false,
+            naive_certificate_validity: None,
         };
         (server, profile)
     }
@@ -3195,6 +3238,7 @@ mod tests {
             certificate_path: generated.certificate_path.clone(),
             certificate_key_path: generated.certificate_key_path.clone(),
             self_signed_certificate: true,
+            naive_certificate_validity: None,
         };
         apply_profile_change(&mut server, &mut profile, ProfileChange::Port(8443)).unwrap();
         apply_profile_change(
@@ -3279,6 +3323,7 @@ mod tests {
             certificate_path: generated.certificate_path,
             certificate_key_path: generated.certificate_key_path,
             self_signed_certificate: true,
+            naive_certificate_validity: None,
         };
         let cert = dir.path().join("external-cert.pem");
         let key = dir.path().join("external-key.pem");
@@ -3611,6 +3656,7 @@ mod tests {
                 certificate_path: generated.certificate_path,
                 certificate_key_path: generated.certificate_key_path,
                 self_signed_certificate: protocol.requires_certificate(request.options.anytls_mode),
+                naive_certificate_validity: None,
             };
             let credentials_before = serde_json::to_vec(&profile.credentials).unwrap();
 
@@ -3736,6 +3782,7 @@ mod tests {
                 certificate_path: None,
                 certificate_key_path: None,
                 self_signed_certificate: false,
+                naive_certificate_validity: None,
             },
             ManagedProfile {
                 h2mux: Default::default(),
@@ -3747,6 +3794,7 @@ mod tests {
                 certificate_path: None,
                 certificate_key_path: None,
                 self_signed_certificate: false,
+                naive_certificate_validity: None,
             },
         ];
         ensure_servers_match_state(&[first_server.clone(), second_server.clone()], &profiles)
@@ -3966,6 +4014,7 @@ mod tests {
             certificate_path: None,
             certificate_key_path: None,
             self_signed_certificate: false,
+            naive_certificate_validity: None,
         };
         let mut value = serde_json::to_value(profile).unwrap();
         value.as_object_mut().unwrap().remove("server_address");
@@ -3989,6 +4038,7 @@ mod tests {
             certificate_path: None,
             certificate_key_path: None,
             self_signed_certificate: false,
+            naive_certificate_validity: None,
             h2mux: H2MuxOptions::default(),
         };
         let original_yaml = serde_yaml::to_string(&server).unwrap();
@@ -4034,6 +4084,7 @@ mod tests {
             certificate_path: None,
             certificate_key_path: None,
             self_signed_certificate: false,
+            naive_certificate_validity: None,
         };
         assert!(validate_profile_name("main", std::slice::from_ref(&existing), None).is_err());
         validate_profile_name("main", std::slice::from_ref(&existing), Some(existing.id)).unwrap();
@@ -4053,6 +4104,7 @@ mod tests {
             certificate_path: None,
             certificate_key_path: None,
             self_signed_certificate: false,
+            naive_certificate_validity: None,
         };
         let old_public_key = match &profile.credentials {
             Credentials::Reality { public_key, .. } => public_key.clone(),
@@ -4110,6 +4162,7 @@ mod tests {
             certificate_path: None,
             certificate_key_path: None,
             self_signed_certificate: false,
+            naive_certificate_validity: None,
         };
 
         apply_profile_change(
@@ -4155,6 +4208,7 @@ mod tests {
             certificate_path: None,
             certificate_key_path: None,
             self_signed_certificate: false,
+            naive_certificate_validity: None,
         };
         let Credentials::Shadowsocks {
             password: old_key,
@@ -4204,6 +4258,7 @@ mod tests {
             certificate_path: None,
             certificate_key_path: None,
             self_signed_certificate: false,
+            naive_certificate_validity: None,
         };
 
         apply_profile_change(
@@ -4284,6 +4339,7 @@ mod tests {
             certificate_path: certificate,
             certificate_key_path: certificate_key,
             self_signed_certificate: true,
+            naive_certificate_validity: None,
         };
 
         apply_profile_change(
@@ -4353,6 +4409,7 @@ mod tests {
             certificate_path: None,
             certificate_key_path: None,
             self_signed_certificate: false,
+            naive_certificate_validity: None,
         };
         apply_profile_change(
             &mut server,
@@ -4472,6 +4529,7 @@ mod tests {
             certificate_path: None,
             certificate_key_path: None,
             self_signed_certificate: false,
+            naive_certificate_validity: None,
         };
 
         apply_profile_change(
@@ -4514,6 +4572,7 @@ mod tests {
             certificate_path: None,
             certificate_key_path: None,
             self_signed_certificate: false,
+            naive_certificate_validity: None,
         };
 
         apply_profile_change(&mut server, &mut profile, ProfileChange::Port(10_880)).unwrap();

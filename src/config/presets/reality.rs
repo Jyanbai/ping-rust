@@ -42,6 +42,7 @@ pub(super) fn generate(
     reality_targets.insert(request.server_name.clone(), target);
 
     Ok(GeneratedPreset {
+        naive_certificate_validity: None,
         server: ServerConfig {
             address: format!("0.0.0.0:{}", request.port),
             transport: None,

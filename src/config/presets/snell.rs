@@ -20,6 +20,7 @@ pub(super) fn generate(
         .clone()
         .unwrap_or_else(generated_password);
     Ok(GeneratedPreset {
+        naive_certificate_validity: None,
         server: ServerConfig {
             address: format!("0.0.0.0:{}", request.port),
             transport: None,

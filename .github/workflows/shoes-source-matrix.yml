@@ -11,6 +11,7 @@ on:
       - scripts/ci/release-path-acceptance.py
       - scripts/ci/acceptance_diagnostics.py
       - scripts/ci/test_acceptance_diagnostics.py
+      - scripts/ci/naive_certificate_acceptance.py
       - .github/workflows/shoes-source-matrix.yml
 
 permissions:
@@ -37,7 +38,14 @@ jobs:
       - name: Test default Release lifecycle and H2MUX
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: sudo --preserve-env=GITHUB_TOKEN env CI=true PING_RUST_BIN="$PWD/target/debug/ping-rust" PING_RUST_SING_BOX_BIN="$RUNNER_TEMP/sing-box-1.14.2-linux-amd64/sing-box" /usr/bin/python3 scripts/ci/release-path-acceptance.py
+        run: sudo --preserve-env=GITHUB_TOKEN env CI=true PING_RUST_DIAGNOSTICS_DIR="$RUNNER_TEMP/prs-release-diagnostics" PING_RUST_BIN="$PWD/target/debug/ping-rust" PING_RUST_SING_BOX_BIN="$RUNNER_TEMP/sing-box-1.14.2-linux-amd64/sing-box" /usr/bin/python3 scripts/ci/release-path-acceptance.py
+      - name: Upload redacted child stderr on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: default-release-redacted-stderr
+          path: ${{ runner.temp }}/prs-release-diagnostics/redacted/*.stderr.log
+          if-no-files-found: ignore
   compare:
     name: Source matrix (${{ matrix.source }})
     runs-on: ubuntu-24.04
