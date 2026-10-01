@@ -19,7 +19,16 @@ pub(super) fn write_test_certificate(
     certificate: &Path,
     key: &Path,
 ) -> Result<NaiveCertificateValidity> {
-    let now = OffsetDateTime::from_unix_timestamp(OffsetDateTime::now_utc().unix_timestamp())?;
+    write_test_certificate_at(server_name, certificate, key, OffsetDateTime::now_utc())
+}
+
+pub(super) fn write_test_certificate_at(
+    server_name: &str,
+    certificate: &Path,
+    key: &Path,
+    now: OffsetDateTime,
+) -> Result<NaiveCertificateValidity> {
+    let now = OffsetDateTime::from_unix_timestamp(now.unix_timestamp())?;
     let mut params = CertificateParams::new(vec![server_name.to_owned()])?;
     params.not_before = now - Duration::hours(1);
     params.not_after = params.not_before + Duration::days(397);

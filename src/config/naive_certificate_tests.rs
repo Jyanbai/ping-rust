@@ -73,7 +73,7 @@ async fn naive_test_certificate_actual_der_has_bounded_validity_and_metadata() {
         after - before <= Duration::days(397),
         "Chromium rejects excessively long validity"
     );
-    assert_eq!(after - before, Duration::days(397));
+    assert_eq!(after - before, Duration::days(199));
     let profile = serde_json::to_value(&result.profile).unwrap();
     assert_eq!(
         profile["naive_certificate_validity"]["not_before"],
@@ -114,7 +114,11 @@ async fn naive_legacy_expiring_and_external_profiles_are_distinguished() {
         .unwrap()
         .remove("naive_certificate_validity");
     let mut legacy: ManagedProfile = serde_json::from_value(json).unwrap();
-    let now = OffsetDateTime::now_utc().unix_timestamp();
+    let now = Date::from_calendar_date(2026, Month::October, 1)
+        .unwrap()
+        .midnight()
+        .assume_utc()
+        .unix_timestamp();
     assert!(legacy
         .naive_certificate_warning(now)
         .unwrap()
@@ -122,11 +126,14 @@ async fn naive_legacy_expiring_and_external_profiles_are_distinguished() {
     legacy.self_signed_certificate = false;
     assert!(legacy.naive_certificate_warning(now).is_none());
     legacy.self_signed_certificate = true;
-    for (seconds, expected) in [(29 * 86400, "不足 30 天"), (0, "已过期"), (-1, "已过期")]
-    {
+    for (remaining, expected) in [
+        (199 * 86400 / 3 - 1, "不足有效期的 1/3"),
+        (0, "已过期"),
+        (-1, "已过期"),
+    ] {
         legacy.naive_certificate_validity = Some(NaiveCertificateValidity {
-            not_before: now - 3600,
-            not_after: now + seconds,
+            not_before: now + remaining - 199 * 86400,
+            not_after: now + remaining,
         });
         assert!(legacy
             .naive_certificate_warning(now)
@@ -134,10 +141,118 @@ async fn naive_legacy_expiring_and_external_profiles_are_distinguished() {
             .contains(expected));
     }
     legacy.naive_certificate_validity = Some(NaiveCertificateValidity {
-        not_before: now - 3600,
-        not_after: now + 30 * 86400,
+        not_before: now + 199 * 86400 / 3 - 199 * 86400,
+        not_after: now + 199 * 86400 / 3,
     });
     assert!(legacy.naive_certificate_warning(now).is_none());
+    legacy.naive_certificate_validity = Some(NaiveCertificateValidity {
+        not_before: now - 3600,
+        not_after: now - 3600 + 397 * 86400,
+    });
+    assert!(legacy
+        .naive_certificate_warning(now)
+        .unwrap()
+        .contains("超过"));
+    legacy
+        .naive_certificate_validity
+        .as_mut()
+        .unwrap()
+        .not_after = now - 3600 + 199 * 86400;
+    assert!(legacy.naive_certificate_warning(now).is_none());
+}
+
+#[test]
+fn naive_sc081_phase_boundaries_use_injected_not_before_in_actual_certificate() {
+    let root = tempfile::tempdir().unwrap();
+    for (year, before_days, after_days) in [(2026, 397, 199), (2027, 199, 99), (2029, 99, 46)] {
+        let boundary = Date::from_calendar_date(year, Month::March, 15)
+            .unwrap()
+            .midnight()
+            .assume_utc();
+        for (offset, days) in [(-1, before_days), (0, after_days), (1, after_days)] {
+            let not_before = boundary + Duration::seconds(offset);
+            let now = not_before + Duration::hours(1);
+            let certificate = root.path().join("certificate.pem");
+            let key = root.path().join("key.pem");
+            let validity = naive_certificate::write_test_certificate_at(
+                "acceptance.example.invalid",
+                &certificate,
+                &key,
+                now,
+            )
+            .unwrap();
+            let (actual_before, actual_after) = certificate_dates(&certificate);
+            assert_eq!(actual_before, not_before);
+            assert_eq!(
+                actual_after - actual_before,
+                Duration::days(days),
+                "phase boundary: {year}, offset={offset}"
+            );
+            assert_eq!(validity.not_before, actual_before.unix_timestamp());
+            assert_eq!(validity.not_after, actual_after.unix_timestamp());
+        }
+    }
+}
+
+#[test]
+fn naive_warning_scales_for_each_phase_and_respects_original_issue_phase() {
+    let mut profile = ManagedProfile {
+        id: Uuid::nil(),
+        name: "test-naive".to_owned(),
+        port: 443,
+        server_address: None,
+        credentials: Credentials::NaiveProxy {
+            username: String::new(),
+            password: String::new(),
+            server_name: "acceptance.example.invalid".to_owned(),
+            padding: true,
+            udp_enabled: false,
+            fallback: None,
+        },
+        certificate_path: None,
+        certificate_key_path: None,
+        self_signed_certificate: true,
+        naive_certificate_validity: None,
+        h2mux: Default::default(),
+    };
+    for (year, days) in [(2026, 199), (2027, 99), (2029, 46)] {
+        let start = Date::from_calendar_date(year, Month::March, 15)
+            .unwrap()
+            .midnight()
+            .assume_utc()
+            .unix_timestamp();
+        let duration = days * 86400;
+        let end = start + duration;
+        profile.naive_certificate_validity = Some(NaiveCertificateValidity {
+            not_before: start,
+            not_after: end,
+        });
+        let whole_threshold = duration / 3;
+        // Strict inequality at the exact 1/3 point; round fractional-second thresholds upward.
+        let rounded_threshold = (duration + 2) / 3;
+        assert!(profile
+            .naive_certificate_warning(end - rounded_threshold)
+            .is_none());
+        assert!(profile
+            .naive_certificate_warning(end - whole_threshold + 1)
+            .unwrap()
+            .contains("不足有效期的 1/3"));
+    }
+    let start = Date::from_calendar_date(2026, Month::March, 14)
+        .unwrap()
+        .midnight()
+        .assume_utc()
+        .unix_timestamp();
+    profile.naive_certificate_validity = Some(NaiveCertificateValidity {
+        not_before: start,
+        not_after: start + 397 * 86400,
+    });
+    assert!(
+        profile
+            .naive_certificate_warning(start + 2 * 86400)
+            .is_none(),
+        "later policy must not reclassify a compliant earlier-issued certificate"
+    );
 }
 
 #[tokio::test]
