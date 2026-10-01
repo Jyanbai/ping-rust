@@ -1,0 +1,60 @@
+name: shoes source compatibility
+
+on:
+  workflow_call:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - src/**
+      - scripts/ci/shoes-source-matrix.py
+      - scripts/ci/validate-h2mux.py
+      - .github/workflows/shoes-source-matrix.yml
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    name: Source matrix (${{ matrix.source }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        source: [github-release-v0.2.7, verified-pin]
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Install isolated runtime
+        shell: bash
+        env:
+          SOURCE: ${{ matrix.source }}
+        run: |
+          set -euo pipefail
+          if [ "$SOURCE" = github-release-v0.2.7 ]; then
+            curl -fL --retry 3 https://github.com/cfal/shoes/releases/download/v0.2.7/shoes-x86_64-unknown-linux-musl.tar.gz -o "$RUNNER_TEMP/shoes.tar.gz"
+            echo "e60ccde92490624d9ff399dd58e69d4d6943b33c5cc4f0b0d1509b0c644fbc2a  $RUNNER_TEMP/shoes.tar.gz" | sha256sum --check
+            tar -xzf "$RUNNER_TEMP/shoes.tar.gz" -C "$RUNNER_TEMP"
+            sudo install -m 0755 "$RUNNER_TEMP/shoes" /usr/local/bin/shoes
+          else
+            pin="$(sed -n 's/^const SHOES_SCHEMA_REVISION: &str = "\([0-9a-f]*\)";$/\1/p' src/installer.rs)"
+            test "$pin" = 386b11532424b8665ee3e46340c6236fb3c47595
+            cargo install --git https://github.com/cfal/shoes --rev "$pin" --locked --root "$RUNNER_TEMP/shoes-pin"
+            sudo install -m 0755 "$RUNNER_TEMP/shoes-pin/bin/shoes" /usr/local/bin/shoes
+          fi
+          curl -fL --retry 3 https://github.com/SagerNet/sing-box/releases/download/v1.14.2/sing-box-1.14.2-linux-amd64.tar.gz -o "$RUNNER_TEMP/sing-box.tar.gz"
+          echo "a684484d7477d1437282ee411f4d131d0340aaad60a7868841ebd5d87dd8a0c6  $RUNNER_TEMP/sing-box.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/sing-box.tar.gz" -C "$RUNNER_TEMP"
+          echo "PING_RUST_SING_BOX_BIN=$RUNNER_TEMP/sing-box-1.14.2-linux-amd64/sing-box" >> "$GITHUB_ENV"
+      - run: cargo build --locked
+      - name: Probe schema and authenticated data
+        env:
+          SHOES_BIN: /usr/local/bin/shoes
+          PING_RUST_SHOES_E2E_BIN: /usr/local/bin/shoes
+          PING_RUST_BIN: ${{ github.workspace }}/target/debug/ping-rust
+        run: python3 scripts/ci/shoes-source-matrix.py --source '${{ matrix.source }}' --output '${{ runner.temp }}/source-matrix.json'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: source-matrix-${{ matrix.source }}
+          path: ${{ runner.temp }}/source-matrix.json

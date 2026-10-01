@@ -6,6 +6,8 @@ import copy
 import hashlib
 import json
 import os
+import secrets
+import uuid
 import datetime
 import socket
 import subprocess
@@ -15,8 +17,10 @@ import time
 from pathlib import Path
 
 
-USER_ID = "b85798ef-e9dc-46a4-9a87-8da4499d36d0"
-PASSWORD = "h2mux-local-test-password"
+USER_ID = str(uuid.uuid4())
+PASSWORD = secrets.token_urlsafe(24)
+SOCKS_USER = secrets.token_hex(8)
+SOCKS_PASSWORD = secrets.token_urlsafe(24)
 HOST = "h2mux.example.com"
 
 
@@ -72,8 +76,11 @@ def serve_origin(connection):
 def through_socks(proxy_port, origin_port, payload):
     with socket.create_connection(("127.0.0.1", proxy_port), 5) as connection:
         connection.settimeout(20)
-        connection.sendall(b"\x05\x01\x00")
-        assert receive_exact(connection, 2) == b"\x05\x00"
+        connection.sendall(b"\x05\x01\x02")
+        assert receive_exact(connection, 2) == b"\x05\x02"
+        user, password = SOCKS_USER.encode(), SOCKS_PASSWORD.encode()
+        connection.sendall(b"\x01" + bytes([len(user)]) + user + bytes([len(password)]) + password)
+        assert receive_exact(connection, 2) == b"\x01\x00"
         connection.sendall(b"\x05\x01\x00\x01\x7f\x00\x00\x01" + origin_port.to_bytes(2, "big"))
         reply = receive_exact(connection, 4)
         assert reply[:2] == b"\x05\x00", f"SOCKS connect failed: {reply!r}"
@@ -124,9 +131,9 @@ def run_case(shoes, directory, kind, options, cert, key, origin_port):
     server = [{"address": f"127.0.0.1:{server_port}", "protocol": {"type": "tls", "tls_targets": {HOST: {"cert": cert.as_posix(), "key": key.as_posix(), "alpn_protocols": alpn, "protocol": server_inner}}}}]
     outbound = {"address": f"127.0.0.1:{server_port}", "protocol": {"type": "tls", "verify": False, "sni_hostname": HOST, "alpn_protocols": alpn, "protocol": client_inner}}
     if second_port is not None:
-        server.append({"address": f"127.0.0.1:{second_port}", "protocol": {"type": "socks", "udp_enabled": False}})
-        outbound = {"chain": [outbound, {"address": f"127.0.0.1:{second_port}", "protocol": {"type": "socks"}}]}
-    client = [{"address": f"127.0.0.1:{proxy_port}", "protocol": {"type": "socks", "udp_enabled": False}, "rules": [{"masks": "0.0.0.0/0", "action": "allow", "client_chains": outbound}]}]
+        server.append({"address": f"127.0.0.1:{second_port}", "protocol": {"type": "socks", "udp_enabled": False, "username": SOCKS_USER, "password": SOCKS_PASSWORD}})
+        outbound = {"chain": [outbound, {"address": f"127.0.0.1:{second_port}", "protocol": {"type": "socks", "username": SOCKS_USER, "password": SOCKS_PASSWORD}}]}
+    client = [{"address": f"127.0.0.1:{proxy_port}", "protocol": {"type": "socks", "udp_enabled": False, "username": SOCKS_USER, "password": SOCKS_PASSWORD}, "rules": [{"masks": "0.0.0.0/0", "action": "allow", "client_chains": outbound}]}]
     server_path = directory / f"{kind}-server.yaml"
     client_path = directory / f"{kind}-client.yaml"
     server_path.write_text(json.dumps(server))
@@ -158,7 +165,7 @@ def run_case(shoes, directory, kind, options, cert, key, origin_port):
             sing_box = os.environ.get("PING_RUST_SING_BOX_BIN")
             if kind == "trojan" and sing_box:
                 sing_port = free_port()
-                sing_config = {"inbounds": [{"type": "socks", "tag": "in", "listen": "127.0.0.1", "listen_port": sing_port}], "outbounds": [{"type": "trojan", "tag": "out", "server": "127.0.0.1", "server_port": server_port, "password": PASSWORD, "tls": {"enabled": True, "server_name": HOST, "insecure": True, "alpn": alpn}, "multiplex": {"enabled": True, "protocol": "h2mux", "max_connections": options[0], "min_streams": options[1], "max_streams": 0, "padding": options[2]}}], "route": {"final": "out"}}
+                sing_config = {"inbounds": [{"type": "socks", "tag": "in", "listen": "127.0.0.1", "listen_port": sing_port, "users": [{"username": SOCKS_USER, "password": SOCKS_PASSWORD}]}], "outbounds": [{"type": "trojan", "tag": "out", "server": "127.0.0.1", "server_port": server_port, "password": PASSWORD, "tls": {"enabled": True, "server_name": HOST, "insecure": True, "alpn": alpn}, "multiplex": {"enabled": True, "protocol": "h2mux", "max_connections": options[0], "min_streams": options[1], "max_streams": 0, "padding": options[2]}}], "route": {"final": "out"}}
                 sing_path = directory / "sing-box-trojan.json"
                 sing_path.write_text(json.dumps(sing_config))
                 subprocess.run([sing_box, "check", "-c", str(sing_path)], check=True)
@@ -170,7 +177,7 @@ def run_case(shoes, directory, kind, options, cert, key, origin_port):
                         through_socks(sing_port, origin_port, bytes(range(256)) * 4096)
                         print("PASS sing-box 1.14.2 -> pinned shoes Trojan H2MUX: small/1 MiB half-close")
                     except Exception:
-                        print((directory / "sing-box.log").read_text(errors="replace"))
+                        print("sing-box data-plane failed (private log retained until fixture cleanup)")
                         raise
                     finally:
                         sing_process.terminate()
@@ -180,8 +187,7 @@ def run_case(shoes, directory, kind, options, cert, key, origin_port):
                             sing_process.kill()
                             sing_process.wait()
         except Exception:
-            print((directory / f"{kind}-server.log").read_text(errors="replace"))
-            print((directory / f"{kind}-client.log").read_text(errors="replace"))
+            print(f"{kind} server/client data-plane failed (private logs retained until fixture cleanup)")
             raise
         finally:
             for process in (client_proc, server_proc):

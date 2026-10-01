@@ -29,6 +29,8 @@ env:
   SHOES_VERSION: 0.2.8
 
 jobs:
+  source-matrix:
+    uses: ./.github/workflows/shoes-source-matrix.yml
   dry-run:
     runs-on: ubuntu-24.04
     steps:
