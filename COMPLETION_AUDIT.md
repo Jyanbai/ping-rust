@@ -545,8 +545,8 @@ H2MUX 在 Release v0.2.7 **可用**，不新增来源拦截。热重载 gating �
 
 | 项目 | 时间（本机 HKT） | 状态 | 关键命令 / 脱敏输出摘要 |
 |---|---|---|---|
-| 撤销临时 OpenWrt 直连例外 | 阶段 0 既有记录 | 通过 | 仅删除测试 VPS 的运行时集合成员；`nft get element inet passwall2 psw2_direct '{ <VPS_IPV4> }'` 随后非零，成员不存在；其它规则未修改。 |
-| Windows 测试客户端和私有配置清理 | 阶段 0 既有记录 | 通过 | 运行中测试客户端 0；删除 10 个含凭据的本地测试文件；原始备份目录保留。 |
+| 撤销临时 OpenWrt 直连例外 | 13:04:06–13:04:07 | 通过 | 仅删除测试 VPS 的运行时集合成员；`nft get element inet passwall2 psw2_direct '{ <VPS_IPV4> }'` 随后非零，成员不存在；其它规则未修改。 |
+| Windows 测试客户端和私有配置清理 | 13:04:08 | 通过 | 运行中测试客户端 0；删除 10 个含凭据的本地测试文件；原始备份目录保留。 |
 | SSH ProxyJump / HK agent | 13:33:32 | 通过 | `ssh prs-test` 使用 ProxyJump HK；HK `id -u` 为 1000；sing-box version 为 1.14.2；curl / python3 可用。 |
 | 服务基线 | 13:30:14 | 通过 | `systemctl show shoes.service -p MainPID -p ActiveState`：2546772 / active；来源 github-release v0.2.7。TCP 48662、38231。系统空间 746 MiB、RAM 1964 MiB、swap 3071 MiB；未清理其它软件。 |
 | FIX_SHA 安装命令 | 13:38:08–13:40:33 | 通过（命令退出）；产物对应关系未验证 | `cargo install --git https://github.com/Jyanbai/ping-rust.git --rev <FIX_SHA> --locked` exit=0；`install-self --install-dir /usr/local/bin --quiet --no-bootstrap` exit=0。复用此前测试 build-dir，CARGO_BUILD_JOBS=1；构建仅 2.35 秒。安装后 MainPID、config/state 哈希与基线相同。后续只读检查发现产物缺少修复提示，不能把 exit=0 当作已验证 FIX_SHA 产物。 |
@@ -580,3 +580,10 @@ H2MUX 在 Release v0.2.7 **可用**，不新增来源拦截。热重载 gating �
 6. 实际 config SHA-256：`56882c35a952aefca474f19f1c8f2c19a81cf96a9b2ef5e1f8805098c9aa60d8`；state SHA-256：`9b4dfb8eac131d1cfd0e261d81394cb69a9ca41ebd2403de1d3c268805277871`。
 
 本轮 R2 **失败保留**。下一步候选为使用全新的隔离 build-dir 重建同一 FIX_SHA，核对实际修复符号后从 R1 重验；此步骤尚未执行，等待用户决定。
+
+
+### 闸门后审计与 CI 状态追加
+
+审计提交 `aeb0b34` 推送后触发新 head 检查。来源 workflow run `36821437871` 的 Default Release systemd acceptance job `110237660177` 在 **2026-10-01 05:47:38 UTC** 于 `ping-rust bootstrap` 失败；日志仅显示命令退出导致断言失败，私有 stdout/stderr 未公开，原因**未定位**。这不改写 FIX_SHA 当时的 23/23 绿检查，也不能把历史绿检查视为新 head 全绿。已在 PR #19 追加报告，未重跑或修正。
+
+13:48:01 HKT 从 HK agent 只读确认：`find /home/agent/prs-v021-acceptance -maxdepth 1 -type f` 无输出，`pgrep -u agent -x sing-box` 无匹配；本轮临时客户端凭据和进程已清理。原始本机配置 / full 备份仍存在。按用户 R2 失败闸门停止，非一次性服务端保持当前测试状态，最终 purge / 原始环境恢复尚未执行。
