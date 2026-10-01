@@ -14,6 +14,35 @@ pub struct NaiveCertificateValidity {
     pub not_after: i64,
 }
 
+// CA/B Forum Ballot SC-081v3:
+// https://cabforum.org/2025/04/11/ballot-sc081v3-introduce-schedule-of-reducing-validity-and-data-reuse-periods/
+// Apply each stage to the certificate's notBefore (UTC), not today's date.
+// Test certificates use one day less than the limit. Public Web PKI policy is
+// used for Chromium compatibility here; actual client acceptance must be tested.
+const VALIDITY_PHASES: &[(i64, i64)] = &[
+    (1_868_227_200, 47),  // 2029-03-15
+    (1_805_068_800, 100), // 2027-03-15
+    (1_773_532_800, 200), // 2026-03-15
+];
+
+fn maximum_validity_days(not_before: i64) -> i64 {
+    VALIDITY_PHASES
+        .iter()
+        .find(|(start, _)| not_before >= *start)
+        .map_or(398, |(_, days)| *days)
+}
+
+impl NaiveCertificateValidity {
+    fn duration_seconds(self) -> i64 {
+        self.not_after.saturating_sub(self.not_before)
+    }
+
+    pub fn needs_regeneration(self) -> bool {
+        let duration = self.duration_seconds();
+        duration <= 0 || duration > maximum_validity_days(self.not_before) * 86400
+    }
+}
+
 pub(super) fn write_test_certificate(
     server_name: &str,
     certificate: &Path,
@@ -31,7 +60,8 @@ pub(super) fn write_test_certificate_at(
     let now = OffsetDateTime::from_unix_timestamp(now.unix_timestamp())?;
     let mut params = CertificateParams::new(vec![server_name.to_owned()])?;
     params.not_before = now - Duration::hours(1);
-    params.not_after = params.not_before + Duration::days(397);
+    params.not_after = params.not_before
+        + Duration::days(maximum_validity_days(params.not_before.unix_timestamp()) - 1);
     let validity = NaiveCertificateValidity {
         not_before: params.not_before.unix_timestamp(),
         not_after: params.not_after.unix_timestamp(),
@@ -59,8 +89,9 @@ impl ManagedProfile {
             "请执行 regenerate-test-certificate，或在更改配置菜单中选择“重新生成测试证书”";
         match self.naive_certificate_validity {
             None => Some(format!("警告：NaiveProxy 旧证书缺少有效期元数据；v0.2.0 的超长有效期与 Chromium 系客户端不兼容。{regenerate}。")),
+            Some(validity) if validity.needs_regeneration() => Some(format!("警告：NaiveProxy 测试证书记录的有效期无效或超过其 notBefore 所在阶段的 SC-081v3 上限。{regenerate}。")),
             Some(validity) if validity.not_after <= now => Some(format!("警告：NaiveProxy 测试证书已过期。{regenerate}。")),
-            Some(validity) if validity.not_after.saturating_sub(now) < 30 * 86400 => Some(format!("警告：NaiveProxy 测试证书剩余不足 30 天。{regenerate}。")),
+            Some(validity) if i128::from(validity.not_after.saturating_sub(now)) * 3 < i128::from(validity.duration_seconds()) => Some(format!("警告：NaiveProxy 测试证书剩余不足有效期的 1/3。{regenerate}。")),
             _ => None,
         }
     }
@@ -72,8 +103,12 @@ impl ManagedProfile {
             return Vec::new();
         }
         let mut lines = Vec::new();
-        if self.naive_certificate_validity.is_some() {
-            lines.push("NaiveProxy 测试证书有效期：397 天".to_owned());
+        if let Some(validity) = self.naive_certificate_validity {
+            lines.push(format!(
+                "NaiveProxy 测试证书记录的有效期：{} 天",
+                validity.duration_seconds() / 86400
+            ));
+            lines.push("NaiveProxy 测试证书采用 SC-081v3 时间表".to_owned());
         }
         let expiry = self
             .naive_certificate_validity

@@ -1439,7 +1439,7 @@ pub(crate) async fn regenerate_test_certificate(id: Uuid) -> Result<()> {
     let result =
         deployment::update_and_activate(id, config::ProfileChange::RegenerateNaiveCertificate)
             .await?;
-    println!("NaiveProxy 测试证书已重新生成（397 天）；受控重启已完成。");
+    println!("NaiveProxy 测试证书已重新生成；受控重启已完成。");
     print_profile_details_with_qr(&result.profile, None);
     Ok(())
 }

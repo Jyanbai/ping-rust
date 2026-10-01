@@ -73,7 +73,17 @@ async fn naive_test_certificate_actual_der_has_bounded_validity_and_metadata() {
         after - before <= Duration::days(397),
         "Chromium rejects excessively long validity"
     );
-    assert_eq!(after - before, Duration::days(199));
+    let issue_date = before.date();
+    let expected_days = if issue_date >= Date::from_calendar_date(2029, Month::March, 15).unwrap() {
+        46
+    } else if issue_date >= Date::from_calendar_date(2027, Month::March, 15).unwrap() {
+        99
+    } else if issue_date >= Date::from_calendar_date(2026, Month::March, 15).unwrap() {
+        199
+    } else {
+        397
+    };
+    assert_eq!(after - before, Duration::days(expected_days));
     let profile = serde_json::to_value(&result.profile).unwrap();
     assert_eq!(
         profile["naive_certificate_validity"]["not_before"],

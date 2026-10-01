@@ -77,7 +77,12 @@ def verify_naive_certificate_lifecycle(binary, run, state, pid, free_port):
     parse = lambda value: datetime.strptime(value, "%b %d %H:%M:%S %Y %Z").replace(tzinfo=timezone.utc).timestamp()
     start, end = parse(certificate["notBefore"]), parse(certificate["notAfter"])
     assert start <= datetime.now(timezone.utc).timestamp()
-    assert end - start == 397 * 86400
+    # Keep this independent from the Rust implementation to check actual DER.
+    phase = datetime.fromtimestamp(start, timezone.utc).date()
+    days = (46 if phase >= datetime(2029, 3, 15).date() else
+            99 if phase >= datetime(2027, 3, 15).date() else
+            199 if phase >= datetime(2026, 3, 15).date() else 397)
+    assert end - start == days * 86400
     assert fresh["naive_certificate_validity"] == {"not_before": int(start), "not_after": int(end)}
     assert "旧证书" not in run("info", name)[0]
-    print("PASS Naive certificate migration: 397-day actual certificate; dry-run rejection; controlled restart; exact activation rollback")
+    print("PASS Naive SC-081v3 certificate migration: scheduled actual certificate; dry-run rejection; controlled restart; exact activation rollback")

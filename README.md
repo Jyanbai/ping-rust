@@ -378,9 +378,9 @@ sudo prs add naiveproxy --server-name naive.example.com --self-signed
 
 用户名、密码默认安全随机生成，fallback 可选绝对静态目录路径。UDP/UoT 尚未完成端到端验证，首版仅支持 TCP。sing-box 原生 `type: naive` 导出只适用于包含 Naive/Chromium 支持的平台或特殊构建；Mihomo、NekoBox、标准 URI、普通二维码和 chain outbound 暂不支持。当前 sing-box Naive outbound 明确拒绝 `insecure: true`，因此自签名测试导出会嵌入公开证书供客户端验证，绝不导出服务器私钥。
 
-NaiveProxy 自签测试证书从生成时刻前 1 小时开始生效，有效期为 397 天；其他协议的自签生成方式保持原样。添加和查看会显示 UTC 到期日期，`sudo prs status`（或 `service status`、菜单中的服务状态）会在剩余不足 30 天或已过期时警告。证书到期后，执行 `sudo prs regenerate-test-certificate <配置名称>`，或在“更改配置”菜单中选择“重新生成测试证书”。操作经过 shoes dry-run、原子提交和受控重启，失败会恢复原配置、证书及服务状态。重新生成后须重新导出客户端配置并信任新证书。
+NaiveProxy 自签测试证书从生成时刻前 1 小时开始生效，按 **CA/B Forum Ballot SC-081v3** 时间表及证书自身的 `notBefore` 确定有效期，并比该阶段上限少 1 天：2026-03-15 起 199 天，2027-03-15 起 99 天，2029-03-15 起 46 天（更早的 `notBefore` 为 397 天）。有效期会逐步缩短；2029 年起大约每 6 周需要重新生成一次，生产环境应使用受信任证书。其他协议的自签生成方式保持原样；最终兼容性以客户端实测结果为准。添加和查看会显示实际有效期和 UTC 到期日期，`sudo prs status`（或 `service status`、菜单中的服务状态）会在剩余不足该证书有效期的 1/3 或已过期时警告。证书到期后，执行 `sudo prs regenerate-test-certificate <配置名称>`，或在“更改配置”菜单中选择“重新生成测试证书”。操作经过 shoes dry-run、原子提交和受控重启，失败会恢复原配置、证书及服务状态。重新生成后须重新导出客户端配置并信任新证书。
 
-**v0.2.0 迁移说明**：旧版 NaiveProxy 自签测试证书有效期过长，与 Chromium 系客户端不兼容。升级后，缺少有效期元数据的旧自签 NaiveProxy 节点会提示需要重新生成；不会自动替换旧证书。仅调整 NaiveProxy 测试模式，因为实机确认的问题来自其 Chromium 证书有效期校验；生产受信任证书和其他协议证书不受此次变更影响。证书有效期修复不代表客户端信任已通过实机验证。
+**v0.2.0 迁移说明**：旧版 NaiveProxy 自签测试证书有效期过长，与 Chromium 系客户端不兼容。升级后，缺少有效期元数据的旧自签 NaiveProxy 节点，以及记录的有效期超过其 `notBefore` 所在阶段上限的测试节点（例如此前生成的 397 天证书），都会提示需要重新生成；不会自动替换旧证书。仅调整 NaiveProxy 测试模式，因为实机确认的问题来自其 Chromium 证书有效期校验；生产受信任证书和其他协议证书不受此次变更影响。证书有效期修复不代表客户端信任已通过实机验证。
 
 AnyTLS 默认使用普通 TLS 外层；`--user` 可重复，格式为 `[名称:]密码`。未提供用户时自动创建一个随机密码用户：
 
