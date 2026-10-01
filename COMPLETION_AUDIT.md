@@ -13,7 +13,7 @@
 | Update Center 与降级保护 | 单元测试 | `cli::tests::update_status_comparison_is_fail_soft_and_drift_is_explicit`；`installer::tests::known_release_downgrade_is_blocked_unless_explicitly_allowed` |
 | H2MUX | CI 容器、单元测试 | `.github/workflows/shoes-schema.yml` 的 sing-box 检查与 watcher probe；`client::tests::h2mux_exports_only_valid_sing_box_preferences` |
 | SOCKS5、Snell v3、NaiveProxy、SS2022+ShadowTLS v3 | CI systemd acceptance、单元测试 | `.github/workflows/ubuntu-acceptance.yml` 的 `Verify prs numeric PTY flow for all protocol presets`；`config::tests::socks5_generation_round_trip_and_edits_preserve_exact_auth_and_udp_state`、`config::tests::snell_v3_yaml_matches_fixed_shoes_schema`、`config::tests::naiveproxy_generates_tls_h2_inner_auth_and_random_credentials`、`config::tests::shadowtls_v3_generates_nested_tcp_only_shadowsocks` |
-| 实机 VPS v0.2.0 全量清单 | 失败（第 1 项闸门） | 2026-10-01，HK 与用户更换的新 VPS 均完成 MERGE_SHA 零输入部署，但 Windows sing-box 外部 Reality 请求均失败；第 2–8 项未验证，停止发版。HK 已按用户要求清理。详见“v0.2.x 实机 VPS 验收”。 |
+| 实机 VPS v0.2.0 全量清单 | 失败（最新为第 2 项闸门） | 2026-10-01，首次 Reality 外部失败记录保留；追加定位为大陆 OpenWrt/Passwall2 测试路径问题，用户授权临时直连例外后同配置外部请求通过。随后新增认证 SOCKS5 节点使 MainPID 改变，Hot Reload 失败；改端口/删除和第 3–8 项未验证，停止发版。详见“v0.2.x 实机 VPS 验收”。 |
 
 ### 证据边界
 
@@ -88,6 +88,67 @@
 | 8. 本次部署 uninstall --purge | 未验证 | 新 VPS 测试前 purge 成功，不等于本次部署后的最终卸载验收；保留当前实例供定位。 |
 
 新 VPS 第 1 项再次触发停止闸门，已停止后续验收和发版，等待用户处理。旧 HK 失败记录保留；没有 release PR、v0.2.1 tag、GitHub Release 或 crates.io 发布，阶段 4 均未验证。
+
+### 2026-10-01：Reality 排查与用户授权的环境修正
+
+本节为后续追加结论，以上首次失败及其未验证项保持原样。仍测试 MERGE_SHA `74b39c86d1065c1fb483c4c7c2f163976f120f2f`；未修改代码、shoes pin、shoes 二进制、节点凭据、unit 或系统时钟。先完成只读排查；用户随后明确选择“按 (a) 修正环境并重测”，授权修正测试路径并恢复原验收顺序。
+
+下表时间均为 **2026-10-01，Asia/Hong_Kong（UTC+08:00），Windows 采集时钟**。VPS/HK/OpenWrt 原生日志另外保留各自主机时间；VPS 比 Windows 快约 43.6 秒，相关日志按实测差值对齐。日志摘要省略公网地址、认证字段和分享链接；命令中的 `<...>` 是脱敏占位符。
+
+| 排查步骤 | 时间 | 实际命令 / 比较方式 | 脱敏输出与状态 |
+|---|---|---|---|
+| 客户端机器与本机网络 | 12:11:22 | `Get-CimInstance Win32_OperatingSystem`；`Get-NetAdapter`；`Get-NetRoute -DestinationPrefix '0.0.0.0/0','::/0'`；读取代理是否启用 | 通过：Windows 11 10.0.22631，本机 Codex 执行环境；Realtek 有线以太网 Up，IPv4 默认路由在该接口；未见活动 VPN 适配器，WinINET 代理未启用。用户确认在中国大陆，上游 OpenWrt 启用 Passwall2；本机无 VPN 不代表路由器无透明代理。 |
+| VPS 地址族与 NAT 线索 | 12:14:00 | `ip -j address show`；`ip -j route show table main`；`curl -4 https://api.ipify.org`；私有导出地址/端口比较 | 通过：导出服务器与 SSH 公网目标一致，地址族 IPv4，端口与 profile/监听一致；VPS 网卡实际为私网 IPv4，出口与 VPS 公网 IP 一致。另有 WARP 的 IPv4/IPv6 接口。云端 NAT/端口映射实现细节未验证；后续 HK 和大陆直连证实本端口实际可达。 |
+| IPv6 出站 | 12:14:00 | `curl -6 --fail --silent --show-error --connect-timeout 5 --max-time 10 https://api64.ipify.org` | 失败：退出 7，`Could not connect to server`。不能把存在 WARP IPv6 地址写成 IPv6 出站成功。 |
+| 服务与配置基线 | 12:14:00 | `systemctl show shoes.service -p MainPID -p ActiveState -p ExecStart`；`sha256sum /etc/shoes/config.yaml /etc/shoes/ping-rust-state.json` | 通过：Debian 13.4、KVM x86_64；active/running，MainPID `2545078`；配置和 state 哈希取得。只读诊断及 Reality 环境修正前后两份哈希一致，直到后续授权新增 SOCKS5。 |
+| 同版本 Linux 客户端 | 12:15:29 / 12:19:13 | GitHub API 固定 `v1.14.2` 资产；`Get-FileHash -Algorithm SHA256`；私有目录中的 `sing-box-1.14.2 version` | 通过：官方 Linux amd64 压缩包 SHA-256 与 API digest 一致；客户端 1.14.2，revision `af6e64c3b69e6132ebaee0e1a3d24e93903f6709`。没有使用 VPS 原有 1.13.11 或 HK 原有 1.15.0-alpha.4 代替版本对照。 |
+| 回环配置校验 | 12:19:14 | `sing-box-1.14.2 check -c <PRIVATE_LOOPBACK_CONFIG>` | 通过：退出 0。同一导出 outbound 仅把 server 改为 `127.0.0.1`；增加 loopback 带认证 mixed 入口、明确 route final 和 debug 日志。诊断目录 0700、配置 0600，不改运行中服务。 |
+| 回环 Reality 请求 | 12:19:15 | `curl --noproxy '' --socks5-hostname 127.0.0.1:<LOCAL_PORT> --proxy-user <AUTH> --fail --silent --show-error --max-time 25 https://api.ipify.org` | 通过：退出 0，用时 `0.531s`，出口与 VPS 公网 IP 一致；客户端 VLESS outbound 完成上传/下载。回环成功后转网络路径排查。 |
+| 同时跟踪服务端日志 | 12:19:14–12:19:16 | `timeout 45 journalctl -u shoes.service -f -n 0 -o short-iso-precise --no-pager`，同时启动 sing-box debug | 通过：实际同步采集；回环成功请求期间无新增 shoes journal 行。未将“没有日志”写成握手失败原因。 |
+| 大陆 TCP 与 Reality 重试 | 12:22:12–12:22:28 | `socket.create_connection((<VPS_IPV4>,48662),timeout=8)`；同上带认证 curl；VPS 同时 `timeout 40 tcpdump -ni any -tttt -q -s 128 -l 'tcp port 48662'` | 失败：客户端 TCP connect 返回成功，但 Reality curl 退出 97，用时 `15.047s`，VLESS `context deadline exceeded`。VPS 抓包已启动，期间未出现该端口报文，shoes journal 也无新增行；客户端 TCP connect 不能单独证明 SYN 到达 VPS。 |
+| VPS 防火墙 / 云安全组 | 12:22:28 | `ufw status verbose`（存在时）；`nft list ruleset`；`iptables-save`；`ip6tables-save` | 通过：ufw 未安装；INPUT 为 accept，没有对 Reality 端口的 drop，Docker 的 FORWARD/drop 仅针对其容器转发。用户确认云安全组“都开放了”；云控制台独立检查为未验证。 |
+| HK 登录身份 | 12:22:10–12:22:11 | `ssh -i <EXISTING_KEY> agent@<HK_ADDRESS>`；`id`；`pwd` | 通过：现有 SSH key 直接登录 agent，uid/gid `1000`，目录 `/home/agent`；后续客户端在自有私有目录执行，未使用 sudo。没有重新安装 HK 上已清理的 ping-rust/shoes。 |
+| HK 固定版本与配置 | 12:24:16–12:24:20 | agent 在自有目录下载官方 1.14.2 包、`sha256sum`、解包、`sing-box version`、`sing-box check -c <PRIVATE_CONFIG>` | 通过：下载 SHA-256 与已验证官方 digest 一致；版本 1.14.2，配置 check 退出 0，使用原 VPS 公网地址/端口与原 Reality 凭据。 |
+| HK 网络与 Reality | 12:24:21–12:24:24 | HK `socket.create_connection` 与同上带认证 curl；VPS `tcpdump -nni any -tttt -s 128 -l 'tcp port 48662'`；同步 `journalctl -u shoes -f` | 通过：TCP connect `0.059s`；Reality 请求退出 0，用时 `0.656s`，出口与 VPS 公网 IP 一致。抓包含 loopback SYN 正对照、HK SYN/SYN-ACK 和双向有效载荷。仅 TCP connect 后主动关闭的探针产生 `EOF while reading`，不归因于成功的 Reality 请求。 |
+| OpenWrt 活动透明代理 | 12:25:16–12:26:31 | 现有 key 登录网关；`pgrep -af 'xray|sing-box|passwall2'`；`nft list ruleset`；内存读取 `/tmp/etc/passwall2/acl/default.json` 的路由/嗅探设置 | 通过：Passwall2 enabled，TCP 默认 redirect 到 Xray `2001`，透明入口启用 `destOverride: [http,tls,quic]`，未设置 `routeOnly`；同时看到 xkeen 规则，但其 `xkeen_active_interfaces` 集合为空，不能将本次截获归因于 xkeen。未公开上游节点凭据。 |
+| Passwall2 请求去向日志 | 12:31:24 | `grep -E '<REALITY_PORT>\|<SNI>' /tmp/etc/passwall2/acl/default.log` | 通过：与时间差对齐的原失败和本次失败日志均为 `accepted tcp:<VPS_ADDRESS>:48662 [tcp_redir -> <PASSWALL_UPSTREAM>]`。证实请求进入现有透明代理链；是否由 SNI 覆盖或链上其它环节具体造成丢失仍未验证。 |
+| Reality 字段与密钥 | 12:29:39 | 私有读取 config/state/export；`X25519(private_key).public_key()` 内存比较 | 通过：服务端私钥派生公钥与导出一致；UUID、short ID、SNI、dest 一致；服务端 VLESS、vision=true；客户端 flow=`xtls-rprx-vision`、uTLS enabled、fingerprint=`chrome`；无 multiplex，max_time_diff=`60000ms`。 |
+| SNI IPv4 TLS | 12:29:39 | `curl -4 --noproxy '' --output /dev/null --connect-timeout 5 --max-time 12 --write-out '<HTTP/TLS_TIMINGS>' https://<SNI>/` | 通过：退出 0，HTTP 302，TCP `0.003099s`、TLS `0.049682s`、总计 `0.052983s`，ssl_verify=0。目标站 IPv4 TLS 不存在 15 秒挂起。 |
+| SNI IPv6 TLS | 12:29:39 | 同上 `curl -6` | 失败：退出 6，`Could not resolve host`，没有建立 IPv6 TLS。不得写成 TLS 成功或归因于本次 IPv4 Reality 失败。 |
+| VPS 与 Windows 时钟 | 12:22:12 / 12:29:40 / 12:34:41 / 12:37:17 | `date -u +%s.%N` 往返中点比较；`timedatectl status`；`timedatectl timesync-status`；`w32tm /query /status` | 实测差值：VPS 比 Windows 快 `43.598s`，修正后仍快 `43.577s`；VPS synchronized=yes、NTP active，timesync-status 的 timesync1 DBus 服务不可用；Windows Time 服务未启动，错误 `0x80070426`。未校时；原时差未变且修正后成功，不能认定它是本次根因。 |
+| v0.1.x 生成/导出逻辑比较 | 12:18:28 / 12:37:17 | `git log -p v0.1.20..74b39c8 -- src/config/presets/reality.rs src/client.rs`；`git show v0.1.3:src/config.rs`；`git log -p -G 'max_time_diff\|generate_reality_keypair' v0.1.3..74b39c8 -- src/config.rs` | 通过（源码检查）：v0.1.20 至 MERGE_SHA 的 Reality preset 无改动；client.rs 的 H2MUX 提交 `1549692` 不启用 Reality/Vision 的 mux，实际导出无 multiplex。历史 v0.1.3 同样采用 X25519、base64url、VLESS Vision、short_ids、60 秒容差；SNI 默认与模块组织曾变化。未重跑历史版本，也未借用历史成功记录冒充本次验收。 |
+| 用户授权的环境修正 | 12:34:37–12:34:38 | `nft get element inet passwall2 psw2_direct '{ <VPS_IPV4> }'`；`nft add element inet passwall2 psw2_direct '{ <VPS_IPV4> }'`；再次 get | 通过：原目标不在 direct 集合，新增唯一测试目标后查询成功。只改运行时 set，未修改 UCI、持久防火墙、全局嗅探设置或其它目标；未重启 Passwall2。此例外仍存在，重建防火墙/Passwall2 规则后可能丢失。 |
+| 修正后大陆 Reality | 12:34:42–12:34:45 | 原 Windows sing-box 1.14.2、同一 outbound 配置、同一带认证 curl；同步 VPS tcpdump/journal | **通过（后续重测）**：curl 退出 0，用时 `2.609s`，出口与 VPS 公网 IP 一致；VPS NIC 上出现对应连接及双向数据。shoes MainPID 仍为 `2545078`，config/state 哈希保持不变。原失败记录不改写。 |
+
+**Reality 根因分类：(a) 测试环境问题。** 已确认大陆 OpenWrt/Passwall2 的透明代理路径使该外部请求未到达目标 shoes 监听；同配置回环、HK 和仅增加测试目标直连例外后的大陆请求均成功。此证据不支持将本次 Reality 失败归为 ping-rust 缺陷或 shoes/sing-box 兼容失败。透明代理链中具体导致丢失的内部机制尚未验证；嗅探目标覆盖仅为线索。改进评估另见 [Reality 零输入部署预检提案](docs/REALITY_PREFLIGHT_PROPOSAL.md)，只写提案，未实现。
+
+### 环境修正后恢复验收：Hot Reload 第 2 项失败
+
+用户授权修正环境后恢复原验收；12:36:02 实际执行：
+
+```sh
+sudo ping-rust add socks5 --name acceptance-hot-reload --port 38231 --yes
+```
+
+- 命令退出 0，输出“部署成功，shoes 服务已启动”；生成的 SOCKS5 用户名和密码均非空，不启用无认证模式。
+- 新增前 MainPID `2545078`；新增后 MainPID **`2546772`**；`ss -ltnp` 显示 Reality TCP `48662` 与新 SOCKS5 TCP `38231`，服务 active。
+- VPS 原生 journal 时间 `12:36:47.733248+08:00` 为 `Stopping shoes.service`，`12:36:47.744175+08:00` 为 `Started shoes.service`，确认是 systemd 重启；不是仅凭 PID 猜测。
+- 初步定位：安装来源实际是 `github-release` / shoes `v0.2.7`。`src/service.rs::capture_hot_reload_snapshot` 仅对 `verified-pin` 且 revision 等于现有 pin 的实例返回快照；该 Release 返回 None，`src/deployment.rs::plan_apply` 选择 Activate，随后 `activate_and_verify` 重启服务。源码与实际路径吻合；未换用 pin 构建掩盖默认安装路径的验收失败。
+
+| 恢复后的验收项 | 最新结果 | 边界 |
+|---|---|---|
+| 1. 首次零输入部署 + Reality 外部请求 | 通过（后续重测） | 首次部署证据沿用前次实际执行；网络修正后原配置外部请求通过，初次失败继续保留。没有 purge/redeploy 或重新生成节点。 |
+| 2a. 新增认证 SOCKS5，MainPID 不变 | **失败** | 新监听出现、认证存在，但 MainPID 改变；触发第 2 项停止闸门。 |
+| 2b. 修改端口 | 未验证 | 新增子项失败后停止，未修改。 |
+| 2c. 删除非最后节点 | 未验证 | 新增子项失败后停止，未删除；保留 Reality 和新增认证 SOCKS5 供定位。 |
+| 3. 四种协议外部抽查 | 未验证 | 第 2 项闸门；创建 SOCKS5 不替代其外部请求验收。 |
+| 4. Chain / Pool / 路由 / 断链 | 未验证 | 第 2 项闸门。 |
+| 5. Update Center | 未验证 | 第 2 项闸门。 |
+| 6. backup → 修改 → restore | 未验证 | 第 2 项闸门。 |
+| 7. reboot 后恢复与 Reality | 未验证 | 第 2 项闸门。 |
+| 8. 本次部署最终 purge | 未验证 | 第 2 项闸门；实例保留。 |
+
+当前停止原因已从 Reality 第 1 项转为 **Hot Reload 第 2 项**。未继续验收、未修改代码、未创建修复或 release PR，未推 tag，未发布 GitHub Release/crates.io；阶段 4 全部未验证。等待用户处理这个新的失败闸门。
 
 ## Goal 4：H2MUX
 
