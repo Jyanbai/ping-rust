@@ -248,6 +248,14 @@ fn executable_mode(_path: &Path) -> Result<u32> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn root_bootstrap_preserves_only_github_token_names() {
+        let command = bootstrap_command(Path::new("/usr/local/bin/ping-rust"), Path::new("/usr/bin/sudo"));
+        let args: Vec<_> = command.get_args().map(|s| s.to_string_lossy().into_owned()).collect();
+        assert_eq!(args, ["--preserve-env=GITHUB_TOKEN,GH_TOKEN", "/usr/local/bin/ping-rust", "bootstrap"]);
+        assert!(command.get_envs().next().is_none());
+    }
+
     #[cfg(unix)]
     #[test]
     fn validates_absolute_non_root_install_directory() {
