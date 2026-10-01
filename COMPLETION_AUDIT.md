@@ -587,3 +587,18 @@ H2MUX 在 Release v0.2.7 **可用**，不新增来源拦截。热重载 gating �
 审计提交 `aeb0b34` 推送后触发新 head 检查。来源 workflow run `36821437871` 的 Default Release systemd acceptance job `110237660177` 在 **2026-10-01 05:47:38 UTC** 于 `ping-rust bootstrap` 失败；日志仅显示命令退出导致断言失败，私有 stdout/stderr 未公开，原因**未定位**。这不改写 FIX_SHA 当时的 23/23 绿检查，也不能把历史绿检查视为新 head 全绿。已在 PR #19 追加报告，未重跑或修正。
 
 13:48:01 HKT 从 HK agent 只读确认：`find /home/agent/prs-v021-acceptance -maxdepth 1 -type f` 无输出，`pgrep -u agent -x sing-box` 无匹配；本轮临时客户端凭据和进程已清理。原始本机配置 / full 备份仍存在。按用户 R2 失败闸门停止，非一次性服务端保持当前测试状态，最终 purge / 原始环境恢复尚未执行。
+
+### 续验收：二进制身份与 bootstrap 诊断（追加）
+
+用户授权隔离重建并从 R1 重新验收。2026-10-01 13:57:48–13:57:49 HKT，只读命令 `sudo sh -c 'command -v ping-rust; readlink -f "$(command -v ping-rust)"'` 两行均为 `/usr/local/bin/ping-rust`。Python 对候选文件计算 SHA-256 并搜索 UTF-8 字节 `本次使用受控重启`：
+
+| 路径 | SHA-256 / 存在情况 | 提示字符串 |
+|---|---|---|
+| `/usr/local/bin/ping-rust` | `a3131804c611815126dcfff4c1623c632598ca34a346c4fd777d0545d8267726` | 不包含 |
+| `/root/.cargo/bin/ping-rust` | `a3131804c611815126dcfff4c1623c632598ca34a346c4fd777d0545d8267726` | 不包含 |
+| VPS `/home/agent/.cargo/bin/ping-rust` | 不存在 | 不适用 |
+| HK agent cargo bin（13:57:47 HKT） | 不存在，UID 1000 | 不适用 |
+
+两份候选二进制相同，**没有证据证明 secure_path 选择了另一份旧二进制**；旧构建产物复用仍是待隔离重建验证的怀疑。前述 R1/R2 原记录保留：它们不能用于证明 FIX_SHA 的实机验收，因为实际二进制未通过身份检查；R2 提示缺失的失败不会改写为通过。当前 service active / MainPID 2548522，config/state 哈希仍与前述失败后的记录一致。
+
+2026-10-01 本次取回 run `36821437871` / job `110237660177` 原始日志，失败原文：`2026-10-01T05:47:38.1888833Z AssertionError: ping-rust bootstrap failed; credential-bearing output suppressed`。原日志没有底层 stderr，无法追溯其具体 HTTP 状态或网络原因。先写脱敏诊断测试，运行时因诊断模块尚未实现而失败；实现后 3 项通过。夹具仅输出白名单错误阶段和 HTTP 状态，不输出任意 stdout/stderr 或凭据；准备在 CI 重现以收集根因证据，尚未认定为限流。

@@ -11,6 +11,7 @@ import threading
 from pathlib import Path
 
 import pexpect
+from acceptance_diagnostics import failure_summary
 
 spec = importlib.util.spec_from_file_location("h2mux_fixture", Path(__file__).with_name("validate-h2mux.py"))
 h2 = importlib.util.module_from_spec(spec)
@@ -21,7 +22,7 @@ BIN = os.environ["PING_RUST_BIN"]
 
 def run(*args):
     result = subprocess.run([BIN, *args], capture_output=True, text=True, timeout=180)
-    assert result.returncode == 0, f"ping-rust {args[0]} failed; credential-bearing output suppressed"
+    assert result.returncode == 0, f"ping-rust {args[0]} failed (exit={result.returncode}): {failure_summary(result.stderr)}"
     return result.stdout, result.stderr
 
 

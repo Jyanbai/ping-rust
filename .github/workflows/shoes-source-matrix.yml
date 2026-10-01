@@ -9,6 +9,8 @@ on:
       - scripts/ci/shoes-source-matrix.py
       - scripts/ci/validate-h2mux.py
       - scripts/ci/release-path-acceptance.py
+      - scripts/ci/acceptance_diagnostics.py
+      - scripts/ci/test_acceptance_diagnostics.py
       - .github/workflows/shoes-source-matrix.yml
 
 permissions:
@@ -25,6 +27,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - run: sudo apt-get update && sudo apt-get install -y python3-pexpect
       - run: cargo build --locked
+      - run: python3 -m unittest discover -s scripts/ci -p test_acceptance_diagnostics.py
       - name: Verify official sing-box
         run: |
           set -euo pipefail
