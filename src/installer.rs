@@ -645,6 +645,44 @@ mod tests {
     use std::io::Read;
 
     #[test]
+    fn release_install_is_pinned_to_verified_tag() {
+        assert_eq!(SHOES_RELEASE_TAG, "v0.2.7");
+        assert_eq!(
+            pinned_release_api(),
+            "https://api.github.com/repos/cfal/shoes/releases/tags/v0.2.7"
+        );
+        assert!(!pinned_release_api().contains("latest"));
+    }
+
+    #[test]
+    fn install_release_never_requests_latest() {
+        let source = include_str!("installer.rs");
+        let body = source
+            .split("async fn install_release(")
+            .nth(1)
+            .and_then(|rest| rest.split("\nasync fn ").next())
+            .unwrap();
+        assert!(body.contains("pinned_release_api()"));
+        assert!(!body.contains("LATEST_RELEASE_API"));
+        assert!(!body.contains("releases/latest"));
+    }
+
+    #[test]
+    fn pinned_release_metadata_must_match_tag() {
+        assert!(ensure_pinned_release_tag("v0.2.7").is_ok());
+        assert!(ensure_pinned_release_tag("v0.3.2").is_err());
+    }
+
+    #[test]
+    fn upstream_newer_release_notice_is_informational_only() {
+        let notice = newer_upstream_release_notice("v0.3.2").unwrap();
+        assert!(notice.contains("v0.3.2") && notice.contains("未经验证"));
+        assert!(newer_upstream_release_notice("v0.2.7").is_none());
+        assert!(newer_upstream_release_notice("v0.2.6").is_none());
+        assert!(newer_upstream_release_notice("garbage").is_none());
+    }
+
+    #[test]
     fn extracts_binary_from_nested_archive() {
         let dir = tempfile::tempdir().unwrap();
         let archive_path = dir.path().join("test.tar.gz");
