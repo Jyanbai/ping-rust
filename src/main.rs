@@ -21,5 +21,11 @@ use clap::Parser;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    if cli::is_version_request(std::env::args()) {
+        let (stdout, stderr) = cli::version_output();
+        println!("{stdout}");
+        eprintln!("{stderr}");
+        return Ok(());
+    }
     cli::run(cli::Cli::parse()).await
 }

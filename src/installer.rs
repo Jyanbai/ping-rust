@@ -212,6 +212,22 @@ fn ensure_pinned_release_tag(tag: &str) -> Result<()> {
     Ok(())
 }
 
+/// 已安装 shoes 来自 GitHub Release 且版本高于固定版本时返回提示；仅展示，绝不自动降级。
+pub fn unverified_installed_notice(known: &ShoesProvenance) -> Option<String> {
+    if known.source != "github-release" {
+        return None;
+    }
+    let raw = known.version.as_deref()?.trim();
+    let installed = release_version(raw)?;
+    let pinned = release_version(SHOES_RELEASE_TAG)?;
+    (installed > pinned).then(|| {
+        let shown = raw.strip_prefix('v').unwrap_or(raw);
+        format!(
+            "当前 shoes v{shown} 未经 ping-rust 验证；可执行 sudo ping-rust update --method release --allow-downgrade 回到 {SHOES_RELEASE_TAG}"
+        )
+    })
+}
+
 /// 上游存在比固定版本更新的 Release 时返回提示文本；仅用于展示，绝不触发安装。
 pub fn newer_upstream_release_notice(upstream_tag: &str) -> Option<String> {
     let upstream = release_version(upstream_tag)?;
@@ -688,7 +704,9 @@ mod tests {
         assert!(unverified_installed_notice(&ShoesProvenance::default()).is_none());
         let mut tagged = release_provenance("v0.3.0");
         tagged.version = Some("v0.3.0".to_owned());
-        assert!(unverified_installed_notice(&tagged).unwrap().contains("shoes v0.3.0 "));
+        assert!(unverified_installed_notice(&tagged)
+            .unwrap()
+            .contains("shoes v0.3.0 "));
     }
 
     #[test]

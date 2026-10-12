@@ -444,7 +444,7 @@ Plain Shadowsocks 命令、旧 state、SIP002 URI/QR 与现有导出保持原行
 - `cargo install --path . --locked` 后执行 `ping-rust --help`
 - `cargo package --locked` / `cargo publish --dry-run --locked`：提交后 strict clean-worktree 候选打包 32 个文件、379.8 KiB（压缩 90.2 KiB），隔离解包重编译与上传前校验通过
 - `cargo-audit 0.22.2`：扫描当前 Cargo.lock 的 224 个依赖，RustSec 1166 条 advisory 中无命中
-- `SOURCE_SNAPSHOT.md`：14/14 section、282,322 bytes，Cargo/主要 Rust（含 deployment/fast_add）/README 全部与真实文件逐字一致
+- `SOURCE_SNAPSHOT.md`：14/14 section、282,322 bytes，Cargo/主要 Rust（含 deployment/fast_add）/README 全部与真实文件逐字一致；已删除，可从 v0.1.9 tag 获取
 - actionlint v1.7.12：`ci.yml`、`release.yml`、`shoes-schema.yml`、`ubuntu-acceptance.yml` 零诊断；ShellCheck v0.11.0 对一键安装器零诊断
 - v0.1.8 产品提交 `960edde`：main CI `29645174662`、Ubuntu 24.04 acceptance `29645174670`、固定 shoes schema `29645174650` 全部成功；tag CI `29645387085` 与 schema `29645387104` 再次成功
 - v0.1.8 Release run `29645387081`：双架构 MUSL、SHA256SUMS、公开一键安装默认 Reality 全部成功；crates.io 公开隔离安装返回 `ping-rust 0.1.8`
