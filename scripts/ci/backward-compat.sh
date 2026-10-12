@@ -14,13 +14,10 @@ mkdir -p "$WORK/new" "$WORK/old" "$WORK/dl"
 
 echo "== install pinned shoes via new build"
 "$NEW" install --method release
-shoes_version="$(/usr/local/bin/shoes --version 2>&1 || true)"
-echo "shoes: $shoes_version"
 
 echo "== generate profiles with new build"
 "$NEW" add reality --port 24431 --name compat-reality --server-address "$SERVER" --yes >/dev/null
-"$NEW" add socks5 --port 24432 --name compat-socks5 --username compat-user \
-  --password compat-pass --server-address "$SERVER" --yes >/dev/null
+"$NEW" add socks5 --port 24432 --name compat-socks5 --server-address "$SERVER" --yes >/dev/null
 socks_uri="$("$NEW" url compat-socks5 | grep -Eo 'socks5?://[^[:space:]]+' | head -n1)"
 test -n "$socks_uri"
 expect "$EXPECT_SCRIPT" "$NEW" add "$socks_uri"
