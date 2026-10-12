@@ -50,6 +50,7 @@ bash <(curl --proto '=https' --tlsv1.2 -fsSL \
 
 ## 功能
 
+- 默认安装经过验收的固定 shoes Release（当前 `v0.2.7`，见 `src/installer.rs` 的 `SHOES_RELEASE_TAG`），不跟随上游 latest；上游有更新 Release 时 Update Center 仅提示“未经验证”，不会自动安装
 - 从 GitHub Release 下载 shoes，自动匹配 x86_64/aarch64 与 GNU/musl，强制校验官方 SHA-256 digest；GNU 资产不兼容时安全回退 static musl
 - 使用 cargo 从与 schema CI 相同的 cfal/shoes 固定源码提交编译安装；低于 1 GiB 内存时自动单任务并关闭 LTO，避免换页风暴
 - 生成经过固定 shoes schema 验证的协议预设；每项均是可直接部署的完整协议栈

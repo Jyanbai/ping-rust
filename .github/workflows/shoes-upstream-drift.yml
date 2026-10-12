@@ -38,6 +38,28 @@ jobs:
             echo "- pinned commit: $pin"
             echo "- upstream HEAD: $upstream"
           } >> "$GITHUB_STEP_SUMMARY"
+      - name: Report newer upstream Release (non-blocking)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          pinned="$(sed -n 's/^pub const SHOES_RELEASE_TAG: &str = "\(v[^"]*\)";$/\1/p' src/installer.rs)"
+          test -n "$pinned"
+          latest="$(gh api repos/cfal/shoes/releases/latest --jq .tag_name)"
+          newest="$(printf '%s\n%s\n' "${pinned#v}" "${latest#v}" | sort -V | tail -n 1)"
+          {
+            echo "### shoes Release drift"
+            echo "- pinned default Release (SHOES_RELEASE_TAG): $pinned"
+            echo "- upstream latest Release: $latest"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$latest" != "$pinned" ] && [ "$newest" = "${latest#v}" ]; then
+            echo "::warning::Upstream shoes Release $latest is newer than pinned SHOES_RELEASE_TAG $pinned (unverified; default install stays on $pinned)."
+            echo "- status: NEWER UPSTREAM RELEASE (unverified, not installed by default)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- status: pinned Release is current" >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: Report no drift
         if: steps.revisions.outputs.pin == steps.revisions.outputs.upstream
         run: |

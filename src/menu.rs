@@ -1593,7 +1593,7 @@ async fn shoes_update_menu() -> Result<()> {
     let report = match selected {
         0 => cli::update_shoes(InstallMethod::Cargo).await?,
         1 => {
-            let target = installer::latest_release_tag().await?;
+            let target = installer::SHOES_RELEASE_TAG.to_owned();
             let known = installer::load_provenance();
             let needs_override = std::path::Path::new(crate::utils::SHOES_BIN).is_file()
                 && !installer::downgrade_allowed(known.version.as_deref(), Some(&target), false);
