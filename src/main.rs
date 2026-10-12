@@ -14,6 +14,7 @@ mod performance;
 mod self_update;
 mod service;
 mod utils;
+mod yaml;
 
 use anyhow::Result;
 use clap::Parser;

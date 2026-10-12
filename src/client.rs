@@ -343,7 +343,7 @@ fn clash_meta(profile: &ManagedProfile, server: &str) -> Result<String> {
             }
         }),
     };
-    serde_yaml::to_string(&json!({ "proxies": [proxy] })).context("生成 Clash Meta YAML 失败")
+    crate::yaml::to_string(&json!({ "proxies": [proxy] })).context("生成 Clash Meta YAML 失败")
 }
 
 fn sing_box(profile: &ManagedProfile, server: &str) -> Result<String> {
@@ -1347,9 +1347,9 @@ mod tests {
         let clash = render(&profile, ClientFormat::ClashMeta, "203.0.113.4").unwrap();
         let sing_box = render(&profile, ClientFormat::SingBox, "203.0.113.4").unwrap();
         let uri = render(&profile, ClientFormat::Nekobox, "203.0.113.4").unwrap();
-        let clash_value: serde_yaml::Value = serde_yaml::from_str(&clash).unwrap();
+        let clash_value: serde_json::Value = crate::yaml::from_str(&clash).unwrap();
         let sing_value: Value = serde_json::from_str(&sing_box).unwrap();
-        assert!(clash_value.is_mapping());
+        assert!(clash_value.is_object());
         assert!(sing_value.is_object());
         assert!(clash.contains("2022-blake3-chacha20-poly1305"));
         assert!(sing_box.contains("2022-blake3-chacha20-poly1305"));
@@ -1546,7 +1546,7 @@ mod tests {
         let clash = render(&tls, ClientFormat::ClashMeta, "203.0.113.5").unwrap();
         let sing_box = render(&tls, ClientFormat::SingBox, "203.0.113.5").unwrap();
         let uri = render(&tls, ClientFormat::Nekobox, "203.0.113.5").unwrap();
-        serde_yaml::from_str::<serde_yaml::Value>(&clash).unwrap();
+        crate::yaml::from_str::<serde_json::Value>(&clash).unwrap();
         serde_json::from_str::<Value>(&sing_box).unwrap();
         url::Url::parse(&uri).unwrap();
         assert!(uri.contains("sni=proxy.example.com"));
@@ -1622,7 +1622,7 @@ mod tests {
         assert!(render(&profile, ClientFormat::Nekobox, "203.0.113.8").is_err());
 
         let clash = render(&profile, ClientFormat::ClashMeta, "203.0.113.8").unwrap();
-        let clash: serde_yaml::Value = serde_yaml::from_str(&clash).unwrap();
+        let clash: serde_json::Value = crate::yaml::from_str(&clash).unwrap();
         assert_eq!(clash["proxies"][0]["type"], "socks5");
         assert_eq!(clash["proxies"][0]["udp"], false);
         assert_eq!(clash["proxies"][0]["username"], "用@户:%");
@@ -1670,7 +1670,7 @@ mod tests {
         assert!(uri.starts_with(&format!("socks5://{username}:generated-secret@")));
 
         let clash = render(&profile, ClientFormat::ClashMeta, "203.0.113.8").unwrap();
-        let clash: serde_yaml::Value = serde_yaml::from_str(&clash).unwrap();
+        let clash: serde_json::Value = crate::yaml::from_str(&clash).unwrap();
         assert_eq!(clash["proxies"][0]["username"], username);
 
         let sing = render(&profile, ClientFormat::SingBox, "203.0.113.8").unwrap();

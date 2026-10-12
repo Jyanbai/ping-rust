@@ -40,15 +40,15 @@ fn read_json(relative: &str) -> Json {
 
 // The only three YAML library touch points of this module.
 fn yaml_to_json(yaml: &str) -> Json {
-    serde_yaml::from_str(yaml).expect("YAML parses into serde_json::Value")
+    crate::yaml::from_str(yaml).expect("YAML parses into serde_json::Value")
 }
 
 fn to_yaml<T: Serialize + ?Sized>(value: &T) -> String {
-    serde_yaml::to_string(value).expect("YAML serializes")
+    crate::yaml::to_string(value).expect("YAML serializes")
 }
 
 fn from_yaml<T: DeserializeOwned>(yaml: &str) -> T {
-    serde_yaml::from_str(yaml).expect("YAML deserializes")
+    crate::yaml::from_str(yaml).expect("YAML deserializes")
 }
 
 fn profile_fixture_documents() -> BTreeMap<String, Vec<u8>> {
