@@ -1,0 +1,14 @@
+proxies:
+- alpn:
+  - h2
+  - http/1.1
+  client-fingerprint: chrome
+  name: golden-trojan-tls
+  network: tcp
+  password: ipWdkrY-MtAhOvcJqXELsZGNubIpW5kA
+  port: 20007
+  server: 203.0.113.10
+  skip-cert-verify: true
+  sni: www.cloudflare.com
+  type: trojan
+  udp: true

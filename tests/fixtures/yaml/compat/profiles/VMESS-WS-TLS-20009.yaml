@@ -1,0 +1,18 @@
+address: 0.0.0.0:20009
+protocol:
+  type: tls
+  tls_targets:
+    www.cloudflare.com:
+      cert: /etc/shoes/fixtures/cert-00000000.pem
+      key: /etc/shoes/fixtures/key-00000000.pem
+      alpn_protocols:
+      - http/1.1
+      protocol:
+        type: websocket
+        targets:
+        - matching_path: /5a9ov0741e5s9g30
+          protocol:
+            type: vmess
+            cipher: any
+            user_id: 741cd2f6-0741-5296-0741-529c30fabc5e
+            udp_enabled: true

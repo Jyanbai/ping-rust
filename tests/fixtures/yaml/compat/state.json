@@ -1,0 +1,324 @@
+{
+  "schema_version": 2,
+  "profiles": [
+    {
+      "id": "00000000-0000-0000-0000-000000001000",
+      "name": "golden-tuic",
+      "port": 20000,
+      "credentials": {
+        "Tuic": {
+          "user_id": "29630741-5a96-0741-def6-c74f8b296307",
+          "password": "1MtaHo3C7QxelsZGN074PwdK_6F07a1A",
+          "server_name": "www.cloudflare.com",
+          "alpn_protocols": [
+            "h3"
+          ],
+          "zero_rtt_handshake": false
+        }
+      },
+      "certificate_path": "/etc/shoes/fixtures/cert-00000000.pem",
+      "certificate_key_path": "/etc/shoes/fixtures/key-00000000.pem",
+      "self_signed_certificate": true
+    },
+    {
+      "id": "00000000-0000-0000-0000-000000001001",
+      "name": "golden-hysteria2",
+      "port": 20001,
+      "credentials": {
+        "Hysteria2": {
+          "password": "pwDkRYFmt6HOv4jQXELszg7uBIpwDKRA",
+          "server_name": "www.cloudflare.com",
+          "alpn_protocols": [
+            "h3"
+          ]
+        }
+      },
+      "certificate_path": "/etc/shoes/fixtures/cert-00000000.pem",
+      "certificate_key_path": "/etc/shoes/fixtures/key-00000000.pem",
+      "self_signed_certificate": true
+    },
+    {
+      "id": "00000000-0000-0000-0000-000000001002",
+      "name": "golden-shadowsocks",
+      "port": 20002,
+      "credentials": {
+        "Shadowsocks": {
+          "cipher": "2022-blake3-aes-256-gcm",
+          "password": "UbIpW/6Ry7MtAHOvCJ0x4lsZ2nU3ip4Dk5yF6taHOVA=",
+          "udp_enabled": true
+        }
+      },
+      "certificate_path": null,
+      "certificate_key_path": null,
+      "self_signed_certificate": false
+    },
+    {
+      "id": "00000000-0000-0000-0000-000000001003",
+      "name": "golden-reality",
+      "port": 20003,
+      "credentials": {
+        "Reality": {
+          "user_id": "85296b07-fa5c-63a7-d8f2-cdef418defa3",
+          "private_key": "5g9uB-7WdKRYFMta-oV8JqXELSzg1u5IpwdkRYFM5AA",
+          "public_key": "ElsZgnubIPWDKryF8TAhO30jQXELS9GNUBiPwdKryfA",
+          "short_id": "bcd85ab63e74bc5e",
+          "server_name": "www.cloudflare.com"
+        }
+      },
+      "certificate_path": null,
+      "certificate_key_path": null,
+      "self_signed_certificate": false
+    },
+    {
+      "id": "00000000-0000-0000-0000-000000001004",
+      "name": "golden-anytls",
+      "port": 20004,
+      "credentials": {
+        "AnyTls": {
+          "users": [
+            {
+              "name": "alice",
+              "password": "placeholder"
+            },
+            {
+              "name": "bob",
+              "password": "placeholder"
+            }
+          ],
+          "server_name": "www.cloudflare.com",
+          "alpn_protocols": [
+            "h2",
+            "http/1.1"
+          ],
+          "udp_enabled": true,
+          "security": "Tls"
+        }
+      },
+      "certificate_path": "/etc/shoes/fixtures/cert-00000000.pem",
+      "certificate_key_path": "/etc/shoes/fixtures/key-00000000.pem",
+      "self_signed_certificate": true
+    },
+    {
+      "id": "00000000-0000-0000-0000-000000001005",
+      "name": "golden-vless-tls-vision",
+      "port": 20005,
+      "credentials": {
+        "VlessTls": {
+          "user_id": "9ef07cd8-29cd-74b8-efa3-741852de30b4",
+          "server_name": "www.cloudflare.com",
+          "alpn_protocols": [
+            "h2",
+            "http/1.1"
+          ],
+          "vision": true
+        }
+      },
+      "certificate_path": "/etc/shoes/fixtures/cert-00000000.pem",
+      "certificate_key_path": "/etc/shoes/fixtures/key-00000000.pem",
+      "self_signed_certificate": true
+    },
+    {
+      "id": "00000000-0000-0000-0000-000000001006",
+      "name": "golden-vless-ws-tls",
+      "port": 20006,
+      "credentials": {
+        "VlessTls": {
+          "user_id": "07a18d2f-3074-85cd-f074-85296defabc5",
+          "server_name": "www.cloudflare.com",
+          "alpn_protocols": [
+            "http/1.1"
+          ],
+          "vision": false,
+          "websocket_path": "/8529m3a74v852x63"
+        }
+      },
+      "certificate_path": "/etc/shoes/fixtures/cert-00000000.pem",
+      "certificate_key_path": "/etc/shoes/fixtures/key-00000000.pem",
+      "self_signed_certificate": true
+    },
+    {
+      "id": "00000000-0000-0000-0000-000000001007",
+      "name": "golden-trojan-tls",
+      "port": 20007,
+      "credentials": {
+        "Trojan": {
+          "password": "ipWdkrY-MtAhOvcJqXELsZGNubIpW5kA",
+          "server_name": "www.cloudflare.com",
+          "alpn_protocols": [
+            "h2",
+            "http/1.1"
+          ],
+          "security": "Tls"
+        }
+      },
+      "certificate_path": "/etc/shoes/fixtures/cert-00000000.pem",
+      "certificate_key_path": "/etc/shoes/fixtures/key-00000000.pem",
+      "self_signed_certificate": true
+    },
+    {
+      "id": "00000000-0000-0000-0000-000000001008",
+      "name": "golden-trojan-reality",
+      "port": 20008,
+      "credentials": {
+        "Trojan": {
+          "password": "n-BiPwdkRYfMtahovcJ_XelszGNu96PA",
+          "server_name": "www.cloudflare.com",
+          "alpn_protocols": [],
+          "security": {
+            "Reality": {
+              "private_key": "S-GNU_IpWdKryFm9-hovc1qXeL6zgnU1iPwD6rY_MtA",
+              "public_key": "XeLSzGnu1ipwDKRYf4T8Ho_CjqX4lsZ2nUbi7wdKryA",
+              "short_id": "e3074de5abc30fa1"
+            }
+          }
+        }
+      },
+      "certificate_path": null,
+      "certificate_key_path": null,
+      "self_signed_certificate": false
+    },
+    {
+      "id": "00000000-0000-0000-0000-000000001009",
+      "name": "golden-vmess-ws-tls",
+      "port": 20009,
+      "credentials": {
+        "VmessTls": {
+          "user_id": "741cd2f6-0741-5296-0741-529c30fabc5e",
+          "server_name": "www.cloudflare.com",
+          "alpn_protocols": [
+            "http/1.1"
+          ],
+          "websocket_path": "/5a9ov0741e5s9g30"
+        }
+      },
+      "certificate_path": "/etc/shoes/fixtures/cert-00000000.pem",
+      "certificate_key_path": "/etc/shoes/fixtures/key-00000000.pem",
+      "self_signed_certificate": true
+    },
+    {
+      "id": "00000000-0000-0000-0000-00000000100a",
+      "name": "golden-socks5",
+      "port": 20010,
+      "credentials": {
+        "Socks5": {
+          "username": "0dKRYFMTAh-v",
+          "password": "RyFmTaHOVcjQ30lsZGn2biPwdkRyfmTA",
+          "udp_enabled": true
+        }
+      },
+      "certificate_path": null,
+      "certificate_key_path": null,
+      "self_signed_certificate": false
+    },
+    {
+      "id": "00000000-0000-0000-0000-00000000100b",
+      "name": "golden-snell",
+      "port": 20011,
+      "credentials": {
+        "Snell": {
+          "cipher": "chacha20-ietf-poly1305",
+          "password": "Bi5w9Kr0F_taHovCjQx4lSZGnUBI7wDA",
+          "udp_enabled": true
+        }
+      },
+      "certificate_path": null,
+      "certificate_key_path": null,
+      "self_signed_certificate": false
+    },
+    {
+      "id": "00000000-0000-0000-0000-00000000100c",
+      "name": "golden-naiveproxy",
+      "port": 20012,
+      "credentials": {
+        "NaiveProxy": {
+          "username": "lSzgN_b2pW3k",
+          "password": "GnuBiPwdkRYfMT0hOVc5qx6lSzGnUB2A",
+          "server_name": "www.cloudflare.com",
+          "padding": true,
+          "udp_enabled": false,
+          "fallback": null
+        }
+      },
+      "certificate_path": "/etc/shoes/fixtures/cert-00000000.pem",
+      "certificate_key_path": "/etc/shoes/fixtures/key-00000000.pem",
+      "self_signed_certificate": true,
+      "naive_certificate_validity": {
+        "not_before": 1791817889,
+        "not_after": 1809011489
+      }
+    },
+    {
+      "id": "00000000-0000-0000-0000-00000000100d",
+      "name": "golden-shadowsocks-shadowtls",
+      "port": 20013,
+      "credentials": {
+        "Shadowsocks": {
+          "cipher": "2022-blake3-aes-256-gcm",
+          "password": "q1ELs9GnUBiP8DKRYfmtaH8Vcj+xels1GNUb6gN0bIA=",
+          "udp_enabled": false,
+          "shadowtls": {
+            "password": "vCJQxelsZgNuBipWD4ryfMtah-Vcjq5A",
+            "server_name": "www.cloudflare.com",
+            "handshake_address": "www.cloudflare.com:443"
+          }
+        }
+      },
+      "certificate_path": null,
+      "certificate_key_path": null,
+      "self_signed_certificate": false
+    },
+    {
+      "id": "00000000-0000-0000-0000-00000000100e",
+      "name": "golden-anytls-reality",
+      "port": 20014,
+      "credentials": {
+        "AnyTls": {
+          "users": [
+            {
+              "name": "default",
+              "password": "P6DKR4FM5ahovCAh4VCjq9E3SzGNUb2A"
+            }
+          ],
+          "server_name": "www.cloudflare.com",
+          "alpn_protocols": [
+            "h2",
+            "http/1.1"
+          ],
+          "udp_enabled": true,
+          "security": {
+            "Reality": {
+              "private_key": "6H0Vc1qX_-SZ0nuBIPwdkrYfMTAHFMtAH074j8X_lSA",
+              "public_key": "fMtAhoVcJQxeL8ZgNub0Pw1B8pWDkrYFMTaHovcJQXA",
+              "short_id": "8fa963e74b8d29ab"
+            }
+          }
+        }
+      },
+      "certificate_path": null,
+      "certificate_key_path": null,
+      "self_signed_certificate": false
+    },
+    {
+      "id": "00000000-0000-0000-0000-00000000100f",
+      "name": "golden-socks5-no-auth",
+      "port": 20015,
+      "credentials": {
+        "Socks5": {
+          "udp_enabled": true
+        }
+      },
+      "certificate_path": null,
+      "certificate_key_path": null,
+      "self_signed_certificate": false
+    }
+  ],
+  "chain_proxy": {
+    "version": 2,
+    "enabled": false,
+    "nodes": [],
+    "pools": [],
+    "chains": [],
+    "rules": [],
+    "default_route": "Direct"
+  }
+}

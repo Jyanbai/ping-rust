@@ -47,12 +47,12 @@ impl H2MuxOptions {
         Ok(())
     }
 
-    pub fn shoes_value(&self) -> Result<serde_yaml::Value> {
+    pub fn shoes_value(&self) -> Result<serde_json::Value> {
         self.validate()?;
         if !self.enabled {
             bail!("不能为关闭的 H2MUX 生成 shoes 配置");
         }
-        Ok(serde_yaml::to_value(json!({
+        Ok(crate::yaml::to_value(json!({
             "max_connections": self.max_connections,
             "min_streams": self.min_streams,
             "max_streams": self.max_streams,

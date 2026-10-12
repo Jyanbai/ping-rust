@@ -63,9 +63,9 @@ impl ChainNode {
         Ok(())
     }
 
-    pub fn shoes_value(&self) -> Result<serde_yaml::Value> {
+    pub fn shoes_value(&self) -> Result<serde_json::Value> {
         self.validate_h2mux()?;
-        let mut value = serde_yaml::to_value(&self.client)?;
+        let mut value = crate::yaml::to_value(&self.client)?;
         if self.h2mux.enabled {
             self.client
                 .protocol
@@ -117,14 +117,14 @@ struct ProbeSocksProtocol {
 struct ProbeRule {
     masks: &'static str,
     action: &'static str,
-    client_chains: serde_yaml::Value,
+    client_chains: serde_json::Value,
 }
 
 #[derive(Serialize)]
 struct ChainProbeRule {
     masks: &'static str,
     action: &'static str,
-    client_chains: serde_yaml::Value,
+    client_chains: serde_json::Value,
 }
 
 #[derive(Serialize)]
@@ -211,8 +211,8 @@ impl ShoesClientProtocol {
 
     fn insert_h2mux(
         &self,
-        value: &mut serde_yaml::Value,
-        options: serde_yaml::Value,
+        value: &mut serde_json::Value,
+        options: serde_json::Value,
     ) -> Result<()> {
         match self {
             Self::Vless { .. } | Self::Vmess { .. } | Self::Trojan { .. } => {
@@ -757,7 +757,7 @@ fn probe_config(node: &ChainNode, port: u16) -> Result<String> {
             client_chains: node.shoes_value()?,
         }],
     }];
-    serde_yaml::to_string(&servers).context("生成链式节点测试配置失败")
+    crate::yaml::to_string(&servers).context("生成链式节点测试配置失败")
 }
 
 fn probe_chain_config(state: &ChainProxyState, chain_id: Uuid, port: u16) -> Result<String> {
@@ -779,7 +779,7 @@ fn probe_chain_config(state: &ChainProxyState, chain_id: Uuid, port: u16) -> Res
             client_chains: crate::config::chain_value(state, chain.id),
         }],
     }];
-    serde_yaml::to_string(&servers).context("生成完整 Chain 测试配置失败")
+    crate::yaml::to_string(&servers).context("生成完整 Chain 测试配置失败")
 }
 
 fn reserve_loopback_port() -> Result<u16> {

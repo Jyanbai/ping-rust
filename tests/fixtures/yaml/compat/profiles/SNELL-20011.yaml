@@ -1,0 +1,8 @@
+address: 0.0.0.0:20011
+protocol:
+  type: snell
+  cipher: chacha20-ietf-poly1305
+  password: Bi5w9Kr0F_taHovCjQx4lSZGnUBI7wDA
+  udp_enabled: true
+rules:
+- allow-all-direct

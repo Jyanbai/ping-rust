@@ -1,0 +1,337 @@
+[
+  {
+    "address": "0.0.0.0:20000",
+    "protocol": {
+      "password": "1MtaHo3C7QxelsZGN074PwdK_6F07a1A",
+      "type": "tuic",
+      "uuid": "29630741-5a96-0741-def6-c74f8b296307",
+      "zero_rtt_handshake": false
+    },
+    "quic_settings": {
+      "alpn_protocols": [
+        "h3"
+      ],
+      "cert": "/etc/shoes/fixtures/cert-00000000.pem",
+      "key": "/etc/shoes/fixtures/key-00000000.pem",
+      "num_endpoints": 0
+    },
+    "rules": [
+      "allow-all-direct"
+    ],
+    "transport": "quic"
+  },
+  {
+    "address": "0.0.0.0:20001",
+    "protocol": {
+      "password": "pwDkRYFmt6HOv4jQXELszg7uBIpwDKRA",
+      "type": "hysteria2",
+      "udp_enabled": true
+    },
+    "quic_settings": {
+      "alpn_protocols": [
+        "h3"
+      ],
+      "cert": "/etc/shoes/fixtures/cert-00000000.pem",
+      "key": "/etc/shoes/fixtures/key-00000000.pem",
+      "num_endpoints": 0
+    },
+    "rules": [
+      "allow-all-direct"
+    ],
+    "transport": "quic"
+  },
+  {
+    "address": "0.0.0.0:20002",
+    "protocol": {
+      "cipher": "2022-blake3-aes-256-gcm",
+      "password": "UbIpW/6Ry7MtAHOvCJ0x4lsZ2nU3ip4Dk5yF6taHOVA=",
+      "type": "shadowsocks",
+      "udp_enabled": true
+    },
+    "rules": [
+      "allow-all-direct"
+    ]
+  },
+  {
+    "address": "0.0.0.0:20003",
+    "protocol": {
+      "reality_targets": {
+        "www.cloudflare.com": {
+          "dest": "www.cloudflare.com:443",
+          "max_time_diff": 60000,
+          "private_key": "5g9uB-7WdKRYFMta-oV8JqXELSzg1u5IpwdkRYFM5AA",
+          "protocol": {
+            "type": "vless",
+            "udp_enabled": true,
+            "user_id": "85296b07-fa5c-63a7-d8f2-cdef418defa3"
+          },
+          "short_ids": [
+            "bcd85ab63e74bc5e"
+          ],
+          "vision": true
+        }
+      },
+      "type": "tls"
+    }
+  },
+  {
+    "address": "0.0.0.0:20004",
+    "protocol": {
+      "tls_targets": {
+        "www.cloudflare.com": {
+          "alpn_protocols": [
+            "h2",
+            "http/1.1"
+          ],
+          "cert": "/etc/shoes/fixtures/cert-00000000.pem",
+          "key": "/etc/shoes/fixtures/key-00000000.pem",
+          "protocol": {
+            "type": "anytls",
+            "udp_enabled": true,
+            "users": [
+              {
+                "name": "alice",
+                "password": "placeholder"
+              },
+              {
+                "name": "bob",
+                "password": "placeholder"
+              }
+            ]
+          }
+        }
+      },
+      "type": "tls"
+    }
+  },
+  {
+    "address": "0.0.0.0:20005",
+    "protocol": {
+      "tls_targets": {
+        "www.cloudflare.com": {
+          "alpn_protocols": [
+            "h2",
+            "http/1.1"
+          ],
+          "cert": "/etc/shoes/fixtures/cert-00000000.pem",
+          "key": "/etc/shoes/fixtures/key-00000000.pem",
+          "protocol": {
+            "type": "vless",
+            "udp_enabled": true,
+            "user_id": "9ef07cd8-29cd-74b8-efa3-741852de30b4"
+          },
+          "vision": true
+        }
+      },
+      "type": "tls"
+    }
+  },
+  {
+    "address": "0.0.0.0:20006",
+    "protocol": {
+      "tls_targets": {
+        "www.cloudflare.com": {
+          "alpn_protocols": [
+            "http/1.1"
+          ],
+          "cert": "/etc/shoes/fixtures/cert-00000000.pem",
+          "key": "/etc/shoes/fixtures/key-00000000.pem",
+          "protocol": {
+            "targets": [
+              {
+                "matching_path": "/8529m3a74v852x63",
+                "protocol": {
+                  "type": "vless",
+                  "udp_enabled": true,
+                  "user_id": "07a18d2f-3074-85cd-f074-85296defabc5"
+                }
+              }
+            ],
+            "type": "websocket"
+          }
+        }
+      },
+      "type": "tls"
+    }
+  },
+  {
+    "address": "0.0.0.0:20007",
+    "protocol": {
+      "tls_targets": {
+        "www.cloudflare.com": {
+          "alpn_protocols": [
+            "h2",
+            "http/1.1"
+          ],
+          "cert": "/etc/shoes/fixtures/cert-00000000.pem",
+          "key": "/etc/shoes/fixtures/key-00000000.pem",
+          "protocol": {
+            "password": "ipWdkrY-MtAhOvcJqXELsZGNubIpW5kA",
+            "type": "trojan"
+          }
+        }
+      },
+      "type": "tls"
+    }
+  },
+  {
+    "address": "0.0.0.0:20008",
+    "protocol": {
+      "reality_targets": {
+        "www.cloudflare.com": {
+          "dest": "www.cloudflare.com:443",
+          "max_time_diff": 60000,
+          "private_key": "S-GNU_IpWdKryFm9-hovc1qXeL6zgnU1iPwD6rY_MtA",
+          "protocol": {
+            "password": "n-BiPwdkRYfMtahovcJ_XelszGNu96PA",
+            "type": "trojan"
+          },
+          "short_ids": [
+            "e3074de5abc30fa1"
+          ],
+          "vision": false
+        }
+      },
+      "type": "tls"
+    }
+  },
+  {
+    "address": "0.0.0.0:20009",
+    "protocol": {
+      "tls_targets": {
+        "www.cloudflare.com": {
+          "alpn_protocols": [
+            "http/1.1"
+          ],
+          "cert": "/etc/shoes/fixtures/cert-00000000.pem",
+          "key": "/etc/shoes/fixtures/key-00000000.pem",
+          "protocol": {
+            "targets": [
+              {
+                "matching_path": "/5a9ov0741e5s9g30",
+                "protocol": {
+                  "cipher": "any",
+                  "type": "vmess",
+                  "udp_enabled": true,
+                  "user_id": "741cd2f6-0741-5296-0741-529c30fabc5e"
+                }
+              }
+            ],
+            "type": "websocket"
+          }
+        }
+      },
+      "type": "tls"
+    }
+  },
+  {
+    "address": "0.0.0.0:20010",
+    "protocol": {
+      "password": "RyFmTaHOVcjQ30lsZGn2biPwdkRyfmTA",
+      "type": "socks",
+      "udp_enabled": true,
+      "username": "0dKRYFMTAh-v"
+    },
+    "rules": [
+      "allow-all-direct"
+    ]
+  },
+  {
+    "address": "0.0.0.0:20011",
+    "protocol": {
+      "cipher": "chacha20-ietf-poly1305",
+      "password": "Bi5w9Kr0F_taHovCjQx4lSZGnUBI7wDA",
+      "type": "snell",
+      "udp_enabled": true
+    },
+    "rules": [
+      "allow-all-direct"
+    ]
+  },
+  {
+    "address": "0.0.0.0:20012",
+    "protocol": {
+      "tls_targets": {
+        "www.cloudflare.com": {
+          "alpn_protocols": [
+            "h2"
+          ],
+          "cert": "/etc/shoes/fixtures/cert-00000000.pem",
+          "key": "/etc/shoes/fixtures/key-00000000.pem",
+          "protocol": {
+            "padding": true,
+            "type": "naiveproxy",
+            "udp_enabled": false,
+            "users": [
+              {
+                "password": "GnuBiPwdkRYfMT0hOVc5qx6lSzGnUB2A",
+                "username": "lSzgN_b2pW3k"
+              }
+            ]
+          }
+        }
+      },
+      "type": "tls"
+    }
+  },
+  {
+    "address": "0.0.0.0:20013",
+    "protocol": {
+      "shadowtls_targets": {
+        "www.cloudflare.com": {
+          "handshake": {
+            "address": "www.cloudflare.com:443"
+          },
+          "password": "vCJQxelsZgNuBipWD4ryfMtah-Vcjq5A",
+          "protocol": {
+            "cipher": "2022-blake3-aes-256-gcm",
+            "password": "q1ELs9GnUBiP8DKRYfmtaH8Vcj+xels1GNUb6gN0bIA=",
+            "type": "shadowsocks",
+            "udp_enabled": false
+          }
+        }
+      },
+      "type": "tls"
+    },
+    "rules": [
+      "allow-all-direct"
+    ]
+  },
+  {
+    "address": "0.0.0.0:20014",
+    "protocol": {
+      "reality_targets": {
+        "www.cloudflare.com": {
+          "dest": "www.cloudflare.com:443",
+          "max_time_diff": 60000,
+          "private_key": "6H0Vc1qX_-SZ0nuBIPwdkrYfMTAHFMtAH074j8X_lSA",
+          "protocol": {
+            "type": "anytls",
+            "udp_enabled": true,
+            "users": [
+              {
+                "name": "default",
+                "password": "P6DKR4FM5ahovCAh4VCjq9E3SzGNUb2A"
+              }
+            ]
+          },
+          "short_ids": [
+            "8fa963e74b8d29ab"
+          ],
+          "vision": false
+        }
+      },
+      "type": "tls"
+    }
+  },
+  {
+    "address": "0.0.0.0:20015",
+    "protocol": {
+      "type": "socks",
+      "udp_enabled": true
+    },
+    "rules": [
+      "allow-all-direct"
+    ]
+  }
+]

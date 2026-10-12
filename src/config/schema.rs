@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::AnyTlsUser;
-use serde_yaml::Value;
+use serde_json::Value;
 
 pub(super) fn default_h3_alpn() -> Vec<String> {
     vec!["h3".to_owned()]

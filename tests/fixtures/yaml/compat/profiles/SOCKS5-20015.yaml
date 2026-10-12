@@ -1,0 +1,6 @@
+address: 0.0.0.0:20015
+protocol:
+  type: socks
+  udp_enabled: true
+rules:
+- allow-all-direct

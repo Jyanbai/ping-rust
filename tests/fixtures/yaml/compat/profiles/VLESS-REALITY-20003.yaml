@@ -1,0 +1,15 @@
+address: 0.0.0.0:20003
+protocol:
+  type: tls
+  reality_targets:
+    www.cloudflare.com:
+      private_key: 5g9uB-7WdKRYFMta-oV8JqXELSzg1u5IpwdkRYFM5AA
+      short_ids:
+      - bcd85ab63e74bc5e
+      dest: www.cloudflare.com:443
+      max_time_diff: 60000
+      vision: true
+      protocol:
+        type: vless
+        user_id: 85296b07-fa5c-63a7-d8f2-cdef418defa3
+        udp_enabled: true

@@ -85,8 +85,8 @@ pub(super) fn profile_documents(
     let mut documents = BTreeMap::new();
     for (server, profile) in servers.iter().zip(profiles) {
         let name = profile.config_file_name();
-        let yaml =
-            serde_yaml::to_string(server).with_context(|| format!("序列化节点文件 {name} 失败"))?;
+        let yaml = crate::yaml::to_string(server)
+            .with_context(|| format!("序列化节点文件 {name} 失败"))?;
         if documents.insert(name.clone(), yaml.into_bytes()).is_some() {
             bail!("节点文件名冲突：{name}");
         }
@@ -104,12 +104,12 @@ pub(super) fn aggregate_profile_documents(
         let contents = documents
             .get(&name)
             .with_context(|| format!("缺少节点文件 {name}"))?;
-        let server: ServerConfig = serde_yaml::from_slice(contents)
+        let server: ServerConfig = crate::yaml::from_slice(contents)
             .with_context(|| format!("解析节点文件 {name} 失败"))?;
         servers.push(server);
     }
     ensure_servers_match_state(&servers, profiles)?;
-    serde_yaml::to_string(&servers).context("聚合节点配置失败")
+    crate::yaml::to_string(&servers).context("聚合节点配置失败")
 }
 
 pub(super) fn write_profile_documents(

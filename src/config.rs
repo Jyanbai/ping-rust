@@ -37,6 +37,8 @@ mod validation;
 
 #[cfg(test)]
 mod naive_certificate_tests;
+#[cfg(test)]
+mod yaml_fixture_tests;
 
 #[cfg(test)]
 use commit::{
@@ -729,7 +731,7 @@ fn chain_rules(client: &ShoesClientConfig) -> Vec<ServerRule> {
     vec![ServerRule::Inline(ChainRule {
         masks: schema::RuleMasks::One("0.0.0.0/0".to_owned()),
         action: "allow".to_owned(),
-        client_chains: Some(serde_yaml::to_value(client).expect("client serializes")),
+        client_chains: Some(crate::yaml::to_value(client).expect("client serializes")),
     })]
 }
 
@@ -912,7 +914,7 @@ async fn generate_inner_with_lock(
         apply_chain_proxy_rules(&mut servers, &state);
     }
 
-    let yaml = serde_yaml::to_string(&servers).context("序列化 shoes YAML 失败")?;
+    let yaml = crate::yaml::to_string(&servers).context("序列化 shoes YAML 失败")?;
     validate_yaml(&yaml)?;
     if validate_with_shoes {
         validate_candidate_with_shoes(&yaml, parent).await?;
@@ -1071,7 +1073,7 @@ pub(crate) async fn update_profile_locked(
         )?);
     }
     let profile = state.profiles[index].clone();
-    let yaml = serde_yaml::to_string(&servers).context("序列化更新后 shoes YAML 失败")?;
+    let yaml = crate::yaml::to_string(&servers).context("序列化更新后 shoes YAML 失败")?;
     let runtime_config_changed = rollback.config.as_deref() != Some(yaml.as_bytes());
     validate_yaml(&yaml)?;
     validate_candidate_with_shoes(&yaml, Path::new(utils::CONFIG_DIR)).await?;
@@ -1946,7 +1948,7 @@ fn default_profile_name(protocol: Protocol, id: Uuid) -> String {
 fn load_servers(path: &Path) -> Result<Vec<ServerConfig>> {
     let yaml =
         fs::read_to_string(path).with_context(|| format!("读取配置 {} 失败", path.display()))?;
-    serde_yaml::from_str(&yaml).context("现有 shoes 配置不是 ping-rust 可管理的格式")
+    crate::yaml::from_str(&yaml).context("现有 shoes 配置不是 ping-rust 可管理的格式")
 }
 
 pub async fn ensure_profile_files() -> Result<bool> {
@@ -1966,7 +1968,7 @@ pub async fn ensure_profile_files() -> Result<bool> {
     if profile_documents_are_current(Path::new(utils::PROFILES_DIR), &documents)? {
         return Ok(false);
     }
-    let yaml = serde_yaml::to_string(&servers).context("序列化迁移聚合配置失败")?;
+    let yaml = crate::yaml::to_string(&servers).context("序列化迁移聚合配置失败")?;
     if !servers.is_empty() {
         validate_candidate_with_shoes(&yaml, Path::new(utils::CONFIG_DIR)).await?;
     }
@@ -2237,7 +2239,7 @@ pub(crate) async fn update_chain_proxy_locked(
         .map(|server| server.rules.clone())
         .collect::<Vec<_>>()
         != old_rules;
-    let yaml = serde_yaml::to_string(&servers).context("序列化链式代理配置失败")?;
+    let yaml = crate::yaml::to_string(&servers).context("序列化链式代理配置失败")?;
     if !servers.is_empty() {
         validate_yaml(&yaml)?;
         validate_candidate_with_shoes(&yaml, Path::new(utils::CONFIG_DIR)).await?;
@@ -2278,7 +2280,7 @@ pub(crate) async fn delete_profile_locked(
     };
     servers.remove(index);
     let profile = state.profiles.remove(index);
-    let yaml = serde_yaml::to_string(&servers).context("序列化更新后配置失败")?;
+    let yaml = crate::yaml::to_string(&servers).context("序列化更新后配置失败")?;
     if !servers.is_empty() {
         validate_yaml(&yaml)?;
         validate_candidate_with_shoes(&yaml, Path::new(utils::CONFIG_DIR)).await?;
@@ -2624,7 +2626,7 @@ fn validate_socks5_component(label: &str, value: &str) -> Result<()> {
 
 fn validate_yaml(yaml: &str) -> Result<()> {
     let configs =
-        serde_yaml::from_str::<Vec<ServerConfig>>(yaml).context("生成的 YAML 无法反序列化")?;
+        crate::yaml::from_str::<Vec<ServerConfig>>(yaml).context("生成的 YAML 无法反序列化")?;
     if configs.is_empty() {
         bail!("生成的配置至少应包含一个服务器");
     }
@@ -2882,7 +2884,7 @@ mod tests {
         let old_state = old_dir.path().join("ping-rust-state.json");
         fs::write(
             &old_config,
-            serde_yaml::to_string(&vec![old_server]).unwrap(),
+            crate::yaml::to_string(&vec![old_server]).unwrap(),
         )
         .unwrap();
         let old_json = serde_json::json!({
@@ -2947,7 +2949,7 @@ mod tests {
             .unwrap();
         let mut servers = vec![server];
         apply_chain_proxy_rules(&mut servers, &state);
-        fs::write(&new_config, serde_yaml::to_string(&servers).unwrap()).unwrap();
+        fs::write(&new_config, crate::yaml::to_string(&servers).unwrap()).unwrap();
         save_state_to(&new_state, &state).unwrap();
         assert!(prepare_managed_snapshot(new_dir.path()).unwrap());
         validate_managed_snapshot(&new_config, &new_state).unwrap();
@@ -2984,11 +2986,12 @@ mod tests {
         let mut servers = vec![first, second];
         apply_chain_proxy_rules(&mut servers, &state);
         ensure_chain_proxy_matches_state(&servers, &state).unwrap();
-        let yaml = serde_yaml::to_string(&servers).unwrap();
+        let yaml = crate::yaml::to_string(&servers).unwrap();
         validate_yaml(&yaml).unwrap();
         assert_eq!(yaml.matches("client_chains:").count(), 4);
         assert_eq!(yaml.matches("masks: 0.0.0.0/0").count(), 2);
-        assert_eq!(yaml.matches("masks: ::/0").count(), 2);
+        // serde-saphyr quotes plain scalars that start with `:`.
+        assert_eq!(yaml.matches("masks: \"::/0\"").count(), 2);
         assert!(yaml.contains("type: socks"));
         assert!(yaml.contains("username: alice"));
         assert!(yaml.contains("password: secret"));
@@ -3000,7 +3003,7 @@ mod tests {
         assert!(ensure_chain_proxy_matches_state(&servers, &state).is_err());
         apply_chain_proxy_rules(&mut servers, &state);
         ensure_chain_proxy_matches_state(&servers, &state).unwrap();
-        let direct_yaml = serde_yaml::to_string(&servers).unwrap();
+        let direct_yaml = crate::yaml::to_string(&servers).unwrap();
         assert!(!direct_yaml.contains("client_chains:"));
         assert_eq!(direct_yaml.matches("allow-all-direct").count(), 2);
     }
@@ -3031,10 +3034,10 @@ mod tests {
             .apply(ChainProxyChange::SetEnabled(true))
             .unwrap();
         apply_chain_proxy_rules(std::slice::from_mut(&mut server), &state);
-        let current = serde_yaml::to_string(std::slice::from_ref(&server)).unwrap();
+        let current = crate::yaml::to_string(std::slice::from_ref(&server)).unwrap();
         assert!(current.contains("client_chains:"));
         let legacy = current.replace("client_chains:", "client_chain:");
-        let parsed: Vec<ServerConfig> = serde_yaml::from_str(&legacy).unwrap();
+        let parsed: Vec<ServerConfig> = crate::yaml::from_str(&legacy).unwrap();
         assert!(parsed[0].rules == server.rules);
     }
 
@@ -3297,7 +3300,7 @@ mod tests {
         assert_eq!(fallback.as_deref(), Some("/var/www/static"));
         assert_eq!(profile.certificate_path, old_cert);
         ensure_servers_match_state(&[server.clone()], &[profile.clone()]).unwrap();
-        let yaml = serde_yaml::to_string(&vec![server]).unwrap();
+        let yaml = crate::yaml::to_string(&vec![server]).unwrap();
         assert!(yaml.contains("new.example.com"));
         assert!(yaml.contains("/var/www/static"));
         let serialized = serde_json::to_string(&profile).unwrap();
@@ -3744,7 +3747,7 @@ mod tests {
         let mut second_request = request;
         second_request.port = 8443;
         let (second, _, _, _) = generate_reality(&second_request);
-        let yaml = serde_yaml::to_string(&vec![first, second]).unwrap();
+        let yaml = crate::yaml::to_string(&vec![first, second]).unwrap();
         validate_yaml(&yaml).unwrap();
     }
 
@@ -3755,7 +3758,7 @@ mod tests {
         let state = dir.path().join("state.json");
         let request = request(Protocol::Reality, config.clone());
         let (server, _, _, _) = generate_reality(&request);
-        fs::write(&config, serde_yaml::to_string(&vec![server]).unwrap()).unwrap();
+        fs::write(&config, crate::yaml::to_string(&vec![server]).unwrap()).unwrap();
         fs::write(
             &state,
             serde_json::to_vec(&ManagedState::default()).unwrap(),
@@ -3818,7 +3821,7 @@ mod tests {
         let config = dir.path().join("config.yaml");
         let state = dir.path().join("ping-rust-state.json");
         let (server, profile) = reality_server_and_profile(53453);
-        fs::write(&config, serde_yaml::to_string(&vec![server]).unwrap()).unwrap();
+        fs::write(&config, crate::yaml::to_string(&vec![server]).unwrap()).unwrap();
         fs::write(
             &state,
             serde_json::to_vec(&ManagedState {
@@ -3833,7 +3836,7 @@ mod tests {
         assert!(prepare_managed_snapshot(dir.path()).unwrap());
         let profile_path = dir.path().join("profiles").join("VLESS-REALITY-53453.yaml");
         let profile_yaml = fs::read_to_string(&profile_path).unwrap();
-        let parsed: ServerConfig = serde_yaml::from_str(&profile_yaml).unwrap();
+        let parsed: ServerConfig = crate::yaml::from_str(&profile_yaml).unwrap();
         assert_eq!(parsed.address, "0.0.0.0:53453");
         assert!(!profile_yaml.trim_start().starts_with('-'));
         assert!(!prepare_managed_snapshot(dir.path()).unwrap());
@@ -3852,7 +3855,7 @@ mod tests {
         .unwrap();
         let aggregate =
             aggregate_profile_documents(&first, std::slice::from_ref(&first_profile)).unwrap();
-        let aggregate_servers: Vec<ServerConfig> = serde_yaml::from_str(&aggregate).unwrap();
+        let aggregate_servers: Vec<ServerConfig> = crate::yaml::from_str(&aggregate).unwrap();
         assert_eq!(aggregate_servers.len(), 1);
         assert_eq!(aggregate_servers[0].address, "0.0.0.0:53453");
         write_profile_documents(&profiles, &first).unwrap();
@@ -4041,7 +4044,7 @@ mod tests {
             naive_certificate_validity: None,
             h2mux: H2MuxOptions::default(),
         };
-        let original_yaml = serde_yaml::to_string(&server).unwrap();
+        let original_yaml = crate::yaml::to_string(&server).unwrap();
         let old_json = serde_json::to_value(&profile).unwrap();
         assert!(old_json.get("h2mux").is_none());
         let old: ManagedProfile = serde_json::from_value(old_json).unwrap();
@@ -4059,7 +4062,7 @@ mod tests {
             ProfileChange::H2Mux(options.clone()),
         )
         .unwrap();
-        assert_eq!(serde_yaml::to_string(&server).unwrap(), original_yaml);
+        assert_eq!(crate::yaml::to_string(&server).unwrap(), original_yaml);
         let saved = serde_json::to_vec(&profile).unwrap();
         let restored: ManagedProfile = serde_json::from_slice(&saved).unwrap();
         assert_eq!(restored.h2mux, options);
@@ -4145,7 +4148,7 @@ mod tests {
         };
         let target = reality_targets.get("www.example.com").unwrap();
         assert_eq!(target.dest, "www.example.com:443");
-        validate_yaml(&serde_yaml::to_string(&vec![server]).unwrap()).unwrap();
+        validate_yaml(&crate::yaml::to_string(&vec![server]).unwrap()).unwrap();
     }
 
     #[test]
@@ -4392,7 +4395,7 @@ mod tests {
         request.options.udp_enabled = false;
         let (mut server, credentials, _, _) =
             generate_parts(&request, Path::new("."), Uuid::nil()).unwrap();
-        let yaml = serde_yaml::to_string(&vec![server.clone()]).unwrap();
+        let yaml = crate::yaml::to_string(&vec![server.clone()]).unwrap();
         assert!(yaml.contains("address: 0.0.0.0:10880"));
         assert!(yaml.contains("type: socks"));
         assert!(yaml.contains("username: alice"));
@@ -4431,7 +4434,7 @@ mod tests {
             ProfileChange::Socks5Authentication(false),
         )
         .unwrap();
-        let no_auth_yaml = serde_yaml::to_string(&vec![server.clone()]).unwrap();
+        let no_auth_yaml = crate::yaml::to_string(&vec![server.clone()]).unwrap();
         assert!(!no_auth_yaml.contains("username:"));
         assert!(!no_auth_yaml.contains("password:"));
         assert!(no_auth_yaml.contains("udp_enabled: true"));
@@ -4491,7 +4494,7 @@ mod tests {
             .is_some_and(is_generated_socks5_username));
         assert!(password.is_some());
         assert!(udp_enabled);
-        let authenticated = serde_yaml::to_string(&vec![authenticated]).unwrap();
+        let authenticated = crate::yaml::to_string(&vec![authenticated]).unwrap();
         assert!(!authenticated.contains("username: default"));
         assert!(authenticated.contains("udp_enabled: true"));
 
@@ -4507,7 +4510,7 @@ mod tests {
                 udp_enabled: true
             }
         ));
-        let anonymous = serde_yaml::to_string(&vec![anonymous]).unwrap();
+        let anonymous = crate::yaml::to_string(&vec![anonymous]).unwrap();
         assert!(!anonymous.contains("username:"));
         assert!(!anonymous.contains("password:"));
     }

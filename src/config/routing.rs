@@ -1,5 +1,5 @@
 use serde::Serialize;
-use serde_yaml::Value;
+use serde_json::Value;
 use uuid::Uuid;
 
 use super::schema::{ChainRule, RuleMasks, ServerRule};
@@ -51,15 +51,15 @@ pub(crate) fn chain_value(state: &ChainProxyState, id: Uuid) -> Value {
                         node.shoes_value().expect("validated client serializes")
                     })
                     .collect();
-                serde_yaml::to_value(PoolYaml { pool: members }).expect("pool serializes")
+                crate::yaml::to_value(PoolYaml { pool: members }).expect("pool serializes")
             }
         })
         .collect();
-    serde_yaml::to_value(ChainYaml { chain: hops }).expect("chain serializes")
+    crate::yaml::to_value(ChainYaml { chain: hops }).expect("chain serializes")
 }
 
 fn direct_value() -> Value {
-    serde_yaml::from_str("protocol:\n  type: direct\n").expect("direct serializes")
+    crate::yaml::from_str("protocol:\n  type: direct\n").expect("direct serializes")
 }
 
 fn rule_for_target(state: &ChainProxyState, masks: RuleMasks, target: &RouteTarget) -> ServerRule {
@@ -69,7 +69,7 @@ fn rule_for_target(state: &ChainProxyState, masks: RuleMasks, target: &RouteTarg
         RouteTarget::Chain(id) => ("allow", Some(chain_value(state, *id))),
         RouteTarget::RoundRobin(ids) => (
             "allow",
-            Some(Value::Sequence(
+            Some(Value::Array(
                 ids.iter().map(|id| chain_value(state, *id)).collect(),
             )),
         ),
@@ -180,7 +180,7 @@ mod tests {
     fn pinned_schema_accepts_full_v2_rule_shape() {
         let state = fixture();
         let rules = render_rules(&state);
-        let rule_yaml = serde_yaml::to_string(&rules).unwrap();
+        let rule_yaml = crate::yaml::to_string(&rules).unwrap();
         assert!(rule_yaml.contains("pool:"));
         assert!(rule_yaml.contains("client_chains:"));
         assert!(rule_yaml.contains("type: direct"));
@@ -206,10 +206,10 @@ mod tests {
         }
         let server = Server {
             address: "127.0.0.1:18080".to_owned(),
-            protocol: serde_yaml::from_str("type: socks\nudp_enabled: false\n").unwrap(),
+            protocol: crate::yaml::from_str("type: socks\nudp_enabled: false\n").unwrap(),
             rules,
         };
-        let yaml = serde_yaml::to_string(&[server]).unwrap();
+        let yaml = crate::yaml::to_string(&[server]).unwrap();
         let temporary = tempfile::tempdir().unwrap();
         let path = temporary.path().join("chain-v2.yaml");
         fs::write(&path, yaml).unwrap();

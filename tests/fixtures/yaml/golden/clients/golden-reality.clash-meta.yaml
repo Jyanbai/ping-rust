@@ -1,0 +1,15 @@
+proxies:
+- client-fingerprint: chrome
+  flow: xtls-rprx-vision
+  name: golden-reality
+  network: tcp
+  port: 20003
+  reality-opts:
+    public-key: ElsZgnubIPWDKryF8TAhO30jQXELS9GNUBiPwdKryfA
+    short-id: bcd85ab63e74bc5e
+  server: 203.0.113.10
+  servername: www.cloudflare.com
+  tls: true
+  type: vless
+  udp: true
+  uuid: 85296b07-fa5c-63a7-d8f2-cdef418defa3

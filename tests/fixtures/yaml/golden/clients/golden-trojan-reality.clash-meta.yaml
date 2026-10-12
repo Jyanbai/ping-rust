@@ -1,0 +1,14 @@
+proxies:
+- alpn: []
+  client-fingerprint: chrome
+  name: golden-trojan-reality
+  network: tcp
+  password: n-BiPwdkRYfMtahovcJ_XelszGNu96PA
+  port: 20008
+  reality-opts:
+    public-key: XeLSzGnu1ipwDKRYf4T8Ho_CjqX4lsZ2nUbi7wdKryA
+    short-id: e3074de5abc30fa1
+  server: 203.0.113.10
+  sni: www.cloudflare.com
+  type: trojan
+  udp: true

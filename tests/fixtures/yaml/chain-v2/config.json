@@ -1,0 +1,1093 @@
+[
+  {
+    "address": "0.0.0.0:20002",
+    "protocol": {
+      "cipher": "2022-blake3-aes-256-gcm",
+      "password": "UbIpW/6Ry7MtAHOvCJ0x4lsZ2nU3ip4Dk5yF6taHOVA=",
+      "type": "shadowsocks",
+      "udp_enabled": true
+    },
+    "rules": [
+      {
+        "action": "allow",
+        "client_chains": {
+          "protocol": {
+            "type": "direct"
+          }
+        },
+        "masks": [
+          "192.168.0.0/16",
+          "10.0.0.0/8"
+        ]
+      },
+      {
+        "action": "block",
+        "masks": "blocked.test"
+      },
+      {
+        "action": "allow",
+        "client_chains": {
+          "chain": [
+            {
+              "address": "198.51.100.1:1080",
+              "protocol": {
+                "password": "chain-pass",
+                "type": "socks",
+                "username": "chain-user"
+              }
+            },
+            {
+              "pool": [
+                {
+                  "address": "198.51.100.2:443",
+                  "protocol": {
+                    "protocol": {
+                      "matching_headers": {
+                        "Host": "cdn.example.com"
+                      },
+                      "matching_path": "/ws",
+                      "protocol": {
+                        "password": "chain-trojan",
+                        "type": "trojan"
+                      },
+                      "type": "websocket"
+                    },
+                    "sni_hostname": "example.com",
+                    "type": "tls",
+                    "verify": true
+                  }
+                },
+                {
+                  "address": "198.51.100.3:443",
+                  "protocol": {
+                    "protocol": {
+                      "type": "vless",
+                      "udp_enabled": true,
+                      "user_id": "00000000-0000-4000-8000-0000000000c3"
+                    },
+                    "public_key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+                    "short_id": "0123456789abcdef",
+                    "sni_hostname": "www.cloudflare.com",
+                    "type": "reality",
+                    "vision": true
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "masks": "*.example.com"
+      },
+      {
+        "action": "allow",
+        "client_chains": [
+          {
+            "chain": [
+              {
+                "address": "198.51.100.1:1080",
+                "protocol": {
+                  "password": "chain-pass",
+                  "type": "socks",
+                  "username": "chain-user"
+                }
+              },
+              {
+                "pool": [
+                  {
+                    "address": "198.51.100.2:443",
+                    "protocol": {
+                      "protocol": {
+                        "matching_headers": {
+                          "Host": "cdn.example.com"
+                        },
+                        "matching_path": "/ws",
+                        "protocol": {
+                          "password": "chain-trojan",
+                          "type": "trojan"
+                        },
+                        "type": "websocket"
+                      },
+                      "sni_hostname": "example.com",
+                      "type": "tls",
+                      "verify": true
+                    }
+                  },
+                  {
+                    "address": "198.51.100.3:443",
+                    "protocol": {
+                      "protocol": {
+                        "type": "vless",
+                        "udp_enabled": true,
+                        "user_id": "00000000-0000-4000-8000-0000000000c3"
+                      },
+                      "public_key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+                      "short_id": "0123456789abcdef",
+                      "sni_hostname": "www.cloudflare.com",
+                      "type": "reality",
+                      "vision": true
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "chain": [
+              {
+                "address": "198.51.100.3:443",
+                "protocol": {
+                  "protocol": {
+                    "type": "vless",
+                    "udp_enabled": true,
+                    "user_id": "00000000-0000-4000-8000-0000000000c3"
+                  },
+                  "public_key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+                  "short_id": "0123456789abcdef",
+                  "sni_hostname": "www.cloudflare.com",
+                  "type": "reality",
+                  "vision": true
+                }
+              }
+            ]
+          }
+        ],
+        "masks": "2001:db8::/32"
+      },
+      {
+        "action": "allow",
+        "client_chains": {
+          "chain": [
+            {
+              "address": "198.51.100.1:1080",
+              "protocol": {
+                "password": "chain-pass",
+                "type": "socks",
+                "username": "chain-user"
+              }
+            },
+            {
+              "pool": [
+                {
+                  "address": "198.51.100.2:443",
+                  "protocol": {
+                    "protocol": {
+                      "matching_headers": {
+                        "Host": "cdn.example.com"
+                      },
+                      "matching_path": "/ws",
+                      "protocol": {
+                        "password": "chain-trojan",
+                        "type": "trojan"
+                      },
+                      "type": "websocket"
+                    },
+                    "sni_hostname": "example.com",
+                    "type": "tls",
+                    "verify": true
+                  }
+                },
+                {
+                  "address": "198.51.100.3:443",
+                  "protocol": {
+                    "protocol": {
+                      "type": "vless",
+                      "udp_enabled": true,
+                      "user_id": "00000000-0000-4000-8000-0000000000c3"
+                    },
+                    "public_key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+                    "short_id": "0123456789abcdef",
+                    "sni_hostname": "www.cloudflare.com",
+                    "type": "reality",
+                    "vision": true
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "masks": "0.0.0.0/0"
+      },
+      {
+        "action": "allow",
+        "client_chains": {
+          "chain": [
+            {
+              "address": "198.51.100.1:1080",
+              "protocol": {
+                "password": "chain-pass",
+                "type": "socks",
+                "username": "chain-user"
+              }
+            },
+            {
+              "pool": [
+                {
+                  "address": "198.51.100.2:443",
+                  "protocol": {
+                    "protocol": {
+                      "matching_headers": {
+                        "Host": "cdn.example.com"
+                      },
+                      "matching_path": "/ws",
+                      "protocol": {
+                        "password": "chain-trojan",
+                        "type": "trojan"
+                      },
+                      "type": "websocket"
+                    },
+                    "sni_hostname": "example.com",
+                    "type": "tls",
+                    "verify": true
+                  }
+                },
+                {
+                  "address": "198.51.100.3:443",
+                  "protocol": {
+                    "protocol": {
+                      "type": "vless",
+                      "udp_enabled": true,
+                      "user_id": "00000000-0000-4000-8000-0000000000c3"
+                    },
+                    "public_key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+                    "short_id": "0123456789abcdef",
+                    "sni_hostname": "www.cloudflare.com",
+                    "type": "reality",
+                    "vision": true
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "masks": "::/0"
+      }
+    ]
+  },
+  {
+    "address": "0.0.0.0:20003",
+    "protocol": {
+      "reality_targets": {
+        "www.cloudflare.com": {
+          "dest": "www.cloudflare.com:443",
+          "max_time_diff": 60000,
+          "private_key": "5g9uB-7WdKRYFMta-oV8JqXELSzg1u5IpwdkRYFM5AA",
+          "protocol": {
+            "type": "vless",
+            "udp_enabled": true,
+            "user_id": "85296b07-fa5c-63a7-d8f2-cdef418defa3"
+          },
+          "short_ids": [
+            "bcd85ab63e74bc5e"
+          ],
+          "vision": true
+        }
+      },
+      "type": "tls"
+    },
+    "rules": [
+      {
+        "action": "allow",
+        "client_chains": {
+          "protocol": {
+            "type": "direct"
+          }
+        },
+        "masks": [
+          "192.168.0.0/16",
+          "10.0.0.0/8"
+        ]
+      },
+      {
+        "action": "block",
+        "masks": "blocked.test"
+      },
+      {
+        "action": "allow",
+        "client_chains": {
+          "chain": [
+            {
+              "address": "198.51.100.1:1080",
+              "protocol": {
+                "password": "chain-pass",
+                "type": "socks",
+                "username": "chain-user"
+              }
+            },
+            {
+              "pool": [
+                {
+                  "address": "198.51.100.2:443",
+                  "protocol": {
+                    "protocol": {
+                      "matching_headers": {
+                        "Host": "cdn.example.com"
+                      },
+                      "matching_path": "/ws",
+                      "protocol": {
+                        "password": "chain-trojan",
+                        "type": "trojan"
+                      },
+                      "type": "websocket"
+                    },
+                    "sni_hostname": "example.com",
+                    "type": "tls",
+                    "verify": true
+                  }
+                },
+                {
+                  "address": "198.51.100.3:443",
+                  "protocol": {
+                    "protocol": {
+                      "type": "vless",
+                      "udp_enabled": true,
+                      "user_id": "00000000-0000-4000-8000-0000000000c3"
+                    },
+                    "public_key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+                    "short_id": "0123456789abcdef",
+                    "sni_hostname": "www.cloudflare.com",
+                    "type": "reality",
+                    "vision": true
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "masks": "*.example.com"
+      },
+      {
+        "action": "allow",
+        "client_chains": [
+          {
+            "chain": [
+              {
+                "address": "198.51.100.1:1080",
+                "protocol": {
+                  "password": "chain-pass",
+                  "type": "socks",
+                  "username": "chain-user"
+                }
+              },
+              {
+                "pool": [
+                  {
+                    "address": "198.51.100.2:443",
+                    "protocol": {
+                      "protocol": {
+                        "matching_headers": {
+                          "Host": "cdn.example.com"
+                        },
+                        "matching_path": "/ws",
+                        "protocol": {
+                          "password": "chain-trojan",
+                          "type": "trojan"
+                        },
+                        "type": "websocket"
+                      },
+                      "sni_hostname": "example.com",
+                      "type": "tls",
+                      "verify": true
+                    }
+                  },
+                  {
+                    "address": "198.51.100.3:443",
+                    "protocol": {
+                      "protocol": {
+                        "type": "vless",
+                        "udp_enabled": true,
+                        "user_id": "00000000-0000-4000-8000-0000000000c3"
+                      },
+                      "public_key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+                      "short_id": "0123456789abcdef",
+                      "sni_hostname": "www.cloudflare.com",
+                      "type": "reality",
+                      "vision": true
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "chain": [
+              {
+                "address": "198.51.100.3:443",
+                "protocol": {
+                  "protocol": {
+                    "type": "vless",
+                    "udp_enabled": true,
+                    "user_id": "00000000-0000-4000-8000-0000000000c3"
+                  },
+                  "public_key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+                  "short_id": "0123456789abcdef",
+                  "sni_hostname": "www.cloudflare.com",
+                  "type": "reality",
+                  "vision": true
+                }
+              }
+            ]
+          }
+        ],
+        "masks": "2001:db8::/32"
+      },
+      {
+        "action": "allow",
+        "client_chains": {
+          "chain": [
+            {
+              "address": "198.51.100.1:1080",
+              "protocol": {
+                "password": "chain-pass",
+                "type": "socks",
+                "username": "chain-user"
+              }
+            },
+            {
+              "pool": [
+                {
+                  "address": "198.51.100.2:443",
+                  "protocol": {
+                    "protocol": {
+                      "matching_headers": {
+                        "Host": "cdn.example.com"
+                      },
+                      "matching_path": "/ws",
+                      "protocol": {
+                        "password": "chain-trojan",
+                        "type": "trojan"
+                      },
+                      "type": "websocket"
+                    },
+                    "sni_hostname": "example.com",
+                    "type": "tls",
+                    "verify": true
+                  }
+                },
+                {
+                  "address": "198.51.100.3:443",
+                  "protocol": {
+                    "protocol": {
+                      "type": "vless",
+                      "udp_enabled": true,
+                      "user_id": "00000000-0000-4000-8000-0000000000c3"
+                    },
+                    "public_key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+                    "short_id": "0123456789abcdef",
+                    "sni_hostname": "www.cloudflare.com",
+                    "type": "reality",
+                    "vision": true
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "masks": "0.0.0.0/0"
+      },
+      {
+        "action": "allow",
+        "client_chains": {
+          "chain": [
+            {
+              "address": "198.51.100.1:1080",
+              "protocol": {
+                "password": "chain-pass",
+                "type": "socks",
+                "username": "chain-user"
+              }
+            },
+            {
+              "pool": [
+                {
+                  "address": "198.51.100.2:443",
+                  "protocol": {
+                    "protocol": {
+                      "matching_headers": {
+                        "Host": "cdn.example.com"
+                      },
+                      "matching_path": "/ws",
+                      "protocol": {
+                        "password": "chain-trojan",
+                        "type": "trojan"
+                      },
+                      "type": "websocket"
+                    },
+                    "sni_hostname": "example.com",
+                    "type": "tls",
+                    "verify": true
+                  }
+                },
+                {
+                  "address": "198.51.100.3:443",
+                  "protocol": {
+                    "protocol": {
+                      "type": "vless",
+                      "udp_enabled": true,
+                      "user_id": "00000000-0000-4000-8000-0000000000c3"
+                    },
+                    "public_key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+                    "short_id": "0123456789abcdef",
+                    "sni_hostname": "www.cloudflare.com",
+                    "type": "reality",
+                    "vision": true
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "masks": "::/0"
+      }
+    ]
+  },
+  {
+    "address": "0.0.0.0:20007",
+    "protocol": {
+      "tls_targets": {
+        "www.cloudflare.com": {
+          "alpn_protocols": [
+            "h2",
+            "http/1.1"
+          ],
+          "cert": "/etc/shoes/fixtures/cert-00000000.pem",
+          "key": "/etc/shoes/fixtures/key-00000000.pem",
+          "protocol": {
+            "password": "ipWdkrY-MtAhOvcJqXELsZGNubIpW5kA",
+            "type": "trojan"
+          }
+        }
+      },
+      "type": "tls"
+    },
+    "rules": [
+      {
+        "action": "allow",
+        "client_chains": {
+          "protocol": {
+            "type": "direct"
+          }
+        },
+        "masks": [
+          "192.168.0.0/16",
+          "10.0.0.0/8"
+        ]
+      },
+      {
+        "action": "block",
+        "masks": "blocked.test"
+      },
+      {
+        "action": "allow",
+        "client_chains": {
+          "chain": [
+            {
+              "address": "198.51.100.1:1080",
+              "protocol": {
+                "password": "chain-pass",
+                "type": "socks",
+                "username": "chain-user"
+              }
+            },
+            {
+              "pool": [
+                {
+                  "address": "198.51.100.2:443",
+                  "protocol": {
+                    "protocol": {
+                      "matching_headers": {
+                        "Host": "cdn.example.com"
+                      },
+                      "matching_path": "/ws",
+                      "protocol": {
+                        "password": "chain-trojan",
+                        "type": "trojan"
+                      },
+                      "type": "websocket"
+                    },
+                    "sni_hostname": "example.com",
+                    "type": "tls",
+                    "verify": true
+                  }
+                },
+                {
+                  "address": "198.51.100.3:443",
+                  "protocol": {
+                    "protocol": {
+                      "type": "vless",
+                      "udp_enabled": true,
+                      "user_id": "00000000-0000-4000-8000-0000000000c3"
+                    },
+                    "public_key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+                    "short_id": "0123456789abcdef",
+                    "sni_hostname": "www.cloudflare.com",
+                    "type": "reality",
+                    "vision": true
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "masks": "*.example.com"
+      },
+      {
+        "action": "allow",
+        "client_chains": [
+          {
+            "chain": [
+              {
+                "address": "198.51.100.1:1080",
+                "protocol": {
+                  "password": "chain-pass",
+                  "type": "socks",
+                  "username": "chain-user"
+                }
+              },
+              {
+                "pool": [
+                  {
+                    "address": "198.51.100.2:443",
+                    "protocol": {
+                      "protocol": {
+                        "matching_headers": {
+                          "Host": "cdn.example.com"
+                        },
+                        "matching_path": "/ws",
+                        "protocol": {
+                          "password": "chain-trojan",
+                          "type": "trojan"
+                        },
+                        "type": "websocket"
+                      },
+                      "sni_hostname": "example.com",
+                      "type": "tls",
+                      "verify": true
+                    }
+                  },
+                  {
+                    "address": "198.51.100.3:443",
+                    "protocol": {
+                      "protocol": {
+                        "type": "vless",
+                        "udp_enabled": true,
+                        "user_id": "00000000-0000-4000-8000-0000000000c3"
+                      },
+                      "public_key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+                      "short_id": "0123456789abcdef",
+                      "sni_hostname": "www.cloudflare.com",
+                      "type": "reality",
+                      "vision": true
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "chain": [
+              {
+                "address": "198.51.100.3:443",
+                "protocol": {
+                  "protocol": {
+                    "type": "vless",
+                    "udp_enabled": true,
+                    "user_id": "00000000-0000-4000-8000-0000000000c3"
+                  },
+                  "public_key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+                  "short_id": "0123456789abcdef",
+                  "sni_hostname": "www.cloudflare.com",
+                  "type": "reality",
+                  "vision": true
+                }
+              }
+            ]
+          }
+        ],
+        "masks": "2001:db8::/32"
+      },
+      {
+        "action": "allow",
+        "client_chains": {
+          "chain": [
+            {
+              "address": "198.51.100.1:1080",
+              "protocol": {
+                "password": "chain-pass",
+                "type": "socks",
+                "username": "chain-user"
+              }
+            },
+            {
+              "pool": [
+                {
+                  "address": "198.51.100.2:443",
+                  "protocol": {
+                    "protocol": {
+                      "matching_headers": {
+                        "Host": "cdn.example.com"
+                      },
+                      "matching_path": "/ws",
+                      "protocol": {
+                        "password": "chain-trojan",
+                        "type": "trojan"
+                      },
+                      "type": "websocket"
+                    },
+                    "sni_hostname": "example.com",
+                    "type": "tls",
+                    "verify": true
+                  }
+                },
+                {
+                  "address": "198.51.100.3:443",
+                  "protocol": {
+                    "protocol": {
+                      "type": "vless",
+                      "udp_enabled": true,
+                      "user_id": "00000000-0000-4000-8000-0000000000c3"
+                    },
+                    "public_key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+                    "short_id": "0123456789abcdef",
+                    "sni_hostname": "www.cloudflare.com",
+                    "type": "reality",
+                    "vision": true
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "masks": "0.0.0.0/0"
+      },
+      {
+        "action": "allow",
+        "client_chains": {
+          "chain": [
+            {
+              "address": "198.51.100.1:1080",
+              "protocol": {
+                "password": "chain-pass",
+                "type": "socks",
+                "username": "chain-user"
+              }
+            },
+            {
+              "pool": [
+                {
+                  "address": "198.51.100.2:443",
+                  "protocol": {
+                    "protocol": {
+                      "matching_headers": {
+                        "Host": "cdn.example.com"
+                      },
+                      "matching_path": "/ws",
+                      "protocol": {
+                        "password": "chain-trojan",
+                        "type": "trojan"
+                      },
+                      "type": "websocket"
+                    },
+                    "sni_hostname": "example.com",
+                    "type": "tls",
+                    "verify": true
+                  }
+                },
+                {
+                  "address": "198.51.100.3:443",
+                  "protocol": {
+                    "protocol": {
+                      "type": "vless",
+                      "udp_enabled": true,
+                      "user_id": "00000000-0000-4000-8000-0000000000c3"
+                    },
+                    "public_key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+                    "short_id": "0123456789abcdef",
+                    "sni_hostname": "www.cloudflare.com",
+                    "type": "reality",
+                    "vision": true
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "masks": "::/0"
+      }
+    ]
+  },
+  {
+    "address": "0.0.0.0:20013",
+    "protocol": {
+      "shadowtls_targets": {
+        "www.cloudflare.com": {
+          "handshake": {
+            "address": "www.cloudflare.com:443"
+          },
+          "password": "vCJQxelsZgNuBipWD4ryfMtah-Vcjq5A",
+          "protocol": {
+            "cipher": "2022-blake3-aes-256-gcm",
+            "password": "q1ELs9GnUBiP8DKRYfmtaH8Vcj+xels1GNUb6gN0bIA=",
+            "type": "shadowsocks",
+            "udp_enabled": false
+          }
+        }
+      },
+      "type": "tls"
+    },
+    "rules": [
+      {
+        "action": "allow",
+        "client_chains": {
+          "protocol": {
+            "type": "direct"
+          }
+        },
+        "masks": [
+          "192.168.0.0/16",
+          "10.0.0.0/8"
+        ]
+      },
+      {
+        "action": "block",
+        "masks": "blocked.test"
+      },
+      {
+        "action": "allow",
+        "client_chains": {
+          "chain": [
+            {
+              "address": "198.51.100.1:1080",
+              "protocol": {
+                "password": "chain-pass",
+                "type": "socks",
+                "username": "chain-user"
+              }
+            },
+            {
+              "pool": [
+                {
+                  "address": "198.51.100.2:443",
+                  "protocol": {
+                    "protocol": {
+                      "matching_headers": {
+                        "Host": "cdn.example.com"
+                      },
+                      "matching_path": "/ws",
+                      "protocol": {
+                        "password": "chain-trojan",
+                        "type": "trojan"
+                      },
+                      "type": "websocket"
+                    },
+                    "sni_hostname": "example.com",
+                    "type": "tls",
+                    "verify": true
+                  }
+                },
+                {
+                  "address": "198.51.100.3:443",
+                  "protocol": {
+                    "protocol": {
+                      "type": "vless",
+                      "udp_enabled": true,
+                      "user_id": "00000000-0000-4000-8000-0000000000c3"
+                    },
+                    "public_key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+                    "short_id": "0123456789abcdef",
+                    "sni_hostname": "www.cloudflare.com",
+                    "type": "reality",
+                    "vision": true
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "masks": "*.example.com"
+      },
+      {
+        "action": "allow",
+        "client_chains": [
+          {
+            "chain": [
+              {
+                "address": "198.51.100.1:1080",
+                "protocol": {
+                  "password": "chain-pass",
+                  "type": "socks",
+                  "username": "chain-user"
+                }
+              },
+              {
+                "pool": [
+                  {
+                    "address": "198.51.100.2:443",
+                    "protocol": {
+                      "protocol": {
+                        "matching_headers": {
+                          "Host": "cdn.example.com"
+                        },
+                        "matching_path": "/ws",
+                        "protocol": {
+                          "password": "chain-trojan",
+                          "type": "trojan"
+                        },
+                        "type": "websocket"
+                      },
+                      "sni_hostname": "example.com",
+                      "type": "tls",
+                      "verify": true
+                    }
+                  },
+                  {
+                    "address": "198.51.100.3:443",
+                    "protocol": {
+                      "protocol": {
+                        "type": "vless",
+                        "udp_enabled": true,
+                        "user_id": "00000000-0000-4000-8000-0000000000c3"
+                      },
+                      "public_key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+                      "short_id": "0123456789abcdef",
+                      "sni_hostname": "www.cloudflare.com",
+                      "type": "reality",
+                      "vision": true
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "chain": [
+              {
+                "address": "198.51.100.3:443",
+                "protocol": {
+                  "protocol": {
+                    "type": "vless",
+                    "udp_enabled": true,
+                    "user_id": "00000000-0000-4000-8000-0000000000c3"
+                  },
+                  "public_key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+                  "short_id": "0123456789abcdef",
+                  "sni_hostname": "www.cloudflare.com",
+                  "type": "reality",
+                  "vision": true
+                }
+              }
+            ]
+          }
+        ],
+        "masks": "2001:db8::/32"
+      },
+      {
+        "action": "allow",
+        "client_chains": {
+          "chain": [
+            {
+              "address": "198.51.100.1:1080",
+              "protocol": {
+                "password": "chain-pass",
+                "type": "socks",
+                "username": "chain-user"
+              }
+            },
+            {
+              "pool": [
+                {
+                  "address": "198.51.100.2:443",
+                  "protocol": {
+                    "protocol": {
+                      "matching_headers": {
+                        "Host": "cdn.example.com"
+                      },
+                      "matching_path": "/ws",
+                      "protocol": {
+                        "password": "chain-trojan",
+                        "type": "trojan"
+                      },
+                      "type": "websocket"
+                    },
+                    "sni_hostname": "example.com",
+                    "type": "tls",
+                    "verify": true
+                  }
+                },
+                {
+                  "address": "198.51.100.3:443",
+                  "protocol": {
+                    "protocol": {
+                      "type": "vless",
+                      "udp_enabled": true,
+                      "user_id": "00000000-0000-4000-8000-0000000000c3"
+                    },
+                    "public_key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+                    "short_id": "0123456789abcdef",
+                    "sni_hostname": "www.cloudflare.com",
+                    "type": "reality",
+                    "vision": true
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "masks": "0.0.0.0/0"
+      },
+      {
+        "action": "allow",
+        "client_chains": {
+          "chain": [
+            {
+              "address": "198.51.100.1:1080",
+              "protocol": {
+                "password": "chain-pass",
+                "type": "socks",
+                "username": "chain-user"
+              }
+            },
+            {
+              "pool": [
+                {
+                  "address": "198.51.100.2:443",
+                  "protocol": {
+                    "protocol": {
+                      "matching_headers": {
+                        "Host": "cdn.example.com"
+                      },
+                      "matching_path": "/ws",
+                      "protocol": {
+                        "password": "chain-trojan",
+                        "type": "trojan"
+                      },
+                      "type": "websocket"
+                    },
+                    "sni_hostname": "example.com",
+                    "type": "tls",
+                    "verify": true
+                  }
+                },
+                {
+                  "address": "198.51.100.3:443",
+                  "protocol": {
+                    "protocol": {
+                      "type": "vless",
+                      "udp_enabled": true,
+                      "user_id": "00000000-0000-4000-8000-0000000000c3"
+                    },
+                    "public_key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+                    "short_id": "0123456789abcdef",
+                    "sni_hostname": "www.cloudflare.com",
+                    "type": "reality",
+                    "vision": true
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "masks": "::/0"
+      }
+    ]
+  }
+]

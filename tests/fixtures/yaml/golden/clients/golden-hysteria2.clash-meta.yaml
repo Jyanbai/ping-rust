@@ -1,0 +1,10 @@
+proxies:
+- alpn:
+  - h3
+  name: golden-hysteria2
+  password: pwDkRYFmt6HOv4jQXELszg7uBIpwDKRA
+  port: 20001
+  server: 203.0.113.10
+  skip-cert-verify: true
+  sni: www.cloudflare.com
+  type: hysteria2

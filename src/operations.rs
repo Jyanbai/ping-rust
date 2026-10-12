@@ -110,8 +110,8 @@ pub async fn restore(archive_path: &Path) -> Result<Option<PathBuf>> {
         bail!("归档缺少 shoes/config.yaml");
     }
     let yaml = fs::read_to_string(restored.join("config.yaml"))?;
-    let _: Vec<serde_yaml::Value> =
-        serde_yaml::from_str(&yaml).context("备份中的 config.yaml 不是有效 YAML 数组")?;
+    let _: Vec<serde_json::Value> =
+        crate::yaml::from_str(&yaml).context("备份中的 config.yaml 不是有效 YAML 数组")?;
     if restored.join("ping-rust-state.json").exists() {
         config::prepare_managed_snapshot(&restored)?;
         config::validate_managed_snapshot(

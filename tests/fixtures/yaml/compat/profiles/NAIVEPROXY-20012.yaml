@@ -1,0 +1,16 @@
+address: 0.0.0.0:20012
+protocol:
+  type: tls
+  tls_targets:
+    www.cloudflare.com:
+      cert: /etc/shoes/fixtures/cert-00000000.pem
+      key: /etc/shoes/fixtures/key-00000000.pem
+      alpn_protocols:
+      - h2
+      protocol:
+        type: naiveproxy
+        users:
+        - username: lSzgN_b2pW3k
+          password: GnuBiPwdkRYfMT0hOVc5qx6lSzGnUB2A
+        padding: true
+        udp_enabled: false
