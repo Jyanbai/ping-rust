@@ -20,9 +20,11 @@ fn parse_options() -> serde_saphyr::Options {
         strict_booleans: true,
         // serde_yaml 0.9 never expands `<<` merge keys implicitly.
         merge_keys: serde_saphyr::MergeKeyPolicy::AsOrdinary,
-        // serde_yaml 0.9 rejects duplicate mapping keys.
+        // Reject duplicate mapping keys (serde_yaml 0.9 did for structs and
+        // its own Mapping; serde_json::Value targets used to keep the last).
         duplicate_keys: serde_saphyr::DuplicateKeyPolicy::Error,
-        // YAML 1.2: `0123` is decimal 123 (as serde_yaml 0.9), never octal.
+        // Never treat a leading `0` as octal. serde_yaml 0.9 read plain
+        // `0123` as the string "0123"; `legacy_compatible_input` keeps that.
         legacy_octal_numbers: false,
         // Error messages must not echo YAML source lines (credentials).
         with_snippet: false,
