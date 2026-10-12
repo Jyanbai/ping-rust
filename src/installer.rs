@@ -22,7 +22,9 @@ use tokio::process::Command;
 
 use crate::{config, performance, utils};
 
-const LATEST_RELEASE_API: &str = "https://api.github.com/repos/cfal/shoes/releases/latest";
+const RELEASE_TAG_API_PREFIX: &str = "https://api.github.com/repos/cfal/shoes/releases/tags/";
+/// 经过验收的 shoes GitHub Release；默认安装、bootstrap 与 `update --method release` 只安装此 tag。
+pub const SHOES_RELEASE_TAG: &str = "v0.2.7";
 const SHOES_GIT_REPOSITORY: &str = "https://github.com/cfal/shoes";
 const SHOES_SCHEMA_REVISION: &str = "386b11532424b8665ee3e46340c6236fb3c47595";
 const SHOES_SCHEMA_VERSION: &str = "0.2.8";
@@ -199,10 +201,24 @@ struct GithubRelease {
     assets: Vec<ReleaseAsset>,
 }
 
-pub async fn latest_release_tag() -> Result<String> {
-    Ok(crate::github_api::get::<GithubRelease>(LATEST_RELEASE_API)
-        .await?
-        .tag_name)
+fn pinned_release_api() -> String {
+    format!("{RELEASE_TAG_API_PREFIX}{SHOES_RELEASE_TAG}")
+}
+
+fn ensure_pinned_release_tag(tag: &str) -> Result<()> {
+    if tag != SHOES_RELEASE_TAG {
+        bail!("GitHub 返回的 shoes Release tag {tag} 与固定版本 {SHOES_RELEASE_TAG} 不一致，已拒绝安装");
+    }
+    Ok(())
+}
+
+/// 上游存在比固定版本更新的 Release 时返回提示文本；仅用于展示，绝不触发安装。
+pub fn newer_upstream_release_notice(upstream_tag: &str) -> Option<String> {
+    let upstream = release_version(upstream_tag)?;
+    let pinned = release_version(SHOES_RELEASE_TAG)?;
+    (upstream > pinned).then(|| {
+        format!("上游有更新版本 {upstream_tag}（未经验证）；默认安装仍使用 {SHOES_RELEASE_TAG}，不会自动安装")
+    })
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -312,10 +328,11 @@ async fn install_release(destination: &Path, allow_downgrade: bool) -> Result<In
 
     let release = {
         let _timer = performance::stage("shoes_release_metadata");
-        crate::github_api::get::<GithubRelease>(LATEST_RELEASE_API)
+        crate::github_api::get::<GithubRelease>(&pinned_release_api())
             .await
-            .context("请求 shoes 最新 Release 失败")?
+            .with_context(|| format!("请求 shoes 固定 Release {SHOES_RELEASE_TAG} 失败"))?
     };
+    ensure_pinned_release_tag(&release.tag_name)?;
 
     let known = load_provenance();
     if destination.is_file()

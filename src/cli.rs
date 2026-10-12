@@ -1399,9 +1399,18 @@ pub async fn print_update_status() -> Result<()> {
     println!("ping-rust 验证 pin:");
     println!("  commit: {}", installer::verified_pin());
     println!("  version: {}", installer::verified_version());
+    println!(
+        "shoes 默认安装 Release（已验证固定）: {}",
+        installer::SHOES_RELEASE_TAG
+    );
     println!("shoes GitHub Latest Release:");
     match shoes_latest {
-        Ok(tag) => println!("  tag: {tag}"),
+        Ok(tag) => {
+            println!("  tag: {tag}");
+            if let Some(notice) = installer::newer_upstream_release_notice(&tag) {
+                println!("  {notice}");
+            }
+        }
         Err(error) => println!("  tag: 查询失败（{error}）"),
     }
     println!("shoes upstream master:");
