@@ -1824,6 +1824,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn version_output_includes_git_commit() {
+        use clap::CommandFactory;
+        let version = Cli::command().get_version().unwrap().to_string();
+        assert!(version.starts_with(env!("CARGO_PKG_VERSION")));
+        let commit = version
+            .strip_prefix(&format!("{} (commit ", env!("CARGO_PKG_VERSION")))
+            .and_then(|rest| rest.strip_suffix(')'))
+            .expect("version must be '<pkg> (commit <sha|unknown>)'");
+        assert!(
+            commit == "unknown"
+                || (commit.len() >= 7 && commit.chars().all(|c| c.is_ascii_hexdigit()))
+        );
+    }
+
+    #[test]
     fn parses_self_update_options() {
         let cli =
             Cli::try_parse_from(["ping-rust", "self-update", "--version", "v0.1.2", "--force"])

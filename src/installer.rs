@@ -661,6 +661,36 @@ mod tests {
     use super::*;
     use std::io::Read;
 
+    fn release_provenance(version: &str) -> ShoesProvenance {
+        ShoesProvenance {
+            source: "github-release".to_owned(),
+            version: Some(version.to_owned()),
+            release_tag: Some(format!("v{version}")),
+            ..ShoesProvenance::default()
+        }
+    }
+
+    #[test]
+    fn unverified_release_notice_only_for_newer_github_release() {
+        let notice = unverified_installed_notice(&release_provenance("0.3.2")).unwrap();
+        assert_eq!(
+            notice,
+            format!(
+                "当前 shoes v0.3.2 未经 ping-rust 验证；可执行 sudo ping-rust update --method release --allow-downgrade 回到 {SHOES_RELEASE_TAG}"
+            )
+        );
+        assert!(notice.ends_with("回到 v0.2.7"));
+        assert!(unverified_installed_notice(&release_provenance("0.2.7")).is_none());
+        assert!(unverified_installed_notice(&release_provenance("0.2.6")).is_none());
+        let mut pin = release_provenance("0.3.2");
+        pin.source = "verified-pin".to_owned();
+        assert!(unverified_installed_notice(&pin).is_none());
+        assert!(unverified_installed_notice(&ShoesProvenance::default()).is_none());
+        let mut tagged = release_provenance("v0.3.0");
+        tagged.version = Some("v0.3.0".to_owned());
+        assert!(unverified_installed_notice(&tagged).unwrap().contains("shoes v0.3.0 "));
+    }
+
     #[test]
     fn release_install_is_pinned_to_verified_tag() {
         assert_eq!(SHOES_RELEASE_TAG, "v0.2.7");
