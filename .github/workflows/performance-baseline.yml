@@ -154,7 +154,7 @@ jobs:
               summary.write("- Result: reliability assertions passed; metrics uploaded without credentials\n")
           PY
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: performance-ubuntu-24.04
           path: ${{ env.PERFORMANCE_OUTPUT }}
@@ -329,7 +329,7 @@ jobs:
           PY
           printf 'DEBIAN_PERFORMANCE_OUTPUT=%s\n' "$output" >> "$GITHUB_ENV"
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: performance-debian-12
           path: ${{ env.DEBIAN_PERFORMANCE_OUTPUT }}
