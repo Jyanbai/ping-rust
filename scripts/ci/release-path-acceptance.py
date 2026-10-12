@@ -18,6 +18,16 @@ h2 = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(h2)
 STATE = Path("/etc/shoes/ping-rust-state.json")
 BIN = os.environ["PING_RUST_BIN"]
+INSTALLER_SOURCE = Path(__file__).resolve().parents[2] / "src" / "installer.rs"
+
+
+def pinned_release_tag():
+    match = re.search(r'^pub const SHOES_RELEASE_TAG: &str = "(v[0-9][^"]*)";$', INSTALLER_SOURCE.read_text(), re.M)
+    assert match, "SHOES_RELEASE_TAG not found in src/installer.rs"
+    return match.group(1)
+
+
+SHOES_RELEASE_TAG = pinned_release_tag()
 
 
 def run(*args):
@@ -51,7 +61,7 @@ def port_present(port):
 
 
 def notice(output):
-    for marker in ("GitHub Release v0.2.7", "固定 pin", "受控重启", "Update Center", "update --method cargo"):
+    for marker in (f"GitHub Release {SHOES_RELEASE_TAG}", "固定 pin", "受控重启", "Update Center", "update --method cargo"):
         assert marker in output, f"restart explanation missing {marker}"
 
 
@@ -106,10 +116,10 @@ def main():
     before = pid()
     assert subprocess.run(["systemctl", "is-enabled", "--quiet", "shoes.service"]).returncode == 0
     provenance = json.loads(Path("/var/lib/ping-rust/shoes-install.json").read_text())
-    assert provenance["source"] == "github-release" and provenance["release_tag"] == "v0.2.7"
+    assert provenance["source"] == "github-release" and provenance["release_tag"] == SHOES_RELEASE_TAG, provenance
     reality = state()["profiles"][0]
     assert port_present(reality["port"])
-    print("PASS default Release zero-input Reality deployment; github-release v0.2.7; enabled/active and listener")
+    print(f"PASS default Release zero-input Reality deployment; github-release {SHOES_RELEASE_TAG}; enabled/active and listener")
     socks_port = h2.free_port()
     _, errors = run("add", "socks5", "--name", "release-auth-socks", "--port", str(socks_port),
                     "--server-address", "127.0.0.1", "--yes", "--plain")
@@ -159,7 +169,7 @@ def main():
                 process.wait(timeout=5)
                 done.set()
                 worker.join(timeout=2)
-    print("PASS github-release v0.2.7 H2MUX preference/export/sing-box 1.14.2 data: small and 1MiB half-close")
+    print(f"PASS github-release {SHOES_RELEASE_TAG} H2MUX preference/export/sing-box 1.14.2 data: small and 1MiB half-close")
     from naive_certificate_acceptance import verify_naive_certificate_lifecycle
     verify_naive_certificate_lifecycle(BIN, run, state, pid, h2.free_port)
     run("uninstall", "--purge")
