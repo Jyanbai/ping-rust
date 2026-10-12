@@ -1,0 +1,513 @@
+{
+  "golden-anytls-reality.sing-box": {
+    "outbounds": [
+      {
+        "password": "P6DKR4FM5ahovCAh4VCjq9E3SzGNUb2A",
+        "server": "203.0.113.10",
+        "server_port": 20014,
+        "tag": "golden-anytls-reality",
+        "tls": {
+          "enabled": true,
+          "reality": {
+            "enabled": true,
+            "public_key": "fMtAhoVcJQxeL8ZgNub0Pw1B8pWDkrYFMTaHovcJQXA",
+            "short_id": "8fa963e74b8d29ab"
+          },
+          "server_name": "www.cloudflare.com",
+          "utls": {
+            "enabled": true,
+            "fingerprint": "chrome"
+          }
+        },
+        "type": "anytls"
+      }
+    ]
+  },
+  "golden-hysteria2.clash-meta": {
+    "proxies": [
+      {
+        "alpn": [
+          "h3"
+        ],
+        "name": "golden-hysteria2",
+        "password": "pwDkRYFmt6HOv4jQXELszg7uBIpwDKRA",
+        "port": 20001,
+        "server": "203.0.113.10",
+        "skip-cert-verify": true,
+        "sni": "www.cloudflare.com",
+        "type": "hysteria2"
+      }
+    ]
+  },
+  "golden-hysteria2.nekobox": "hysteria2://pwDkRYFmt6HOv4jQXELszg7uBIpwDKRA@203.0.113.10:20001?sni=www.cloudflare.com&alpn=h3&insecure=1&allowInsecure=1#HYSTERIA2-20001",
+  "golden-hysteria2.sing-box": {
+    "outbounds": [
+      {
+        "password": "pwDkRYFmt6HOv4jQXELszg7uBIpwDKRA",
+        "server": "203.0.113.10",
+        "server_port": 20001,
+        "tag": "golden-hysteria2",
+        "tls": {
+          "alpn": [
+            "h3"
+          ],
+          "enabled": true,
+          "insecure": true,
+          "server_name": "www.cloudflare.com"
+        },
+        "type": "hysteria2"
+      }
+    ]
+  },
+  "golden-reality.clash-meta": {
+    "proxies": [
+      {
+        "client-fingerprint": "chrome",
+        "flow": "xtls-rprx-vision",
+        "name": "golden-reality",
+        "network": "tcp",
+        "port": 20003,
+        "reality-opts": {
+          "public-key": "ElsZgnubIPWDKryF8TAhO30jQXELS9GNUBiPwdKryfA",
+          "short-id": "bcd85ab63e74bc5e"
+        },
+        "server": "203.0.113.10",
+        "servername": "www.cloudflare.com",
+        "tls": true,
+        "type": "vless",
+        "udp": true,
+        "uuid": "85296b07-fa5c-63a7-d8f2-cdef418defa3"
+      }
+    ]
+  },
+  "golden-reality.nekobox": "vless://85296b07-fa5c-63a7-d8f2-cdef418defa3@203.0.113.10:20003?encryption=none&flow=xtls-rprx-vision&security=reality&sni=www.cloudflare.com&fp=chrome&pbk=ElsZgnubIPWDKryF8TAhO30jQXELS9GNUBiPwdKryfA&sid=bcd85ab63e74bc5e&type=tcp#VLESS-REALITY-20003",
+  "golden-reality.sing-box": {
+    "outbounds": [
+      {
+        "flow": "xtls-rprx-vision",
+        "server": "203.0.113.10",
+        "server_port": 20003,
+        "tag": "golden-reality",
+        "tls": {
+          "enabled": true,
+          "reality": {
+            "enabled": true,
+            "public_key": "ElsZgnubIPWDKryF8TAhO30jQXELS9GNUBiPwdKryfA",
+            "short_id": "bcd85ab63e74bc5e"
+          },
+          "server_name": "www.cloudflare.com",
+          "utls": {
+            "enabled": true,
+            "fingerprint": "chrome"
+          }
+        },
+        "type": "vless",
+        "uuid": "85296b07-fa5c-63a7-d8f2-cdef418defa3"
+      }
+    ]
+  },
+  "golden-shadowsocks-shadowtls.clash-meta": {
+    "proxies": [
+      {
+        "cipher": "2022-blake3-aes-256-gcm",
+        "client-fingerprint": "chrome",
+        "name": "golden-shadowsocks-shadowtls",
+        "password": "q1ELs9GnUBiP8DKRYfmtaH8Vcj+xels1GNUb6gN0bIA=",
+        "plugin": "shadow-tls",
+        "plugin-opts": {
+          "host": "www.cloudflare.com",
+          "password": "vCJQxelsZgNuBipWD4ryfMtah-Vcjq5A",
+          "version": 3
+        },
+        "port": 20013,
+        "server": "203.0.113.10",
+        "type": "ss",
+        "udp": false
+      }
+    ]
+  },
+  "golden-shadowsocks-shadowtls.sing-box": {
+    "outbounds": [
+      {
+        "detour": "golden-shadowsocks-shadowtls-shadowtls",
+        "method": "2022-blake3-aes-256-gcm",
+        "password": "q1ELs9GnUBiP8DKRYfmtaH8Vcj+xels1GNUb6gN0bIA=",
+        "server": "203.0.113.10",
+        "server_port": 20013,
+        "tag": "golden-shadowsocks-shadowtls",
+        "type": "shadowsocks"
+      },
+      {
+        "password": "vCJQxelsZgNuBipWD4ryfMtah-Vcjq5A",
+        "server": "203.0.113.10",
+        "server_port": 20013,
+        "tag": "golden-shadowsocks-shadowtls-shadowtls",
+        "tls": {
+          "enabled": true,
+          "server_name": "www.cloudflare.com",
+          "utls": {
+            "enabled": true,
+            "fingerprint": "chrome"
+          }
+        },
+        "type": "shadowtls",
+        "version": 3
+      }
+    ]
+  },
+  "golden-shadowsocks.clash-meta": {
+    "proxies": [
+      {
+        "cipher": "2022-blake3-aes-256-gcm",
+        "name": "golden-shadowsocks",
+        "password": "UbIpW/6Ry7MtAHOvCJ0x4lsZ2nU3ip4Dk5yF6taHOVA=",
+        "port": 20002,
+        "server": "203.0.113.10",
+        "type": "ss",
+        "udp": true
+      }
+    ]
+  },
+  "golden-shadowsocks.nekobox": "ss://MjAyMi1ibGFrZTMtYWVzLTI1Ni1nY206VWJJcFcvNlJ5N010QUhPdkNKMHg0bHNaMm5VM2lwNERrNXlGNnRhSE9WQT0@203.0.113.10:20002#SHADOWSOCKS-20002",
+  "golden-shadowsocks.sing-box": {
+    "outbounds": [
+      {
+        "method": "2022-blake3-aes-256-gcm",
+        "password": "UbIpW/6Ry7MtAHOvCJ0x4lsZ2nU3ip4Dk5yF6taHOVA=",
+        "server": "203.0.113.10",
+        "server_port": 20002,
+        "tag": "golden-shadowsocks",
+        "type": "shadowsocks"
+      }
+    ]
+  },
+  "golden-socks5-no-auth.clash-meta": {
+    "proxies": [
+      {
+        "name": "golden-socks5-no-auth",
+        "port": 20015,
+        "server": "203.0.113.10",
+        "type": "socks5",
+        "udp": true
+      }
+    ]
+  },
+  "golden-socks5-no-auth.sing-box": {
+    "outbounds": [
+      {
+        "server": "203.0.113.10",
+        "server_port": 20015,
+        "tag": "golden-socks5-no-auth",
+        "type": "socks"
+      }
+    ]
+  },
+  "golden-socks5.clash-meta": {
+    "proxies": [
+      {
+        "name": "golden-socks5",
+        "password": "RyFmTaHOVcjQ30lsZGn2biPwdkRyfmTA",
+        "port": 20010,
+        "server": "203.0.113.10",
+        "type": "socks5",
+        "udp": true,
+        "username": "0dKRYFMTAh-v"
+      }
+    ]
+  },
+  "golden-socks5.sing-box": {
+    "outbounds": [
+      {
+        "password": "RyFmTaHOVcjQ30lsZGn2biPwdkRyfmTA",
+        "server": "203.0.113.10",
+        "server_port": 20010,
+        "tag": "golden-socks5",
+        "type": "socks",
+        "username": "0dKRYFMTAh-v"
+      }
+    ]
+  },
+  "golden-trojan-reality.clash-meta": {
+    "proxies": [
+      {
+        "alpn": [],
+        "client-fingerprint": "chrome",
+        "name": "golden-trojan-reality",
+        "network": "tcp",
+        "password": "n-BiPwdkRYfMtahovcJ_XelszGNu96PA",
+        "port": 20008,
+        "reality-opts": {
+          "public-key": "XeLSzGnu1ipwDKRYf4T8Ho_CjqX4lsZ2nUbi7wdKryA",
+          "short-id": "e3074de5abc30fa1"
+        },
+        "server": "203.0.113.10",
+        "sni": "www.cloudflare.com",
+        "type": "trojan",
+        "udp": true
+      }
+    ]
+  },
+  "golden-trojan-reality.nekobox": "trojan://n-BiPwdkRYfMtahovcJ_XelszGNu96PA@203.0.113.10:20008?security=reality&pbk=XeLSzGnu1ipwDKRYf4T8Ho_CjqX4lsZ2nUbi7wdKryA&sid=e3074de5abc30fa1&sni=www.cloudflare.com&fp=chrome&type=tcp#TROJAN-REALITY-20008",
+  "golden-trojan-reality.sing-box": {
+    "outbounds": [
+      {
+        "password": "n-BiPwdkRYfMtahovcJ_XelszGNu96PA",
+        "server": "203.0.113.10",
+        "server_port": 20008,
+        "tag": "golden-trojan-reality",
+        "tls": {
+          "enabled": true,
+          "reality": {
+            "enabled": true,
+            "public_key": "XeLSzGnu1ipwDKRYf4T8Ho_CjqX4lsZ2nUbi7wdKryA",
+            "short_id": "e3074de5abc30fa1"
+          },
+          "server_name": "www.cloudflare.com",
+          "utls": {
+            "enabled": true,
+            "fingerprint": "chrome"
+          }
+        },
+        "type": "trojan"
+      }
+    ]
+  },
+  "golden-trojan-tls.clash-meta": {
+    "proxies": [
+      {
+        "alpn": [
+          "h2",
+          "http/1.1"
+        ],
+        "client-fingerprint": "chrome",
+        "name": "golden-trojan-tls",
+        "network": "tcp",
+        "password": "ipWdkrY-MtAhOvcJqXELsZGNubIpW5kA",
+        "port": 20007,
+        "server": "203.0.113.10",
+        "skip-cert-verify": true,
+        "sni": "www.cloudflare.com",
+        "type": "trojan",
+        "udp": true
+      }
+    ]
+  },
+  "golden-trojan-tls.nekobox": "trojan://ipWdkrY-MtAhOvcJqXELsZGNubIpW5kA@203.0.113.10:20007?security=tls&insecure=1&allowInsecure=1&sni=www.cloudflare.com&fp=chrome&type=tcp#TROJAN-TLS-20007",
+  "golden-trojan-tls.sing-box": {
+    "outbounds": [
+      {
+        "password": "ipWdkrY-MtAhOvcJqXELsZGNubIpW5kA",
+        "server": "203.0.113.10",
+        "server_port": 20007,
+        "tag": "golden-trojan-tls",
+        "tls": {
+          "alpn": [
+            "h2",
+            "http/1.1"
+          ],
+          "enabled": true,
+          "insecure": true,
+          "server_name": "www.cloudflare.com"
+        },
+        "type": "trojan"
+      }
+    ]
+  },
+  "golden-tuic.clash-meta": {
+    "proxies": [
+      {
+        "alpn": [
+          "h3"
+        ],
+        "congestion-controller": "bbr",
+        "name": "golden-tuic",
+        "password": "1MtaHo3C7QxelsZGN074PwdK_6F07a1A",
+        "port": 20000,
+        "reduce-rtt": false,
+        "server": "203.0.113.10",
+        "skip-cert-verify": true,
+        "sni": "www.cloudflare.com",
+        "type": "tuic",
+        "udp-relay-mode": "native",
+        "uuid": "29630741-5a96-0741-def6-c74f8b296307"
+      }
+    ]
+  },
+  "golden-tuic.nekobox": "tuic://29630741-5a96-0741-def6-c74f8b296307:1MtaHo3C7QxelsZGN074PwdK_6F07a1A@203.0.113.10:20000?congestion_control=bbr&alpn=h3&sni=www.cloudflare.com&insecure=1&allowInsecure=1#TUIC-20000",
+  "golden-tuic.sing-box": {
+    "outbounds": [
+      {
+        "congestion_control": "bbr",
+        "password": "1MtaHo3C7QxelsZGN074PwdK_6F07a1A",
+        "server": "203.0.113.10",
+        "server_port": 20000,
+        "tag": "golden-tuic",
+        "tls": {
+          "alpn": [
+            "h3"
+          ],
+          "enabled": true,
+          "insecure": true,
+          "server_name": "www.cloudflare.com"
+        },
+        "type": "tuic",
+        "uuid": "29630741-5a96-0741-def6-c74f8b296307",
+        "zero_rtt_handshake": false
+      }
+    ]
+  },
+  "golden-vless-tls-vision.clash-meta": {
+    "proxies": [
+      {
+        "alpn": [
+          "h2",
+          "http/1.1"
+        ],
+        "client-fingerprint": "chrome",
+        "flow": "xtls-rprx-vision",
+        "name": "golden-vless-tls-vision",
+        "network": "tcp",
+        "port": 20005,
+        "server": "203.0.113.10",
+        "servername": "www.cloudflare.com",
+        "skip-cert-verify": true,
+        "tls": true,
+        "type": "vless",
+        "udp": true,
+        "uuid": "9ef07cd8-29cd-74b8-efa3-741852de30b4"
+      }
+    ]
+  },
+  "golden-vless-tls-vision.nekobox": "vless://9ef07cd8-29cd-74b8-efa3-741852de30b4@203.0.113.10:20005?encryption=none&flow=xtls-rprx-vision&security=tls&sni=www.cloudflare.com&fp=chrome&insecure=1&allowInsecure=1&type=tcp#VLESS-TLS-VISION-20005",
+  "golden-vless-tls-vision.sing-box": {
+    "outbounds": [
+      {
+        "flow": "xtls-rprx-vision",
+        "server": "203.0.113.10",
+        "server_port": 20005,
+        "tag": "golden-vless-tls-vision",
+        "tls": {
+          "alpn": [
+            "h2",
+            "http/1.1"
+          ],
+          "enabled": true,
+          "insecure": true,
+          "server_name": "www.cloudflare.com"
+        },
+        "type": "vless",
+        "uuid": "9ef07cd8-29cd-74b8-efa3-741852de30b4"
+      }
+    ]
+  },
+  "golden-vless-ws-tls.clash-meta": {
+    "proxies": [
+      {
+        "alpn": [
+          "http/1.1"
+        ],
+        "client-fingerprint": "chrome",
+        "name": "golden-vless-ws-tls",
+        "network": "ws",
+        "port": 20006,
+        "server": "203.0.113.10",
+        "servername": "www.cloudflare.com",
+        "skip-cert-verify": true,
+        "tls": true,
+        "type": "vless",
+        "udp": true,
+        "uuid": "07a18d2f-3074-85cd-f074-85296defabc5",
+        "ws-opts": {
+          "headers": {
+            "Host": "www.cloudflare.com"
+          },
+          "path": "/8529m3a74v852x63"
+        }
+      }
+    ]
+  },
+  "golden-vless-ws-tls.nekobox": "vless://07a18d2f-3074-85cd-f074-85296defabc5@203.0.113.10:20006?encryption=none&security=tls&sni=www.cloudflare.com&fp=chrome&insecure=1&allowInsecure=1&type=ws&host=www.cloudflare.com&path=%2F8529m3a74v852x63#VLESS-WS-TLS-20006",
+  "golden-vless-ws-tls.sing-box": {
+    "outbounds": [
+      {
+        "server": "203.0.113.10",
+        "server_port": 20006,
+        "tag": "golden-vless-ws-tls",
+        "tls": {
+          "alpn": [
+            "http/1.1"
+          ],
+          "enabled": true,
+          "insecure": true,
+          "server_name": "www.cloudflare.com"
+        },
+        "transport": {
+          "headers": {
+            "Host": "www.cloudflare.com"
+          },
+          "path": "/8529m3a74v852x63",
+          "type": "ws"
+        },
+        "type": "vless",
+        "uuid": "07a18d2f-3074-85cd-f074-85296defabc5"
+      }
+    ]
+  },
+  "golden-vmess-ws-tls.clash-meta": {
+    "proxies": [
+      {
+        "alpn": [
+          "http/1.1"
+        ],
+        "alterId": 0,
+        "cipher": "auto",
+        "client-fingerprint": "chrome",
+        "name": "golden-vmess-ws-tls",
+        "network": "ws",
+        "port": 20009,
+        "server": "203.0.113.10",
+        "servername": "www.cloudflare.com",
+        "skip-cert-verify": true,
+        "tls": true,
+        "type": "vmess",
+        "udp": true,
+        "uuid": "741cd2f6-0741-5296-0741-529c30fabc5e",
+        "ws-opts": {
+          "headers": {
+            "Host": "www.cloudflare.com"
+          },
+          "path": "/5a9ov0741e5s9g30"
+        }
+      }
+    ]
+  },
+  "golden-vmess-ws-tls.nekobox": "vmess://eyJhZGQiOiIyMDMuMC4xMTMuMTAiLCJhaWQiOjAsImFscG4iOiJodHRwLzEuMSIsImZwIjoiY2hyb21lIiwiaG9zdCI6Ind3dy5jbG91ZGZsYXJlLmNvbSIsImlkIjoiNzQxY2QyZjYtMDc0MS01Mjk2LTA3NDEtNTI5YzMwZmFiYzVlIiwiaW5zZWN1cmUiOiIxIiwibmV0Ijoid3MiLCJwYXRoIjoiLzVhOW92MDc0MWU1czlnMzAiLCJwb3J0IjoyMDAwOSwicHMiOiJWTUVTUy1XUy1UTFMtMjAwMDkiLCJzY3kiOiJhdXRvIiwic25pIjoid3d3LmNsb3VkZmxhcmUuY29tIiwidGxzIjoidGxzIiwidHlwZSI6Im5vbmUiLCJ2IjoyfQ==",
+  "golden-vmess-ws-tls.sing-box": {
+    "outbounds": [
+      {
+        "alter_id": 0,
+        "security": "auto",
+        "server": "203.0.113.10",
+        "server_port": 20009,
+        "tag": "golden-vmess-ws-tls",
+        "tls": {
+          "alpn": [
+            "http/1.1"
+          ],
+          "enabled": true,
+          "insecure": true,
+          "server_name": "www.cloudflare.com"
+        },
+        "transport": {
+          "headers": {
+            "Host": "www.cloudflare.com"
+          },
+          "path": "/5a9ov0741e5s9g30",
+          "type": "ws"
+        },
+        "type": "vmess",
+        "uuid": "741cd2f6-0741-5296-0741-529c30fabc5e"
+      }
+    ]
+  }
+}

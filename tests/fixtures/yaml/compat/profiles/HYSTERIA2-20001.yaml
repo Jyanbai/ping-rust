@@ -1,0 +1,14 @@
+address: 0.0.0.0:20001
+transport: quic
+quic_settings:
+  cert: /etc/shoes/fixtures/cert-00000000.pem
+  key: /etc/shoes/fixtures/key-00000000.pem
+  alpn_protocols:
+  - h3
+  num_endpoints: 0
+protocol:
+  type: hysteria2
+  password: pwDkRYFmt6HOv4jQXELszg7uBIpwDKRA
+  udp_enabled: true
+rules:
+- allow-all-direct

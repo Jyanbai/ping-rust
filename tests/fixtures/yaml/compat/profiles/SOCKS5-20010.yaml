@@ -1,0 +1,8 @@
+address: 0.0.0.0:20010
+protocol:
+  type: socks
+  username: 0dKRYFMTAh-v
+  password: RyFmTaHOVcjQ30lsZGn2biPwdkRyfmTA
+  udp_enabled: true
+rules:
+- allow-all-direct

@@ -13,6 +13,7 @@ shoes --dry-run examples/socks5-no-auth.yaml
 shoes --dry-run examples/snell.yaml
 cargo test --locked --test chain_proxy_e2e -- --nocapture
 cargo test --locked pinned_schema_accepts_full_v2_rule_shape -- --nocapture
+cargo test --locked yaml_special_strings_round_trip_as_exact_strings -- --nocapture
 cargo test --locked --test chain_v2_e2e -- --nocapture
 python3 scripts/ci/validate-h2mux.py
 )

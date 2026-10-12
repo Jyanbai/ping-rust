@@ -1,0 +1,18 @@
+proxies:
+- alpn:
+  - http/1.1
+  client-fingerprint: chrome
+  name: golden-vless-ws-tls
+  network: ws
+  port: 20006
+  server: 203.0.113.10
+  servername: www.cloudflare.com
+  skip-cert-verify: true
+  tls: true
+  type: vless
+  udp: true
+  uuid: 07a18d2f-3074-85cd-f074-85296defabc5
+  ws-opts:
+    headers:
+      Host: www.cloudflare.com
+    path: /8529m3a74v852x63

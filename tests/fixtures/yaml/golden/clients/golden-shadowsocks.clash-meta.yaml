@@ -1,0 +1,8 @@
+proxies:
+- cipher: 2022-blake3-aes-256-gcm
+  name: golden-shadowsocks
+  password: UbIpW/6Ry7MtAHOvCJ0x4lsZ2nU3ip4Dk5yF6taHOVA=
+  port: 20002
+  server: 203.0.113.10
+  type: ss
+  udp: true

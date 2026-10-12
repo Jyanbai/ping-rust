@@ -1,0 +1,20 @@
+proxies:
+- alpn:
+  - http/1.1
+  alterId: 0
+  cipher: auto
+  client-fingerprint: chrome
+  name: golden-vmess-ws-tls
+  network: ws
+  port: 20009
+  server: 203.0.113.10
+  servername: www.cloudflare.com
+  skip-cert-verify: true
+  tls: true
+  type: vmess
+  udp: true
+  uuid: 741cd2f6-0741-5296-0741-529c30fabc5e
+  ws-opts:
+    headers:
+      Host: www.cloudflare.com
+    path: /5a9ov0741e5s9g30

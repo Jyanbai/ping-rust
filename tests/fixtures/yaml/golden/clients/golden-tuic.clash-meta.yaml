@@ -1,0 +1,14 @@
+proxies:
+- alpn:
+  - h3
+  congestion-controller: bbr
+  name: golden-tuic
+  password: 1MtaHo3C7QxelsZGN074PwdK_6F07a1A
+  port: 20000
+  reduce-rtt: false
+  server: 203.0.113.10
+  skip-cert-verify: true
+  sni: www.cloudflare.com
+  type: tuic
+  udp-relay-mode: native
+  uuid: 29630741-5a96-0741-def6-c74f8b296307

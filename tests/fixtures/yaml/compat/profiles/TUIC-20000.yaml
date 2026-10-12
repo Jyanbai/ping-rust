@@ -1,0 +1,15 @@
+address: 0.0.0.0:20000
+transport: quic
+quic_settings:
+  cert: /etc/shoes/fixtures/cert-00000000.pem
+  key: /etc/shoes/fixtures/key-00000000.pem
+  alpn_protocols:
+  - h3
+  num_endpoints: 0
+protocol:
+  type: tuic
+  uuid: 29630741-5a96-0741-def6-c74f8b296307
+  password: 1MtaHo3C7QxelsZGN074PwdK_6F07a1A
+  zero_rtt_handshake: false
+rules:
+- allow-all-direct

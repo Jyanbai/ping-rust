@@ -1,0 +1,14 @@
+proxies:
+- cipher: 2022-blake3-aes-256-gcm
+  client-fingerprint: chrome
+  name: golden-shadowsocks-shadowtls
+  password: q1ELs9GnUBiP8DKRYfmtaH8Vcj+xels1GNUb6gN0bIA=
+  plugin: shadow-tls
+  plugin-opts:
+    host: www.cloudflare.com
+    password: vCJQxelsZgNuBipWD4ryfMtah-Vcjq5A
+    version: 3
+  port: 20013
+  server: 203.0.113.10
+  type: ss
+  udp: false

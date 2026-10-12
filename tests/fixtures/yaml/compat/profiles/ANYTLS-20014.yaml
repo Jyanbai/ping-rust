@@ -1,0 +1,17 @@
+address: 0.0.0.0:20014
+protocol:
+  type: tls
+  reality_targets:
+    www.cloudflare.com:
+      private_key: 6H0Vc1qX_-SZ0nuBIPwdkrYfMTAHFMtAH074j8X_lSA
+      short_ids:
+      - 8fa963e74b8d29ab
+      dest: www.cloudflare.com:443
+      max_time_diff: 60000
+      vision: false
+      protocol:
+        type: anytls
+        users:
+        - name: default
+          password: P6DKR4FM5ahovCAh4VCjq9E3SzGNUb2A
+        udp_enabled: true

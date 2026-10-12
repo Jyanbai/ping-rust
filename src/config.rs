@@ -37,6 +37,8 @@ mod validation;
 
 #[cfg(test)]
 mod naive_certificate_tests;
+#[cfg(test)]
+mod yaml_fixture_tests;
 
 #[cfg(test)]
 use commit::{

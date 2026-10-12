@@ -1,0 +1,14 @@
+address: 0.0.0.0:20008
+protocol:
+  type: tls
+  reality_targets:
+    www.cloudflare.com:
+      private_key: S-GNU_IpWdKryFm9-hovc1qXeL6zgnU1iPwD6rY_MtA
+      short_ids:
+      - e3074de5abc30fa1
+      dest: www.cloudflare.com:443
+      max_time_diff: 60000
+      vision: false
+      protocol:
+        type: trojan
+        password: n-BiPwdkRYfMtahovcJ_XelszGNu96PA

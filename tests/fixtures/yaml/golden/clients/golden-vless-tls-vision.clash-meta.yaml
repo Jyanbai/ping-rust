@@ -1,0 +1,16 @@
+proxies:
+- alpn:
+  - h2
+  - http/1.1
+  client-fingerprint: chrome
+  flow: xtls-rprx-vision
+  name: golden-vless-tls-vision
+  network: tcp
+  port: 20005
+  server: 203.0.113.10
+  servername: www.cloudflare.com
+  skip-cert-verify: true
+  tls: true
+  type: vless
+  udp: true
+  uuid: 9ef07cd8-29cd-74b8-efa3-741852de30b4

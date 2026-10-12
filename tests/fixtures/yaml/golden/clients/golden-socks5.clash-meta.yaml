@@ -1,0 +1,8 @@
+proxies:
+- name: golden-socks5
+  password: RyFmTaHOVcjQ30lsZGn2biPwdkRyfmTA
+  port: 20010
+  server: 203.0.113.10
+  type: socks5
+  udp: true
+  username: 0dKRYFMTAh-v
