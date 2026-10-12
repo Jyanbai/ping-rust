@@ -1,0 +1,61 @@
+name: Backward compatibility (v0.2.1 reads new files)
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  v0-2-1-reads-new-state:
+    name: v0.2.1 Release reads files written by this build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Build static ping-rust
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools
+          rustup target add x86_64-unknown-linux-musl
+          cargo build --locked --release --target x86_64-unknown-linux-musl
+      - name: Start privileged Debian 12 with systemd
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --detach --name compat \
+            --privileged --cgroupns=host \
+            --tmpfs /run --tmpfs /run/lock \
+            --volume /sys/fs/cgroup:/sys/fs/cgroup:rw \
+            --volume "$PWD:/workspace:ro" \
+            debian:12 bash -lc \
+              'apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends systemd systemd-sysv ca-certificates curl jq expect iproute2 && exec /sbin/init'
+          for _ in {1..180}; do
+            state="$(docker exec compat systemctl is-system-running 2>/dev/null || true)"
+            if [[ "$state" == running || "$state" == degraded ]]; then break; fi
+            [[ "$(docker inspect --format '{{.State.Status}}' compat)" == running ]] || { docker logs compat; exit 1; }
+            sleep 1
+          done
+          docker exec compat systemctl --version
+      - name: Generate with new build, read with v0.2.1, compare
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          docker cp target/x86_64-unknown-linux-musl/release/ping-rust compat:/usr/local/bin/ping-rust
+          docker exec compat chmod 0755 /usr/local/bin/ping-rust
+          docker exec -e GH_TOKEN compat bash /workspace/scripts/ci/backward-compat.sh
+      - name: Diagnostics
+        if: failure()
+        shell: bash
+        run: |
+          docker exec compat journalctl -u shoes.service --no-pager -n 80 || true
+          docker exec compat bash -c 'diff -ru /tmp/compat/new /tmp/compat/old | head -200' || true
