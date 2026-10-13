@@ -22,6 +22,24 @@ use crate::{
     service::{self, ServiceAction},
 };
 
+/// 构建时注入的 git commit；无 .git 的源码构建为 "unknown"。
+pub const GIT_COMMIT: &str = env!("PING_RUST_GIT_COMMIT");
+
+/// `--version` / `-V` 的输出：stdout 第一行保持 `ping-rust <版本>`（已发布版本的 self-update
+/// 校验按整行精确比较 stdout），commit 单独输出到 stderr。
+pub fn version_output() -> (String, String) {
+    (
+        format!("ping-rust {}", env!("CARGO_PKG_VERSION")),
+        format!("commit {GIT_COMMIT}"),
+    )
+}
+
+/// 仅当参数恰好为单个 `--version` 或 `-V` 时返回 true。
+pub fn is_version_request<I: IntoIterator<Item = String>>(args: I) -> bool {
+    let args: Vec<String> = args.into_iter().skip(1).collect();
+    args.len() == 1 && matches!(args[0].as_str(), "--version" | "-V")
+}
+
 #[derive(Debug, Parser)]
 #[command(name = "ping-rust")]
 #[command(version, about = "shoes 代理的一键安装与管理工具")]
@@ -1388,6 +1406,9 @@ pub async fn print_update_status() -> Result<()> {
         "  已知安装版本：{}",
         known.version.as_deref().unwrap_or("未知")
     );
+    if let Some(notice) = installer::unverified_installed_notice(&known) {
+        println!("  {}", notice.yellow());
+    }
     println!(
         "  已知 revision/tag：{}",
         known
@@ -1432,6 +1453,12 @@ pub async fn print_update_status() -> Result<()> {
 }
 
 pub(crate) fn execute_service(action: ServiceAction) -> Result<()> {
+    if matches!(action, ServiceAction::Status) {
+        if let Some(notice) = installer::unverified_installed_notice(&installer::load_provenance())
+        {
+            eprintln!("{}", notice.yellow());
+        }
+    }
     if matches!(action, ServiceAction::Status) && Path::new(crate::utils::STATE_FILE).exists() {
         let state = config::load_state().context("读取测试证书状态失败")?;
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
@@ -1822,6 +1849,27 @@ fn print_certificate_notice(result: &config::GenerationResult) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn version_output_includes_git_commit() {
+        let (stdout, stderr) = version_output();
+        assert_eq!(stdout, format!("ping-rust {}", env!("CARGO_PKG_VERSION")));
+        let commit = stderr.strip_prefix("commit ").expect("commit line");
+        assert!(
+            commit == "unknown"
+                || (commit.len() >= 7 && commit.chars().all(|c| c.is_ascii_hexdigit()))
+        );
+        let args = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(is_version_request(args(&["ping-rust", "--version"])));
+        assert!(is_version_request(args(&["prs", "-V"])));
+        assert!(!is_version_request(args(&[
+            "ping-rust",
+            "self-update",
+            "--version",
+            "v0.2.2"
+        ])));
+        assert!(!is_version_request(args(&["ping-rust"])));
+    }
 
     #[test]
     fn parses_self_update_options() {
