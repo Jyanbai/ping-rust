@@ -981,3 +981,10 @@ self-update 前后逐文件 SHA-256 相同：config.yaml=`c8ccaade93786551c8c2b9
 以上为allocated size，子目录已包含在父目录中，**不能相加**。完整包文件清单和原始脱敏命令记录保存于本机验收资料，不上传凭据。依赖删除由用户决定。prs-test是保留并恢复原环境的机器，不能按最初一次性VPS计划销毁。
 
 最终结论：阶段5两组公开安装/self-update冒烟、正式发布、最终purge、原始环境恢复与HK原节点外部请求均**通过**。PR #21发版证据已在10/10 checks成功后合并，main=`638e905989e816b80f05bbdd39494a22c8c04e9c`，runs `36848619596`/`36848712861`。本追加仅文档，不改变发布源码。原bootstrap run **36821437871底层根因仍未定位**；历史开机enabled状态证据不足；旧无效二进制测试、397天指令错误及当时失败均保留，没有用后续成功覆盖。
+
+## v0.2.2 发版记录（2026-10-13，HKT）
+
+- 准备 PR #30（squash `af6c5a0`）：未验证 shoes 版本提示（status / Update Center）；`--version` 在 stderr 输出构建 commit（stdout 保持 `ping-rust <版本>`，以兼容 v0.2.1 self-update 的精确校验）；删除 SOURCE_SNAPSHOT.md；quinn-proto 升至 0.11.19（RUSTSEC-2026-0338..0342）；新增 backward-compat CI（v0.2.1 Release 经 SHA256SUMS 校验后读取新版写出的 Reality / SOCKS5 / Chain 2.0 文件：info 逐字一致，导出语义一致，仅 clash-meta `server` 引号差异；shoes --dry-run 通过）。
+- 版本 PR #31（squash `8c3fc3e`），tag `v0.2.2` 指向该提交；Release workflow 成功，资产为 x86_64 / aarch64 musl tar.gz 与 SHA256SUMS，本地 `sha256sum -c` 通过，二进制输出 `ping-rust 0.2.2` / `commit 8c3fc3ea77fa`。`cargo publish --dry-run --locked` 通过。
+- 生产冒烟（prs-test，经 ProxyJump HK）：**未执行**。本机缺少 ssh 客户端、`prs-test` / HK 主机定义和登录凭据，按闸门停止；prs-test 未做任何改动，没有升级，也没有回滚。
+- crates.io：**未发布**，因为冒烟闸门没有通过（本机也没有配置 crates.io token）。
