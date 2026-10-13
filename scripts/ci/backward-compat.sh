@@ -34,10 +34,13 @@ find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$WORK/hash-before"
 
 capture() {
   local bin="$1" out="$2"
-  "$bin" info >"$out/info" 2>&1
+  local rc
+  rc=0; "$bin" info >"$out/info" 2>&1 || rc=$?; echo "exit=$rc" >>"$out/info"
   for id in "${ids[@]}"; do
     for fmt in clash-meta sing-box nekobox; do
-      "$bin" export "$fmt" --profile "$id" --server "$SERVER" >"$out/export-$fmt-$id" 2>&1
+      rc=0
+      "$bin" export "$fmt" --profile "$id" --server "$SERVER" >"$out/export-$fmt-$id" 2>&1 || rc=$?
+      echo "exit=$rc" >>"$out/export-$fmt-$id"
     done
   done
 }
@@ -61,7 +64,10 @@ find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$WORK/hash-after"
 diff -u "$WORK/hash-before" "$WORK/hash-after"
 diff -ru "$WORK/new" "$WORK/old"
 count="$(find "$WORK/new" -type f | wc -l)"
-echo "compared $count outputs: identical"
+ok="$(grep -lx 'exit=0' "$WORK"/new/* | wc -l)"
+echo "compared $count outputs: identical ($ok exited 0 in both; others failed identically in both)"
+grep -x 'exit=0' "$WORK/new/info"
+grep -H -v '^exit=0$' -x "$WORK"/new/* /dev/null | grep 'exit=' || true
 
 /usr/local/bin/shoes --dry-run /etc/shoes/config.yaml
 echo "backward compatibility: PASS"
