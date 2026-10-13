@@ -25,7 +25,7 @@ expect "$EXPECT_SCRIPT" "$NEW" enable
 
 ls -la /etc/shoes /etc/shoes/profiles
 for f in /etc/shoes/config.yaml /etc/shoes/ping-rust-state.json; do test -s "$f"; done
-set -x
+:
 jq -e '.chain_proxy.enabled == true and (.chain_proxy.nodes | length) >= 1' /etc/shoes/ping-rust-state.json >/dev/null \
   || { echo "Chain 2.0 state missing"; jq '.chain_proxy' /etc/shoes/ping-rust-state.json | sed -E 's/"(password|uuid|private_key|key)": "[^"]*"/"\1": "<redacted>"/g'; exit 1; }
 mapfile -t ids < <(jq -r '.profiles[].id' /etc/shoes/ping-rust-state.json)
@@ -62,10 +62,10 @@ capture "$OLD" "$WORK/old"
 echo "== compare"
 find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$WORK/hash-after"
 diff -u "$WORK/hash-before" "$WORK/hash-after"
-diff -ru "$WORK/new" "$WORK/old"
+python3 "$(dirname "$0")/compare-compat-outputs.py" "$WORK/new" "$WORK/old"
 count="$(find "$WORK/new" -type f | wc -l)"
 ok="$(grep -lx 'exit=0' "$WORK"/new/* | wc -l)"
-echo "compared $count outputs: identical ($ok exited 0 in both; others failed identically in both)"
+echo "$count outputs; $ok exited 0 in both"
 grep -x 'exit=0' "$WORK/new/info"
 grep -H -v '^exit=0$' -x "$WORK"/new/* /dev/null | grep 'exit=' || true
 
