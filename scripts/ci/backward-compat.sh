@@ -25,7 +25,9 @@ expect "$EXPECT_SCRIPT" "$NEW" enable
 
 ls -la /etc/shoes /etc/shoes/profiles
 for f in /etc/shoes/config.yaml /etc/shoes/ping-rust-state.json; do test -s "$f"; done
-grep -q 'chain' -r /etc/shoes || { echo "Chain 2.0 state missing"; exit 1; }
+set -x
+jq -e '.chain_proxy.enabled == true and (.chain_proxy.nodes | length) >= 1' /etc/shoes/ping-rust-state.json >/dev/null \
+  || { echo "Chain 2.0 state missing"; jq '.chain_proxy' /etc/shoes/ping-rust-state.json | sed -E 's/"(password|uuid|private_key|key)": "[^"]*"/"\1": "<redacted>"/g'; exit 1; }
 mapfile -t ids < <(jq -r '.profiles[].id' /etc/shoes/ping-rust-state.json)
 test "${#ids[@]}" -eq 2
 find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$WORK/hash-before"
