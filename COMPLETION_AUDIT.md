@@ -986,5 +986,33 @@ self-update 前后逐文件 SHA-256 相同：config.yaml=`c8ccaade93786551c8c2b9
 
 - 准备 PR #30（squash `af6c5a0`）：未验证 shoes 版本提示（status / Update Center）；`--version` 在 stderr 输出构建 commit（stdout 保持 `ping-rust <版本>`，以兼容 v0.2.1 self-update 的精确校验）；删除 SOURCE_SNAPSHOT.md；quinn-proto 升至 0.11.19（RUSTSEC-2026-0338..0342）；新增 backward-compat CI（v0.2.1 Release 经 SHA256SUMS 校验后读取新版写出的 Reality / SOCKS5 / Chain 2.0 文件：info 逐字一致，导出语义一致，仅 clash-meta `server` 引号差异；shoes --dry-run 通过）。
 - 版本 PR #31（squash `8c3fc3e`），tag `v0.2.2` 指向该提交；Release workflow 成功，资产为 x86_64 / aarch64 musl tar.gz 与 SHA256SUMS，本地 `sha256sum -c` 通过，二进制输出 `ping-rust 0.2.2` / `commit 8c3fc3ea77fa`。`cargo publish --dry-run --locked` 通过。
-- 生产冒烟（prs-test，经 ProxyJump HK）：**未执行**。本机缺少 ssh 客户端、`prs-test` / HK 主机定义和登录凭据，按闸门停止；prs-test 未做任何改动，没有升级，也没有回滚。
-- crates.io：**未发布**，因为冒烟闸门没有通过（本机也没有配置 crates.io token）。
+- 生产冒烟（prs-test，经 ProxyJump HK）：最初因执行环境缺少 SSH 客户端、主机定义和登录凭据而未执行；随后由本地 agent 在生产节点完成 V1–V7，**全部通过**。2026-10-14 补录的脱敏结果见下节；最初停止记录不再表示当前冒烟状态。
+- crates.io：最初因冒烟闸门未通过而未发布；后续发布和 Linux registry 安装验证结果见下节。
+
+## v0.2.2 生产冒烟与 crates.io 发布（2026-10-14，HKT 补录）
+
+### 生产节点冒烟 V1–V7
+
+以下是用户转交的已完成冒烟结果：**由本地 agent 在生产节点执行，V1–V7 全部通过**。本节为脱敏补录，不把本次发布任务描述成重新执行生产冒烟；不记录主机地址、出口 IP、节点认证参数、分享链接或密钥。
+
+| 验证内容 | 结果 | 脱敏证据 |
+|---|---|---|
+| 管理工具 self-update | 通过 | 从 ping-rust 0.2.0 升级到 0.2.2 成功。 |
+| shoes 与配置保持 | 通过 | shoes 二进制、配置哈希及 shoes.service MainPID 均与升级前一致。 |
+| 管理信息兼容 | 通过 | `info` 输出与升级前一致。 |
+| 原 Reality 节点外部请求 | 通过 | HK 客户端请求成功，出口 IP 与预期生产出口一致。 |
+| 临时认证 SOCKS5 节点外部请求 | 通过 | HK 客户端请求成功，出口 IP 与原 Reality 请求一致。 |
+| 正式 Release 二进制一致性 | 通过 | 生产 ping-rust 二进制 SHA-256 `174e38de…0d79` 与官方 v0.2.2 x86_64 Release 包内二进制一致；此处保留用户转交的缩写，不补造完整哈希。 |
+
+### crates.io 发布与独立安装验证
+
+- 发布源码由本机执行 `git clone --depth 1 --branch v0.2.2 https://github.com/Jyanbai/ping-rust.git` 准备，确认 HEAD=`8c3fc3ea77fa0d0b122a1c648e34ca6f80270489`、工作树干净、Cargo.toml version=`0.2.2`。原有工作区的未提交改动未纳入发布。
+- 在本机 clone 根目录执行 `remote-sync.cmd ping-rust-v022-publish-20261014`，按 Git 清单同步 140 个文件；bero 校验全部内容一致，未执行 git。Cargo.toml / Cargo.lock 的本机与远端 SHA-256 分别为 `61dbdc5582db23d3fe6cf31342848f25abad2df025f8355380ba781ee6bf7610` / `c0a51762f0e5ade6640595bd504cf8a05ca9ec7645ad036d57314da6ca1f1e3e`。
+- 正式发布由 bero 后台 job `ping-rust-v022-publish-20261014` 执行 `cargo publish --locked`；保留 Nice=19、IOSchedulingClass=idle、Cargo 单任务配置和 4 GiB 磁盘守护。启动前根分区可用 4,743,335,936 bytes，共享 target 756 MiB / 792,039,424 bytes，未达到 1.5 GiB 清理阈值。
+- 发布日志末尾：`Uploaded ping-rust v0.2.2 to registry crates-io`、`Published ping-rust v0.2.2 at registry crates-io`；`[job] 耗时 30.69s，峰值内存 600196KB，退出码 0`。完成后 `du -sh ~/cargo-target` 为 1011M（1,059,168,256 bytes），`df -h /` 为 20G / 已用 15G / Avail 4.2G / 78%，精确可用 4,462,182,400 bytes。
+- 官方 `GET /api/v1/crates/ping-rust` 返回 `max_version=0.2.2`；版本 API 返回 num=`0.2.2`、yanked=false、created_at=`2026-10-14T13:04:39.464555Z`（HKT 21:04:39）、checksum=`481e54092384780706171dadff179f4b8e34fe4106be37fb7c46b88042d86b05`。
+- 短期 token 通过本机密码表单输入，经 SSH 标准输入和仅存在于内存的 Unix socket 传递，仅以 `CARGO_REGISTRY_TOKEN` 交给 cargo。没有执行 `cargo login`，没有将 token 写入文件、日志、命令行参数、PR 或本审计。发布完成后本机及远端凭据缓冲已清除，cargo 子进程已退出，本机环境变量不存在。
+- bero 安装验证尝试：后台 job `ping-rust-v022-install-20261014` 执行 `cargo install ping-rust --version 0.2.2 --locked --root <临时目录>`。编译期间根分区可用空间降至 4,290,752,512 bytes，低于 4 GiB（4,294,967,296 bytes），磁盘守护终止任务；`[job] 耗时 40.04s，峰值内存 12312KB，退出码 75`。此次安装未完成，**未运行版本检查**，不计为安装验证通过。结束共享 target 为 1.2G（1,226,305,536 bytes），`df -h /` 为 20G / 已用 15G / Avail 4.0G / 79%，精确可用 4,290,433,024 bytes；按硬性规则停止后续远端操作，没有清理 target 或重试任务。
+- 独立 Linux 安装验证：用户提供的外部验证在独立 Linux 环境（cargo 1.97.0）执行 `cargo install ping-rust --version 0.2.2 --locked --root <临时目录>`，安装成功，编译用时 **4m11s**。安装后的 `ping-rust --version` stdout 恰为 `ping-rust 0.2.2`，stderr 为 `commit unknown`；这是 crates.io 源码包没有 `.git` 时 `build.rs` 的预期回退。该环境的临时安装目录已删除。本次 agent 补录该外部证据，未重新执行安装验证。
+
+最终状态：生产冒烟 V1–V7、crates.io 正式发布、公共 API 核对及独立 Linux registry 安装/版本验证均通过；bero 的安装尝试以退出码 75 中止，保留为失败尝试记录。此次审计收尾仅更新文档并走 GitHub PR，不处理 bero 磁盘问题，不改变发布源码、tag 或 GitHub Release。
