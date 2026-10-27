@@ -14,7 +14,9 @@
         type: direct
   - masks: blocked.test
     action: block
-  - masks: '*.example.com'
+  - masks:
+      domain_pattern:
+        - '*.example.com'
     action: allow
     client_chains:
       chain:
@@ -175,7 +177,7 @@
         vision: true
         protocol:
           type: vless
-          user_id: 85296b07-fa5c-63a7-d8f2-cdef418defa3
+          user_id: 85296b07-fa5c-43a7-98f2-cdef418defa3
           udp_enabled: true
   rules:
   - masks:
@@ -187,7 +189,9 @@
         type: direct
   - masks: blocked.test
     action: block
-  - masks: '*.example.com'
+  - masks:
+      domain_pattern:
+        - '*.example.com'
     action: allow
     client_chains:
       chain:
@@ -358,7 +362,9 @@
         type: direct
   - masks: blocked.test
     action: block
-  - masks: '*.example.com'
+  - masks:
+      domain_pattern:
+        - '*.example.com'
     action: allow
     client_chains:
       chain:
@@ -529,7 +535,9 @@
         type: direct
   - masks: blocked.test
     action: block
-  - masks: '*.example.com'
+  - masks:
+      domain_pattern:
+        - '*.example.com'
     action: allow
     client_chains:
       chain:

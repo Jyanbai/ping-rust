@@ -53,7 +53,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        source: [github-release-v0.2.7, verified-pin]
+        source: [github-release-v0.3.6, verified-pin]
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
@@ -64,14 +64,14 @@ jobs:
           SOURCE: ${{ matrix.source }}
         run: |
           set -euo pipefail
-          if [ "$SOURCE" = github-release-v0.2.7 ]; then
-            curl -fL --retry 3 https://github.com/cfal/shoes/releases/download/v0.2.7/shoes-x86_64-unknown-linux-musl.tar.gz -o "$RUNNER_TEMP/shoes.tar.gz"
-            echo "e60ccde92490624d9ff399dd58e69d4d6943b33c5cc4f0b0d1509b0c644fbc2a  $RUNNER_TEMP/shoes.tar.gz" | sha256sum --check
+          if [ "$SOURCE" = github-release-v0.3.6 ]; then
+            curl -fL --retry 3 https://github.com/cfal/shoes/releases/download/v0.3.6/shoes-x86_64-unknown-linux-musl.tar.gz -o "$RUNNER_TEMP/shoes.tar.gz"
+            echo "d09a9f5915ae8c3fc933bd86c025f2d8878d45e1dee8f0e2bb404c920de8c707  $RUNNER_TEMP/shoes.tar.gz" | sha256sum --check
             tar -xzf "$RUNNER_TEMP/shoes.tar.gz" -C "$RUNNER_TEMP"
             sudo install -m 0755 "$RUNNER_TEMP/shoes" /usr/local/bin/shoes
           else
             pin="$(sed -n 's/^const SHOES_SCHEMA_REVISION: &str = "\([0-9a-f]*\)";$/\1/p' src/installer.rs)"
-            test "$pin" = 386b11532424b8665ee3e46340c6236fb3c47595
+            test "$pin" = 3737e07467387044e677ae7cf8b1c16d291f1b68
             cargo install --git https://github.com/cfal/shoes --rev "$pin" --locked --root "$RUNNER_TEMP/shoes-pin"
             sudo install -m 0755 "$RUNNER_TEMP/shoes-pin/bin/shoes" /usr/local/bin/shoes
           fi

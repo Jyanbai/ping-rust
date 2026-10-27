@@ -2,7 +2,7 @@ use serde::Serialize;
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::schema::{ChainRule, RuleMasks, ServerRule};
+use super::schema::{ChainRule, RuleMask, RuleMasks, ServerRule};
 use crate::chain_proxy::{ChainHop, ChainProxyState, RouteTarget};
 
 #[derive(Serialize)]
@@ -81,6 +81,16 @@ fn rule_for_target(state: &ChainProxyState, masks: RuleMasks, target: &RouteTarg
     })
 }
 
+fn render_mask(mask: &str) -> RuleMask {
+    if let Some(pattern) = mask.strip_prefix("*.") {
+        RuleMask::DomainPattern {
+            domain_pattern: vec![format!("*.{pattern}")],
+        }
+    } else {
+        RuleMask::Legacy(mask.to_owned())
+    }
+}
+
 pub(super) fn render_rules(state: &ChainProxyState) -> Vec<ServerRule> {
     if !state.enabled {
         return vec![ServerRule::Group("allow-all-direct".to_owned())];
@@ -91,21 +101,21 @@ pub(super) fn render_rules(state: &ChainProxyState) -> Vec<ServerRule> {
         .filter(|rule| rule.enabled)
         .map(|rule| {
             let masks = if rule.masks.len() == 1 {
-                RuleMasks::One(rule.masks[0].clone())
+                RuleMasks::One(render_mask(&rule.masks[0]))
             } else {
-                RuleMasks::Many(rule.masks.clone())
+                RuleMasks::Many(rule.masks.iter().map(|mask| render_mask(mask)).collect())
             };
             rule_for_target(state, masks, &rule.target)
         })
         .collect::<Vec<_>>();
     rules.push(rule_for_target(
         state,
-        RuleMasks::One("0.0.0.0/0".to_owned()),
+        RuleMasks::One(RuleMask::Legacy("0.0.0.0/0".to_owned())),
         &state.default_route,
     ));
     rules.push(rule_for_target(
         state,
-        RuleMasks::One("::/0".to_owned()),
+        RuleMasks::One(RuleMask::Legacy("::/0".to_owned())),
         &state.default_route,
     ));
     rules
@@ -223,5 +233,14 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    #[test]
+    fn wildcard_chain_masks_use_v036_domain_pattern_shape() {
+        let state = fixture();
+        let yaml = crate::yaml::to_string(&render_rules(&state)).unwrap();
+        assert!(yaml.contains("domain_pattern:"));
+        assert!(yaml.contains("example.com"));
+        assert!(!yaml.contains("masks: '*.example.com'"));
     }
 }

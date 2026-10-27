@@ -255,14 +255,14 @@ jobs:
         if: matrix.os == 'ubuntu-24.04'
         shell: bash
         env:
-          SHOES_ARCHIVE_SHA256: e60ccde92490624d9ff399dd58e69d4d6943b33c5cc4f0b0d1509b0c644fbc2a
+          SHOES_ARCHIVE_SHA256: d09a9f5915ae8c3fc933bd86c025f2d8878d45e1dee8f0e2bb404c920de8c707
         run: |
           set -euo pipefail
-          archive="$RUNNER_TEMP/shoes-v0.2.7.tar.gz"
-          directory="$RUNNER_TEMP/shoes-v0.2.7"
+          archive="$RUNNER_TEMP/shoes-v0.3.6.tar.gz"
+          directory="$RUNNER_TEMP/shoes-v0.3.6"
           curl --fail --location --retry 3 --proto '=https' --tlsv1.2 \
             --output "$archive" \
-            https://github.com/cfal/shoes/releases/download/v0.2.7/shoes-x86_64-unknown-linux-musl.tar.gz
+            https://github.com/cfal/shoes/releases/download/v0.3.6/shoes-x86_64-unknown-linux-musl.tar.gz
           echo "$SHOES_ARCHIVE_SHA256  $archive" | sha256sum --check --strict
           mkdir -p "$directory"
           tar -xzf "$archive" -C "$directory"
@@ -270,7 +270,7 @@ jobs:
       - name: Prove stable shoes chain traffic has no direct fallback
         if: matrix.os == 'ubuntu-24.04'
         env:
-          PING_RUST_SHOES_E2E_BIN: ${{ runner.temp }}/shoes-v0.2.7/shoes
+          PING_RUST_SHOES_E2E_BIN: ${{ runner.temp }}/shoes-v0.3.6/shoes
         run: cargo test --locked --test chain_proxy_e2e -- --nocapture
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo build --locked --release
@@ -423,14 +423,14 @@ jobs:
         if: matrix.name == 'Debian 12'
         shell: bash
         env:
-          SHOES_ARCHIVE_SHA256: e60ccde92490624d9ff399dd58e69d4d6943b33c5cc4f0b0d1509b0c644fbc2a
+          SHOES_ARCHIVE_SHA256: d09a9f5915ae8c3fc933bd86c025f2d8878d45e1dee8f0e2bb404c920de8c707
         run: |
           set -euo pipefail
-          archive="$RUNNER_TEMP/shoes-v0.2.7.tar.gz"
-          directory="$RUNNER_TEMP/shoes-v0.2.7"
+          archive="$RUNNER_TEMP/shoes-v0.3.6.tar.gz"
+          directory="$RUNNER_TEMP/shoes-v0.3.6"
           curl --fail --location --retry 3 --proto '=https' --tlsv1.2 \
             --output "$archive" \
-            https://github.com/cfal/shoes/releases/download/v0.2.7/shoes-x86_64-unknown-linux-musl.tar.gz
+            https://github.com/cfal/shoes/releases/download/v0.3.6/shoes-x86_64-unknown-linux-musl.tar.gz
           echo "$SHOES_ARCHIVE_SHA256  $archive" | sha256sum --check --strict
           mkdir -p "$directory"
           tar -xzf "$archive" -C "$directory"
@@ -438,6 +438,6 @@ jobs:
       - name: Prove stable shoes chain traffic has no direct fallback
         if: matrix.name == 'Debian 12'
         env:
-          PING_RUST_SHOES_E2E_BIN: ${{ runner.temp }}/shoes-v0.2.7/shoes
+          PING_RUST_SHOES_E2E_BIN: ${{ runner.temp }}/shoes-v0.3.6/shoes
         run: cargo test --locked --test chain_proxy_e2e -- --nocapture
       - run: cargo build --locked --release

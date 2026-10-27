@@ -7,7 +7,7 @@
       "port": 20000,
       "credentials": {
         "Tuic": {
-          "user_id": "29630741-5a96-0741-def6-c74f8b296307",
+          "user_id": "29630741-5a96-4741-8ef6-c74f8b296307",
           "password": "1MtaHo3C7QxelsZGN074PwdK_6F07a1A",
           "server_name": "www.cloudflare.com",
           "alpn_protocols": [
@@ -58,7 +58,7 @@
       "port": 20003,
       "credentials": {
         "Reality": {
-          "user_id": "85296b07-fa5c-63a7-d8f2-cdef418defa3",
+          "user_id": "85296b07-fa5c-43a7-98f2-cdef418defa3",
           "private_key": "5g9uB-7WdKRYFMta-oV8JqXELSzg1u5IpwdkRYFM5AA",
           "public_key": "ElsZgnubIPWDKryF8TAhO30jQXELS9GNUBiPwdKryfA",
           "short_id": "bcd85ab63e74bc5e",
@@ -104,7 +104,7 @@
       "port": 20005,
       "credentials": {
         "VlessTls": {
-          "user_id": "9ef07cd8-29cd-74b8-efa3-741852de30b4",
+          "user_id": "9ef07cd8-29cd-44b8-9fa3-741852de30b4",
           "server_name": "www.cloudflare.com",
           "alpn_protocols": [
             "h2",
@@ -123,7 +123,7 @@
       "port": 20006,
       "credentials": {
         "VlessTls": {
-          "user_id": "07a18d2f-3074-85cd-f074-85296defabc5",
+          "user_id": "07a18d2f-3074-45cd-8f74-85296defabc5",
           "server_name": "www.cloudflare.com",
           "alpn_protocols": [
             "http/1.1"
@@ -183,7 +183,7 @@
       "port": 20009,
       "credentials": {
         "VmessTls": {
-          "user_id": "741cd2f6-0741-5296-0741-529c30fabc5e",
+          "user_id": "741cd2f6-0741-4296-8741-529c30fabc5e",
           "server_name": "www.cloudflare.com",
           "alpn_protocols": [
             "http/1.1"

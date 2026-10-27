@@ -76,11 +76,11 @@
         "tls": true,
         "type": "vless",
         "udp": true,
-        "uuid": "85296b07-fa5c-63a7-d8f2-cdef418defa3"
+        "uuid": "85296b07-fa5c-43a7-98f2-cdef418defa3"
       }
     ]
   },
-  "golden-reality.nekobox": "vless://85296b07-fa5c-63a7-d8f2-cdef418defa3@203.0.113.10:20003?encryption=none&flow=xtls-rprx-vision&security=reality&sni=www.cloudflare.com&fp=chrome&pbk=ElsZgnubIPWDKryF8TAhO30jQXELS9GNUBiPwdKryfA&sid=bcd85ab63e74bc5e&type=tcp#VLESS-REALITY-20003",
+  "golden-reality.nekobox": "vless://85296b07-fa5c-43a7-98f2-cdef418defa3@203.0.113.10:20003?encryption=none&flow=xtls-rprx-vision&security=reality&sni=www.cloudflare.com&fp=chrome&pbk=ElsZgnubIPWDKryF8TAhO30jQXELS9GNUBiPwdKryfA&sid=bcd85ab63e74bc5e&type=tcp#VLESS-REALITY-20003",
   "golden-reality.sing-box": {
     "outbounds": [
       {
@@ -102,7 +102,7 @@
           }
         },
         "type": "vless",
-        "uuid": "85296b07-fa5c-63a7-d8f2-cdef418defa3"
+        "uuid": "85296b07-fa5c-43a7-98f2-cdef418defa3"
       }
     ]
   },
@@ -329,11 +329,11 @@
         "sni": "www.cloudflare.com",
         "type": "tuic",
         "udp-relay-mode": "native",
-        "uuid": "29630741-5a96-0741-def6-c74f8b296307"
+        "uuid": "29630741-5a96-4741-8ef6-c74f8b296307"
       }
     ]
   },
-  "golden-tuic.nekobox": "tuic://29630741-5a96-0741-def6-c74f8b296307:1MtaHo3C7QxelsZGN074PwdK_6F07a1A@203.0.113.10:20000?congestion_control=bbr&alpn=h3&sni=www.cloudflare.com&insecure=1&allowInsecure=1#TUIC-20000",
+  "golden-tuic.nekobox": "tuic://29630741-5a96-4741-8ef6-c74f8b296307:1MtaHo3C7QxelsZGN074PwdK_6F07a1A@203.0.113.10:20000?congestion_control=bbr&alpn=h3&sni=www.cloudflare.com&insecure=1&allowInsecure=1#TUIC-20000",
   "golden-tuic.sing-box": {
     "outbounds": [
       {
@@ -351,7 +351,7 @@
           "server_name": "www.cloudflare.com"
         },
         "type": "tuic",
-        "uuid": "29630741-5a96-0741-def6-c74f8b296307",
+        "uuid": "29630741-5a96-4741-8ef6-c74f8b296307",
         "zero_rtt_handshake": false
       }
     ]
@@ -374,11 +374,11 @@
         "tls": true,
         "type": "vless",
         "udp": true,
-        "uuid": "9ef07cd8-29cd-74b8-efa3-741852de30b4"
+        "uuid": "9ef07cd8-29cd-44b8-9fa3-741852de30b4"
       }
     ]
   },
-  "golden-vless-tls-vision.nekobox": "vless://9ef07cd8-29cd-74b8-efa3-741852de30b4@203.0.113.10:20005?encryption=none&flow=xtls-rprx-vision&security=tls&sni=www.cloudflare.com&fp=chrome&insecure=1&allowInsecure=1&type=tcp#VLESS-TLS-VISION-20005",
+  "golden-vless-tls-vision.nekobox": "vless://9ef07cd8-29cd-44b8-9fa3-741852de30b4@203.0.113.10:20005?encryption=none&flow=xtls-rprx-vision&security=tls&sni=www.cloudflare.com&fp=chrome&insecure=1&allowInsecure=1&type=tcp#VLESS-TLS-VISION-20005",
   "golden-vless-tls-vision.sing-box": {
     "outbounds": [
       {
@@ -396,7 +396,7 @@
           "server_name": "www.cloudflare.com"
         },
         "type": "vless",
-        "uuid": "9ef07cd8-29cd-74b8-efa3-741852de30b4"
+        "uuid": "9ef07cd8-29cd-44b8-9fa3-741852de30b4"
       }
     ]
   },
@@ -416,7 +416,7 @@
         "tls": true,
         "type": "vless",
         "udp": true,
-        "uuid": "07a18d2f-3074-85cd-f074-85296defabc5",
+        "uuid": "07a18d2f-3074-45cd-8f74-85296defabc5",
         "ws-opts": {
           "headers": {
             "Host": "www.cloudflare.com"
@@ -426,7 +426,7 @@
       }
     ]
   },
-  "golden-vless-ws-tls.nekobox": "vless://07a18d2f-3074-85cd-f074-85296defabc5@203.0.113.10:20006?encryption=none&security=tls&sni=www.cloudflare.com&fp=chrome&insecure=1&allowInsecure=1&type=ws&host=www.cloudflare.com&path=%2F8529m3a74v852x63#VLESS-WS-TLS-20006",
+  "golden-vless-ws-tls.nekobox": "vless://07a18d2f-3074-45cd-8f74-85296defabc5@203.0.113.10:20006?encryption=none&security=tls&sni=www.cloudflare.com&fp=chrome&insecure=1&allowInsecure=1&type=ws&host=www.cloudflare.com&path=%2F8529m3a74v852x63#VLESS-WS-TLS-20006",
   "golden-vless-ws-tls.sing-box": {
     "outbounds": [
       {
@@ -449,7 +449,7 @@
           "type": "ws"
         },
         "type": "vless",
-        "uuid": "07a18d2f-3074-85cd-f074-85296defabc5"
+        "uuid": "07a18d2f-3074-45cd-8f74-85296defabc5"
       }
     ]
   },
@@ -471,7 +471,7 @@
         "tls": true,
         "type": "vmess",
         "udp": true,
-        "uuid": "741cd2f6-0741-5296-0741-529c30fabc5e",
+        "uuid": "741cd2f6-0741-4296-8741-529c30fabc5e",
         "ws-opts": {
           "headers": {
             "Host": "www.cloudflare.com"
@@ -481,7 +481,7 @@
       }
     ]
   },
-  "golden-vmess-ws-tls.nekobox": "vmess://eyJhZGQiOiIyMDMuMC4xMTMuMTAiLCJhaWQiOjAsImFscG4iOiJodHRwLzEuMSIsImZwIjoiY2hyb21lIiwiaG9zdCI6Ind3dy5jbG91ZGZsYXJlLmNvbSIsImlkIjoiNzQxY2QyZjYtMDc0MS01Mjk2LTA3NDEtNTI5YzMwZmFiYzVlIiwiaW5zZWN1cmUiOiIxIiwibmV0Ijoid3MiLCJwYXRoIjoiLzVhOW92MDc0MWU1czlnMzAiLCJwb3J0IjoyMDAwOSwicHMiOiJWTUVTUy1XUy1UTFMtMjAwMDkiLCJzY3kiOiJhdXRvIiwic25pIjoid3d3LmNsb3VkZmxhcmUuY29tIiwidGxzIjoidGxzIiwidHlwZSI6Im5vbmUiLCJ2IjoyfQ==",
+  "golden-vmess-ws-tls.nekobox": "vmess://eyJhZGQiOiIyMDMuMC4xMTMuMTAiLCJhaWQiOjAsImFscG4iOiJodHRwLzEuMSIsImZwIjoiY2hyb21lIiwiaG9zdCI6Ind3dy5jbG91ZGZsYXJlLmNvbSIsImlkIjoiNzQxY2QyZjYtMDc0MS00Mjk2LTg3NDEtNTI5YzMwZmFiYzVlIiwiaW5zZWN1cmUiOiIxIiwibmV0Ijoid3MiLCJwYXRoIjoiLzVhOW92MDc0MWU1czlnMzAiLCJwb3J0IjoyMDAwOSwicHMiOiJWTUVTUy1XUy1UTFMtMjAwMDkiLCJzY3kiOiJhdXRvIiwic25pIjoid3d3LmNsb3VkZmxhcmUuY29tIiwidGxzIjoidGxzIiwidHlwZSI6Im5vbmUiLCJ2IjoyfQ==",
   "golden-vmess-ws-tls.sing-box": {
     "outbounds": [
       {
@@ -506,7 +506,7 @@
           "type": "ws"
         },
         "type": "vmess",
-        "uuid": "741cd2f6-0741-5296-0741-529c30fabc5e"
+        "uuid": "741cd2f6-0741-4296-8741-529c30fabc5e"
       }
     ]
   }

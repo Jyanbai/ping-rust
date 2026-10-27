@@ -729,7 +729,7 @@ fn direct_rules() -> Vec<ServerRule> {
 
 fn chain_rules(client: &ShoesClientConfig) -> Vec<ServerRule> {
     vec![ServerRule::Inline(ChainRule {
-        masks: schema::RuleMasks::One("0.0.0.0/0".to_owned()),
+        masks: schema::RuleMasks::One(schema::RuleMask::Legacy("0.0.0.0/0".to_owned())),
         action: "allow".to_owned(),
         client_chains: Some(crate::yaml::to_value(client).expect("client serializes")),
     })]

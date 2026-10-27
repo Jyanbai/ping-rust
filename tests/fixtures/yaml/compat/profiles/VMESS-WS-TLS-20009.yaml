@@ -14,5 +14,5 @@ protocol:
           protocol:
             type: vmess
             cipher: any
-            user_id: 741cd2f6-0741-5296-0741-529c30fabc5e
+            user_id: 741cd2f6-0741-4296-8741-529c30fabc5e
             udp_enabled: true

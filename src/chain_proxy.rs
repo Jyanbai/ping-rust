@@ -263,7 +263,7 @@ impl ShoesClientProtocol {
             Self::Shadowsocks { udp_enabled, .. }
             | Self::Vless { udp_enabled, .. }
             | Self::Vmess { udp_enabled, .. } => *udp_enabled,
-            // shoes 0.2.8 still leaves Trojan UDP client handling unimplemented.
+            // shoes 0.3.6 still leaves Trojan UDP client handling unimplemented.
             Self::Trojan { .. } => false,
             Self::Reality { protocol, .. }
             | Self::Tls { protocol, .. }

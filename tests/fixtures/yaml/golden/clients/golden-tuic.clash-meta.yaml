@@ -11,4 +11,4 @@ proxies:
   sni: www.cloudflare.com
   type: tuic
   udp-relay-mode: native
-  uuid: 29630741-5a96-0741-def6-c74f8b296307
+  uuid: 29630741-5a96-4741-8ef6-c74f8b296307

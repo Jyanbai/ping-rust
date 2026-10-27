@@ -11,7 +11,7 @@ proxies:
   tls: true
   type: vless
   udp: true
-  uuid: 07a18d2f-3074-85cd-f074-85296defabc5
+  uuid: 07a18d2f-3074-45cd-8f74-85296defabc5
   ws-opts:
     headers:
       Host: www.cloudflare.com
