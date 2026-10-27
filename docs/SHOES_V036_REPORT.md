@@ -22,7 +22,8 @@
 | Release digest、`shoes --version` | 通过 | `shoes 0.3.6`，资产 digest 校验通过 |
 | upstream examples dry-run | 通过 | 20 个 `examples/*.yaml`，退出码 0 |
 | 兼容与 Chain 夹具 dry-run | 通过 | 18 个 YAML 夹具，退出码 0；单 profile 夹具按 v0.3.6 顶层数组格式包装后验证 |
-| GitHub Actions systemd / 链式代理验收 | 未验证 | 已更新 workflow，等待 draft PR CI |
+| GitHub Actions systemd / 链式代理验收 | 通过 | draft PR #36 的默认 Release、source matrix（Release/pin）、dry-run、多发行版和链式代理 jobs 全部通过 |
+| v0.2.1 backward-compat 读取新状态 | 通过 | 旧版本读取新配置和 exports 通过；比较器只允许版本探针的已知差异 |
 | Xray 26.x 外部 Reality 六个 SNI 握手 | 未验证 | 本阶段未运行外部客户端 |
 | Mihomo 三种 Snell cipher 实际连通 | 未验证 | 本阶段未运行外部客户端 |
 | Update Center v0.2.7 → v0.3.6 | 未验证 | 本阶段未运行实机升级 |
@@ -42,7 +43,7 @@
 
 shoes v0.3.6 监听配置父目录，事件静默窗口为 5 秒。ping-rust 等待 10 秒，满足超时大于去抖窗口的前提；候选配置仍先 dry-run，再通过同目录原子替换提交。
 
-旧的硬链接锚点通知机制已移除。新 watcher 已覆盖创建、修改和删除事件，继续触碰额外锚点会把临时文件或候选文件写入变成额外事件，可能重复重载。workflow 已加入 journal 中 `Servers ready` 的单次增量检查，并对新增、改端口、删除非最后节点检查 MainPID 不变和监听集合变化。最终 systemd 行为以 draft PR 的 GitHub Actions 结果为准。
+旧的硬链接锚点通知机制已移除。新 watcher 已覆盖创建、修改和删除事件，继续触碰额外锚点会把临时文件或候选文件写入变成额外事件，可能重复重载。workflow 已加入 journal 中 `Servers ready` 的单次增量检查，并对新增、改端口、删除非最后节点检查 MainPID 不变和监听集合变化。draft PR #36 的 GitHub Actions 已通过这些 gate。
 
 ## bero 磁盘记录
 
@@ -59,5 +60,5 @@ shoes v0.3.6 监听配置父目录，事件静默窗口为 5 秒。ping-rust 等
 
 ## 建议
 
-- 在 draft PR 的 Actions 通过后，再安排 Xray、Mihomo 和 Update Center 实机验收；这些项目当前仍标记为未验证。
+- 后续安排 Xray、Mihomo 和 Update Center 实机验收；这些项目当前仍标记为未验证。
 - C 阶段若继续扩展协议预设，应沿用 v0.3.6 的 typed rule 写法，并为新增客户端连接测试单独留证据。
