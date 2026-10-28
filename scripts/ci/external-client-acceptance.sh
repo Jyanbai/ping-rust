@@ -2,7 +2,7 @@
 # External client acceptance for shoes v0.3.6. Every downloaded binary is
 # pinned to a release and checked before execution. Snell results are recorded
 # per cipher because Mihomo's schema only exposes the AES-128-GCM variant.
-set -u -o pipefail
+set -euo pipefail
 
 PING_RUST="${PING_RUST:-target/release/ping-rust}"
 WORK="${WORK:-$RUNNER_TEMP/ping-rust-external-clients}"
@@ -121,7 +121,11 @@ sudo openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
   -subj '/CN=example.test' \
   -keyout /etc/shoes/fixtures/key-00000000.pem \
   -out /etc/shoes/fixtures/cert-00000000.pem >/dev/null 2>&1
-"$SHOES" --dry-run "$legacy_fixture" >"$WORK/logs/v036-legacy-config-dry-run.txt" 2>&1 || true
+if sudo "$SHOES" --dry-run "$legacy_fixture" \
+    >"$WORK/logs/v036-legacy-config-dry-run.txt" 2>&1; then
+  echo 'v0.3.6 unexpectedly accepted the unchanged v0.2.x fixture' >&2
+  exit 1
+fi
 cat >"$WORK/legacy-mask.yaml" <<'YAML'
 - address: 127.0.0.1:25200
   protocol:
