@@ -77,7 +77,7 @@ run_reality() {
   local config="$WORK/reality-${label}.yaml"
   local generated="$WORK/logs/reality-${label}.txt"
   "$PING_RUST" generate reality --name "reality-${label}" --port "$port" \
-    --server-name "$sni" --dest 127.0.0.1:18080 --output "$config" \
+    --server-name "$sni" --dest "${sni}:443" --output "$config" \
     >"$generated" 2>&1 || return 1
   local uuid public_key short_id
   uuid="$(awk -F'：' '/^UUID：/ {print $2; exit}' "$generated")"
@@ -145,8 +145,10 @@ for sni in "${snis[@]}"; do
   echo "reality xray ${XRAY_26_TAG} ${sni}: ${result}"
 done
 if run_reality "$XRAY_MIN" minimum www.cloudflare.com 25020; then
+  minimum_result=PASS
   echo "reality xray ${XRAY_MIN_TAG} www.cloudflare.com: PASS"
 else
+  minimum_result=FAIL
   echo "reality xray ${XRAY_MIN_TAG} www.cloudflare.com: FAIL"
 fi
 
@@ -179,6 +181,15 @@ for cipher in aes-128-gcm aes-256-gcm chacha20-ietf-poly1305; do
     fi
     sudo cp /etc/shoes/config.yaml "$config"
     sudo chmod a+r "$config" "$WORK/mihomo-${cipher}.yaml"
+    cat >>"$WORK/mihomo-${cipher}.yaml" <<YAML
+mixed-port: 18090
+mode: global
+log-level: info
+proxy-groups:
+  - name: GLOBAL
+    type: select
+    proxies: [snell-${cipher}]
+YAML
   elif ! "$PING_RUST" generate snell --name "snell-${cipher}" --port "$port" \
       --cipher "$cipher" --password "$password" --no-udp --output "$config" \
       >"$generated" 2>&1; then
@@ -230,3 +241,6 @@ printf '%s\n' "${reality_results[@]}" >"$WORK/logs/reality-summary.txt"
 printf '%s\n' "${snell_results[@]}" >"$WORK/logs/snell-summary.txt"
 chmod -R a+rX "$WORK"
 echo 'external client acceptance complete'
+if printf '%s\n' "${reality_results[@]}" | grep -Fq '=FAIL' || [ "$minimum_result" != PASS ]; then
+  exit 1
+fi
