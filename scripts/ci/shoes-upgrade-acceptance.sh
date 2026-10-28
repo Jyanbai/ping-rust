@@ -40,7 +40,7 @@ test -x "$OLD_PING_RUST"
   --server-name www.cloudflare.com --yes --plain >"$WORK/records/old-reality.txt"
 "$OLD_PING_RUST" add snell \
   --name legacy-snell --port 24432 --server-address "$SERVER" \
-  --cipher chacha20-ietf-poly1305 --yes >"$WORK/records/old-snell.txt"
+  --yes >"$WORK/records/old-snell.txt"
 expect "$(dirname "$0")/legacy-chain-menu.exp" "$OLD_PING_RUST"
 
 systemctl is-active --quiet shoes.service

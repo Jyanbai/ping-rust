@@ -12,7 +12,7 @@ XRAY_26_SHA256=b3e5902d06d6282fe53cfa2fc426058b9aeaa429b2c812e20887cd47f26d08bf
 XRAY_MIN_TAG=v25.5.16
 XRAY_MIN_SHA256=7679da6a3bb9dc2b3ce82d7f9f64ac1bb0e4bd6c3b9a0926613e5fc88abef25a
 MIHOMO_TAG=v1.19.33
-MIHOMO_SHA256=132f6f3edf9a65e62f04853aed3358472e0b2b7666daa8419edfa2ddf5bb6323
+MIHOMO_SHA256=8ec92e7b2fdc6b853ba00156bab7e4e965c8b0d843b8c4ac8ab98795f02ad524
 export NO_COLOR=1 TERM=dumb
 mkdir -p "$WORK/bin" "$WORK/logs" "$WORK/http"
 printf 'external client acceptance\n' >"$WORK/http/marker"
@@ -51,6 +51,7 @@ download_checked \
 gzip -dc "$WORK/bin/mihomo.gz" >"$WORK/bin/mihomo"
 chmod 0755 "$WORK/bin/mihomo"
 MIHOMO="$WORK/bin/mihomo"
+sudo install -m 0755 "$SHOES" /usr/local/bin/shoes
 
 python3 -m http.server 18080 --bind 127.0.0.1 --directory "$WORK/http" \
   >"$WORK/logs/http.log" 2>&1 &
@@ -74,7 +75,7 @@ run_reality() {
   local xray="$1" label="$2" sni="$3" port="$4"
   local prefix="$WORK/logs/reality-${label}"
   local config="$WORK/reality-${label}.yaml"
-  local generated="$WORK/reality-${label}.txt"
+  local generated="$WORK/logs/reality-${label}.txt"
   "$PING_RUST" generate reality --name "reality-${label}" --port "$port" \
     --server-name "$sni" --dest 127.0.0.1:18080 --output "$config" \
     >"$generated" 2>&1 || return 1
@@ -112,6 +113,23 @@ echo "xray ${XRAY_26_TAG}: $($XRAY_26 version 2>&1 | head -n 1)"
 echo "xray ${XRAY_MIN_TAG}: $($XRAY_MIN version 2>&1 | head -n 1)"
 legacy_fixture="$(cd "$(dirname "$0")/../../tests/fixtures/yaml/chain-v2" && pwd)/config.yaml"
 "$SHOES" --dry-run "$legacy_fixture" >"$WORK/logs/v036-legacy-config-dry-run.txt" 2>&1 || true
+cat >"$WORK/uuid-invalid.yaml" <<'YAML'
+- address: 0.0.0.0:24431
+  protocol:
+    type: tls
+    reality_targets:
+      www.cloudflare.com:
+        private_key: 5g9uB-7WdKRYFMta-oV8qJXELSzg1u5IpwdkRYFM5AA
+        short_ids: [bcd85ab63e74bc5e]
+        dest: www.cloudflare.com:443
+        max_time_diff: 60000
+        vision: true
+        protocol:
+          type: vless
+          user_id: 85296b07-fa5c-63a7-d8f2-cdef418defa3
+          udp_enabled: true
+YAML
+"$SHOES" --dry-run "$WORK/uuid-invalid.yaml" >"$WORK/logs/v036-invalid-uuid-dry-run.txt" 2>&1 || true
 reality_results=()
 snis=(www.amazon.com www.ebay.com www.paypal.com www.cloudflare.com dash.cloudflare.com aws.amazon.com)
 index=0
@@ -138,7 +156,6 @@ for cipher in aes-128-gcm aes-256-gcm chacha20-ietf-poly1305; do
     # Exercise the product's own Clash Meta exporter for the AES case.  The
     # other two ciphers are intentionally hand-written below because Mihomo's
     # Snell schema cannot represent their cipher choice.
-    sudo install -m 0755 "$SHOES" /usr/local/bin/shoes
     sudo rm -rf /etc/shoes
     sudo mkdir -p /etc/shoes
     if ! sudo "$PING_RUST" generate snell --name "snell-${cipher}" --port "$port" \
@@ -154,7 +171,8 @@ for cipher in aes-128-gcm aes-256-gcm chacha20-ietf-poly1305; do
       snell_results+=("${cipher}=FAIL(export)")
       continue
     fi
-    cp /etc/shoes/config.yaml "$config"
+    sudo cp /etc/shoes/config.yaml "$config"
+    sudo chmod a+r "$config" "$WORK/mihomo-${cipher}.yaml"
   elif ! "$PING_RUST" generate snell --name "snell-${cipher}" --port "$port" \
       --cipher "$cipher" --password "$password" --no-udp --output "$config" \
       >"$generated" 2>&1; then
