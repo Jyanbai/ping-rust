@@ -102,8 +102,12 @@ JSON
   wait_tcp 18081 || { kill "$shoes_pid" "$xray_pid" 2>/dev/null || true; return 1; }
   curl --noproxy '' --fail --silent --show-error --max-time 10 \
     --proxy socks5h://127.0.0.1:18081 http://127.0.0.1:18080/marker \
-    | grep -Fxq 'external client acceptance'
+    >"${prefix}-response.txt" 2>&1
   local result=$?
+  if [ "$result" -eq 0 ]; then
+    grep -Fxq 'external client acceptance' "${prefix}-response.txt"
+    result=$?
+  fi
   kill "$shoes_pid" "$xray_pid" 2>/dev/null || true
   ACTIVE_PIDS=""
   return "$result"
@@ -210,7 +214,12 @@ YAML
   ACTIVE_PIDS="$shoes_pid $mihomo_pid"
   if wait_tcp 18090 && curl --noproxy '' --fail --silent --show-error --max-time 10 \
       --proxy http://127.0.0.1:18090 http://127.0.0.1:18080/marker \
-      | grep -Fxq 'external client acceptance'; then result=PASS; else result=FAIL; fi
+      >"$WORK/logs/snell-${cipher}-response.txt" 2>&1 \
+      && grep -Fxq 'external client acceptance' "$WORK/logs/snell-${cipher}-response.txt"; then
+    result=PASS
+  else
+    result=FAIL
+  fi
   kill "$shoes_pid" "$mihomo_pid" 2>/dev/null || true
   ACTIVE_PIDS=""
   snell_results+=("${cipher}=${result}")
