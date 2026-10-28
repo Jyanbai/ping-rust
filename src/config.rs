@@ -48,7 +48,7 @@ use commit::{
     commit_managed, profile_documents, profile_documents_are_current, write_profile_documents,
 };
 pub(crate) use routing::chain_value;
-use routing::render_rules;
+use routing::{render_legacy_rules, render_rules};
 use schema::{
     default_h3_alpn, ChainRule, InnerProtocol, NaiveUser, QuicSettings, RealityTarget,
     ServerConfig, ServerProtocol, ServerRule, ShadowTlsHandshake, ShadowTlsTarget,
@@ -234,19 +234,28 @@ pub struct ShadowTlsCredentials {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
 pub enum SnellCipher {
+    #[default]
     #[value(name = "aes-128-gcm")]
     #[serde(rename = "aes-128-gcm")]
     Aes128Gcm,
     #[value(name = "aes-256-gcm")]
     #[serde(rename = "aes-256-gcm")]
     Aes256Gcm,
-    #[default]
     #[value(name = "chacha20-ietf-poly1305")]
     #[serde(rename = "chacha20-ietf-poly1305")]
     Chacha20IetfPoly1305,
 }
 
 impl SnellCipher {
+    pub fn mihomo_warning(self) -> Option<&'static str> {
+        match self {
+            Self::Aes128Gcm => None,
+            Self::Aes256Gcm | Self::Chacha20IetfPoly1305 => {
+                Some("未经客户端验证，Mihomo 仅支持 aes-128-gcm")
+            }
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Aes128Gcm => "aes-128-gcm",
@@ -729,7 +738,7 @@ fn direct_rules() -> Vec<ServerRule> {
 
 fn chain_rules(client: &ShoesClientConfig) -> Vec<ServerRule> {
     vec![ServerRule::Inline(ChainRule {
-        masks: schema::RuleMasks::One("0.0.0.0/0".to_owned()),
+        masks: schema::RuleMasks::One(schema::RuleMask::Legacy("0.0.0.0/0".to_owned())),
         action: "allow".to_owned(),
         client_chains: Some(crate::yaml::to_value(client).expect("client serializes")),
     })]
@@ -763,7 +772,11 @@ fn ensure_chain_proxy_matches_state(servers: &[ServerConfig], state: &ManagedSta
         }
     } else if state.chain_proxy.enabled {
         let expected = render_rules(&state.chain_proxy);
-        if servers.iter().any(|server| server.rules != expected) {
+        let legacy = render_legacy_rules(&state.chain_proxy);
+        if servers
+            .iter()
+            .any(|server| server.rules != expected && server.rules != legacy)
+        {
             bail!("链式代理状态与 shoes 配置不一致");
         }
     } else if let Some(node) = state.chain_proxy.effective() {
@@ -780,6 +793,68 @@ fn ensure_chain_proxy_matches_state(servers: &[ServerConfig], state: &ManagedSta
         bail!("链式代理状态为关闭，但 shoes 配置仍包含链式出口");
     }
     Ok(())
+}
+
+pub(crate) struct ConfigMigrationResult {
+    rollback: Option<ManagedRollback>,
+}
+
+impl ConfigMigrationResult {
+    pub(crate) fn rollback_managed(&mut self) -> Result<()> {
+        self.rollback
+            .take()
+            .context("该配置迁移结果不包含可回滚的系统配置事务")?
+            .restore_to(
+                Path::new(utils::CONFIG_FILE),
+                Path::new(utils::STATE_FILE),
+                Path::new(utils::PROFILES_DIR),
+            )
+    }
+
+    pub(crate) fn finish(mut self) {
+        self.rollback.take();
+    }
+}
+
+/// Rewrite a v0.2.x managed configuration from state using the current shoes
+/// schema, validate it with the newly installed binary, and commit it as one
+/// managed configuration transaction.
+pub(crate) async fn migrate_managed_config_with_binary(
+    binary: &Path,
+) -> Result<ConfigMigrationResult> {
+    utils::require_linux_root()?;
+    let config_path = Path::new(utils::CONFIG_FILE);
+    let state_path = Path::new(utils::STATE_FILE);
+    let state = load_state_for_update()?;
+    let old_servers = load_servers(config_path)?;
+    ensure_servers_match_state(&old_servers, &state.profiles)
+        .context("配置文件与管理状态不一致，已拒绝 shoes 迁移")?;
+    let mut servers = old_servers;
+    if state.chain_proxy.enabled {
+        apply_chain_proxy_rules(&mut servers, &state);
+    }
+    let yaml = crate::yaml::to_string(&servers).context("序列化 shoes 迁移配置失败")?;
+    validate_yaml(&yaml)?;
+    #[cfg(feature = "ci-fault-injection")]
+    let dry_run_yaml = if std::env::var("PING_RUST_CI_UPGRADE_FAULT").as_deref() == Ok("dry-run") {
+        "- address: ["
+    } else {
+        yaml.as_str()
+    };
+    #[cfg(not(feature = "ci-fault-injection"))]
+    let dry_run_yaml = yaml.as_str();
+    validate_candidate_with_binary(dry_run_yaml, Path::new(utils::CONFIG_DIR), binary).await?;
+    let rollback = ManagedRollback {
+        config: read_optional(config_path)?,
+        state: read_optional(state_path)?,
+        profiles: ProfileDirectorySnapshot::capture(Path::new(utils::PROFILES_DIR))?,
+        generated_certificate: None,
+        generated_certificate_key: None,
+    };
+    commit_managed(config_path, state_path, &servers, &state)?;
+    Ok(ConfigMigrationResult {
+        rollback: Some(rollback),
+    })
 }
 
 fn ensure_chain_proxy_has_no_direct_udp_path(state: &ManagedState) -> Result<()> {
@@ -2634,7 +2709,13 @@ fn validate_yaml(yaml: &str) -> Result<()> {
 }
 
 async fn validate_candidate_with_shoes(yaml: &str, directory: &Path) -> Result<()> {
-    validate_candidate_with_binary(yaml, directory, Path::new(utils::SHOES_BIN)).await
+    match validate_candidate_with_binary(yaml, directory, Path::new(utils::SHOES_BIN)).await {
+        Ok(()) => Ok(()),
+        Err(error) if yaml.contains("domain_pattern:") => {
+            bail!("请先升级 shoes 到 v0.3.6 后再修改配置：{error:#}")
+        }
+        Err(error) => Err(error),
+    }
 }
 
 async fn validate_candidate_with_binary(yaml: &str, directory: &Path, binary: &Path) -> Result<()> {
@@ -3442,7 +3523,7 @@ mod tests {
         let yaml = fs::read_to_string(result.config_path).unwrap();
         assert!(yaml.contains("address: 0.0.0.0:23456"));
         assert!(yaml.contains("type: snell"));
-        assert!(yaml.contains("cipher: chacha20-ietf-poly1305"));
+        assert!(yaml.contains("cipher: aes-128-gcm"));
         assert!(yaml.contains("password:"));
         assert!(yaml.contains("udp_enabled: true"));
         assert!(!yaml.contains("udp_num_sockets"));
@@ -3454,7 +3535,7 @@ mod tests {
         else {
             panic!("expected Snell credentials");
         };
-        assert_eq!(cipher, SnellCipher::Chacha20IetfPoly1305);
+        assert_eq!(cipher, SnellCipher::Aes128Gcm);
         assert!(!password.is_empty());
         assert!(udp_enabled);
 
@@ -3476,7 +3557,7 @@ mod tests {
         else {
             panic!("expected restored Snell credentials");
         };
-        assert_eq!(*cipher, SnellCipher::Chacha20IetfPoly1305);
+        assert_eq!(*cipher, SnellCipher::Aes128Gcm);
         assert!(!password.is_empty());
         assert!(*udp_enabled);
     }
@@ -3539,6 +3620,43 @@ mod tests {
             assert_eq!(state_cipher, cipher);
             assert_eq!(state_password, "chosen-snell-password");
         }
+    }
+
+    #[test]
+    fn existing_chacha_snell_state_keeps_its_cipher_after_default_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut request = request(Protocol::Snell, dir.path().join("config.yaml"));
+        request.options.snell_cipher = SnellCipher::Chacha20IetfPoly1305;
+        let (server, credentials, _, _) =
+            generate_parts(&request, dir.path(), Uuid::new_v4()).unwrap();
+        let profile = ManagedProfile {
+            h2mux: Default::default(),
+            id: Uuid::new_v4(),
+            name: "old-snell".to_owned(),
+            port: request.port,
+            server_address: None,
+            credentials,
+            certificate_path: None,
+            certificate_key_path: None,
+            self_signed_certificate: false,
+            naive_certificate_validity: None,
+        };
+        let state = ManagedState {
+            schema_version: 2,
+            profiles: vec![profile],
+            chain_proxy: ChainProxyState::default(),
+        };
+        let state_path = dir.path().join("state.json");
+        fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+        let restored = load_state_from(&state_path).unwrap();
+        assert!(matches!(
+            restored.profiles[0].credentials,
+            Credentials::Snell {
+                cipher: SnellCipher::Chacha20IetfPoly1305,
+                ..
+            }
+        ));
+        ensure_servers_match_state(&[server], &restored.profiles).unwrap();
     }
 
     #[tokio::test]

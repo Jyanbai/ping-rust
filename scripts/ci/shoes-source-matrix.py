@@ -131,7 +131,7 @@ def request(proxy_port, host, port):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--source", required=True, choices=["github-release-v0.2.7", "verified-pin"])
+    parser.add_argument("--source", required=True, choices=["github-release-v0.3.6", "verified-pin"])
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
     shoes, binary = os.environ["SHOES_BIN"], os.environ["PING_RUST_BIN"]

@@ -433,6 +433,11 @@ pub async fn run(cli: Cli) -> Result<()> {
             } else {
                 SnellCipher::default()
             };
+            if matches!(protocol, Protocol::Snell) && cipher.is_some() {
+                if let Some(warning) = snell_cipher.mihomo_warning() {
+                    eprintln!("{warning}");
+                }
+            }
             if matches!(protocol, Protocol::AnyTls) && anytls_users.is_empty() {
                 anytls_users.push(config::generated_anytls_user("default"));
             }
@@ -641,44 +646,78 @@ pub(crate) async fn update_shoes_with_options(
 ) -> Result<installer::InstallReport> {
     crate::utils::require_linux_root()?;
     let lock = crate::utils::exclusive_lock(std::path::Path::new(crate::utils::LOCK_FILE))?;
-    let unit_exists = std::path::Path::new(crate::utils::SERVICE_FILE).exists();
-    let was_active = unit_exists && service::is_active()?;
+    let service_snapshot = if std::path::Path::new(crate::utils::SERVICE_FILE).is_file() {
+        Some(service::capture_snapshot()?)
+    } else {
+        None
+    };
     let mut report =
-        installer::install_locked_with_options(method, true, allow_downgrade, lock).await?;
-    if !was_active {
-        if let Err(error) = report.commit_provenance() {
-            report
-                .rollback_binary()
-                .context("shoes 安装来源保存失败，二进制回滚失败")?;
-            return Err(error.context("shoes 安装来源保存失败，旧二进制已恢复"));
-        }
-        return Ok(report);
-    }
-    if let Err(restart) = service::restart_and_verify() {
-        let binary_rollback = report.rollback_binary();
-        let service_rollback = if binary_rollback.is_ok() {
-            service::restart_and_verify()
-        } else {
-            Ok(())
-        };
-        return match (binary_rollback, service_rollback) {
-            (Ok(()), Ok(())) => {
-                Err(restart.context("新版 shoes 启动失败，旧二进制和服务已恢复"))
+        installer::install_locked_for_migration(method, true, allow_downgrade, lock).await?;
+    let mut migration = if std::path::Path::new(crate::utils::CONFIG_FILE).is_file() {
+        match config::migrate_managed_config_with_binary(std::path::Path::new(
+            crate::utils::SHOES_BIN,
+        ))
+        .await
+        {
+            Ok(migration) => Some(migration),
+            Err(error) => {
+                let restore = report.rollback_binary();
+                return match restore {
+                    Ok(()) => Err(error.context("shoes 配置迁移失败，旧二进制已恢复")),
+                    Err(restore) => anyhow::bail!(
+                        "shoes 配置迁移失败且旧二进制恢复失败：迁移={error:#}；二进制={restore:#}"
+                    ),
+                };
             }
-            (Err(binary), _) => anyhow::bail!(
-                "新版 shoes 启动失败且旧二进制恢复失败：启动={restart:#}；二进制={binary:#}"
-            ),
-            (Ok(()), Err(service)) => anyhow::bail!(
-                "新版 shoes 启动失败，旧二进制已恢复但服务恢复失败：启动={restart:#}；服务={service:#}"
+        }
+    } else {
+        None
+    };
+
+    if service_snapshot
+        .as_ref()
+        .is_some_and(service::ServiceSnapshot::was_active)
+    {
+        if let Err(restart) = service::restart_and_verify() {
+            let config_rollback = migration
+                .as_mut()
+                .map(|migration| migration.rollback_managed())
+                .transpose();
+            let binary_rollback = report.rollback_binary();
+            let service_rollback = service_snapshot
+                .map(service::restore_snapshot)
+                .unwrap_or(Ok(()));
+            return match (config_rollback, binary_rollback, service_rollback) {
+                (Ok(_), Ok(()), Ok(())) => {
+                    Err(restart.context("新版 shoes 启动失败，二进制、配置和服务已恢复"))
+                }
+                (config, binary, service) => anyhow::bail!(
+                    "新版 shoes 启动失败，回滚不完整：启动={restart:#}；配置={config:?}；二进制={binary:?}；服务={service:?}"
+                ),
+            };
+        }
+    }
+
+    if let Err(error) = report.commit_provenance() {
+        let config_rollback = migration
+            .as_mut()
+            .map(|migration| migration.rollback_managed())
+            .transpose();
+        let binary_rollback = report.rollback_binary();
+        let service_rollback = service_snapshot
+            .map(service::restore_snapshot)
+            .unwrap_or(Ok(()));
+        return match (config_rollback, binary_rollback, service_rollback) {
+            (Ok(_), Ok(()), Ok(())) => {
+                Err(error.context("shoes 安装来源保存失败，旧二进制、配置和服务已恢复"))
+            }
+            (config, binary, service) => anyhow::bail!(
+                "shoes 安装来源保存失败，回滚不完整：来源={error:#}；配置={config:?}；二进制={binary:?}；服务={service:?}"
             ),
         };
     }
-    if let Err(error) = report.commit_provenance() {
-        report
-            .rollback_binary()
-            .context("shoes 安装来源保存失败，二进制回滚失败")?;
-        service::restart_and_verify().context("shoes 安装来源保存失败，旧服务恢复失败")?;
-        return Err(error.context("shoes 安装来源保存失败，旧二进制和服务已恢复"));
+    if let Some(migration) = migration {
+        migration.finish();
     }
     Ok(report)
 }

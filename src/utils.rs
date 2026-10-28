@@ -1,7 +1,7 @@
 use std::{
     env, fs,
     fs::File,
-    io::{self, Read, Seek, SeekFrom, Write},
+    io::{self, Write},
     path::{Path, PathBuf},
     process::Command,
 };
@@ -17,8 +17,6 @@ pub const STATE_FILE: &str = "/etc/shoes/ping-rust-state.json";
 pub const SHOES_PROVENANCE_FILE: &str = "/var/lib/ping-rust/shoes-install.json";
 pub const LOCK_FILE: &str = "/run/lock/ping-rust.lock";
 pub const SERVICE_FILE: &str = "/etc/systemd/system/shoes.service";
-pub const HOT_RELOAD_ANCHOR_FILE: &str = "/var/lib/ping-rust/.shoes-config-watch";
-const HOT_RELOAD_ANCHOR_PID_FILE: &str = "/var/lib/ping-rust/.shoes-config-watch-pid";
 
 pub fn remove_command_aliases() -> Result<usize> {
     let executable = env::current_exe().context("无法确定 ping-rust 当前路径")?;
@@ -198,77 +196,6 @@ pub fn atomic_write(destination: &Path, contents: &[u8], mode: u32) -> Result<()
     persist_replace(temp, destination)
 }
 
-/// Prepare a hard link before shoes starts watching the aggregate config.
-/// Creating a hard link while shoes is running itself emits a metadata change
-/// event, so this must only be used immediately before a service restart.
-pub fn refresh_hot_reload_anchor() -> Result<()> {
-    let config = Path::new(CONFIG_FILE);
-    let config_metadata = fs::symlink_metadata(config)?;
-    if !config_metadata.is_file() || config_metadata.file_type().is_symlink() {
-        bail!("shoes 聚合配置不是普通文件：{}", config.display());
-    }
-    let anchor = Path::new(HOT_RELOAD_ANCHOR_FILE);
-    let pid_path = Path::new(HOT_RELOAD_ANCHOR_PID_FILE);
-    let parent = anchor.parent().context("热重载锚点路径没有父目录")?;
-    ensure_directory(parent, 0o700)?;
-    if let Ok(metadata) = fs::symlink_metadata(anchor) {
-        if !metadata.is_file() || metadata.file_type().is_symlink() {
-            bail!("热重载锚点不是普通文件：{}", anchor.display());
-        }
-        fs::remove_file(anchor).context("更新 shoes 热重载锚点失败")?;
-    }
-    if pid_path.exists() {
-        fs::remove_file(pid_path).context("清理旧 shoes 热重载 PID 失败")?;
-    }
-    fs::hard_link(config, anchor).with_context(|| {
-        format!(
-            "创建 shoes 热重载锚点失败：{} -> {}",
-            config.display(),
-            anchor.display()
-        )
-    })
-}
-
-pub fn mark_hot_reload_anchor_pid(pid: u32) -> Result<()> {
-    atomic_write(
-        Path::new(HOT_RELOAD_ANCHOR_PID_FILE),
-        pid.to_string().as_bytes(),
-        0o600,
-    )
-}
-
-pub fn hot_reload_anchor_ready(pid: u32) -> bool {
-    let anchor = Path::new(HOT_RELOAD_ANCHOR_FILE);
-    anchor
-        .symlink_metadata()
-        .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
-        && fs::read_to_string(HOT_RELOAD_ANCHOR_PID_FILE)
-            .ok()
-            .is_some_and(|recorded| recorded.trim() == pid.to_string())
-}
-
-/// Generate a file modification event on the inode watched by shoes without
-/// changing its contents. The aggregate config is already committed when this
-/// is called, so shoes rereads the new path atomically.
-pub fn notify_hot_reload_anchor() -> Result<()> {
-    let anchor = Path::new(HOT_RELOAD_ANCHOR_FILE);
-    let mut file = File::options()
-        .read(true)
-        .write(true)
-        .open(anchor)
-        .with_context(|| format!("打开 shoes 热重载锚点失败：{}", anchor.display()))?;
-    let length = file.metadata()?.len();
-    if length == 0 {
-        file.set_len(0)?;
-    } else {
-        let mut byte = [0u8; 1];
-        file.read_exact(&mut byte)?;
-        file.seek(SeekFrom::Start(0))?;
-        file.write_all(&byte)?;
-    }
-    file.sync_all().context("同步 shoes 热重载锚点失败")
-}
-
 pub fn ensure_directory(path: &Path, mode: u32) -> Result<()> {
     fs::create_dir_all(path).with_context(|| format!("创建目录 {} 失败", path.display()))?;
     set_mode(path, mode).with_context(|| format!("设置目录 {} 权限失败", path.display()))
@@ -321,12 +248,10 @@ mod tests {
             .collect::<Vec<_>>();
         let yaml = |port| {
             format!(
-            "- address: 127.0.0.1:{port}\n  protocol:\n    type: socks\n    udp_enabled: false\n  rules:\n  - allow-all-direct\n"
-        )
+                "- address: 127.0.0.1:{port}\n  protocol:\n    type: socks\n    udp_enabled: false\n  rules:\n  - allow-all-direct\n"
+            )
         };
         atomic_write(&config, yaml(ports[0]).as_bytes(), 0o600).unwrap();
-        let anchor = work.path().join("config-watch-anchor");
-        fs::hard_link(&config, &anchor).unwrap();
         let log_file = std::fs::File::create(work.path().join("shoes.log")).unwrap();
         let mut process = std::process::Command::new(binary)
             .arg(&config)
@@ -336,7 +261,7 @@ mod tests {
             .unwrap();
         let probe = |port| std::net::TcpStream::connect(("127.0.0.1", port)).is_ok();
         let wait = |port, expected| {
-            for _ in 0..100 {
+            for _ in 0..140 {
                 if probe(port) == expected {
                     return true;
                 }
@@ -349,13 +274,6 @@ mod tests {
         if initial {
             for index in 1..3 {
                 atomic_write(&config, yaml(ports[index]).as_bytes(), 0o600).unwrap();
-                let first_byte = fs::read(&anchor).unwrap()[0];
-                File::options()
-                    .write(true)
-                    .open(&anchor)
-                    .unwrap()
-                    .write_all(&[first_byte])
-                    .unwrap();
                 replacements.push((wait(ports[index], true), wait(ports[index - 1], false)));
             }
         }
@@ -366,7 +284,6 @@ mod tests {
         assert!(initial, "initial shoes listener did not start");
         assert_eq!(replacements, vec![(true, true), (true, true)]);
     }
-
     #[test]
     fn atomic_write_replaces_content() {
         let dir = tempfile::tempdir().unwrap();

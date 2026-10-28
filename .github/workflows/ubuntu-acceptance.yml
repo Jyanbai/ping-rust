@@ -17,8 +17,8 @@ permissions:
 env:
   GITHUB_TOKEN: ${{ github.token }}
   PUBLIC_VERSION: 0.1.15
-  SHOES_ARCHIVE_SHA256: e60ccde92490624d9ff399dd58e69d4d6943b33c5cc4f0b0d1509b0c644fbc2a
-  SHOES_URL: https://github.com/cfal/shoes/releases/download/v0.2.7/shoes-x86_64-unknown-linux-musl.tar.gz
+  SHOES_ARCHIVE_SHA256: d09a9f5915ae8c3fc933bd86c025f2d8878d45e1dee8f0e2bb404c920de8c707
+  SHOES_URL: https://github.com/cfal/shoes/releases/download/v0.3.6/shoes-x86_64-unknown-linux-musl.tar.gz
 
 jobs:
   root-systemd:
@@ -504,6 +504,7 @@ jobs:
           set -euo pipefail
           previous_pid="$(sudo systemctl show --property MainPID --value shoes.service)"
           test "$previous_pid" -gt 0
+          reload_before="$(sudo journalctl -u shoes.service -b -o cat --no-pager | grep -Fxc 'Servers ready' || true)"
           hysteria_output="$RUNNER_TEMP/hysteria2-generation.txt"
           sudo "$PING_RUST" generate hysteria2 \
             --name acceptance-hysteria2 \
@@ -522,6 +523,9 @@ jobs:
             sleep 0.5
           done
           sudo ss -H -lun | awk '{print $4}' | grep -Eq '(^|:)24444$'
+          reload_after="$(sudo journalctl -u shoes.service -b -o cat --no-pager | grep -Fxc 'Servers ready' || true)"
+          test "$reload_after" -eq "$((reload_before + 1))" \
+            || { echo "expected one shoes reload for add (before=$reload_before after=$reload_after)" >&2; exit 1; }
 
           hysteria_profile="$(
             grep -Eo '[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}' \
@@ -924,6 +928,32 @@ jobs:
           done
 
           edit_pid_before="$(sudo systemctl show --property MainPID --value shoes.service)"
+          reload_count() {
+            sudo journalctl -u shoes.service -b -o cat --no-pager \
+              | grep -Fxc 'Servers ready' || true
+          }
+          wait_for_single_reload() {
+            local before="$1"
+            local action="$2"
+            local expected=$((before + 1))
+            local after
+            for _ in {1..40}; do
+              after="$(reload_count)"
+              if [ "$after" -gt "$expected" ]; then
+                echo "unexpected extra shoes reload during $action (before=$before after=$after)" >&2
+                sudo journalctl -u shoes.service -b -o cat --no-pager >&2 || true
+                return 1
+              fi
+              if [ "$after" -eq "$expected" ]; then
+                return 0
+              fi
+              sleep 0.5
+            done
+            echo "missing shoes reload during $action (before=$before after=$after)" >&2
+            sudo journalctl -u shoes.service -b -o cat --no-pager >&2 || true
+            return 1
+          }
+          edit_reload_before="$(reload_count)"
           profile_number="$(sudo python3 - <<'PY'
           import json
           with open('/etc/shoes/ping-rust-state.json', encoding='utf-8') as stream:
@@ -959,6 +989,7 @@ jobs:
           expect { eof {} timeout { puts stderr "timeout waiting for change exit"; exit 33 } }
           EXPECT
           test "$(sudo systemctl show --property MainPID --value shoes.service)" = "$edit_pid_before"
+          wait_for_single_reload "$edit_reload_before" "modify port"
           wait_listener t 25450
           ! sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)25448$'
           sudo test ! -e /etc/shoes/profiles/VLESS-REALITY-25448.yaml
@@ -982,6 +1013,7 @@ jobs:
           PY
           )"
           delete_pid_before="$(sudo systemctl show --property MainPID --value shoes.service)"
+          delete_reload_before="$(reload_count)"
           sudo env PRS_COMMAND="$PRS" PROFILE_NUMBER="$profile_number" \
             SS_PROFILE_NUMBER="$ss_profile_number" expect <<'EXPECT'
           log_user 0
@@ -1028,6 +1060,7 @@ jobs:
           expect { eof {} timeout { puts stderr "timeout waiting for delete exit"; exit 37 } }
           EXPECT
           test "$(sudo systemctl show --property MainPID --value shoes.service)" = "$delete_pid_before"
+          wait_for_single_reload "$delete_reload_before" "delete non-final profile"
           wait_listener t 25450
           sudo test ! -e /etc/shoes/profiles/SHADOWSOCKS-25449.yaml
           for _ in {1..20}; do
@@ -1107,7 +1140,6 @@ jobs:
           unit_before="$(sudo sha256sum /etc/systemd/system/shoes.service | awk '{print $1}')"
           previous_pid="$(sudo systemctl show --property MainPID --value shoes.service)"
           test "$previous_pid" -gt 0
-          test "$(sudo cat /var/lib/ping-rust/.shoes-config-watch-pid)" = "$previous_pid"
           sudo systemctl is-active --quiet shoes.service
           sudo systemctl is-enabled --quiet shoes.service
 
@@ -1144,8 +1176,6 @@ jobs:
           sudo systemctl is-enabled --quiet shoes.service
           sudo ss -H -lnt | awk '{print $4}' | grep -Eq "(^|:)${REALITY_PORT}$"
           ! sudo ss -H -lnt | awk '{print $4}' | grep -Eq "(^|:)${rollback_port}$"
-          test "$(sudo cat /var/lib/ping-rust/.shoes-config-watch-pid)" = \
-            "$(sudo systemctl show --property MainPID --value shoes.service)"
           rm -f "$failure_log"
 
       - name: Roll back config and systemd state when activation fails
@@ -1405,8 +1435,8 @@ jobs:
           docker exec ping-rust-debian \
             /opt/ping-rust-current/bin/ping-rust --version
 
-          archive="$RUNNER_TEMP/shoes-v0.2.7.tar.gz"
-          directory="$RUNNER_TEMP/shoes-v0.2.7"
+          archive="$RUNNER_TEMP/shoes-v0.3.6.tar.gz"
+          directory="$RUNNER_TEMP/shoes-v0.3.6"
           curl --fail --location --retry 3 --proto '=https' --tlsv1.2 \
             --output "$archive" "$SHOES_URL"
           echo "$SHOES_ARCHIVE_SHA256  $archive" | sha256sum --check --strict

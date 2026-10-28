@@ -12,4 +12,4 @@ proxies:
   tls: true
   type: vless
   udp: true
-  uuid: 85296b07-fa5c-63a7-d8f2-cdef418defa3
+  uuid: 85296b07-fa5c-43a7-98f2-cdef418defa3

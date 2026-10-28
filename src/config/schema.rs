@@ -49,8 +49,15 @@ pub(super) struct ChainRule {
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub(super) enum RuleMasks {
-    One(String),
-    Many(Vec<String>),
+    One(RuleMask),
+    Many(Vec<RuleMask>),
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub(super) enum RuleMask {
+    Legacy(String),
+    DomainPattern { domain_pattern: Vec<String> },
 }
 
 #[derive(Clone, Serialize, Deserialize)]

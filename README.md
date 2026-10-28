@@ -9,7 +9,7 @@
 
 核心逻辑全部位于 Rust 源码中；`scripts/install.sh` 只负责执行 Rust 前的架构检测、下载、SHA-256 校验与严格解包，原子安装、快捷命令所有权判断和首次部署均由已校验的 Rust 二进制完成。
 
-> 当前稳定版：[`v0.2.2`](https://github.com/Jyanbai/ping-rust/releases/tag/v0.2.2)。v0.2.0 引入 Update Center、Verified Hot Reload、Chain Proxy 2.0、规则路由和受验证范围内的 H2MUX；v0.2.1 增加 Pool 节点批量测试、热重载不可用原因提示和 NaiveProxy 测试证书有效期管理；v0.2.2 将默认安装的 shoes 固定为经过验证的 v0.2.7（已装更新的未验证版本时提示回退命令），YAML 库换成 serde-saphyr（修复 RUSTSEC-2024-0449），`--version` 额外输出构建 commit。**热重载需要固定 pin 构建；默认一键安装使用 GitHub Release 来源，监听变更使用受控重启。**支持 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks、AnyTLS、VLESS-TLS-Vision、VLESS-WS-TLS、Trojan-TLS、Trojan-REALITY、VMess-WS-TLS、SOCKS5、Snell v3 和 NaiveProxy 十三种受管协议。用户只选择完整协议，不需要理解或手动组合传输层、安全层与内层协议。
+> 当前稳定版：[`v0.2.2`](https://github.com/Jyanbai/ping-rust/releases/tag/v0.2.2)。v0.2.0 引入 Update Center、Verified Hot Reload、Chain Proxy 2.0、规则路由和受验证范围内的 H2MUX；v0.2.1 增加 Pool 节点批量测试、热重载不可用原因提示和 NaiveProxy 测试证书有效期管理；v0.2.2 将默认安装的 shoes 固定为经过验证的 v0.3.6（已装更新的未验证版本时提示回退命令），YAML 库换成 serde-saphyr（修复 RUSTSEC-2024-0449），`--version` 额外输出构建 commit。**热重载需要固定 pin 构建；默认一键安装使用 GitHub Release 来源，监听变更使用受控重启。**支持 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks、AnyTLS、VLESS-TLS-Vision、VLESS-WS-TLS、Trojan-TLS、Trojan-REALITY、VMess-WS-TLS、SOCKS5、Snell v3 和 NaiveProxy 十三种受管协议。用户只选择完整协议，不需要理解或手动组合传输层、安全层与内层协议。
 
 完整文档：[Wiki](https://github.com/Jyanbai/ping-rust/wiki) · [快速开始](https://github.com/Jyanbai/ping-rust/wiki/Quick-Start) · [链式代理](https://github.com/Jyanbai/ping-rust/wiki/Chain-Proxy) · [故障排查](https://github.com/Jyanbai/ping-rust/wiki/Troubleshooting)
 
@@ -50,7 +50,7 @@ bash <(curl --proto '=https' --tlsv1.2 -fsSL \
 
 ## 功能
 
-- 默认安装经过验收的固定 shoes Release（当前 `v0.2.7`，见 `src/installer.rs` 的 `SHOES_RELEASE_TAG`），不跟随上游 latest；上游有更新 Release 时 Update Center 仅提示“未经验证”，不会自动安装
+- 默认安装经过验收的固定 shoes Release（当前 `v0.3.6`，见 `src/installer.rs` 的 `SHOES_RELEASE_TAG`），不跟随上游 latest；上游有更新 Release 时 Update Center 仅提示“未经验证”，不会自动安装
 - 从 GitHub Release 下载 shoes，自动匹配 x86_64/aarch64 与 GNU/musl，强制校验官方 SHA-256 digest；GNU 资产不兼容时安全回退 static musl
 - 使用 cargo 从与 schema CI 相同的 cfal/shoes 固定源码提交编译安装；低于 1 GiB 内存时自动单任务并关闭 LTO，避免换页风暴
 - 生成经过固定 shoes schema 验证的协议预设；每项均是可直接部署的完整协议栈
@@ -211,7 +211,7 @@ vless://...security=reality...pbk=...&sid=...#VLESS-REALITY-25448
 
 ### Hot Reload
 
-热重载要求 shoes 来源为 `verified-pin`，revision 等于 `386b11532424b8665ee3e46340c6236fb3c47595`，服务已运行、unit 内容与加载路径未被修改、没有 drop-in，且受保护的文件锚点已就绪。默认一键安装使用 GitHub Release 来源，因此不启用 Verified Hot Reload；新增监听、修改端口或删除非最后节点时，使用受控重启，并输出原因和切换方法。此路径的 MainPID 改变是预期结果。
+热重载要求 shoes 来源为 `verified-pin`，revision 等于 `3737e07467387044e677ae7cf8b1c16d291f1b68`，服务已运行、unit 内容与加载路径未被修改、没有 drop-in。shoes v0.3.6 监听配置父目录，源码中的去抖窗口为 5 秒；默认一键安装使用 GitHub Release 来源，因此不启用 Verified Hot Reload。
 
 在 `prs → 6) 更新 → shoes 内核` 中选择已验证固定 pin，或执行：
 
@@ -221,7 +221,7 @@ sudo ping-rust update --method cargo
 
 切换需要 Rust、C linker、Git 与构建依赖，会从源码编译 shoes，耗时取决于 CPU、磁盘和缓存。低于 1 GiB 内存不建议编译；需为编译预留内存、swap 和磁盘空间，实测耗时与峰值见验收记录。安装成功后 provenance 才记录为 `verified-pin`。切回 Release 不会启用热重载；已知降级仍需明确允许。
 
-满足前置条件时，新增监听、修改监听端口和删除非最后节点会尝试 shoes 原生配置热重载。ping-rust 保留聚合配置的原子替换，用文件锚点通知固定 shoes 的 watcher；只有 MainPID 不变、服务保持 active、预期监听出现且旧监听消失时才算成功。候选配置仍先通过 `shoes --dry-run`。已开始的热重载未能确认时，操作失败并恢复旧配置与服务状态，必要时重新启动旧服务。
+满足前置条件时，新增监听、修改监听端口和删除非最后节点会尝试 shoes 原生配置热重载。ping-rust 通过同一目录内的原子替换触发父目录 watcher，等待时间高于 v0.3.6 的去抖窗口；不会再触碰额外锚点文件，避免重复重载。只有 MainPID 不变、服务保持 active、预期监听出现且旧监听消失时才算成功。候选配置仍先通过 `shoes --dry-run`；失败会恢复旧配置与服务状态，并记录 journal 中的实际重载次数。
 
 只改显示名称或公网地址等不影响运行 YAML 的信息无需服务动作。凭据等无法从监听端口证明已生效的修改继续重启 shoes；首次部署仍启动服务，删除最后一个节点仍停止服务。备份恢复、链式代理切换和 shoes 二进制更新保持原有服务处理流程。
 
@@ -255,17 +255,17 @@ Pool 与多 Chain 轮询只表示连接分布，不提供健康检查、自动�
 
 “测试节点 / Chain”严格复用临时 shoes SOCKS5 入口执行完整代理请求；Chain 测试会验证所有有序 hop，而不是逐节点测试的集合。Pool 手动测试按成员顺序输出每个节点的可用性、失败原因和耗时，不改变在线路由。测试进程和权限为 `0600` 的临时配置随后立即删除。它不会修改当前出口或线上 systemd 服务。
 
-新建 v2 状态的默认路由是 DIRECT；在节点管理中“选择出口”会创建或更新单跳默认 Chain，兼容旧版操作习惯。旧版 `active_node` 状态在内存中迁移为单跳 Chain，保留原启用状态与出口；仅读取状态不会改写文件。仍被 Pool、Chain、规则或默认路由引用的对象不能删除。固定 shoes 0.2.8 的 Hysteria2/TUIC UDP 服务端路径会忽略 client chain 并直接创建 UDP socket，因此存在这些入站时会拒绝启用全局链式代理。节点凭据保存在权限为 `0600` 的管理状态和配置文件中，备份同样包含这些敏感信息。
+新建 v2 状态的默认路由是 DIRECT；在节点管理中“选择出口”会创建或更新单跳默认 Chain，兼容旧版操作习惯。旧版 `active_node` 状态在内存中迁移为单跳 Chain，保留原启用状态与出口；仅读取状态不会改写文件。仍被 Pool、Chain、规则或默认路由引用的对象不能删除。固定 shoes 0.3.6 的 Hysteria2/TUIC UDP 服务端路径会忽略 client chain 并直接创建 UDP socket，因此存在这些入站时会拒绝启用全局链式代理。节点凭据保存在权限为 `0600` 的管理状态和配置文件中，备份同样包含这些敏感信息。
 
 示例：`JP Pool = jp-1, jp-2`；`HK-JP Chain = HK → JP Pool`；规则 `10.0.0.0/8 → DIRECT`、`*.finance.example → TW Chain`、`*.ads.example → BLOCK`；默认路由 `HK-JP Chain`。规则顺序与菜单顺序相同，先匹配的规则优先；可上移和下移。Chain/路由修改继续走候选 `shoes --dry-run`、原子提交、systemd 重启与失败回滚；普通 profile 的已验证 Hot Reload 行为不变。
 
 ### H2MUX 客户端偏好
 
-VMess WebSocket TLS、非 Vision VLESS WebSocket TLS 和 Trojan TLS 可在“更改配置”中设置 H2MUX；链式代理的相应节点可独立设置。默认关闭。连接数模式默认 `max_connections=4`、`min_streams=4`、`max_streams=0`、`padding=false`；最大 streams 模式与连接数模式互斥。GitHub Release shoes v0.2.7 与固定 pin 服务端均自动识别 H2MUX，无需更改服务端 YAML；来源矩阵见 `COMPLETION_AUDIT.md`。只修改受管 profile 的客户端偏好时，运行配置不变，服务无需重启或热重载；修改链式节点会更新运行配置并走现有安全重启路径。
+VMess WebSocket TLS、非 Vision VLESS WebSocket TLS 和 Trojan TLS 可在“更改配置”中设置 H2MUX；链式代理的相应节点可独立设置。默认关闭。连接数模式默认 `max_connections=4`、`min_streams=4`、`max_streams=0`、`padding=false`；最大 streams 模式与连接数模式互斥。GitHub Release shoes v0.3.6 与固定 pin 服务端均自动识别 H2MUX，无需更改服务端 YAML；来源矩阵见 `COMPLETION_AUDIT.md`。只修改受管 profile 的客户端偏好时，运行配置不变，服务无需重启或热重载；修改链式节点会更新运行配置并走现有安全重启路径。
 
 sing-box 导出会携带 `multiplex.protocol=h2mux`；固定 shoes 上的 VMess/VLESS WebSocket TLS 和 Trojan TLS 已通过本地 TCP、并发流、half-close 与大 payload 验证，sing-box 1.14.2 已通过导出配置检查及 Trojan H2MUX 数据面测试。Mihomo H2MUX 存在已知兼容问题，开启偏好时拒绝 Mihomo 导出；NekoBox、普通分享 URI 与 QR 仍可用于普通连接，但不携带 H2MUX 设置。VLESS Vision、Shadowsocks、SS2022 + ShadowTLS、Snell v3 及其它协议不提供 H2MUX 开关。H2MUX UDP 尚未验证或启用；Pool、Chain 和路由语义不受该偏好影响。
 
-首次安装流程是：`install.sh → 自动安装 ping-rust/shoes → 自动随机端口部署 VLESS-REALITY → 复制 URL`，中间零输入。Reality 未指定 SNI 时会从 `www.amazon.com`、`www.ebay.com`、`www.paypal.com`、`www.cloudflare.com`、`dash.cloudflare.com`、`aws.amazon.com` 中随机选择；列表不含 Apple，客户端指纹固定为本地 233boy 脚本使用的 `chrome`。后续日常流程是：`prs → 1 → 选择协议 → 输入端口/直接回车随机`；Shadowsocks 会额外选择加密方式和密码，SS 2022 密码不符合所选 cipher 的 Base64 密钥长度时会警告并自动替换。其余协议自动生成 UUID、密码、Reality 密钥、WebSocket 路径或证书。SOCKS5 快速添加默认生成安全随机用户名和密码并启用 UDP ASSOCIATE；Snell v3 快速添加默认生成随机密码并启用 UDP-over-TCP。NaiveProxy 要求明确选择受信任证书或自签名测试模式，不会静默生成生产自签名配置。添加或查看配置成功后直接退出 `prs`；主菜单输入 `0` 退出，任意子菜单输入 `0` 返回主菜单。自动端口从 `20000..=65535` 的高位范围选择；菜单协议选择固定使用连续编号 `1..=13`。信息只会在配置通过 `shoes --dry-run`、原子写入、systemd 启动且确认为 active 后输出；失败会恢复原配置和服务状态。
+首次安装流程是：`install.sh → 自动安装 ping-rust/shoes → 自动随机端口部署 VLESS-REALITY → 复制 URL`，中间零输入。Reality 未指定 SNI 时会从 `www.amazon.com`、`www.ebay.com`、`www.paypal.com`、`www.cloudflare.com`、`dash.cloudflare.com`、`aws.amazon.com` 中随机选择；列表不含 Apple，客户端指纹固定为本地 233boy 脚本使用的 `chrome`。后续日常流程是：`prs → 1 → 选择协议 → 输入端口/直接回车随机`；Shadowsocks 会额外选择加密方式和密码，SS 2022 密码不符合所选 cipher 的 Base64 密钥长度时会警告并自动替换。其余协议自动生成 UUID、密码、Reality 密钥、WebSocket 路径或证书。SOCKS5 快速添加默认生成安全随机用户名和密码并启用 UDP ASSOCIATE；Snell v3 快速添加默认使用 `aes-128-gcm`，生成随机密码并启用 UDP-over-TCP。NaiveProxy 要求明确选择受信任证书或自签名测试模式，不会静默生成生产自签名配置。添加或查看配置成功后直接退出 `prs`；主菜单输入 `0` 退出，任意子菜单输入 `0` 返回主菜单。自动端口从 `20000..=65535` 的高位范围选择；菜单协议选择固定使用连续编号 `1..=13`。信息只会在配置通过 `shoes --dry-run`、原子写入、systemd 启动且确认为 active 后输出；失败会恢复原配置和服务状态。
 
 非交互方式：
 
@@ -295,7 +295,7 @@ sudo prs add socks5
 sudo prs add snell
 ```
 
-SOCKS5 支持 TCP CONNECT 与 UDP ASSOCIATE，默认启用用户名/密码认证。SOCKS5 本身不提供传输加密，更适合作为工具型代理、内网代理或链式出口。高级添加可关闭 UDP，或在明确警告后主动选择无认证模式。Snell v3 高级添加可选择 cipher、密码和 UDP-over-TCP 开关。
+SOCKS5 支持 TCP CONNECT 与 UDP ASSOCIATE，默认启用用户名/密码认证。SOCKS5 本身不提供传输加密，更适合作为工具型代理、内网代理或链式出口。高级添加可关闭 UDP，或在明确警告后主动选择无认证模式。Snell v3 高级添加可选择 cipher、密码和 UDP-over-TCP 开关；选择 `aes-256-gcm` 或 `chacha20-ietf-poly1305` 时会显示 Mihomo 兼容性警告。
 
 WebSocket 路径默认安全随机生成；需要固定路径时可使用完整命令：
 
@@ -458,7 +458,7 @@ sudo ping-rust export nekobox --profile <配置-UUID> --server 203.0.113.10
 
 只有一个配置时可以省略 `--profile`。SOCKS5 可导出 percent-encoded `socks5://` URI、终端 QR、sing-box `type: socks` 和 Clash Meta/Mihomo `type: socks5`；IPv6 地址会使用方括号。NekoBox 没有在本项目核实到稳定、明确的专用 SOCKS5 导入 schema，因此 `export nekobox` 会明确拒绝，不把普通 URI 冒充已验证的 NekoBox 格式。
 
-Snell v3 使用 shoes 原生服务端，支持三个固定 shoes cipher 和 UDP-over-TCP。Mihomo/Clash Meta 可导出 `type: snell`、`version: 3`、`psk` 和 `udp`；为避免不兼容，当前只对 Mihomo v3 明确支持的 `aes-128-gcm` 配置开放无损导出。当前 sing-box Snell 只支持 v4/v6，NekoBox 也没有已核实的 v3 导入能力，因此两者明确拒绝。Snell v3 没有统一、跨客户端的标准 URI，`url`、`qr` 和 `--plain` 不会生成伪 `snell://`。链式代理 outbound 尚未实现 Snell。Mihomo 同样不支持 AnyTLS+Reality，标准 AnyTLS URI也无法表达 Reality 公钥；所有不兼容情况都会返回中文错误。所有 Reality 导出只包含公钥，永远不包含服务器私钥。
+Snell v3 使用 shoes 原生服务端，新节点默认 `aes-128-gcm`；`aes-256-gcm` 和 `chacha20-ietf-poly1305` 保留为高级选项，选择时提示客户端兼容性。CI 的 Mihomo v1.19.33 实测仅 `aes-128-gcm` 可用；Mihomo/Clash Meta 仅对该 cipher 开放无损导出 `type: snell`、`version: 3`、`psk` 和 `udp`。已有节点的 cipher 不会自动修改；若已有 chacha20 或 aes-256 Snell 节点使用 Mihomo 客户端，请将节点改为 `aes-128-gcm` 并重新导出客户端配置。当前 sing-box Snell 只支持 v4/v6，NekoBox 也没有已核实的 v3 导入能力，因此两者明确拒绝。Snell v3 没有统一、跨客户端的标准 URI，`url`、`qr` 和 `--plain` 不会生成伪 `snell://`。链式代理 outbound 尚未实现 Snell。Mihomo 同样不支持 AnyTLS+Reality，标准 AnyTLS URI也无法表达 Reality 公钥；所有不兼容情况都会返回中文错误。所有 Reality 导出只包含公钥，永远不包含服务器私钥。
 
 ## 备份与恢复
 
@@ -628,3 +628,15 @@ ping-rust/
 
 
 
+
+### shoes v0.3.6 兼容说明
+
+本分支把默认 shoes Release 和源码 pin 同步到 v0.3.6（commit `3737e07467387044e677ae7cf8b1c16d291f1b68`）。v0.3.6 修复了 REALITY 对最小 28 字节 `EncryptedExtensions` 目标的握手失败，并更新了 watcher：配置父目录由 watcher 监听，上游源码去抖窗口为 5 秒（背景资料约称 3 秒）。ping-rust 的热重载超时设置为 10 秒，覆盖该窗口。
+
+REALITY 外部握手验收使用 Xray 26.x 客户端，兼容客户端至少需要 Xray 25.5.16；链式代理的 Reality 出口不再模拟 Chrome 指纹。默认的六个 SNI 目标为 `www.amazon.com`、`www.ebay.com`、`www.paypal.com`、`www.cloudflare.com`、`dash.cloudflare.com` 和 `aws.amazon.com`，每个目标都应单独记录握手结果。
+
+Snell v3 新节点默认 `aes-128-gcm`。CI 中 Mihomo v1.19.33 经代理请求仅该 cipher 通过；Mihomo 客户端仅支持 `aes-128-gcm`。已有节点保持原 cipher，不会在升级时自动修改。已有的 chacha20 或 aes-256 Snell 节点若使用 Mihomo 客户端，需要改为 `aes-128-gcm` 并重新导出客户端配置。该测试不能判断 shoes salt 改动的影响。
+
+Chain 规则中的通配主机名会按 v0.3.6 的 `domain_pattern` 对象格式（字符串数组值）写入；旧版 `masks: '*.example.com'` 形式在 v0.3.6 中会被拒绝，升级时由 ping-rust 重新生成候选配置。
+
+`global_limits` 保持省略，表示不启用全局限制。只有明确需要限流时才在 shoes YAML 中写入该字段，避免升级后给现有用户引入隐式默认限制。

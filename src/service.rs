@@ -35,7 +35,6 @@ pub enum HotReloadReason {
     UnitModified,
     ShoesSourceUnsupported(installer::ShoesProvenance),
     DropInPresent,
-    AnchorNotReady,
     ListenerSnapshotMismatch,
     InspectionFailed(String),
 }
@@ -53,7 +52,6 @@ impl HotReloadReason {
                 "shoes 来源或 revision 不满足固定 pin 验证要求".to_owned()
             }
             Self::DropInPresent => "shoes unit 存在 drop-in".to_owned(),
-            Self::AnchorNotReady => "热重载文件锚点未就绪".to_owned(),
             Self::ListenerSnapshotMismatch => {
                 "当前监听与受管配置不一致，无法验证监听变更".to_owned()
             }
@@ -109,7 +107,6 @@ fn hot_reload_unavailable_reason(
     unit_matches: bool,
     shoes: &installer::ShoesProvenance,
     drop_ins: &str,
-    anchor_ready: bool,
 ) -> Option<HotReloadReason> {
     if !was_active {
         Some(HotReloadReason::ServiceNotRunning)
@@ -121,14 +118,13 @@ fn hot_reload_unavailable_reason(
         Some(HotReloadReason::ShoesSourceUnsupported(shoes.clone()))
     } else if !drop_ins.is_empty() && drop_ins != "-" {
         Some(HotReloadReason::DropInPresent)
-    } else if !anchor_ready {
-        Some(HotReloadReason::AnchorNotReady)
     } else {
         None
     }
 }
 
-const HOT_RELOAD_TIMEOUT: Duration = Duration::from_secs(6);
+// shoes v0.3.6 debounces parent-directory watcher events for five seconds.
+const HOT_RELOAD_TIMEOUT: Duration = Duration::from_secs(10);
 const HOT_RELOAD_POLL: Duration = Duration::from_millis(200);
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -194,14 +190,10 @@ pub fn install_unit(enable_now: bool) -> Result<()> {
         unit_contents().as_bytes(),
         0o644,
     )?;
-    let anchor_prepared = enable_now && prepare_anchor_before_start();
     systemctl(&["daemon-reload"])?;
     if enable_now {
         for command in activation_commands(was_active, was_failed) {
             systemctl(command)?;
-        }
-        if anchor_prepared {
-            mark_anchor_after_start();
         }
     }
     Ok(())
@@ -218,25 +210,11 @@ pub fn activate_and_verify() -> Result<()> {
 pub fn restart_and_verify() -> Result<()> {
     utils::require_linux_root()?;
     ensure_systemctl()?;
-    let anchor_prepared = prepare_anchor_before_start();
     systemctl_after_reset(RESTART_COMMAND)?;
     verify_active_stable(systemctl_is_active, || {
         thread::sleep(Duration::from_millis(750))
     })?;
-    if anchor_prepared {
-        mark_anchor_after_start();
-    }
     Ok(())
-}
-
-fn prepare_anchor_before_start() -> bool {
-    utils::refresh_hot_reload_anchor().is_ok()
-}
-
-fn mark_anchor_after_start() {
-    if let Ok(Some(pid)) = main_pid() {
-        let _ = utils::mark_hot_reload_anchor_pid(pid);
-    }
 }
 
 fn verify_active_stable(
@@ -305,13 +283,9 @@ pub fn capture_hot_reload_snapshot(snapshot: &ServiceSnapshot) -> Result<HotRelo
     let main_pid = snapshot
         .main_pid
         .context("shoes.service active but MainPID is unavailable")?;
-    if let Some(reason) = hot_reload_unavailable_reason(
-        snapshot.was_active,
-        true,
-        &shoes,
-        &drop_ins,
-        utils::hot_reload_anchor_ready(main_pid),
-    ) {
+    if let Some(reason) =
+        hot_reload_unavailable_reason(snapshot.was_active, true, &shoes, &drop_ins)
+    {
         return Ok(HotReloadReadiness::Unavailable(reason));
     }
     let snapshot = HotReloadSnapshot {
@@ -326,7 +300,6 @@ pub fn hot_reload_and_verify(
     expected_ports: &BTreeSet<u16>,
     removed_ports: &BTreeSet<u16>,
 ) -> Result<()> {
-    utils::notify_hot_reload_anchor()?;
     let deadline = std::time::Instant::now() + HOT_RELOAD_TIMEOUT;
     loop {
         let active = systemctl_is_active()?;
@@ -459,8 +432,6 @@ pub fn restore_snapshot(snapshot: ServiceSnapshot) -> Result<()> {
     utils::require_linux_root()?;
     ensure_systemctl()?;
     let path = Path::new(utils::SERVICE_FILE);
-    let managed_unit = snapshot.unit_contents.as_deref() == Some(unit_contents().as_bytes());
-
     if path.exists() {
         let _ = Command::new("systemctl")
             .args(["disable", "--now", SERVICE_NAME])
@@ -482,14 +453,10 @@ pub fn restore_snapshot(snapshot: ServiceSnapshot) -> Result<()> {
                 .status();
         }
         if snapshot.was_active {
-            let anchor_prepared = managed_unit && prepare_anchor_before_start();
             systemctl_after_reset(START_COMMAND)?;
             verify_active_stable(systemctl_is_active, || {
                 thread::sleep(Duration::from_millis(750))
             })?;
-            if anchor_prepared {
-                mark_anchor_after_start();
-            }
         } else {
             let _ = Command::new("systemctl")
                 .args(["stop", SERVICE_NAME])
@@ -621,7 +588,7 @@ mod tests {
     #[test]
     fn hot_reload_reason_service_not_running() {
         assert_eq!(
-            hot_reload_unavailable_reason(false, true, &pin_provenance(), "", true),
+            hot_reload_unavailable_reason(false, true, &pin_provenance(), ""),
             Some(HotReloadReason::ServiceNotRunning)
         );
     }
@@ -629,7 +596,7 @@ mod tests {
     #[test]
     fn hot_reload_reason_modified_unit() {
         assert_eq!(
-            hot_reload_unavailable_reason(true, false, &pin_provenance(), "", true),
+            hot_reload_unavailable_reason(true, false, &pin_provenance(), ""),
             Some(HotReloadReason::UnitModified)
         );
     }
@@ -638,17 +605,17 @@ mod tests {
     fn hot_reload_reason_release_and_wrong_pin_remain_ineligible() {
         let release = installer::ShoesProvenance {
             source: "github-release".into(),
-            release_tag: Some("v0.2.7".into()),
+            release_tag: Some("v0.3.6".into()),
             ..Default::default()
         };
         assert_eq!(
-            hot_reload_unavailable_reason(true, true, &release, "", true),
+            hot_reload_unavailable_reason(true, true, &release, ""),
             Some(HotReloadReason::ShoesSourceUnsupported(release))
         );
         let mut wrong_pin = pin_provenance();
         wrong_pin.revision = Some("different-revision".into());
         assert!(matches!(
-            hot_reload_unavailable_reason(true, true, &wrong_pin, "", true),
+            hot_reload_unavailable_reason(true, true, &wrong_pin, ""),
             Some(HotReloadReason::ShoesSourceUnsupported(_))
         ));
     }
@@ -656,30 +623,21 @@ mod tests {
     #[test]
     fn hot_reload_reason_drop_in() {
         assert_eq!(
-            hot_reload_unavailable_reason(true, true, &pin_provenance(), "override.conf", true),
+            hot_reload_unavailable_reason(true, true, &pin_provenance(), "override.conf"),
             Some(HotReloadReason::DropInPresent)
         );
-    }
-
-    #[test]
-    fn hot_reload_reason_anchor_not_ready() {
-        assert_eq!(
-            hot_reload_unavailable_reason(true, true, &pin_provenance(), "", false),
-            Some(HotReloadReason::AnchorNotReady)
-        );
-        assert!(hot_reload_unavailable_reason(true, true, &pin_provenance(), "-", true).is_none());
     }
 
     #[test]
     fn hot_reload_release_fallback_explains_source_and_switch() {
         let reason = HotReloadReason::ShoesSourceUnsupported(installer::ShoesProvenance {
             source: "github-release".into(),
-            release_tag: Some("v0.2.7".into()),
+            release_tag: Some("v0.3.6".into()),
             ..Default::default()
         });
         let message = reason.restart_notice();
         for expected in [
-            "GitHub Release v0.2.7",
+            "GitHub Release v0.3.6",
             "固定 pin",
             "受控重启",
             "Update Center",
@@ -757,6 +715,12 @@ mod tests {
         .unwrap());
         assert!(reload_observation(42, 43, true, &expected, &expected, &removed).is_err());
         assert!(reload_observation(42, 0, false, &expected, &expected, &removed).is_err());
+    }
+
+    #[test]
+    fn hot_reload_timeout_covers_shoes_v036_debounce_window() {
+        // shoes v0.3.6 uses a five-second quiet period for parent-directory events.
+        assert!(HOT_RELOAD_TIMEOUT > Duration::from_secs(5));
     }
 
     #[test]

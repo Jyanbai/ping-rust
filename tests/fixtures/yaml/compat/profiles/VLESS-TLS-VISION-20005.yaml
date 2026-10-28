@@ -11,5 +11,5 @@ protocol:
       vision: true
       protocol:
         type: vless
-        user_id: 9ef07cd8-29cd-74b8-efa3-741852de30b4
+        user_id: 9ef07cd8-29cd-44b8-9fa3-741852de30b4
         udp_enabled: true

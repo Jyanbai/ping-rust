@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Backward-compat acceptance: files written by the new build must be read by the
-# published v0.2.1 Release binary with identical info/export output.
+# published v0.2.1 Release binary with identical exports and info except for
+# the intentional shoes --version probe introduced by the v0.3.6 upgrade.
 # Runs as root inside a disposable systemd container. Placeholder data only.
 set -euo pipefail
 

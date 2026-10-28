@@ -24,10 +24,10 @@ use crate::{config, performance, utils};
 
 const RELEASE_TAG_API_PREFIX: &str = "https://api.github.com/repos/cfal/shoes/releases/tags/";
 /// 经过验收的 shoes GitHub Release；默认安装、bootstrap 与 `update --method release` 只安装此 tag。
-pub const SHOES_RELEASE_TAG: &str = "v0.2.7";
+pub const SHOES_RELEASE_TAG: &str = "v0.3.6";
 const SHOES_GIT_REPOSITORY: &str = "https://github.com/cfal/shoes";
-const SHOES_SCHEMA_REVISION: &str = "386b11532424b8665ee3e46340c6236fb3c47595";
-const SHOES_SCHEMA_VERSION: &str = "0.2.8";
+const SHOES_SCHEMA_REVISION: &str = "3737e07467387044e677ae7cf8b1c16d291f1b68";
+const SHOES_SCHEMA_VERSION: &str = "0.3.6";
 const MAX_ARCHIVE_SIZE: u64 = 128 * 1024 * 1024;
 const MAX_BINARY_SIZE: u64 = 128 * 1024 * 1024;
 const LOW_MEMORY_THRESHOLD_KIB: u64 = 1024 * 1024;
@@ -276,6 +276,29 @@ pub(crate) async fn install_locked_with_options(
     allow_downgrade: bool,
     lock: utils::ExclusiveLock,
 ) -> Result<InstallReport> {
+    install_locked_inner(method, force, allow_downgrade, lock, true).await
+}
+
+/// Install a new shoes binary without validating the old on-disk config. The
+/// caller must immediately run the managed migration transaction before any
+/// service restart; this is needed because v0.3.6 intentionally rejects the
+/// v0.2.x wildcard rule spelling.
+pub(crate) async fn install_locked_for_migration(
+    method: InstallMethod,
+    force: bool,
+    allow_downgrade: bool,
+    lock: utils::ExclusiveLock,
+) -> Result<InstallReport> {
+    install_locked_inner(method, force, allow_downgrade, lock, false).await
+}
+
+async fn install_locked_inner(
+    method: InstallMethod,
+    force: bool,
+    allow_downgrade: bool,
+    lock: utils::ExclusiveLock,
+    validate_existing_config: bool,
+) -> Result<InstallReport> {
     utils::require_linux_root()?;
     let rollback = BinaryRollback::capture(Path::new(utils::SHOES_BIN))?;
     let installation = match method {
@@ -286,7 +309,7 @@ pub(crate) async fn install_locked_with_options(
     };
     match installation {
         Ok(mut report) => {
-            if Path::new(utils::CONFIG_FILE).is_file() {
+            if validate_existing_config && Path::new(utils::CONFIG_FILE).is_file() {
                 if let Err(validation) = config::validate_with_binary(
                     Path::new(utils::SHOES_BIN),
                     Path::new(utils::CONFIG_FILE),
@@ -623,8 +646,42 @@ fn is_musl() -> bool {
 }
 
 pub async fn installed_version() -> Result<String> {
-    binary_health(Path::new(utils::SHOES_BIN)).await?;
-    Ok("shoes（CLI 未提供版本参数）".to_owned())
+    let binary = Path::new(utils::SHOES_BIN);
+    binary_health(binary).await?;
+    let output = Command::new(binary)
+        .arg("--version")
+        .output()
+        .await
+        .with_context(|| format!("无法执行 {} --version", binary.display()))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if stderr.contains("Invalid argument: --version")
+            || stdout.contains("Invalid argument: --version")
+        {
+            return Ok("shoes（CLI 未提供版本参数）".to_owned());
+        }
+        bail!(
+            "{} --version 失败（退出码：{}）：{}{}",
+            binary.display(),
+            output.status,
+            stderr.trim(),
+            stdout.trim()
+        );
+    }
+    parse_version_output(&output.stdout, &output.stderr)
+}
+
+fn parse_version_output(stdout: &[u8], stderr: &[u8]) -> Result<String> {
+    let stdout = String::from_utf8_lossy(stdout);
+    let stderr = String::from_utf8_lossy(stderr);
+    let version = stdout
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .or_else(|| stderr.lines().map(str::trim).find(|line| !line.is_empty()))
+        .context("shoes --version 未返回版本")?;
+    Ok(version.to_owned())
 }
 
 async fn binary_health(binary: &Path) -> Result<()> {
@@ -687,34 +744,46 @@ mod tests {
     }
 
     #[test]
+    fn parses_shoes_version_from_stdout_or_stderr() {
+        assert_eq!(
+            parse_version_output(b"shoes 0.3.6\n", b"").unwrap(),
+            "shoes 0.3.6"
+        );
+        assert_eq!(
+            parse_version_output(b"\n", b"shoes 0.3.6\n").unwrap(),
+            "shoes 0.3.6"
+        );
+        assert!(parse_version_output(b"\n", b"\n").is_err());
+    }
+    #[test]
     fn unverified_release_notice_only_for_newer_github_release() {
-        let notice = unverified_installed_notice(&release_provenance("0.3.2")).unwrap();
+        let notice = unverified_installed_notice(&release_provenance("0.3.7")).unwrap();
         assert_eq!(
             notice,
             format!(
-                "当前 shoes v0.3.2 未经 ping-rust 验证；可执行 sudo ping-rust update --method release --allow-downgrade 回到 {SHOES_RELEASE_TAG}"
+                "当前 shoes v0.3.7 未经 ping-rust 验证；可执行 sudo ping-rust update --method release --allow-downgrade 回到 {SHOES_RELEASE_TAG}"
             )
         );
-        assert!(notice.ends_with("回到 v0.2.7"));
+        assert!(notice.ends_with("回到 v0.3.6"));
         assert!(unverified_installed_notice(&release_provenance("0.2.7")).is_none());
         assert!(unverified_installed_notice(&release_provenance("0.2.6")).is_none());
         let mut pin = release_provenance("0.3.2");
         pin.source = "verified-pin".to_owned();
         assert!(unverified_installed_notice(&pin).is_none());
         assert!(unverified_installed_notice(&ShoesProvenance::default()).is_none());
-        let mut tagged = release_provenance("v0.3.0");
-        tagged.version = Some("v0.3.0".to_owned());
+        let mut tagged = release_provenance("v0.3.7");
+        tagged.version = Some("v0.3.7".to_owned());
         assert!(unverified_installed_notice(&tagged)
             .unwrap()
-            .contains("shoes v0.3.0 "));
+            .contains("shoes v0.3.7 "));
     }
 
     #[test]
     fn release_install_is_pinned_to_verified_tag() {
-        assert_eq!(SHOES_RELEASE_TAG, "v0.2.7");
+        assert_eq!(SHOES_RELEASE_TAG, "v0.3.6");
         assert_eq!(
             pinned_release_api(),
-            "https://api.github.com/repos/cfal/shoes/releases/tags/v0.2.7"
+            "https://api.github.com/repos/cfal/shoes/releases/tags/v0.3.6"
         );
         assert!(!pinned_release_api().contains("latest"));
     }
@@ -734,15 +803,15 @@ mod tests {
 
     #[test]
     fn pinned_release_metadata_must_match_tag() {
-        assert!(ensure_pinned_release_tag("v0.2.7").is_ok());
+        assert!(ensure_pinned_release_tag("v0.3.6").is_ok());
         assert!(ensure_pinned_release_tag("v0.3.2").is_err());
     }
 
     #[test]
     fn upstream_newer_release_notice_is_informational_only() {
-        let notice = newer_upstream_release_notice("v0.3.2").unwrap();
-        assert!(notice.contains("v0.3.2") && notice.contains("未经验证"));
-        assert!(newer_upstream_release_notice("v0.2.7").is_none());
+        let notice = newer_upstream_release_notice("v0.3.7").unwrap();
+        assert!(notice.contains("v0.3.7") && notice.contains("未经验证"));
+        assert!(newer_upstream_release_notice("v0.3.6").is_none());
         assert!(newer_upstream_release_notice("v0.2.6").is_none());
         assert!(newer_upstream_release_notice("garbage").is_none());
     }
@@ -795,11 +864,11 @@ mod tests {
 
     #[test]
     fn known_release_downgrade_is_blocked_unless_explicitly_allowed() {
-        assert!(!downgrade_allowed(Some("0.2.8"), Some("0.2.7"), false));
-        assert!(downgrade_allowed(Some("0.2.7"), Some("0.2.8"), false));
-        assert!(downgrade_allowed(Some("0.2.8"), Some("0.2.8"), false));
-        assert!(downgrade_allowed(Some("0.2.8"), Some("0.2.7"), true));
-        assert!(!downgrade_allowed(None, Some("0.2.8"), false));
+        assert!(!downgrade_allowed(Some("0.3.7"), Some("0.3.6"), false));
+        assert!(downgrade_allowed(Some("0.3.6"), Some("0.3.7"), false));
+        assert!(downgrade_allowed(Some("0.3.7"), Some("0.3.7"), false));
+        assert!(downgrade_allowed(Some("0.3.7"), Some("0.3.6"), true));
+        assert!(!downgrade_allowed(None, Some("0.3.6"), false));
     }
 
     #[test]
@@ -817,7 +886,7 @@ mod tests {
         fs::write(&binary, b"verified shoes").unwrap();
         let provenance = ShoesProvenance {
             source: "verified-pin".to_owned(),
-            version: Some("0.2.8".to_owned()),
+            version: Some("0.3.6".to_owned()),
             revision: Some(SHOES_SCHEMA_REVISION.to_owned()),
             release_tag: None,
             binary_sha256: None,
