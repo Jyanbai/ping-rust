@@ -266,7 +266,7 @@ done
 
 printf '%s\n' "${reality_results[@]}" >"$WORK/logs/reality-summary.txt"
 printf '%s\n' "${snell_results[@]}" >"$WORK/logs/snell-summary.txt"
-chmod -R a+rX "$WORK"
+sudo chmod -R a+rX "$WORK"
 echo 'external client acceptance complete'
 if printf '%s\n' "${reality_results[@]}" | grep -Fq '=FAIL' || [ "$minimum_result" != PASS ]; then
   exit 1
