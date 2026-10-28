@@ -1,0 +1,40 @@
+#!/usr/bin/expect -f
+
+set timeout 60
+log_user 1
+set binary [lindex $argv 0]
+
+proc wait_for {pattern stage} {
+    expect {
+        -re $pattern { return }
+        eof { puts stderr "migrated Chain probe ended during $stage"; exit 1 }
+        timeout { puts stderr "migrated Chain probe timed out during $stage"; exit 1 }
+    }
+}
+proc choice {value} { send -- "$value\r" }
+
+spawn $binary
+wait_for {请选择 \[0-10\]} "main menu"
+choice 9
+wait_for {请选择 \[0-9\]} "operations menu"
+choice 1
+wait_for {Chain Proxy 2\.0} "chain menu"
+choice 7
+wait_for {测试节点} "test menu"
+choice 1
+wait_for {选择测试节点} "node selection"
+choice 1
+wait_for {节点可用：} "Reality node probe"
+wait_for {Chain Proxy 2\.0} "chain menu after node probe"
+choice 7
+wait_for {测试完整 Chain} "test menu after node probe"
+choice 2
+wait_for {选择 Chain} "Chain selection"
+choice 1
+wait_for {完整 Chain 测试通过} "Chain probe"
+wait_for {Chain Proxy 2\.0} "chain menu after Chain probe"
+choice 0
+wait_for {请选择 \[0-10\]} "main menu after probes"
+choice 0
+wait_for {已退出} "exit"
+expect eof

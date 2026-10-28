@@ -105,6 +105,29 @@ expected_ports='24431|24432'
 if [ "$expected_profiles" -eq 3 ]; then expected_ports='24431|24432|24433'; fi
 test "$(ss -H -lnt | awk '{print $4}' | grep -Ec ":(${expected_ports})$")" -eq "$expected_profiles"
 
+cat >"$WORK/endpoint.py" <<'PY'
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(204)
+        self.end_headers()
+
+HTTPServer(("127.0.0.1", 18082), Handler).serve_forever()
+PY
+python3 "$WORK/endpoint.py" >"$WORK/records/endpoint.log" 2>&1 &
+endpoint_pid=$!
+trap 'kill "$endpoint_pid" 2>/dev/null || true' EXIT
+for _ in $(seq 1 50); do
+  if ss -H -lnt | grep -q ':18082$'; then break; fi
+  sleep 0.1
+done
+export PING_RUST_CHAIN_TEST_URL=http://127.0.0.1:18082/
+expect "$(dirname "$0")/migrated-chain-probe.exp" "$NEW" \
+  >"$WORK/records/migrated-chain-probe.txt" 2>&1
+grep -Fq '节点可用：' "$WORK/records/migrated-chain-probe.txt"
+grep -Fq '完整 Chain 测试通过' "$WORK/records/migrated-chain-probe.txt"
+
 sha256sum /etc/shoes/config.yaml /etc/shoes/ping-rust-state.json \
   >"$WORK/records/hash-after.txt"
 find /etc/shoes/profiles -maxdepth 1 -type f -print0 \
