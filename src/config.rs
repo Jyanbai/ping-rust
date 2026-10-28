@@ -234,19 +234,28 @@ pub struct ShadowTlsCredentials {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
 pub enum SnellCipher {
+    #[default]
     #[value(name = "aes-128-gcm")]
     #[serde(rename = "aes-128-gcm")]
     Aes128Gcm,
     #[value(name = "aes-256-gcm")]
     #[serde(rename = "aes-256-gcm")]
     Aes256Gcm,
-    #[default]
     #[value(name = "chacha20-ietf-poly1305")]
     #[serde(rename = "chacha20-ietf-poly1305")]
     Chacha20IetfPoly1305,
 }
 
 impl SnellCipher {
+    pub fn mihomo_warning(self) -> Option<&'static str> {
+        match self {
+            Self::Aes128Gcm => None,
+            Self::Aes256Gcm | Self::Chacha20IetfPoly1305 => {
+                Some("未经客户端验证，Mihomo 仅支持 aes-128-gcm")
+            }
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Aes128Gcm => "aes-128-gcm",
@@ -826,7 +835,15 @@ pub(crate) async fn migrate_managed_config_with_binary(
     }
     let yaml = crate::yaml::to_string(&servers).context("序列化 shoes 迁移配置失败")?;
     validate_yaml(&yaml)?;
-    validate_candidate_with_binary(&yaml, Path::new(utils::CONFIG_DIR), binary).await?;
+    #[cfg(feature = "ci-fault-injection")]
+    let dry_run_yaml = if std::env::var("PING_RUST_CI_UPGRADE_FAULT").as_deref() == Ok("dry-run") {
+        "- address: ["
+    } else {
+        yaml.as_str()
+    };
+    #[cfg(not(feature = "ci-fault-injection"))]
+    let dry_run_yaml = yaml.as_str();
+    validate_candidate_with_binary(dry_run_yaml, Path::new(utils::CONFIG_DIR), binary).await?;
     let rollback = ManagedRollback {
         config: read_optional(config_path)?,
         state: read_optional(state_path)?,
@@ -3506,7 +3523,7 @@ mod tests {
         let yaml = fs::read_to_string(result.config_path).unwrap();
         assert!(yaml.contains("address: 0.0.0.0:23456"));
         assert!(yaml.contains("type: snell"));
-        assert!(yaml.contains("cipher: chacha20-ietf-poly1305"));
+        assert!(yaml.contains("cipher: aes-128-gcm"));
         assert!(yaml.contains("password:"));
         assert!(yaml.contains("udp_enabled: true"));
         assert!(!yaml.contains("udp_num_sockets"));
@@ -3518,7 +3535,7 @@ mod tests {
         else {
             panic!("expected Snell credentials");
         };
-        assert_eq!(cipher, SnellCipher::Chacha20IetfPoly1305);
+        assert_eq!(cipher, SnellCipher::Aes128Gcm);
         assert!(!password.is_empty());
         assert!(udp_enabled);
 
@@ -3540,7 +3557,7 @@ mod tests {
         else {
             panic!("expected restored Snell credentials");
         };
-        assert_eq!(*cipher, SnellCipher::Chacha20IetfPoly1305);
+        assert_eq!(*cipher, SnellCipher::Aes128Gcm);
         assert!(!password.is_empty());
         assert!(*udp_enabled);
     }
@@ -3603,6 +3620,43 @@ mod tests {
             assert_eq!(state_cipher, cipher);
             assert_eq!(state_password, "chosen-snell-password");
         }
+    }
+
+    #[test]
+    fn existing_chacha_snell_state_keeps_its_cipher_after_default_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut request = request(Protocol::Snell, dir.path().join("config.yaml"));
+        request.options.snell_cipher = SnellCipher::Chacha20IetfPoly1305;
+        let (server, credentials, _, _) =
+            generate_parts(&request, dir.path(), Uuid::new_v4()).unwrap();
+        let profile = ManagedProfile {
+            h2mux: Default::default(),
+            id: Uuid::new_v4(),
+            name: "old-snell".to_owned(),
+            port: request.port,
+            server_address: None,
+            credentials,
+            certificate_path: None,
+            certificate_key_path: None,
+            self_signed_certificate: false,
+            naive_certificate_validity: None,
+        };
+        let state = ManagedState {
+            schema_version: 2,
+            profiles: vec![profile],
+            chain_proxy: ChainProxyState::default(),
+        };
+        let state_path = dir.path().join("state.json");
+        fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+        let restored = load_state_from(&state_path).unwrap();
+        assert!(matches!(
+            restored.profiles[0].credentials,
+            Credentials::Snell {
+                cipher: SnellCipher::Chacha20IetfPoly1305,
+                ..
+            }
+        ));
+        ensure_servers_match_state(&[server], &restored.profiles).unwrap();
     }
 
     #[tokio::test]

@@ -265,7 +265,7 @@ VMess WebSocket TLS、非 Vision VLESS WebSocket TLS 和 Trojan TLS 可在“更
 
 sing-box 导出会携带 `multiplex.protocol=h2mux`；固定 shoes 上的 VMess/VLESS WebSocket TLS 和 Trojan TLS 已通过本地 TCP、并发流、half-close 与大 payload 验证，sing-box 1.14.2 已通过导出配置检查及 Trojan H2MUX 数据面测试。Mihomo H2MUX 存在已知兼容问题，开启偏好时拒绝 Mihomo 导出；NekoBox、普通分享 URI 与 QR 仍可用于普通连接，但不携带 H2MUX 设置。VLESS Vision、Shadowsocks、SS2022 + ShadowTLS、Snell v3 及其它协议不提供 H2MUX 开关。H2MUX UDP 尚未验证或启用；Pool、Chain 和路由语义不受该偏好影响。
 
-首次安装流程是：`install.sh → 自动安装 ping-rust/shoes → 自动随机端口部署 VLESS-REALITY → 复制 URL`，中间零输入。Reality 未指定 SNI 时会从 `www.amazon.com`、`www.ebay.com`、`www.paypal.com`、`www.cloudflare.com`、`dash.cloudflare.com`、`aws.amazon.com` 中随机选择；列表不含 Apple，客户端指纹固定为本地 233boy 脚本使用的 `chrome`。后续日常流程是：`prs → 1 → 选择协议 → 输入端口/直接回车随机`；Shadowsocks 会额外选择加密方式和密码，SS 2022 密码不符合所选 cipher 的 Base64 密钥长度时会警告并自动替换。其余协议自动生成 UUID、密码、Reality 密钥、WebSocket 路径或证书。SOCKS5 快速添加默认生成安全随机用户名和密码并启用 UDP ASSOCIATE；Snell v3 快速添加默认生成随机密码并启用 UDP-over-TCP。NaiveProxy 要求明确选择受信任证书或自签名测试模式，不会静默生成生产自签名配置。添加或查看配置成功后直接退出 `prs`；主菜单输入 `0` 退出，任意子菜单输入 `0` 返回主菜单。自动端口从 `20000..=65535` 的高位范围选择；菜单协议选择固定使用连续编号 `1..=13`。信息只会在配置通过 `shoes --dry-run`、原子写入、systemd 启动且确认为 active 后输出；失败会恢复原配置和服务状态。
+首次安装流程是：`install.sh → 自动安装 ping-rust/shoes → 自动随机端口部署 VLESS-REALITY → 复制 URL`，中间零输入。Reality 未指定 SNI 时会从 `www.amazon.com`、`www.ebay.com`、`www.paypal.com`、`www.cloudflare.com`、`dash.cloudflare.com`、`aws.amazon.com` 中随机选择；列表不含 Apple，客户端指纹固定为本地 233boy 脚本使用的 `chrome`。后续日常流程是：`prs → 1 → 选择协议 → 输入端口/直接回车随机`；Shadowsocks 会额外选择加密方式和密码，SS 2022 密码不符合所选 cipher 的 Base64 密钥长度时会警告并自动替换。其余协议自动生成 UUID、密码、Reality 密钥、WebSocket 路径或证书。SOCKS5 快速添加默认生成安全随机用户名和密码并启用 UDP ASSOCIATE；Snell v3 快速添加默认使用 `aes-128-gcm`，生成随机密码并启用 UDP-over-TCP。NaiveProxy 要求明确选择受信任证书或自签名测试模式，不会静默生成生产自签名配置。添加或查看配置成功后直接退出 `prs`；主菜单输入 `0` 退出，任意子菜单输入 `0` 返回主菜单。自动端口从 `20000..=65535` 的高位范围选择；菜单协议选择固定使用连续编号 `1..=13`。信息只会在配置通过 `shoes --dry-run`、原子写入、systemd 启动且确认为 active 后输出；失败会恢复原配置和服务状态。
 
 非交互方式：
 
@@ -295,7 +295,7 @@ sudo prs add socks5
 sudo prs add snell
 ```
 
-SOCKS5 支持 TCP CONNECT 与 UDP ASSOCIATE，默认启用用户名/密码认证。SOCKS5 本身不提供传输加密，更适合作为工具型代理、内网代理或链式出口。高级添加可关闭 UDP，或在明确警告后主动选择无认证模式。Snell v3 高级添加可选择 cipher、密码和 UDP-over-TCP 开关。
+SOCKS5 支持 TCP CONNECT 与 UDP ASSOCIATE，默认启用用户名/密码认证。SOCKS5 本身不提供传输加密，更适合作为工具型代理、内网代理或链式出口。高级添加可关闭 UDP，或在明确警告后主动选择无认证模式。Snell v3 高级添加可选择 cipher、密码和 UDP-over-TCP 开关；选择 `aes-256-gcm` 或 `chacha20-ietf-poly1305` 时会显示 Mihomo 兼容性警告。
 
 WebSocket 路径默认安全随机生成；需要固定路径时可使用完整命令：
 
@@ -458,7 +458,7 @@ sudo ping-rust export nekobox --profile <配置-UUID> --server 203.0.113.10
 
 只有一个配置时可以省略 `--profile`。SOCKS5 可导出 percent-encoded `socks5://` URI、终端 QR、sing-box `type: socks` 和 Clash Meta/Mihomo `type: socks5`；IPv6 地址会使用方括号。NekoBox 没有在本项目核实到稳定、明确的专用 SOCKS5 导入 schema，因此 `export nekobox` 会明确拒绝，不把普通 URI 冒充已验证的 NekoBox 格式。
 
-Snell v3 使用 shoes 原生服务端，支持三个固定 shoes cipher 和 UDP-over-TCP。Mihomo/Clash Meta 可导出 `type: snell`、`version: 3`、`psk` 和 `udp`；为避免不兼容，当前只对 Mihomo v3 明确支持的 `aes-128-gcm` 配置开放无损导出。当前 sing-box Snell 只支持 v4/v6，NekoBox 也没有已核实的 v3 导入能力，因此两者明确拒绝。Snell v3 没有统一、跨客户端的标准 URI，`url`、`qr` 和 `--plain` 不会生成伪 `snell://`。链式代理 outbound 尚未实现 Snell。Mihomo 同样不支持 AnyTLS+Reality，标准 AnyTLS URI也无法表达 Reality 公钥；所有不兼容情况都会返回中文错误。所有 Reality 导出只包含公钥，永远不包含服务器私钥。
+Snell v3 使用 shoes 原生服务端，新节点默认 `aes-128-gcm`；`aes-256-gcm` 和 `chacha20-ietf-poly1305` 保留为高级选项，选择时提示客户端兼容性。CI 的 Mihomo v1.19.33 实测仅 `aes-128-gcm` 可用；Mihomo/Clash Meta 仅对该 cipher 开放无损导出 `type: snell`、`version: 3`、`psk` 和 `udp`。已有节点的 cipher 不会自动修改；若已有 chacha20 或 aes-256 Snell 节点使用 Mihomo 客户端，请将节点改为 `aes-128-gcm` 并重新导出客户端配置。当前 sing-box Snell 只支持 v4/v6，NekoBox 也没有已核实的 v3 导入能力，因此两者明确拒绝。Snell v3 没有统一、跨客户端的标准 URI，`url`、`qr` 和 `--plain` 不会生成伪 `snell://`。链式代理 outbound 尚未实现 Snell。Mihomo 同样不支持 AnyTLS+Reality，标准 AnyTLS URI也无法表达 Reality 公钥；所有不兼容情况都会返回中文错误。所有 Reality 导出只包含公钥，永远不包含服务器私钥。
 
 ## 备份与恢复
 
@@ -635,7 +635,7 @@ ping-rust/
 
 REALITY 外部握手验收使用 Xray 26.x 客户端，兼容客户端至少需要 Xray 25.5.16；链式代理的 Reality 出口不再模拟 Chrome 指纹。默认的六个 SNI 目标为 `www.amazon.com`、`www.ebay.com`、`www.paypal.com`、`www.cloudflare.com`、`dash.cloudflare.com` 和 `aws.amazon.com`，每个目标都应单独记录握手结果。
 
-Snell v3 的 salt 长度已随 shoes v0.3.3 变化。升级到 v0.3.6 时，使用 `aes-128-gcm`、`aes-256-gcm` 或 `chacha20-ietf-poly1305` 的现有节点必须用 Mihomo 分别做一次真实连接测试；失败时重新生成密码并替换客户端配置。迁移期间不要把旧密码和新 cipher 混用。
+Snell v3 新节点默认 `aes-128-gcm`。CI 中 Mihomo v1.19.33 经代理请求仅该 cipher 通过；Mihomo 客户端仅支持 `aes-128-gcm`。已有节点保持原 cipher，不会在升级时自动修改。已有的 chacha20 或 aes-256 Snell 节点若使用 Mihomo 客户端，需要改为 `aes-128-gcm` 并重新导出客户端配置。该测试不能判断 shoes salt 改动的影响。
 
 Chain 规则中的通配主机名会按 v0.3.6 的 `domain_pattern` 对象格式（字符串数组值）写入；旧版 `masks: '*.example.com'` 形式在 v0.3.6 中会被拒绝，升级时由 ping-rust 重新生成候选配置。
 

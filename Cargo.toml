@@ -18,6 +18,9 @@ exclude = [
 keywords = ["proxy", "shoes", "reality", "vless", "cli"]
 categories = ["command-line-utilities", "network-programming"]
 
+[features]
+ci-fault-injection = []
+
 [[bin]]
 name = "ping-rust"
 path = "src/main.rs"

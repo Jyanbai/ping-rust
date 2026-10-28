@@ -90,6 +90,70 @@ systemctl is-active --quiet shoes.service
 test "$(systemctl show --property=MainPID --value shoes.service)" = \
   "$(cat "$WORK/records/mainpid-before.txt")"
 
+echo '== rollback after new shoes rejects the dry-run candidate'
+sha256sum /usr/local/bin/shoes /etc/shoes/config.yaml /etc/shoes/ping-rust-state.json \
+  >"$WORK/records/rollback-baseline-sha256.txt"
+ss -H -lnt | awk '{print $4}' | grep -E ':2443[12]$' | sort \
+  >"$WORK/records/rollback-baseline-listeners.txt"
+test "$(wc -l <"$WORK/records/rollback-baseline-listeners.txt")" -eq 2
+
+assert_rollback_restored() {
+  local scenario="$1"
+  sha256sum --check --strict "$WORK/records/rollback-baseline-sha256.txt" \
+    >"$WORK/records/rollback-${scenario}-hash-check.txt"
+  sha256sum /usr/local/bin/shoes /etc/shoes/config.yaml /etc/shoes/ping-rust-state.json \
+    >"$WORK/records/rollback-${scenario}-sha256.txt"
+  systemctl is-active --quiet shoes.service
+  ss -H -lnt | awk '{print $4}' | grep -E ':2443[12]$' | sort \
+    >"$WORK/records/rollback-${scenario}-listeners.txt"
+  cmp "$WORK/records/rollback-baseline-listeners.txt" \
+    "$WORK/records/rollback-${scenario}-listeners.txt"
+  /usr/local/bin/shoes --dry-run /etc/shoes/config.yaml \
+    >"$WORK/records/rollback-${scenario}-old-config-dry-run.txt" 2>&1
+  echo "rollback ${scenario}: PASS"
+}
+
+if PING_RUST_CI_UPGRADE_FAULT=dry-run "$NEW" update --method release \
+    >"$WORK/records/rollback-dry-run.txt" 2>&1; then
+  echo 'dry-run fault was not observed' >&2
+  exit 1
+fi
+grep -Fq 'shoes 拒绝生成的配置' "$WORK/records/rollback-dry-run.txt"
+assert_rollback_restored dry-run
+
+echo '== rollback after the committed config and failed service restart'
+mkdir -p "$WORK/fault-bin"
+cat >"$WORK/fault-bin/systemctl" <<'SH'
+#!/bin/sh
+if [ "${1:-}" = restart ] && [ "${2:-}" = shoes.service ]; then
+  grep -Fq 'domain_pattern:' /etc/shoes/config.yaml || exit 43
+  sha256sum /usr/local/bin/shoes /etc/shoes/config.yaml /etc/shoes/ping-rust-state.json \
+    >"$PING_RUST_ROLLBACK_RECORD"
+  /usr/bin/systemctl stop shoes.service || exit $?
+  if /usr/bin/systemctl is-active --quiet shoes.service; then exit 44; fi
+  printf 'injected shoes restart failure after stopping service\n' >&2
+  exit 42
+fi
+exec /usr/bin/systemctl "$@"
+SH
+chmod 0755 "$WORK/fault-bin/systemctl"
+if PATH="$WORK/fault-bin:$PATH" \
+    PING_RUST_ROLLBACK_RECORD="$WORK/records/rollback-restart-at-fault-sha256.txt" \
+    "$NEW" update --method release \
+    >"$WORK/records/rollback-restart.txt" 2>&1; then
+  echo 'restart fault was not observed' >&2
+  exit 1
+fi
+grep -Fq 'injected shoes restart failure' "$WORK/records/rollback-restart.txt"
+grep -Fq '二进制、配置和服务已恢复' "$WORK/records/rollback-restart.txt"
+test "$(sed -n '1s/ .*//p' "$WORK/records/rollback-restart-at-fault-sha256.txt")" != \
+  "$(sed -n '1s/ .*//p' "$WORK/records/rollback-baseline-sha256.txt")"
+test "$(sed -n '2s/ .*//p' "$WORK/records/rollback-restart-at-fault-sha256.txt")" != \
+  "$(sed -n '2s/ .*//p' "$WORK/records/rollback-baseline-sha256.txt")"
+test "$(sed -n '3s/ .*//p' "$WORK/records/rollback-restart-at-fault-sha256.txt")" = \
+  "$(sed -n '3s/ .*//p' "$WORK/records/rollback-baseline-sha256.txt")"
+assert_rollback_restored restart
+
 echo '== transactional shoes upgrade and config migration'
 "$NEW" update --method release >"$WORK/records/update.txt" 2>&1
 grep -Fq "v${NEW_SHOES_VERSION}" "$WORK/records/update.txt"

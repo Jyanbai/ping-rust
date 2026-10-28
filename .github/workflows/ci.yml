@@ -505,7 +505,7 @@ jobs:
           docker exec \
             --env CARGO_TARGET_DIR=/tmp/ping-rust-target \
             ping-rust-debian-upgrade \
-            cargo install --path /workspace --locked --root /opt/ping-rust-current
+            cargo install --path /workspace --locked --features ci-fault-injection --root /opt/ping-rust-current
           docker exec ping-rust-debian-upgrade \
             /opt/ping-rust-current/bin/ping-rust --version
 

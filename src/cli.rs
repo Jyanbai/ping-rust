@@ -433,6 +433,11 @@ pub async fn run(cli: Cli) -> Result<()> {
             } else {
                 SnellCipher::default()
             };
+            if matches!(protocol, Protocol::Snell) && cipher.is_some() {
+                if let Some(warning) = snell_cipher.mihomo_warning() {
+                    eprintln!("{warning}");
+                }
+            }
             if matches!(protocol, Protocol::AnyTls) && anytls_users.is_empty() {
                 anytls_users.push(config::generated_anytls_user("default"));
             }

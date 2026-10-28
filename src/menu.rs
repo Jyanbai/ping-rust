@@ -1185,20 +1185,57 @@ fn select_shadowsocks_cipher(mode: config::ShadowsocksMode) -> Result<Option<Sha
     }
 }
 
+const SNELL_CIPHERS: [SnellCipher; 3] = [
+    SnellCipher::Aes128Gcm,
+    SnellCipher::Aes256Gcm,
+    SnellCipher::Chacha20IetfPoly1305,
+];
+const SNELL_CIPHER_LABELS: [&str; 3] = [
+    "aes-128-gcm（默认，Mihomo 已验证）",
+    "高级：aes-256-gcm",
+    "高级：chacha20-ietf-poly1305",
+];
+
+fn snell_new_node_choice(value: &str) -> Option<Option<SnellCipher>> {
+    if value.trim().is_empty() {
+        return Some(Some(SnellCipher::default()));
+    }
+    parse_numbered_choice(value, SNELL_CIPHERS.len())
+        .map(|selected| selected.map(|index| SNELL_CIPHERS[index]))
+}
+
+fn warn_unverified_snell_cipher(cipher: SnellCipher) {
+    if let Some(warning) = cipher.mihomo_warning() {
+        println!("{warning}");
+    }
+}
+
 fn select_snell_cipher(prompt: &str) -> Result<Option<SnellCipher>> {
-    let ciphers = [
-        SnellCipher::Aes128Gcm,
-        SnellCipher::Aes256Gcm,
-        SnellCipher::Chacha20IetfPoly1305,
-    ];
-    let labels = ciphers
-        .iter()
-        .map(|cipher| cipher.as_str())
-        .collect::<Vec<_>>();
-    let Some(selected) = select_numbered(prompt, &labels)? else {
+    let Some(selected) = select_numbered(prompt, &SNELL_CIPHER_LABELS)? else {
         return Ok(None);
     };
-    Ok(Some(ciphers[selected]))
+    let cipher = SNELL_CIPHERS[selected];
+    warn_unverified_snell_cipher(cipher);
+    Ok(Some(cipher))
+}
+
+fn select_new_snell_cipher() -> Result<Option<SnellCipher>> {
+    println!("\n选择 Snell v3 加密方式（回车使用 aes-128-gcm）:\n");
+    for (index, label) in SNELL_CIPHER_LABELS.iter().enumerate() {
+        println!("{}) {label}", index + 1);
+    }
+    println!("0) 返回\n");
+    loop {
+        let value = read_menu_choice(SNELL_CIPHERS.len())?;
+        match snell_new_node_choice(&value) {
+            Some(Some(cipher)) => {
+                warn_unverified_snell_cipher(cipher);
+                return Ok(Some(cipher));
+            }
+            Some(None) => return Ok(None),
+            None => println!("无效序号；请输入 0 到 3，或直接回车使用默认值。"),
+        }
+    }
 }
 
 fn prepare_shadowsocks_password(
@@ -1353,7 +1390,7 @@ async fn advanced_add_config_menu() -> Result<()> {
         }
     }
     if matches!(protocol, Protocol::Snell) {
-        let Some(cipher) = select_snell_cipher("选择 Snell v3 加密方式")? else {
+        let Some(cipher) = select_new_snell_cipher()? else {
             return Ok(());
         };
         options.snell_cipher = cipher;
@@ -1702,6 +1739,30 @@ mod tests {
         assert_eq!(Protocol::from_menu_number(13), Some(Protocol::NaiveProxy));
         assert_eq!(protocol_items[10], (11, "SOCKS5"));
         assert_eq!(protocol_items[11], (12, "Snell v3"));
+    }
+
+    #[test]
+    fn snell_new_node_defaults_to_mihomo_verified_cipher_and_keeps_advanced_choices() {
+        assert_eq!(SnellCipher::default(), SnellCipher::Aes128Gcm);
+        assert_eq!(
+            snell_new_node_choice(""),
+            Some(Some(SnellCipher::Aes128Gcm))
+        );
+        assert_eq!(
+            snell_new_node_choice("2"),
+            Some(Some(SnellCipher::Aes256Gcm))
+        );
+        assert_eq!(
+            snell_new_node_choice("3"),
+            Some(Some(SnellCipher::Chacha20IetfPoly1305))
+        );
+        assert_eq!(snell_new_node_choice("0"), Some(None));
+        assert_eq!(snell_new_node_choice("4"), None);
+        assert_eq!(
+            SnellCipher::Aes256Gcm.mihomo_warning(),
+            Some("未经客户端验证，Mihomo 仅支持 aes-128-gcm")
+        );
+        assert_eq!(SnellCipher::Aes128Gcm.mihomo_warning(), None);
     }
 
     #[test]
