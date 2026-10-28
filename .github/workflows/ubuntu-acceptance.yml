@@ -903,7 +903,7 @@ jobs:
           }
           snell_info="$(sudo "$PRS" info "$(profile_id_for_port 25457)")"
           grep -F "Snell 版本：3" <<<"$snell_info" >/dev/null
-          grep -F "加密方式：chacha20-ietf-poly1305" <<<"$snell_info" >/dev/null
+          grep -F "加密方式：aes-128-gcm" <<<"$snell_info" >/dev/null
           grep -F "密码：" <<<"$snell_info" >/dev/null
           grep -F "UDP-over-TCP：启用" <<<"$snell_info" >/dev/null
           printf 'VLESS_TLS_PROFILE=%s\n' "$(profile_id_for_port 25451)" >> "$GITHUB_ENV"
