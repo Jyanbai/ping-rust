@@ -70,7 +70,7 @@ echo '== version mismatch: new ping-rust writes a typed candidate against old sh
 expected_profiles=2
 set +e
 "$NEW" add shadowsocks --name mismatch-probe --port 24433 \
-  --server-address "$SERVER" --cipher aes-128-gcm --yes --plain \
+  --server-address "$SERVER" --yes --plain \
   >"$WORK/records/mismatch.txt" 2>&1
 mismatch_status=$?
 set -e

@@ -110,6 +110,8 @@ JSON
 
 echo "xray ${XRAY_26_TAG}: $($XRAY_26 version 2>&1 | head -n 1)"
 echo "xray ${XRAY_MIN_TAG}: $($XRAY_MIN version 2>&1 | head -n 1)"
+legacy_fixture="$(cd "$(dirname "$0")/../../tests/fixtures/yaml/chain-v2" && pwd)/config.yaml"
+"$SHOES" --dry-run "$legacy_fixture" >"$WORK/logs/v036-legacy-config-dry-run.txt" 2>&1 || true
 reality_results=()
 snis=(www.amazon.com www.ebay.com www.paypal.com www.cloudflare.com dash.cloudflare.com aws.amazon.com)
 index=0
@@ -196,4 +198,5 @@ done
 
 printf '%s\n' "${reality_results[@]}" >"$WORK/logs/reality-summary.txt"
 printf '%s\n' "${snell_results[@]}" >"$WORK/logs/snell-summary.txt"
+chmod -R a+rX "$WORK"
 echo 'external client acceptance complete'

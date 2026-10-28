@@ -565,5 +565,5 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: external-client-acceptance-records
-          path: ${{ runner.temp }}/ping-rust-external-clients
+          path: ${{ runner.temp }}/ping-rust-external-clients/logs
           if-no-files-found: warn
