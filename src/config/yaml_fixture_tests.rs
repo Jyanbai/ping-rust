@@ -73,7 +73,11 @@ fn client_export_value(format: ClientFormat, text: &str) -> Json {
 
 #[test]
 fn yaml_fixtures_parse_to_their_recorded_values() {
-    for relative in ["compat/config.yaml", "chain-v2/config.yaml"] {
+    for relative in [
+        "compat/config.yaml",
+        "chain-v2/config.yaml",
+        "chain-v036/config.yaml",
+    ] {
         let companion = relative.replace(".yaml", ".json");
         assert_eq!(
             yaml_to_json(&read_fixture(relative)),
@@ -201,22 +205,60 @@ fn golden_client_exports_are_semantically_unchanged() {
 fn golden_chain_v2_config_is_semantically_unchanged() {
     let state = load_state_from(&fixture_root().join("chain-v2/state.json")).unwrap();
     assert!(state.chain_proxy.enabled);
-    let expected = read_json("chain-v2/config.json");
+    let expected_legacy = read_json("chain-v2/config.json");
 
     // Old file read back: rules parsed from YAML equal freshly rendered rules.
     let legacy = load_servers(&fixture_root().join("chain-v2/config.yaml")).unwrap();
     ensure_servers_match_state(&legacy, &state.profiles).unwrap();
-    ensure_chain_proxy_matches_state(&legacy, &state).unwrap();
-    assert_eq!(yaml_to_json(&to_yaml(&legacy)), expected);
+    assert_eq!(yaml_to_json(&to_yaml(&legacy)), expected_legacy);
 
-    // Fresh render from state.
+    // Fresh render from the old state must use the v0.3.6 typed rule shape.
     let mut servers = legacy.clone();
     for server in &mut servers {
         server.rules = direct_rules();
     }
     apply_chain_proxy_rules(&mut servers, &state);
     ensure_chain_proxy_matches_state(&servers, &state).unwrap();
-    assert_eq!(yaml_to_json(&to_yaml(&servers)), expected);
+    let rendered = yaml_to_json(&to_yaml(&servers));
+    let wildcard_rules = rendered
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|server| server["rules"].as_array().unwrap())
+        .filter(|rule| rule["masks"].get("domain_pattern").is_some())
+        .count();
+    assert_eq!(wildcard_rules, 4);
+}
+
+#[test]
+fn old_chain_v2_state_regenerates_v036_domain_pattern_rules() {
+    let state = load_state_from(&fixture_root().join("chain-v2/state.json")).unwrap();
+    let mut servers = load_servers(&fixture_root().join("chain-v2/config.yaml")).unwrap();
+    ensure_servers_match_state(&servers, &state.profiles).unwrap();
+    apply_chain_proxy_rules(&mut servers, &state);
+    let rendered = to_yaml(&servers);
+    assert!(rendered.contains("domain_pattern:"));
+    assert!(!rendered.contains("masks: '*.example.com'"));
+}
+
+#[test]
+fn old_chain_v2_config_is_rejected_by_v036_dry_run() {
+    let Some(binary) = std::env::var_os("PING_RUST_SHOES_E2E_BIN") else {
+        return;
+    };
+    let binary = PathBuf::from(binary);
+    if !binary.is_file() {
+        return;
+    }
+    let output = std::process::Command::new(&binary)
+        .arg("--dry-run")
+        .arg(fixture_root().join("chain-v2/config.yaml"))
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "v0.3.6 unexpectedly accepted the legacy chain-v2 fixture"
+    );
 }
 
 const SPECIAL_STRINGS: &[&str] = &[

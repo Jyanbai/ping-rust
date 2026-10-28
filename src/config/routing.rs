@@ -121,6 +121,38 @@ pub(super) fn render_rules(state: &ChainProxyState) -> Vec<ServerRule> {
     rules
 }
 
+/// Render the v0.2.x spelling of the v2 rules. This is used only while reading
+/// a configuration written before shoes gained the typed `domain_pattern`
+/// mask. The state remains authoritative and callers must immediately rewrite
+/// the candidate with [`render_rules`].
+pub(super) fn render_legacy_rules(state: &ChainProxyState) -> Vec<ServerRule> {
+    fn legacy_mask(mask: RuleMask) -> RuleMask {
+        match mask {
+            RuleMask::DomainPattern { domain_pattern } => {
+                RuleMask::Legacy(domain_pattern.into_iter().next().unwrap_or_default())
+            }
+            RuleMask::Legacy(value) => RuleMask::Legacy(value),
+        }
+    }
+    fn legacy_masks(masks: RuleMasks) -> RuleMasks {
+        match masks {
+            RuleMasks::One(mask) => RuleMasks::One(legacy_mask(mask)),
+            RuleMasks::Many(masks) => RuleMasks::Many(masks.into_iter().map(legacy_mask).collect()),
+        }
+    }
+
+    render_rules(state)
+        .into_iter()
+        .map(|rule| match rule {
+            ServerRule::Group(_) => rule,
+            ServerRule::Inline(mut rule) => {
+                rule.masks = legacy_masks(rule.masks);
+                ServerRule::Inline(rule)
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

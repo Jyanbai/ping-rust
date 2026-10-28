@@ -276,6 +276,29 @@ pub(crate) async fn install_locked_with_options(
     allow_downgrade: bool,
     lock: utils::ExclusiveLock,
 ) -> Result<InstallReport> {
+    install_locked_inner(method, force, allow_downgrade, lock, true).await
+}
+
+/// Install a new shoes binary without validating the old on-disk config. The
+/// caller must immediately run the managed migration transaction before any
+/// service restart; this is needed because v0.3.6 intentionally rejects the
+/// v0.2.x wildcard rule spelling.
+pub(crate) async fn install_locked_for_migration(
+    method: InstallMethod,
+    force: bool,
+    allow_downgrade: bool,
+    lock: utils::ExclusiveLock,
+) -> Result<InstallReport> {
+    install_locked_inner(method, force, allow_downgrade, lock, false).await
+}
+
+async fn install_locked_inner(
+    method: InstallMethod,
+    force: bool,
+    allow_downgrade: bool,
+    lock: utils::ExclusiveLock,
+    validate_existing_config: bool,
+) -> Result<InstallReport> {
     utils::require_linux_root()?;
     let rollback = BinaryRollback::capture(Path::new(utils::SHOES_BIN))?;
     let installation = match method {
@@ -286,7 +309,7 @@ pub(crate) async fn install_locked_with_options(
     };
     match installation {
         Ok(mut report) => {
-            if Path::new(utils::CONFIG_FILE).is_file() {
+            if validate_existing_config && Path::new(utils::CONFIG_FILE).is_file() {
                 if let Err(validation) = config::validate_with_binary(
                     Path::new(utils::SHOES_BIN),
                     Path::new(utils::CONFIG_FILE),

@@ -76,7 +76,7 @@
             }
           ]
         },
-        "masks": {"domain_pattern": ["*.example.com"]}
+        "masks": "*.example.com"
       },
       {
         "action": "allow",
@@ -274,7 +274,7 @@
           "protocol": {
             "type": "vless",
             "udp_enabled": true,
-            "user_id": "85296b07-fa5c-43a7-98f2-cdef418defa3"
+            "user_id": "85296b07-fa5c-63a7-d8f2-cdef418defa3"
           },
           "short_ids": [
             "bcd85ab63e74bc5e"
@@ -353,7 +353,7 @@
             }
           ]
         },
-        "masks": {"domain_pattern": ["*.example.com"]}
+        "masks": "*.example.com"
       },
       {
         "action": "allow",
@@ -628,7 +628,7 @@
             }
           ]
         },
-        "masks": {"domain_pattern": ["*.example.com"]}
+        "masks": "*.example.com"
       },
       {
         "action": "allow",
@@ -903,7 +903,7 @@
             }
           ]
         },
-        "masks": {"domain_pattern": ["*.example.com"]}
+        "masks": "*.example.com"
       },
       {
         "action": "allow",

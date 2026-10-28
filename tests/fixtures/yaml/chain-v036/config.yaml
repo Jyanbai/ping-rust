@@ -1,0 +1,687 @@
+- address: 0.0.0.0:20002
+  protocol:
+    type: shadowsocks
+    cipher: 2022-blake3-aes-256-gcm
+    password: UbIpW/6Ry7MtAHOvCJ0x4lsZ2nU3ip4Dk5yF6taHOVA=
+    udp_enabled: true
+  rules:
+  - masks:
+    - 192.168.0.0/16
+    - 10.0.0.0/8
+    action: allow
+    client_chains:
+      protocol:
+        type: direct
+  - masks: blocked.test
+    action: block
+  - masks:
+      domain_pattern:
+        - '*.example.com'
+    action: allow
+    client_chains:
+      chain:
+      - address: 198.51.100.1:1080
+        protocol:
+          type: socks
+          username: chain-user
+          password: chain-pass
+      - pool:
+        - address: 198.51.100.2:443
+          protocol:
+            type: tls
+            verify: true
+            sni_hostname: example.com
+            protocol:
+              type: websocket
+              matching_path: /ws
+              matching_headers:
+                Host: cdn.example.com
+              protocol:
+                type: trojan
+                password: chain-trojan
+        - address: 198.51.100.3:443
+          protocol:
+            type: reality
+            public_key: BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc
+            short_id: 0123456789abcdef
+            sni_hostname: www.cloudflare.com
+            vision: true
+            protocol:
+              type: vless
+              user_id: 00000000-0000-4000-8000-0000000000c3
+              udp_enabled: true
+  - masks: 2001:db8::/32
+    action: allow
+    client_chains:
+    - chain:
+      - address: 198.51.100.1:1080
+        protocol:
+          type: socks
+          username: chain-user
+          password: chain-pass
+      - pool:
+        - address: 198.51.100.2:443
+          protocol:
+            type: tls
+            verify: true
+            sni_hostname: example.com
+            protocol:
+              type: websocket
+              matching_path: /ws
+              matching_headers:
+                Host: cdn.example.com
+              protocol:
+                type: trojan
+                password: chain-trojan
+        - address: 198.51.100.3:443
+          protocol:
+            type: reality
+            public_key: BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc
+            short_id: 0123456789abcdef
+            sni_hostname: www.cloudflare.com
+            vision: true
+            protocol:
+              type: vless
+              user_id: 00000000-0000-4000-8000-0000000000c3
+              udp_enabled: true
+    - chain:
+      - address: 198.51.100.3:443
+        protocol:
+          type: reality
+          public_key: BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc
+          short_id: 0123456789abcdef
+          sni_hostname: www.cloudflare.com
+          vision: true
+          protocol:
+            type: vless
+            user_id: 00000000-0000-4000-8000-0000000000c3
+            udp_enabled: true
+  - masks: 0.0.0.0/0
+    action: allow
+    client_chains:
+      chain:
+      - address: 198.51.100.1:1080
+        protocol:
+          type: socks
+          username: chain-user
+          password: chain-pass
+      - pool:
+        - address: 198.51.100.2:443
+          protocol:
+            type: tls
+            verify: true
+            sni_hostname: example.com
+            protocol:
+              type: websocket
+              matching_path: /ws
+              matching_headers:
+                Host: cdn.example.com
+              protocol:
+                type: trojan
+                password: chain-trojan
+        - address: 198.51.100.3:443
+          protocol:
+            type: reality
+            public_key: BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc
+            short_id: 0123456789abcdef
+            sni_hostname: www.cloudflare.com
+            vision: true
+            protocol:
+              type: vless
+              user_id: 00000000-0000-4000-8000-0000000000c3
+              udp_enabled: true
+  - masks: ::/0
+    action: allow
+    client_chains:
+      chain:
+      - address: 198.51.100.1:1080
+        protocol:
+          type: socks
+          username: chain-user
+          password: chain-pass
+      - pool:
+        - address: 198.51.100.2:443
+          protocol:
+            type: tls
+            verify: true
+            sni_hostname: example.com
+            protocol:
+              type: websocket
+              matching_path: /ws
+              matching_headers:
+                Host: cdn.example.com
+              protocol:
+                type: trojan
+                password: chain-trojan
+        - address: 198.51.100.3:443
+          protocol:
+            type: reality
+            public_key: BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc
+            short_id: 0123456789abcdef
+            sni_hostname: www.cloudflare.com
+            vision: true
+            protocol:
+              type: vless
+              user_id: 00000000-0000-4000-8000-0000000000c3
+              udp_enabled: true
+- address: 0.0.0.0:20003
+  protocol:
+    type: tls
+    reality_targets:
+      www.cloudflare.com:
+        private_key: 5g9uB-7WdKRYFMta-oV8JqXELSzg1u5IpwdkRYFM5AA
+        short_ids:
+        - bcd85ab63e74bc5e
+        dest: www.cloudflare.com:443
+        max_time_diff: 60000
+        vision: true
+        protocol:
+          type: vless
+          user_id: 85296b07-fa5c-43a7-98f2-cdef418defa3
+          udp_enabled: true
+  rules:
+  - masks:
+    - 192.168.0.0/16
+    - 10.0.0.0/8
+    action: allow
+    client_chains:
+      protocol:
+        type: direct
+  - masks: blocked.test
+    action: block
+  - masks:
+      domain_pattern:
+        - '*.example.com'
+    action: allow
+    client_chains:
+      chain:
+      - address: 198.51.100.1:1080
+        protocol:
+          type: socks
+          username: chain-user
+          password: chain-pass
+      - pool:
+        - address: 198.51.100.2:443
+          protocol:
+            type: tls
+            verify: true
+            sni_hostname: example.com
+            protocol:
+              type: websocket
+              matching_path: /ws
+              matching_headers:
+                Host: cdn.example.com
+              protocol:
+                type: trojan
+                password: chain-trojan
+        - address: 198.51.100.3:443
+          protocol:
+            type: reality
+            public_key: BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc
+            short_id: 0123456789abcdef
+            sni_hostname: www.cloudflare.com
+            vision: true
+            protocol:
+              type: vless
+              user_id: 00000000-0000-4000-8000-0000000000c3
+              udp_enabled: true
+  - masks: 2001:db8::/32
+    action: allow
+    client_chains:
+    - chain:
+      - address: 198.51.100.1:1080
+        protocol:
+          type: socks
+          username: chain-user
+          password: chain-pass
+      - pool:
+        - address: 198.51.100.2:443
+          protocol:
+            type: tls
+            verify: true
+            sni_hostname: example.com
+            protocol:
+              type: websocket
+              matching_path: /ws
+              matching_headers:
+                Host: cdn.example.com
+              protocol:
+                type: trojan
+                password: chain-trojan
+        - address: 198.51.100.3:443
+          protocol:
+            type: reality
+            public_key: BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc
+            short_id: 0123456789abcdef
+            sni_hostname: www.cloudflare.com
+            vision: true
+            protocol:
+              type: vless
+              user_id: 00000000-0000-4000-8000-0000000000c3
+              udp_enabled: true
+    - chain:
+      - address: 198.51.100.3:443
+        protocol:
+          type: reality
+          public_key: BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc
+          short_id: 0123456789abcdef
+          sni_hostname: www.cloudflare.com
+          vision: true
+          protocol:
+            type: vless
+            user_id: 00000000-0000-4000-8000-0000000000c3
+            udp_enabled: true
+  - masks: 0.0.0.0/0
+    action: allow
+    client_chains:
+      chain:
+      - address: 198.51.100.1:1080
+        protocol:
+          type: socks
+          username: chain-user
+          password: chain-pass
+      - pool:
+        - address: 198.51.100.2:443
+          protocol:
+            type: tls
+            verify: true
+            sni_hostname: example.com
+            protocol:
+              type: websocket
+              matching_path: /ws
+              matching_headers:
+                Host: cdn.example.com
+              protocol:
+                type: trojan
+                password: chain-trojan
+        - address: 198.51.100.3:443
+          protocol:
+            type: reality
+            public_key: BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc
+            short_id: 0123456789abcdef
+            sni_hostname: www.cloudflare.com
+            vision: true
+            protocol:
+              type: vless
+              user_id: 00000000-0000-4000-8000-0000000000c3
+              udp_enabled: true
+  - masks: ::/0
+    action: allow
+    client_chains:
+      chain:
+      - address: 198.51.100.1:1080
+        protocol:
+          type: socks
+          username: chain-user
+          password: chain-pass
+      - pool:
+        - address: 198.51.100.2:443
+          protocol:
+            type: tls
+            verify: true
+            sni_hostname: example.com
+            protocol:
+              type: websocket
+              matching_path: /ws
+              matching_headers:
+                Host: cdn.example.com
+              protocol:
+                type: trojan
+                password: chain-trojan
+        - address: 198.51.100.3:443
+          protocol:
+            type: reality
+            public_key: BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc
+            short_id: 0123456789abcdef
+            sni_hostname: www.cloudflare.com
+            vision: true
+            protocol:
+              type: vless
+              user_id: 00000000-0000-4000-8000-0000000000c3
+              udp_enabled: true
+- address: 0.0.0.0:20007
+  protocol:
+    type: tls
+    tls_targets:
+      www.cloudflare.com:
+        cert: /etc/shoes/fixtures/cert-00000000.pem
+        key: /etc/shoes/fixtures/key-00000000.pem
+        alpn_protocols:
+        - h2
+        - http/1.1
+        protocol:
+          type: trojan
+          password: ipWdkrY-MtAhOvcJqXELsZGNubIpW5kA
+  rules:
+  - masks:
+    - 192.168.0.0/16
+    - 10.0.0.0/8
+    action: allow
+    client_chains:
+      protocol:
+        type: direct
+  - masks: blocked.test
+    action: block
+  - masks:
+      domain_pattern:
+        - '*.example.com'
+    action: allow
+    client_chains:
+      chain:
+      - address: 198.51.100.1:1080
+        protocol:
+          type: socks
+          username: chain-user
+          password: chain-pass
+      - pool:
+        - address: 198.51.100.2:443
+          protocol:
+            type: tls
+            verify: true
+            sni_hostname: example.com
+            protocol:
+              type: websocket
+              matching_path: /ws
+              matching_headers:
+                Host: cdn.example.com
+              protocol:
+                type: trojan
+                password: chain-trojan
+        - address: 198.51.100.3:443
+          protocol:
+            type: reality
+            public_key: BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc
+            short_id: 0123456789abcdef
+            sni_hostname: www.cloudflare.com
+            vision: true
+            protocol:
+              type: vless
+              user_id: 00000000-0000-4000-8000-0000000000c3
+              udp_enabled: true
+  - masks: 2001:db8::/32
+    action: allow
+    client_chains:
+    - chain:
+      - address: 198.51.100.1:1080
+        protocol:
+          type: socks
+          username: chain-user
+          password: chain-pass
+      - pool:
+        - address: 198.51.100.2:443
+          protocol:
+            type: tls
+            verify: true
+            sni_hostname: example.com
+            protocol:
+              type: websocket
+              matching_path: /ws
+              matching_headers:
+                Host: cdn.example.com
+              protocol:
+                type: trojan
+                password: chain-trojan
+        - address: 198.51.100.3:443
+          protocol:
+            type: reality
+            public_key: BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc
+            short_id: 0123456789abcdef
+            sni_hostname: www.cloudflare.com
+            vision: true
+            protocol:
+              type: vless
+              user_id: 00000000-0000-4000-8000-0000000000c3
+              udp_enabled: true
+    - chain:
+      - address: 198.51.100.3:443
+        protocol:
+          type: reality
+          public_key: BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc
+          short_id: 0123456789abcdef
+          sni_hostname: www.cloudflare.com
+          vision: true
+          protocol:
+            type: vless
+            user_id: 00000000-0000-4000-8000-0000000000c3
+            udp_enabled: true
+  - masks: 0.0.0.0/0
+    action: allow
+    client_chains:
+      chain:
+      - address: 198.51.100.1:1080
+        protocol:
+          type: socks
+          username: chain-user
+          password: chain-pass
+      - pool:
+        - address: 198.51.100.2:443
+          protocol:
+            type: tls
+            verify: true
+            sni_hostname: example.com
+            protocol:
+              type: websocket
+              matching_path: /ws
+              matching_headers:
+                Host: cdn.example.com
+              protocol:
+                type: trojan
+                password: chain-trojan
+        - address: 198.51.100.3:443
+          protocol:
+            type: reality
+            public_key: BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc
+            short_id: 0123456789abcdef
+            sni_hostname: www.cloudflare.com
+            vision: true
+            protocol:
+              type: vless
+              user_id: 00000000-0000-4000-8000-0000000000c3
+              udp_enabled: true
+  - masks: ::/0
+    action: allow
+    client_chains:
+      chain:
+      - address: 198.51.100.1:1080
+        protocol:
+          type: socks
+          username: chain-user
+          password: chain-pass
+      - pool:
+        - address: 198.51.100.2:443
+          protocol:
+            type: tls
+            verify: true
+            sni_hostname: example.com
+            protocol:
+              type: websocket
+              matching_path: /ws
+              matching_headers:
+                Host: cdn.example.com
+              protocol:
+                type: trojan
+                password: chain-trojan
+        - address: 198.51.100.3:443
+          protocol:
+            type: reality
+            public_key: BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc
+            short_id: 0123456789abcdef
+            sni_hostname: www.cloudflare.com
+            vision: true
+            protocol:
+              type: vless
+              user_id: 00000000-0000-4000-8000-0000000000c3
+              udp_enabled: true
+- address: 0.0.0.0:20013
+  protocol:
+    type: tls
+    shadowtls_targets:
+      www.cloudflare.com:
+        password: vCJQxelsZgNuBipWD4ryfMtah-Vcjq5A
+        handshake:
+          address: www.cloudflare.com:443
+        protocol:
+          type: shadowsocks
+          cipher: 2022-blake3-aes-256-gcm
+          password: q1ELs9GnUBiP8DKRYfmtaH8Vcj+xels1GNUb6gN0bIA=
+          udp_enabled: false
+  rules:
+  - masks:
+    - 192.168.0.0/16
+    - 10.0.0.0/8
+    action: allow
+    client_chains:
+      protocol:
+        type: direct
+  - masks: blocked.test
+    action: block
+  - masks:
+      domain_pattern:
+        - '*.example.com'
+    action: allow
+    client_chains:
+      chain:
+      - address: 198.51.100.1:1080
+        protocol:
+          type: socks
+          username: chain-user
+          password: chain-pass
+      - pool:
+        - address: 198.51.100.2:443
+          protocol:
+            type: tls
+            verify: true
+            sni_hostname: example.com
+            protocol:
+              type: websocket
+              matching_path: /ws
+              matching_headers:
+                Host: cdn.example.com
+              protocol:
+                type: trojan
+                password: chain-trojan
+        - address: 198.51.100.3:443
+          protocol:
+            type: reality
+            public_key: BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc
+            short_id: 0123456789abcdef
+            sni_hostname: www.cloudflare.com
+            vision: true
+            protocol:
+              type: vless
+              user_id: 00000000-0000-4000-8000-0000000000c3
+              udp_enabled: true
+  - masks: 2001:db8::/32
+    action: allow
+    client_chains:
+    - chain:
+      - address: 198.51.100.1:1080
+        protocol:
+          type: socks
+          username: chain-user
+          password: chain-pass
+      - pool:
+        - address: 198.51.100.2:443
+          protocol:
+            type: tls
+            verify: true
+            sni_hostname: example.com
+            protocol:
+              type: websocket
+              matching_path: /ws
+              matching_headers:
+                Host: cdn.example.com
+              protocol:
+                type: trojan
+                password: chain-trojan
+        - address: 198.51.100.3:443
+          protocol:
+            type: reality
+            public_key: BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc
+            short_id: 0123456789abcdef
+            sni_hostname: www.cloudflare.com
+            vision: true
+            protocol:
+              type: vless
+              user_id: 00000000-0000-4000-8000-0000000000c3
+              udp_enabled: true
+    - chain:
+      - address: 198.51.100.3:443
+        protocol:
+          type: reality
+          public_key: BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc
+          short_id: 0123456789abcdef
+          sni_hostname: www.cloudflare.com
+          vision: true
+          protocol:
+            type: vless
+            user_id: 00000000-0000-4000-8000-0000000000c3
+            udp_enabled: true
+  - masks: 0.0.0.0/0
+    action: allow
+    client_chains:
+      chain:
+      - address: 198.51.100.1:1080
+        protocol:
+          type: socks
+          username: chain-user
+          password: chain-pass
+      - pool:
+        - address: 198.51.100.2:443
+          protocol:
+            type: tls
+            verify: true
+            sni_hostname: example.com
+            protocol:
+              type: websocket
+              matching_path: /ws
+              matching_headers:
+                Host: cdn.example.com
+              protocol:
+                type: trojan
+                password: chain-trojan
+        - address: 198.51.100.3:443
+          protocol:
+            type: reality
+            public_key: BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc
+            short_id: 0123456789abcdef
+            sni_hostname: www.cloudflare.com
+            vision: true
+            protocol:
+              type: vless
+              user_id: 00000000-0000-4000-8000-0000000000c3
+              udp_enabled: true
+  - masks: ::/0
+    action: allow
+    client_chains:
+      chain:
+      - address: 198.51.100.1:1080
+        protocol:
+          type: socks
+          username: chain-user
+          password: chain-pass
+      - pool:
+        - address: 198.51.100.2:443
+          protocol:
+            type: tls
+            verify: true
+            sni_hostname: example.com
+            protocol:
+              type: websocket
+              matching_path: /ws
+              matching_headers:
+                Host: cdn.example.com
+              protocol:
+                type: trojan
+                password: chain-trojan
+        - address: 198.51.100.3:443
+          protocol:
+            type: reality
+            public_key: BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc
+            short_id: 0123456789abcdef
+            sni_hostname: www.cloudflare.com
+            vision: true
+            protocol:
+              type: vless
+              user_id: 00000000-0000-4000-8000-0000000000c3
+              udp_enabled: true

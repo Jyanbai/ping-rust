@@ -48,7 +48,7 @@ use commit::{
     commit_managed, profile_documents, profile_documents_are_current, write_profile_documents,
 };
 pub(crate) use routing::chain_value;
-use routing::render_rules;
+use routing::{render_legacy_rules, render_rules};
 use schema::{
     default_h3_alpn, ChainRule, InnerProtocol, NaiveUser, QuicSettings, RealityTarget,
     ServerConfig, ServerProtocol, ServerRule, ShadowTlsHandshake, ShadowTlsTarget,
@@ -763,7 +763,11 @@ fn ensure_chain_proxy_matches_state(servers: &[ServerConfig], state: &ManagedSta
         }
     } else if state.chain_proxy.enabled {
         let expected = render_rules(&state.chain_proxy);
-        if servers.iter().any(|server| server.rules != expected) {
+        let legacy = render_legacy_rules(&state.chain_proxy);
+        if servers
+            .iter()
+            .any(|server| server.rules != expected && server.rules != legacy)
+        {
             bail!("链式代理状态与 shoes 配置不一致");
         }
     } else if let Some(node) = state.chain_proxy.effective() {
@@ -780,6 +784,60 @@ fn ensure_chain_proxy_matches_state(servers: &[ServerConfig], state: &ManagedSta
         bail!("链式代理状态为关闭，但 shoes 配置仍包含链式出口");
     }
     Ok(())
+}
+
+pub(crate) struct ConfigMigrationResult {
+    rollback: Option<ManagedRollback>,
+}
+
+impl ConfigMigrationResult {
+    pub(crate) fn rollback_managed(&mut self) -> Result<()> {
+        self.rollback
+            .take()
+            .context("该配置迁移结果不包含可回滚的系统配置事务")?
+            .restore_to(
+                Path::new(utils::CONFIG_FILE),
+                Path::new(utils::STATE_FILE),
+                Path::new(utils::PROFILES_DIR),
+            )
+    }
+
+    pub(crate) fn finish(mut self) {
+        self.rollback.take();
+    }
+}
+
+/// Rewrite a v0.2.x managed configuration from state using the current shoes
+/// schema, validate it with the newly installed binary, and commit it as one
+/// managed configuration transaction.
+pub(crate) async fn migrate_managed_config_with_binary(
+    binary: &Path,
+) -> Result<ConfigMigrationResult> {
+    utils::require_linux_root()?;
+    let config_path = Path::new(utils::CONFIG_FILE);
+    let state_path = Path::new(utils::STATE_FILE);
+    let state = load_state_for_update()?;
+    let old_servers = load_servers(config_path)?;
+    ensure_servers_match_state(&old_servers, &state.profiles)
+        .context("配置文件与管理状态不一致，已拒绝 shoes 迁移")?;
+    let mut servers = old_servers;
+    if state.chain_proxy.enabled {
+        apply_chain_proxy_rules(&mut servers, &state);
+    }
+    let yaml = crate::yaml::to_string(&servers).context("序列化 shoes 迁移配置失败")?;
+    validate_yaml(&yaml)?;
+    validate_candidate_with_binary(&yaml, Path::new(utils::CONFIG_DIR), binary).await?;
+    let rollback = ManagedRollback {
+        config: read_optional(config_path)?,
+        state: read_optional(state_path)?,
+        profiles: ProfileDirectorySnapshot::capture(Path::new(utils::PROFILES_DIR))?,
+        generated_certificate: None,
+        generated_certificate_key: None,
+    };
+    commit_managed(config_path, state_path, &servers, &state)?;
+    Ok(ConfigMigrationResult {
+        rollback: Some(rollback),
+    })
 }
 
 fn ensure_chain_proxy_has_no_direct_udp_path(state: &ManagedState) -> Result<()> {
@@ -2634,7 +2692,13 @@ fn validate_yaml(yaml: &str) -> Result<()> {
 }
 
 async fn validate_candidate_with_shoes(yaml: &str, directory: &Path) -> Result<()> {
-    validate_candidate_with_binary(yaml, directory, Path::new(utils::SHOES_BIN)).await
+    match validate_candidate_with_binary(yaml, directory, Path::new(utils::SHOES_BIN)).await {
+        Ok(()) => Ok(()),
+        Err(error) if yaml.contains("domain_pattern:") => {
+            bail!("请先升级 shoes 到 v0.3.6 后再修改配置：{error:#}")
+        }
+        Err(error) => Err(error),
+    }
 }
 
 async fn validate_candidate_with_binary(yaml: &str, directory: &Path, binary: &Path) -> Result<()> {
