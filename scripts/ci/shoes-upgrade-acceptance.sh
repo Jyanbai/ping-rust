@@ -61,6 +61,7 @@ install -m 0755 "$NEW_PING_RUST" /usr/local/bin/ping-rust
 NEW=/usr/local/bin/ping-rust
 "$NEW" info >"$WORK/records/info-new-with-old-shoes.txt"
 grep -Fq '配置数量：2' "$WORK/records/info-new-with-old-shoes.txt"
+grep -Fq 'shoes（CLI 未提供版本参数）' "$WORK/records/info-new-with-old-shoes.txt"
 grep -Fq 'legacy-reality' "$WORK/records/info-new-with-old-shoes.txt"
 grep -Fq 'legacy-snell' "$WORK/records/info-new-with-old-shoes.txt"
 cmp /etc/shoes/config.yaml "$WORK/records/config-before.yaml"

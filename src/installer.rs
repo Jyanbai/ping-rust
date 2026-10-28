@@ -654,12 +654,19 @@ pub async fn installed_version() -> Result<String> {
         .await
         .with_context(|| format!("无法执行 {} --version", binary.display()))?;
     if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if stderr.contains("Invalid argument: --version")
+            || stdout.contains("Invalid argument: --version")
+        {
+            return Ok("shoes（CLI 未提供版本参数）".to_owned());
+        }
         bail!(
             "{} --version 失败（退出码：{}）：{}{}",
             binary.display(),
             output.status,
-            String::from_utf8_lossy(&output.stderr).trim(),
-            String::from_utf8_lossy(&output.stdout).trim()
+            stderr.trim(),
+            stdout.trim()
         );
     }
     parse_version_output(&output.stdout, &output.stderr)
