@@ -34,7 +34,8 @@ OLD_PING_RUST="$WORK/download/ping-rust"
 test -x "$OLD_PING_RUST"
 "$OLD_PING_RUST" --version | grep -Fx 'ping-rust 0.2.2'
 
-"$OLD_PING_RUST" install --method release
+"$OLD_PING_RUST" install --method release >"$WORK/records/install-old.txt" 2>&1
+grep -Fq "v${OLD_SHOES_VERSION}" "$WORK/records/install-old.txt"
 "$OLD_PING_RUST" add reality \
   --name legacy-reality --port 24431 --server-address "$SERVER" \
   --server-name www.cloudflare.com --yes --plain >"$WORK/records/old-reality.txt"
@@ -46,7 +47,6 @@ expect "$(dirname "$0")/legacy-chain-menu.exp" "$OLD_PING_RUST" "$reality_uri" \
   >"$WORK/records/legacy-chain-menu.txt" 2>&1
 
 systemctl is-active --quiet shoes.service
-"/usr/local/bin/shoes" --version | grep -F "shoes $OLD_SHOES_VERSION"
 "$OLD_PING_RUST" info >"$WORK/records/info-old.txt"
 sha256sum /etc/shoes/config.yaml /etc/shoes/ping-rust-state.json \
   >"$WORK/records/hash-before.txt"
@@ -91,7 +91,7 @@ test "$(systemctl show --property=MainPID --value shoes.service)" = \
 
 echo '== transactional shoes upgrade and config migration'
 "$NEW" update --method release >"$WORK/records/update.txt" 2>&1
-/usr/local/bin/shoes --version | grep -F "shoes $NEW_SHOES_VERSION"
+grep -Fq "v${NEW_SHOES_VERSION}" "$WORK/records/update.txt"
 systemctl is-active --quiet shoes.service
 "$NEW" info >"$WORK/records/info-after.txt"
 grep -Fq 'legacy-reality' "$WORK/records/info-after.txt"

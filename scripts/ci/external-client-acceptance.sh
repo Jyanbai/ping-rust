@@ -80,9 +80,9 @@ run_reality() {
     --server-name "$sni" --dest 127.0.0.1:18080 --output "$config" \
     >"$generated" 2>&1 || return 1
   local uuid public_key short_id
-  uuid="$(awk -F'= ' '/用户ID \(id\)/ {print $2; exit}' "$generated")"
-  public_key="$(awk -F'= ' '/公钥 \(Public key\)/ {print $2; exit}' "$generated")"
-  short_id="$(awk -F'= ' '/短 ID \(shortId\)/ {print $2; exit}' "$generated")"
+  uuid="$(awk -F'：' '/^UUID：/ {print $2; exit}' "$generated")"
+  public_key="$(awk -F'：' '/^Reality 公钥：/ {print $2; exit}' "$generated")"
+  short_id="$(awk -F'：' '/^Short ID：/ {print $2; exit}' "$generated")"
   test -n "$uuid" -a -n "$public_key" -a -n "$short_id"
 
   "$SHOES" "$config" >"${prefix}-shoes.log" 2>&1 &
@@ -189,7 +189,7 @@ for cipher in aes-128-gcm aes-256-gcm chacha20-ietf-poly1305; do
     cat >"$WORK/mihomo-${cipher}.yaml" <<YAML
 mixed-port: 18090
 mode: global
-log-level: silent
+log-level: info
 proxies:
   - name: snell-${cipher}
     type: snell
@@ -204,6 +204,7 @@ proxy-groups:
     proxies: [snell-${cipher}]
 YAML
   fi
+  cp "$WORK/mihomo-${cipher}.yaml" "$WORK/logs/snell-${cipher}-client.yaml"
   "$MIHOMO" -f "$WORK/mihomo-${cipher}.yaml" >"$WORK/logs/snell-${cipher}-mihomo.log" 2>&1 &
   mihomo_pid=$!
   ACTIVE_PIDS="$shoes_pid $mihomo_pid"
