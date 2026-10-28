@@ -7,7 +7,7 @@
 - Release：`v0.3.6`
 - shoes schema revision：`3737e07467387044e677ae7cf8b1c16d291f1b68`
 - x86_64 musl SHA-256：`d09a9f5915ae8c3fc933bd86c025f2d8878d45e1dee8f0e2bb404c920de8c707`
-- PR #36 最终提交：`aae96d2`
+- PR #36 最终提交：`8597df7`
 
 ## GitHub Actions 结果
 
