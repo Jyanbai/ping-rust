@@ -93,7 +93,7 @@ run_reality() {
 {
   "log": {"loglevel": "warning"},
   "inbounds": [{"listen": "127.0.0.1", "port": 18081, "protocol": "socks", "settings": {"udp": false}}],
-  "outbounds": [{"protocol": "vless", "settings": {"vnext": [{"address": "127.0.0.1", "port": ${port}, "users": [{"id": "${uuid}", "encryption": "none", "flow": "xtls-rprx-vision"}]}]}, "streamSettings": {"network": "tcp", "security": "reality", "realitySettings": {"serverName": "${sni}", "fingerprint": "chrome", "publicKey": "${public_key}", "shortId": "${short_id}"}}}]
+  "outbounds": [{"protocol": "vless", "settings": {"vnext": [{"address": "127.0.0.1", "port": ${port}, "users": [{"id": "${uuid}", "encryption": "none", "flow": "xtls-rprx-vision"}]}]}, "streamSettings": {"network": "tcp", "security": "reality", "realitySettings": {"serverName": "${sni}", "fingerprint": "chrome", "password": "${public_key}", "publicKey": "${public_key}", "shortId": "${short_id}"}}}]
 }
 JSON
   "$xray" run -c "${prefix}-xray.json" >"${prefix}-xray.log" 2>&1 &
@@ -164,6 +164,8 @@ for cipher in aes-128-gcm aes-256-gcm chacha20-ietf-poly1305; do
       snell_results+=("${cipher}=FAIL(generate)")
       continue
     fi
+    sudo systemctl stop shoes.service 2>/dev/null || true
+    sudo systemctl reset-failed shoes.service 2>/dev/null || true
     profile_id="$(sudo python3 -c 'import json; print(json.load(open("/etc/shoes/ping-rust-state.json"))["profiles"][0]["id"])')"
     if ! sudo "$PING_RUST" export clash-meta --profile "$profile_id" \
       --server 127.0.0.1 --output "$WORK/mihomo-${cipher}.yaml" \
