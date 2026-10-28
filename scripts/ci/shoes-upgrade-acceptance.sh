@@ -41,7 +41,8 @@ test -x "$OLD_PING_RUST"
 "$OLD_PING_RUST" add snell \
   --name legacy-snell --port 24432 --server-address "$SERVER" \
   --yes >"$WORK/records/old-snell.txt"
-expect "$(dirname "$0")/legacy-chain-menu.exp" "$OLD_PING_RUST"
+expect "$(dirname "$0")/legacy-chain-menu.exp" "$OLD_PING_RUST" \
+  >"$WORK/records/legacy-chain-menu.txt" 2>&1
 
 systemctl is-active --quiet shoes.service
 "/usr/local/bin/shoes" --version | grep -F "shoes $OLD_SHOES_VERSION"
