@@ -116,7 +116,29 @@ JSON
 echo "xray ${XRAY_26_TAG}: $($XRAY_26 version 2>&1 | head -n 1)"
 echo "xray ${XRAY_MIN_TAG}: $($XRAY_MIN version 2>&1 | head -n 1)"
 legacy_fixture="$(cd "$(dirname "$0")/../../tests/fixtures/yaml/chain-v2" && pwd)/config.yaml"
+sudo mkdir -p /etc/shoes/fixtures
+sudo openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+  -subj '/CN=example.test' \
+  -keyout /etc/shoes/fixtures/key-00000000.pem \
+  -out /etc/shoes/fixtures/cert-00000000.pem >/dev/null 2>&1
 "$SHOES" --dry-run "$legacy_fixture" >"$WORK/logs/v036-legacy-config-dry-run.txt" 2>&1 || true
+cat >"$WORK/legacy-mask.yaml" <<'YAML'
+- address: 127.0.0.1:25200
+  protocol:
+    type: socks
+    udp_enabled: false
+  rules:
+  - masks: '*.example.test'
+    action: allow
+    client_chains:
+      protocol:
+        type: direct
+YAML
+if "$SHOES" --dry-run "$WORK/legacy-mask.yaml" \
+    >"$WORK/logs/v036-legacy-mask-dry-run.txt" 2>&1; then
+  echo 'v0.3.6 unexpectedly accepted the legacy wildcard mask' >&2
+  exit 1
+fi
 cat >"$WORK/uuid-invalid.yaml" <<'YAML'
 - address: 0.0.0.0:24431
   protocol:
