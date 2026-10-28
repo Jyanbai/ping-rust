@@ -181,6 +181,7 @@ for cipher in aes-128-gcm aes-256-gcm chacha20-ietf-poly1305; do
     fi
     sudo cp /etc/shoes/config.yaml "$config"
     sudo chmod a+r "$config" "$WORK/mihomo-${cipher}.yaml"
+    sudo chown "$(id -u):$(id -g)" "$WORK/mihomo-${cipher}.yaml"
     cat >>"$WORK/mihomo-${cipher}.yaml" <<YAML
 mixed-port: 18090
 mode: global
