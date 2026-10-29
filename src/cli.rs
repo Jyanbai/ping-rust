@@ -1580,6 +1580,15 @@ pub async fn show_info(selector: Option<&str>) -> Result<()> {
             };
             println!("配置数量：{}", profiles.len());
             for profile in profiles {
+                if matches!(profile.credentials, config::Credentials::VlessEnc { .. }) {
+                    let uri = profile
+                        .server_address
+                        .as_deref()
+                        .map(|server| client::share_uri(profile, server))
+                        .transpose()?;
+                    println!("{}", profile_details_text(profile, uri.as_deref()));
+                    continue;
+                }
                 for line in profile.naive_certificate_details() {
                     println!("  {line}");
                 }
