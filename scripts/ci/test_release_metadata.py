@@ -18,10 +18,26 @@ class ReleaseMetadataTest(unittest.TestCase):
 
     def test_readme_installation_examples_use_release(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        installation = readme.split("## 一键安装（推荐）", 1)[1].split("## 功能", 1)[0]
         self.assertIn(f"releases/tag/v{VERSION}", readme)
-        self.assertIn(f"--version v{VERSION}", readme)
-        self.assertNotRegex(readme, r"--version v0\.2\.")
+        self.assertIn(f"--version v{VERSION}", installation)
+        self.assertNotRegex(installation, r"--version v0\.2\.")
         self.assertNotIn("VLESS-ENC（开发分支，未发版）", readme)
+
+    def test_readme_downgrade_example_and_version_history(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("sudo ping-rust self-update --version v0.2.2 --allow-downgrade", readme)
+        self.assertIn("v0.2.2 将默认安装的 shoes 固定为经过验证的 v0.2.7", readme)
+
+    def test_release_notes_state_verified_reality_clients_and_downgrade_limit(self):
+        notes = (ROOT / "docs" / f"RELEASE_NOTES_v{VERSION}.md").read_text(encoding="utf-8")
+        self.assertIn(
+            "Reality 客户端：CI 实测 Xray **v25.5.16** 和 **v26.6.27** 可以连接，"
+            "建议使用 Xray 25.5.16 及以上。更早的版本未验证，可能连不上"
+            "（例如旧版 v2rayN 内置的 Xray），请先升级客户端及其 Xray 内核。",
+            notes,
+        )
+        self.assertIn("删除 VLESS-ENC 节点后再降级的其他行为未验证。", notes)
 
     def test_release_notes_cover_compatibility_and_upgrade_order(self):
         notes = (ROOT / "docs" / f"RELEASE_NOTES_v{VERSION}.md").read_text(encoding="utf-8")

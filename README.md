@@ -9,7 +9,7 @@
 
 核心逻辑全部位于 Rust 源码中；`scripts/install.sh` 只负责执行 Rust 前的架构检测、下载、SHA-256 校验与严格解包，原子安装、快捷命令所有权判断和首次部署均由已校验的 Rust 二进制完成。
 
-> 当前版本：[`v0.3.0`](https://github.com/Jyanbai/ping-rust/releases/tag/v0.3.0)，升级要求见[正式发版说明](docs/RELEASE_NOTES_v0.3.0.md)。v0.3.0 新增 VLESS-ENC，自动迁移通配符路由规则，并将新建 Snell v3 节点默认 cipher 改为 aes-128-gcm。v0.2.0 引入 Update Center、Verified Hot Reload、Chain Proxy 2.0、规则路由和受验证范围内的 H2MUX；v0.2.1 增加 Pool 节点批量测试、热重载不可用原因提示和 NaiveProxy 测试证书有效期管理；v0.2.2 将默认安装的 shoes 固定为经过验证的 v0.3.6（已装更新的未验证版本时提示回退命令），YAML 库换成 serde-saphyr（修复 RUSTSEC-2024-0449），`--version` 额外输出构建 commit。**热重载需要固定 pin 构建；默认一键安装使用 GitHub Release 来源，监听变更使用受控重启。**支持 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks、AnyTLS、VLESS-TLS-Vision、VLESS-WS-TLS、Trojan-TLS、Trojan-REALITY、VMess-WS-TLS、SOCKS5、Snell v3、NaiveProxy 和 VLESS-ENC 十四种受管协议。用户只选择完整协议，不需要理解或手动组合传输层、安全层与内层协议。
+> 当前版本：[`v0.3.0`](https://github.com/Jyanbai/ping-rust/releases/tag/v0.3.0)，升级要求见[正式发版说明](docs/RELEASE_NOTES_v0.3.0.md)。v0.3.0 新增 VLESS-ENC，自动迁移通配符路由规则，并将新建 Snell v3 节点默认 cipher 改为 aes-128-gcm。v0.2.0 引入 Update Center、Verified Hot Reload、Chain Proxy 2.0、规则路由和受验证范围内的 H2MUX；v0.2.1 增加 Pool 节点批量测试、热重载不可用原因提示和 NaiveProxy 测试证书有效期管理；v0.2.2 将默认安装的 shoes 固定为经过验证的 v0.2.7（已装更新的未验证版本时提示回退命令），YAML 库换成 serde-saphyr（修复 RUSTSEC-2024-0449），`--version` 额外输出构建 commit。**热重载需要固定 pin 构建；默认一键安装使用 GitHub Release 来源，监听变更使用受控重启。**支持 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks、AnyTLS、VLESS-TLS-Vision、VLESS-WS-TLS、Trojan-TLS、Trojan-REALITY、VMess-WS-TLS、SOCKS5、Snell v3、NaiveProxy 和 VLESS-ENC 十四种受管协议。用户只选择完整协议，不需要理解或手动组合传输层、安全层与内层协议。
 
 完整文档：[Wiki](https://github.com/Jyanbai/ping-rust/wiki) · [快速开始](https://github.com/Jyanbai/ping-rust/wiki/Quick-Start) · [链式代理](https://github.com/Jyanbai/ping-rust/wiki/Chain-Proxy) · [故障排查](https://github.com/Jyanbai/ping-rust/wiki/Troubleshooting)
 
@@ -458,7 +458,7 @@ sudo ping-rust self-update
 `update` 只更新 shoes 内核；`self-update` 更新 ping-rust 本身。已知较低的 GitHub Release 默认会被拒绝，只有明确使用 `--allow-downgrade` 才会允许：
 
 ```bash
-sudo ping-rust self-update --version v0.3.0
+sudo ping-rust self-update --version v0.2.2 --allow-downgrade
 sudo ping-rust update --method release --allow-downgrade
 ```
 
