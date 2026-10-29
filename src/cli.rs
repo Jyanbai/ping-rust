@@ -963,7 +963,6 @@ fn profile_details_lines(profile: &config::ManagedProfile, share_uri: Option<&st
                 auth.as_str()
             ));
             lines.push(format!("Encryption：{encryption}"));
-            lines.push("不套 TLS；安全性完全依赖 VLESS Encryption。".to_owned());
         }
         config::Credentials::Reality {
             user_id,
