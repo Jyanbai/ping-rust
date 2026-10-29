@@ -10,6 +10,15 @@ VERSION = "0.3.0"
 
 
 class ReleaseMetadataTest(unittest.TestCase):
+    def test_v030_documentation_has_current_release_and_reload_guidance(self):
+        vless_enc = (ROOT / "docs" / "wiki" / "VLESS-ENC.md").read_text(encoding="utf-8")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        for stale_text in ("开发分支", "未发版", "Release 可使用受验证热重载"):
+            with self.subTest(stale_text=stale_text):
+                self.assertNotIn(stale_text, vless_enc)
+        self.assertIn("VLESS-ENC 与其他协议使用相同的热重载资格", vless_enc)
+        self.assertNotIn("本分支把默认 shoes Release", readme)
+
     def test_manifest_and_lock_agree_with_release(self):
         manifest = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
         lock = (ROOT / "Cargo.lock").read_text(encoding="utf-8")
