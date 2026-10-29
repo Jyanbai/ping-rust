@@ -249,6 +249,8 @@ jobs:
           test "${#err}" -lt 4096 \
             || { echo "error: failure output unexpectedly large (${#err} bytes)" >&2; exit 1; }
           rm -rf -- "$asset_root" "$install_root"
+      - name: Check release metadata and upgrade guidance
+        run: python3 scripts/ci/test_release_metadata.py
       - run: cargo fmt --all -- --check
       - name: Install stable shoes for unit and chain traffic acceptance
         shell: bash
