@@ -2,7 +2,7 @@
 
 ## 客户端兼容要求
 
-- Reality 客户端需要 Xray **25.5.16 及以上**。旧版 v2rayN 内置的 Xray 版本过低时会连不上 Reality，请先升级客户端及其 Xray 内核。
+- Reality 客户端：CI 实测 Xray **v25.5.16** 和 **v26.6.27** 可以连接，建议使用 Xray 25.5.16 及以上。更早的版本未验证，可能连不上（例如旧版 v2rayN 内置的 Xray），请先升级客户端及其 Xray 内核。
 - Snell v3：Mihomo 只支持 `aes-128-gcm`。新节点默认改为 `aes-128-gcm`，已有节点不自动修改；已有的 chacha20 或 aes-256 节点若使用 Mihomo，需要手动修改 cipher 并重新导出配置。
 
 ## 升级与配置迁移
@@ -28,4 +28,4 @@ sudo ping-rust update --method release
 
 ## 降级限制
 
-添加 VLESS-ENC 节点后**不能降级到 v0.2.x**，旧版无法读取包含该节点的管理状态。若必须降级，请先在 v0.3.0 中删除全部 VLESS-ENC 节点并备份配置，再执行降级。
+添加 VLESS-ENC 节点后**不能降级到 v0.2.x**，旧版无法读取包含该节点的管理状态。若必须降级，请先在 v0.3.0 中删除全部 VLESS-ENC 节点并备份配置，再执行降级。删除 VLESS-ENC 节点后再降级的其他行为未验证。
