@@ -10,6 +10,7 @@ on:
       - scripts/ci/validate-h2mux.py
       - scripts/ci/release-path-acceptance.py
       - scripts/ci/acceptance_diagnostics.py
+      - scripts/ci/harness_diagnostics.py
       - scripts/ci/test_acceptance_diagnostics.py
       - scripts/ci/naive_certificate_acceptance.py
       - .github/workflows/shoes-source-matrix.yml

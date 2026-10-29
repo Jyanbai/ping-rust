@@ -8,10 +8,13 @@ import json
 import os
 import secrets
 import subprocess
+import sys
 import tempfile
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
+
+from harness_diagnostics import failure_details
 
 
 spec = importlib.util.spec_from_file_location("h2mux_fixture", Path(__file__).with_name("validate-h2mux.py"))
@@ -36,7 +39,10 @@ def stop(process):
 
 
 def dry_run(shoes, path):
-    return subprocess.run([shoes, "--dry-run", str(path)], capture_output=True, timeout=30).returncode
+    result = subprocess.run([shoes, "--dry-run", str(path)], capture_output=True, timeout=30)
+    if result.returncode:
+        print(failure_details(result.stderr.decode(errors="replace"), path.read_text()), file=sys.stderr, flush=True)
+    return result.returncode
 
 
 def chain_case(shoes, root):
@@ -161,8 +167,13 @@ def main():
             result = subprocess.run(command, capture_output=True, timeout=90)
             if result.returncode:
                 output = (result.stdout + result.stderr).decode(errors="replace")
+                config = path.read_text() if path.exists() else "[configuration not created]"
+                print(failure_details(
+                    result.stderr.decode(errors="replace"), config,
+                    (h2.SOCKS_USER, h2.SOCKS_PASSWORD, h2.PASSWORD, h2.USER_ID),
+                ), file=sys.stderr, flush=True)
                 if "shoes" not in output or "验证" not in output:
-                    raise AssertionError(f"{protocol}: generation failed before known dry-run gate (private output suppressed)")
+                    raise AssertionError(f"{protocol}: generation failed before known dry-run gate (see redacted diagnostics above)")
                 record(rows, protocol, "被 dry-run 拦截", f"ping-rust generate {protocol} --output <TEMP>; exit={result.returncode}; shoes candidate validation rejected")
             else:
                 assert dry_run(shoes, path) == 0

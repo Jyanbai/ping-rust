@@ -406,14 +406,142 @@ fn write_upstream(path: &Path, port: u16, password: &str) -> io::Result<()> {
 }
 
 fn validate_shoes(shoes: &Path, config: &Path) -> TestResult {
-    run_status(
-        Command::new(shoes)
-            .arg("--dry-run")
-            .arg(config)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null()),
-        "shoes dry-run",
+    let output = Command::new(shoes)
+        .arg("--dry-run")
+        .arg(config)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|error| format!("shoes dry-run could not start: {error}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    // Parse before printing: malformed YAML must never fall back to raw secrets.
+    let mut secrets = Vec::new();
+    let yaml = fs::read_to_string(config)
+        .ok()
+        .and_then(|text| serde_saphyr::from_str::<Value>(&text).ok())
+        .map(|mut value| {
+            redact_diagnostic_config(&mut value, &mut secrets);
+            serde_saphyr::to_string(&value).unwrap_or_else(|_| "[YAML unavailable]".into())
+        });
+    let mut stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
+    secrets.dedup();
+    for secret in secrets {
+        if !secret.is_empty() {
+            stderr = stderr.replace(&secret, "[REDACTED]");
+        }
+    }
+    let stderr = if yaml.is_some() {
+        bounded_diagnostic(&stderr)
+    } else {
+        "[stderr suppressed: YAML could not be safely redacted]".into()
+    };
+    Err(format!(
+        "shoes dry-run failed with {}\nstderr:\n{stderr}\nvalidated YAML (redacted):\n{}",
+        output.status,
+        bounded_diagnostic(yaml.as_deref().unwrap_or("[YAML unavailable]"))
     )
+    .into())
+}
+
+fn redact_diagnostic_config(value: &mut Value, secrets: &mut Vec<String>) {
+    match value {
+        Value::Object(fields) => {
+            for (key, value) in fields {
+                let key = key.to_ascii_lowercase();
+                if [
+                    "key",
+                    "password",
+                    "secret",
+                    "token",
+                    "decryption",
+                    "user",
+                    "id",
+                ]
+                .iter()
+                .any(|part| key.contains(part))
+                {
+                    collect_diagnostic_secrets(value, secrets);
+                    *value = Value::String("[REDACTED]".into());
+                } else {
+                    redact_diagnostic_config(value, secrets);
+                }
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                redact_diagnostic_config(value, secrets);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_diagnostic_secrets(value: &Value, secrets: &mut Vec<String>) {
+    match value {
+        Value::String(value) => secrets.push(value.clone()),
+        Value::Array(values) => {
+            for value in values {
+                collect_diagnostic_secrets(value, secrets);
+            }
+        }
+        Value::Object(fields) => {
+            for value in fields.values() {
+                collect_diagnostic_secrets(value, secrets);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn bounded_diagnostic(text: &str) -> String {
+    let mut bounded: String = text.chars().take(8192).collect();
+    if text.chars().count() > 8192 {
+        bounded.push_str("\n[truncated]");
+    }
+    bounded
+}
+
+#[test]
+fn dry_run_failure_preserves_stderr_and_redacted_yaml() {
+    let root = tempfile::tempdir().unwrap();
+    let shoes = root.path().join("shoes");
+    fs::write(&shoes, "#!/bin/sh\necho 'schema rejected' >&2\nexit 7\n").unwrap();
+    fs::set_permissions(&shoes, fs::Permissions::from_mode(0o700)).unwrap();
+    let config = root.path().join("client.yaml");
+    fs::write(
+        &config,
+        "protocol:\n  type: reality\n  private_key: test-private-material\n  user_id: test-user-material\n",
+    )
+    .unwrap();
+    let error = validate_shoes(&shoes, &config).unwrap_err().to_string();
+    assert!(error.contains("schema rejected"));
+    assert!(error.contains("reality"));
+    assert!(error.contains("[REDACTED]"));
+    assert!(!error.contains("test-private-material"));
+    assert!(!error.contains("test-user-material"));
+}
+
+#[test]
+fn dry_run_success_keeps_output_silent() {
+    let config = tempfile::NamedTempFile::new().unwrap();
+    assert!(validate_shoes(Path::new("/bin/true"), config.path()).is_ok());
+}
+
+#[test]
+fn dry_run_diagnostics_bound_unicode_and_redact_nested_secrets() {
+    let mut value = serde_json::json!({"protocol": {"keys": ["secret-one", "secret-two"]}});
+    let mut secrets = Vec::new();
+    redact_diagnostic_config(&mut value, &mut secrets);
+    assert_eq!(secrets, ["secret-one", "secret-two"]);
+    assert!(!value.to_string().contains("secret-one"));
+    let text = "错".repeat(9000);
+    let bounded = bounded_diagnostic(&text);
+    assert!(bounded.ends_with("[truncated]"));
+    assert_eq!(bounded.matches('错').count(), 8192);
 }
 
 fn wait_for_port(address: SocketAddr) -> io::Result<()> {
