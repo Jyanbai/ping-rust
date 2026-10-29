@@ -1,5 +1,15 @@
 # VLESS-ENC C 阶段验证报告
 
+## PR #38 合并前第二阶段（2026-10-29）
+
+- 已将 feat/vless-encryption 的 7 个提交 rebase 到 main `75c8d1f84aa5f4cf7b60d94bc8fbb5584ad5c64a`，无冲突。
+- 删除 Release 专属资格及 adding_vless_enc 通路。保留 `complete_release_metadata_does_not_change_existing_protocol_restart_policy`；将本 PR 新增的 Release 热重载测试改为断言 `ShoesSourceUnsupported`，完整元数据、其他 tag、缺摘要均拒绝。新测试先写，旧实现实际失败后再修改代码。
+- Release 互通的 MainPID 不变断言改为 MainPID 改变、服务 active、新端口监听；原因是统一已有协议的受控重启策略。九项流量、响应标记、端点计数和凭据审计保留，artifact 审计同步检查新字段。固定 pin 的第 14 项 PTY MainPID 不变断言保持不变。历史兼容夹具未修改。
+- bero fmt 通过：0.28s / 57060KB / exit 0；clippy `--locked --all-targets -- -D warnings` 通过：46.26s / 558700KB / exit 0；`cargo test --locked`：225 单元、6 集成通过，3 单元和 2 集成 ignored，11.89s / 73520KB / exit 0。完整测试使用与 CI 相同的 `PING_RUST_TEST_SHOES` 和 `PING_RUST_SHOES_E2E_BIN`；未设置生成器路径的首次测试为 223 passed / 2 failed / 3 ignored，原因是默认路径不存在，没有修改断言来绕过。
+- 本阶段两次磁盘守护退出 75 后均停止，用户分别授权一次删除共享 target；本次续跑删除前无 cargo/rustc，根分区可用字节 6105538560 → 7346925568。仅删除 `~/cargo-target`。最终测试后 target 1.2G，根分区可用 6080217088 字节。Nice=19、IO idle、单任务 Cargo 和磁盘守护保持启用。
+- 以下章节保留为第二阶段修订前的历史证据，其 Release MainPID 不变结果不代表当前策略。第二阶段 Actions 及降级读取结果以 PR body 的完整交付记录为准。
+- bero 降级读取探针：校验固定 SHA-256 的 v0.2.2 Release 在 user namespace 隔离根目录读取独立 VLESS-ENC state 夹具，实际退出 1：unknown variant `VlessEnc`，line 11 column 18；state 字节保持不变。探针 job exit 0 / 0.73s / 33652KB，target 1.2G，根分区可用 6082662400 字节。其他 v0.2.x 未验证。CI 另外验证九项真实互通后实际生成的 state。
+
 功能代码提交为 `d5f0285`；日志下载参数修正为 `53a2740`。draft PR #38 保持草稿；本阶段不合并、不推 tag、不发版。后续文档提交不改变功能代码。完整交付检查以 PR 的最终检查结果和交付记录为准。
 
 ## 九项真实代理互通与保密审计
@@ -149,7 +159,7 @@ VLESS encryption generation failed: VLESS generator option requires a value
 
 历史兼容夹具未修改。原有“夹具覆盖所有预设”断言保留，向待比较的协议列表增加独立 `vless-enc/state.json` 夹具，以覆盖第 14 项；原有 13 种协议的语义比较和凭据重生成断言均保留。
 
-热重载接入说明：原流程仅允许固定源码 pin。本阶段仅在新增 VLESS-ENC 时增加完整来源记录的 v0.3.6 Release 资格（精确 tag/version，加上启动前重新核对的二进制摘要），供实际 Release 二进制完成 MainPID 验收。其他协议的 Release 重启策略保持不变。缺少来源或摘要、摘要不匹配、其他 Release 和错误 pin 继续拒绝；原有拒绝路径断言未放宽。互通 CI 的来源记录如实标为 `github-release`，没有伪装成源码 pin。
+热重载接入说明（第二阶段修订）：删除新增 VLESS-ENC 的 Release 专属资格，所有协议统一为固定源码 pin 热重载、Release 受控重启。Release 互通 CI 检查每次新增后 MainPID 改变、服务 active、新端口监听及九项实际流量；固定 pin 的 Ubuntu acceptance 第 14 项 PTY 仍检查 MainPID 不变。下文及开头表格的既往 MainPID 证据属于修订前历史运行，不代表当前 Release 策略。
 
 ## 建议
 

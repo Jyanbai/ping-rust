@@ -1,5 +1,7 @@
 # 发版说明草稿（未发布）
 
+- 降级限制：添加 VLESS-ENC 节点后，降级到 v0.2.x 将无法读取管理状态，降级前需先删除该节点。已在 bero 使用校验固定 SHA-256 的 v0.2.2 Release 实测：读取含 VLESS-ENC 的 state 退出 1，报错 `unknown variant `VlessEnc``，state 未改写；其他 v0.2.x 版本未验证。
+
 - 新增 VLESS-ENC 预设：菜单第 14 项及 `prs add vless-enc`；原生 TCP，不套 TLS/Reality，安全性完全依赖 VLESS Encryption。支持 native/xorpub/random（random 关闭 TCP splice）、x25519/mlkem768、可选 Vision 和 Mihomo 导出；不支持 sing-box、NekoBox、链式出口或 H2MUX。客户端请使用 CI 实测通过的 Xray v26.6.27 或 Mihomo v1.19.33；更旧版本未验证。
 
 - shoes 默认版本升级到 v0.3.6；旧 Chain 2.0 通配符规则在升级时从 state 重新生成，升级事务先 dry-run，再提交配置和重启服务，失败时回滚。

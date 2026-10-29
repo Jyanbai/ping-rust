@@ -20,6 +20,7 @@ RECORDS = Path(os.environ["RECORDS"])
 SECRETS = []
 LOGS = []
 RESULTS = []
+DOWNGRADE = {}
 FORBIDDEN = re.compile(rb"mlkem768x25519plus\.(?:native|xorpub|random)\.600s\.[A-Za-z0-9_-]+")
 
 
@@ -108,7 +109,11 @@ def test_case(client, mode, auth, vision, index):
     if vision:
         args.append("--vision")
     uri = command(args, label + "-add").strip()
-    require(pid() == old_pid, "add must hot reload with unchanged MainPID")
+    require(pid() != old_pid, "Release add must perform controlled restart")
+    require(command(["systemctl", "is-active", "shoes"], label + "-active").strip() == "active",
+            "service must be active after controlled restart")
+    listeners = command(["ss", "-H", "-ltn", "sport", "=", str(port)], label + "-listener")
+    require(bool(listeners.strip()), "new server port must listen after controlled restart")
     profile_path = Path(f"/etc/shoes/profiles/VLESS-ENC-{port}.yaml")
     aggregate = Path("/etc/shoes/config.yaml")
     for path in (profile_path, aggregate):
@@ -161,7 +166,7 @@ def test_case(client, mode, auth, vision, index):
         response = command(["curl", "--noproxy", "", "--fail", "--silent", "--show-error", "--max-time", "15", "--proxy", "socks5h://127.0.0.1:18081", f"http://127.0.0.1:18080{request_path}"], label + "-request")
         require(response == request_path, "proxy response marker differs")
     require(HITS.count(request_path) == before + 1, "endpoint did not receive exactly one request")
-    RESULTS.append({"case": label, "result": "PASS", "endpoint_requests": 1, "main_pid_unchanged": True})
+    RESULTS.append({"case": label, "result": "PASS", "endpoint_requests": 1, "controlled_restart": True, "service_active": True, "new_port_listening": True})
     print(label + ": PASS", flush=True)
 
 
@@ -179,6 +184,22 @@ def main():
         matrix += [("xray", "native", "mlkem768", False), ("mihomo", "native", "x25519", False), ("mihomo", "native", "x25519", True)]
         for index, case in enumerate(matrix):
             test_case(*case, index)
+        # Read the real state produced above with the published v0.2.2 binary.
+        # Keep only the parser error: never persist any old CLI profile output.
+        old = os.environ["OLD_PING_RUST"]
+        version = command([old, "--version"], "downgrade-version").strip()
+        require(version.startswith("ping-rust 0.2.2"), "downgrade binary version")
+        state_path = Path("/etc/shoes/ping-rust-state.json")
+        before = state_path.read_bytes()
+        result = subprocess.run([old, "info"], capture_output=True, timeout=30)
+        require(result.returncode != 0, "v0.2.2 must refuse VLESS-ENC state")
+        safe(result.stdout + result.stderr)
+        error = re.search(rb"unknown variant [`']VlessEnc[`'][^\r\n]*", result.stderr)
+        require(error is not None, "v0.2.2 must report unknown VlessEnc variant")
+        require(state_path.read_bytes() == before, "v0.2.2 read must preserve state")
+        DOWNGRADE.update(version="v0.2.2", exit_code=result.returncode,
+                         error=error[0].decode(), state_unchanged=True)
+        print("v0.2.2 downgrade probe: " + error[0].decode(), flush=True)
     except Exception as error:
         # Do not print exception chains, argv, captured output or config data.
         stage = str(error) if isinstance(error, AcceptanceFailure) else "unexpected error; details withheld"
@@ -200,7 +221,7 @@ def main():
         except Exception:
             print("Secret audit failed; raw output has been withheld.", flush=True)
             status = 1
-        report = {"xray": "v26.6.27", "mihomo": "v1.19.33", "shoes": "v0.3.6", "cases": RESULTS, "artifact_secret_audit": status == 0}
+        report = {"xray": "v26.6.27", "mihomo": "v1.19.33", "shoes": "v0.3.6", "cases": RESULTS, "downgrade": DOWNGRADE, "artifact_secret_audit": status == 0}
         (RECORDS / "results.json").write_text(json.dumps(report, indent=2) + "\n")
         endpoint.shutdown()
         subprocess.run(["systemctl", "stop", "shoes"], capture_output=True, timeout=30)

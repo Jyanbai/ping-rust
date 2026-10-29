@@ -62,12 +62,29 @@ jobs:
           "$directory/shoes" --version
           "$directory/xray" version | head -n 1
           "$directory/mihomo" -v
-      - name: Nine proxy cases, endpoint receipts, MainPID and credential audits
+      - name: Download v0.2.2 Release for the state downgrade probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          directory="$RUNNER_TEMP/vless-enc-old"
+          mkdir -p "$directory"
+          base="https://github.com/Jyanbai/ping-rust/releases/download/v0.2.2"
+          asset="ping-rust-x86_64-unknown-linux-musl.tar.gz"
+          curl -fsSL --retry 3 --proto '=https' --tlsv1.2 "$base/$asset" -o "$directory/$asset"
+          curl -fsSL --retry 3 --proto '=https' --tlsv1.2 "$base/SHA256SUMS" -o "$directory/SHA256SUMS"
+          (cd "$directory" && grep -F "  $asset" SHA256SUMS | sha256sum -c --strict)
+          echo "66a8502a199c31971ab474545ecc18661c4cfd2dc1b0afe81511b33aaf04ba0b  $directory/$asset" | sha256sum -c --strict
+          tar -xzf "$directory/$asset" -C "$directory"
+          old="$(find "$directory" -type f -name ping-rust -perm -111 | head -n 1)"
+          test -x "$old"
+          echo "OLD_PING_RUST=$old" >> "$GITHUB_ENV"
+      - name: Nine proxy cases, controlled restart, listeners and credential audits
         shell: bash
         run: |
           set -euo pipefail
           trap 'sudo chmod -R a+rX "$RUNNER_TEMP/vless-enc-records" 2>/dev/null || true' EXIT
           sudo env PING_RUST="$PWD/target/release/ping-rust" \
+            OLD_PING_RUST="$OLD_PING_RUST" \
             XRAY="$RUNNER_TEMP/vless-enc-binaries/xray" \
             MIHOMO="$RUNNER_TEMP/vless-enc-binaries/mihomo" \
             WORK="$RUNNER_TEMP/vless-enc-runtime" \
@@ -118,6 +135,9 @@ jobs:
           report = json.loads(Path('records/results.json').read_text())
           assert report['artifact_secret_audit']
           assert len(report['cases']) == 9
-          assert all(case['result'] == 'PASS' and case['endpoint_requests'] == 1 and case['main_pid_unchanged'] for case in report['cases'])
+          assert all(case['result'] == 'PASS' and case['endpoint_requests'] == 1 and case['controlled_restart'] and case['service_active'] and case['new_port_listening'] for case in report['cases'])
+          assert report['downgrade']['version'] == 'v0.2.2'
+          assert report['downgrade']['exit_code'] != 0 and report['downgrade']['state_unchanged']
+          assert 'unknown variant' in report['downgrade']['error'] and 'VlessEnc' in report['downgrade']['error']
           print('Uploaded artifact and completed job log: no decryption strings; all nine cases passed.')
           PY

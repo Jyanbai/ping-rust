@@ -93,7 +93,7 @@ sudo prs add vless-enc --encryption-auth mlkem768
 
 支持 Mihomo 的 `encryption` 字段，Vision 开启时同时导出 `flow: xtls-rprx-vision`。**不支持 sing-box 或 NekoBox 导出，不支持用作链式出口，也不提供 H2MUX 开关。**
 
-客户端请使用 CI 实测通过的 Xray **v26.6.27** 或 Mihomo **v1.19.33**；未验证更旧版本，不能据此推断其可用。Xray 已通过三种外观 × Vision 开关的 x25519 六种组合及一次 mlkem768；Mihomo 已通过 native/x25519 的 Vision 关闭和开启两种组合。结果和 run/job ID 见 [C 阶段报告](docs/VLESS_ENC_REPORT.md)。新增 VLESS-ENC 时，带完整来源记录、且二进制摘要仍匹配的 shoes v0.3.6 Release 可使用受验证热重载；来源未知或不匹配时使用现有受控重启流程。已有协议的 Release 重启策略保持不变。
+客户端请使用 CI 实测通过的 Xray **v26.6.27** 或 Mihomo **v1.19.33**；未验证更旧版本，不能据此推断其可用。Xray 已通过三种外观 × Vision 开关的 x25519 六种组合及一次 mlkem768；Mihomo 已通过 native/x25519 的 Vision 关闭和开启两种组合。结果和 run/job ID 见 [C 阶段报告](docs/VLESS_ENC_REPORT.md)。VLESS-ENC 与其他协议使用相同的热重载资格：固定 pin 构建支持热重载，GitHub Release 来源使用受控重启。
 
 ### 协议分级
 
@@ -491,7 +491,7 @@ sudo ping-rust backup ./shoes-backup.tar.gz
 sudo ping-rust restore ./shoes-backup.tar.gz
 ```
 
-备份包含私钥、UUID 和密码，文件权限为 `0600`，请加密保存。恢复过程拒绝绝对路径、`..`、符号链接和特殊文件；新配置未通过 shoes 校验时会自动恢复旧目录。成功恢复后，旧目录仍保留为 `/etc/shoes.pre-restore-<时间戳>`，确认无误后再手动清理。
+备份包含 VLESS-ENC 服务端 decryption 密钥，请按私钥标准保管。备份还包含其他私钥、UUID 和密码，文件权限为 `0600`，请加密保存。恢复过程拒绝绝对路径、`..`、符号链接和特殊文件；新配置未通过 shoes 校验时会自动恢复旧目录。成功恢复后，旧目录仍保留为 `/etc/shoes.pre-restore-<时间戳>`，确认无误后再手动清理。
 
 ## 文件位置与权限
 

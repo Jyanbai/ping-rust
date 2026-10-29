@@ -106,39 +106,17 @@ fn hot_reload_supported(shoes: &installer::ShoesProvenance) -> bool {
     shoes.source == "verified-pin" && shoes.revision.as_deref() == Some(installer::verified_pin())
 }
 
-fn vless_enc_release_reload_supported(shoes: &installer::ShoesProvenance) -> bool {
-    // load_provenance verifies that the installed binary still matches its digest.
-    shoes.source == "github-release"
-        && shoes.release_tag.as_deref() == Some("v0.3.6")
-        && shoes.version.as_deref() == Some("0.3.6")
-        && shoes.binary_sha256.as_ref().is_some_and(|digest| {
-            digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
-        })
-}
-
 fn hot_reload_unavailable_reason(
     was_active: bool,
     unit_matches: bool,
     shoes: &installer::ShoesProvenance,
     drop_ins: &str,
 ) -> Option<HotReloadReason> {
-    hot_reload_unavailable_reason_for_operation(was_active, unit_matches, shoes, drop_ins, false)
-}
-
-fn hot_reload_unavailable_reason_for_operation(
-    was_active: bool,
-    unit_matches: bool,
-    shoes: &installer::ShoesProvenance,
-    drop_ins: &str,
-    adding_vless_enc: bool,
-) -> Option<HotReloadReason> {
     if !was_active {
         Some(HotReloadReason::ServiceNotRunning)
     } else if !unit_matches {
         Some(HotReloadReason::UnitModified)
-    } else if !(hot_reload_supported(shoes)
-        || adding_vless_enc && vless_enc_release_reload_supported(shoes))
-    {
+    } else if !hot_reload_supported(shoes) {
         Some(HotReloadReason::ShoesSourceUnsupported(shoes.clone()))
     } else if !drop_ins.is_empty() && drop_ins != "-" {
         Some(HotReloadReason::DropInPresent)
@@ -274,10 +252,7 @@ pub fn capture_snapshot() -> Result<ServiceSnapshot> {
     })
 }
 
-pub fn capture_hot_reload_snapshot(
-    snapshot: &ServiceSnapshot,
-    adding_vless_enc: bool,
-) -> Result<HotReloadReadiness> {
+pub fn capture_hot_reload_snapshot(snapshot: &ServiceSnapshot) -> Result<HotReloadReadiness> {
     if !snapshot.was_active {
         return Ok(HotReloadReadiness::Unavailable(
             HotReloadReason::ServiceNotRunning,
@@ -295,17 +270,7 @@ pub fn capture_hot_reload_snapshot(
     }
     let shoes = installer::load_provenance();
     let drop_ins = systemctl_show_value("DropInPaths")?;
-    let reason = if adding_vless_enc {
-        hot_reload_unavailable_reason_for_operation(
-            snapshot.was_active,
-            true,
-            &shoes,
-            &drop_ins,
-            true,
-        )
-    } else {
-        hot_reload_unavailable_reason(snapshot.was_active, true, &shoes, &drop_ins)
-    };
+    let reason = hot_reload_unavailable_reason(snapshot.was_active, true, &shoes, &drop_ins);
     if let Some(reason) = reason {
         return Ok(HotReloadReadiness::Unavailable(reason));
     }
@@ -617,7 +582,7 @@ mod tests {
     }
 
     #[test]
-    fn vless_enc_verified_v036_release_can_hot_reload_but_incomplete_metadata_cannot() {
+    fn adding_vless_enc_release_requires_controlled_restart_even_with_complete_metadata() {
         let mut release = installer::ShoesProvenance {
             source: "github-release".into(),
             release_tag: Some("v0.3.6".into()),
@@ -625,18 +590,21 @@ mod tests {
             binary_sha256: Some("a".repeat(64)),
             ..Default::default()
         };
-        assert!(
-            hot_reload_unavailable_reason_for_operation(true, true, &release, "", true).is_none()
-        );
+        assert!(matches!(
+            hot_reload_unavailable_reason(true, true, &release, ""),
+            Some(HotReloadReason::ShoesSourceUnsupported(_))
+        ));
         release.release_tag = Some("v0.3.7".into());
-        assert!(
-            hot_reload_unavailable_reason_for_operation(true, true, &release, "", true).is_some()
-        );
+        assert!(matches!(
+            hot_reload_unavailable_reason(true, true, &release, ""),
+            Some(HotReloadReason::ShoesSourceUnsupported(_))
+        ));
         release.release_tag = Some("v0.3.6".into());
         release.binary_sha256 = None;
-        assert!(
-            hot_reload_unavailable_reason_for_operation(true, true, &release, "", true).is_some()
-        );
+        assert!(matches!(
+            hot_reload_unavailable_reason(true, true, &release, ""),
+            Some(HotReloadReason::ShoesSourceUnsupported(_))
+        ));
     }
 
     fn pin_provenance() -> installer::ShoesProvenance {
