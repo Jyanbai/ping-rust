@@ -106,7 +106,7 @@ VLESS encryption generation failed: VLESS generator option requires a value
 | ping-rust-c-policy-final-fmt | cargo fmt --all -- --check 通过 | 0.49 s | 55708 KB | 0 |
 | ping-rust-c-info-final-clippy | 最新功能代码 clippy --locked --all-targets -- -D warnings 通过 | 5.14 s | 431308 KB | 0 |
 
-最后一项实际调用校验过的 shoes 二进制，覆盖 native、xorpub、random 各自的 x25519 和 mlkem768，共 6 次生成；输出仅在进程内解析，没有打印生成凭据。它验证密钥生成，不证明代理互通。
+`ping-rust-c-generator-test` 实际调用校验过的 shoes 二进制，覆盖 native、xorpub、random 各自的 x25519 和 mlkem768，共 6 次生成；输出仅在进程内解析，没有打印生成凭据。它验证密钥生成，不证明代理互通。
 
 其他基础覆盖：严格两行解析、缺行、多余行、顺序错误、非法编码/长度/模式/认证、子进程参数、失败输出不进入错误，以及链式导入重复 encryption 参数不能覆盖非 none 值。
 
@@ -173,6 +173,7 @@ VLESS encryption generation failed: VLESS generator option requires a value
 - 互通 run `40803997437`（job `123218462133`）新增服务成功且 MainPID 不变，但 `prs info` 缺少模式及 Encryption，首例在客户端流量前失败；没有将它计为流量通过。已让该 CLI 路径复用通过单元测试的完整详情渲染，保留互通断言。
 - 互通 run `40804477686` 的九项流量已通过，但独立审计 job `123221135200` 被新版 gh 的 ANSI 日志输出保护拦截，扫描未执行。仅在重定向到待扫描文件的日志下载命令上添加 `--allow-escape-sequences`，没有取消或放宽审计；后续 run `40804965892` 九项和独立审计全部通过。
 - source compatibility run `40804965967` 的固定 pin 子任务在 SOCKS5 生成阶段单次失败，原始子进程输出被既有脚本抑制，根因未验证。同一功能代码的 run `40804477604` 及 schema run `40804477683` 均完整通过；未为这次失败修改源码、断言或历史夹具。最终文档提交重新运行全部 PR 检查，交付状态以最终 PR 检查为准。
+- 额外手动链式 systemd run `40806048459` 首次执行中，Debian job `123225144249` 通过；Ubuntu job `123225144162` 在启用首个链式节点之后，校验测试客户端 YAML 时 shoes dry-run 返回 1，未进入后续流量断言。既有 helper 丢弃了 dry-run stderr，根因未验证；没有修改用例或放宽断言，仅重跑失败的 Ubuntu job 以检查能否复现。最终 attempt、job 和实际结果见 PR 交付记录，不将首次失败记为通过。
 
 ## 已通过的既有 CI 证据
 
