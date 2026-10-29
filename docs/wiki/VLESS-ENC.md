@@ -20,4 +20,4 @@ sudo prs add vless-enc --encryption-auth mlkem768
 
 支持 Mihomo 的 `encryption` 字段，Vision 开启时同时导出 `flow: xtls-rprx-vision`。**不支持 sing-box 或 NekoBox 导出，不支持用作链式出口，也不提供 H2MUX 开关。**
 
-客户端版本以本分支 CI 实测为准，当前固定测试目标为 Xray **v26.6.27** 和 Mihomo **v1.19.33**，互通结果尚待 CI 确认；不据此推断更旧版本可用。结果和 run/job ID 见 主仓库的 `docs/VLESS_ENC_REPORT.md`。本分支还为带完整来源记录、且二进制摘要仍匹配的 shoes v0.3.6 Release 启用受验证热重载；来源未知或不匹配时使用现有受控重启流程。
+客户端版本以本分支 CI 实测为准，当前固定测试目标为 Xray **v26.6.27** 和 Mihomo **v1.19.33**，互通结果尚待 CI 确认；不据此推断更旧版本可用。结果和 run/job ID 见 主仓库的 `docs/VLESS_ENC_REPORT.md`。新增 VLESS-ENC 时，带完整来源记录、且二进制摘要仍匹配的 shoes v0.3.6 Release 可使用受验证热重载；来源未知或不匹配时使用现有受控重启流程。已有协议的 Release 重启策略保持不变。

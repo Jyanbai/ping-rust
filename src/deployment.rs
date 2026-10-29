@@ -41,8 +41,11 @@ fn plan_apply(
     }
 }
 
-fn capture_reload_readiness(snapshot: &service::ServiceSnapshot) -> service::HotReloadReadiness {
-    service::capture_hot_reload_snapshot(snapshot).unwrap_or_else(|error| {
+fn capture_reload_readiness(
+    snapshot: &service::ServiceSnapshot,
+    adding_vless_enc: bool,
+) -> service::HotReloadReadiness {
+    service::capture_hot_reload_snapshot(snapshot, adding_vless_enc).unwrap_or_else(|error| {
         service::HotReloadReadiness::Unavailable(service::HotReloadReason::InspectionFailed(
             format!("{error:#}"),
         ))
@@ -80,7 +83,11 @@ pub async fn generate_and_activate(request: GenerationRequest) -> Result<Generat
     utils::require_linux_root()?;
     let lock = utils::exclusive_lock(Path::new(utils::LOCK_FILE))?;
     let service_snapshot = service::capture_snapshot()?;
-    let hot_reload_snapshot = capture_reload_readiness(&service_snapshot).filter(|snapshot| {
+    let hot_reload_snapshot = capture_reload_readiness(
+        &service_snapshot,
+        request.protocol == config::Protocol::VlessEnc,
+    )
+    .filter(|snapshot| {
         config::load_state().is_ok_and(|state| {
             state
                 .profiles
@@ -145,7 +152,7 @@ pub async fn update_and_activate(id: Uuid, change: ProfileChange) -> Result<Gene
         None
     };
     let hot_reload_snapshot = observable_port_change.then(|| {
-        capture_reload_readiness(&service_snapshot).filter(|snapshot| {
+        capture_reload_readiness(&service_snapshot, false).filter(|snapshot| {
             previous_port.is_some_and(|port| snapshot.listening_ports.contains(&port))
         })
     });
@@ -211,14 +218,15 @@ pub async fn delete_and_activate(id: Uuid) -> Result<config::ManagedProfile> {
     let lock = utils::exclusive_lock(Path::new(utils::LOCK_FILE))?;
     let service_snapshot = service::capture_snapshot()?;
     let was_active = Path::new(utils::SERVICE_FILE).exists() && service::is_active()?;
-    let hot_reload_snapshot = capture_reload_readiness(&service_snapshot).filter(|snapshot| {
-        config::load_state().is_ok_and(|state| {
-            state
-                .profiles
-                .iter()
-                .all(|profile| snapshot.listening_ports.contains(&profile.port))
-        })
-    });
+    let hot_reload_snapshot =
+        capture_reload_readiness(&service_snapshot, false).filter(|snapshot| {
+            config::load_state().is_ok_and(|state| {
+                state
+                    .profiles
+                    .iter()
+                    .all(|profile| snapshot.listening_ports.contains(&profile.port))
+            })
+        });
     let mut result = config::delete_profile_locked(id, lock).await?;
     let strategy = plan_apply(
         ApplyOperation::Delete,

@@ -23,9 +23,13 @@ RESULTS = []
 FORBIDDEN = re.compile(rb"mlkem768x25519plus\.(?:native|xorpub|random)\.600s\.[A-Za-z0-9_-]+")
 
 
+class AcceptanceFailure(Exception):
+    """A fixed stage label, never child output or credential data."""
+
+
 def require(condition, stage):
     if not condition:
-        raise RuntimeError(stage)
+        raise AcceptanceFailure(stage)
 
 
 def safe(data):
@@ -165,8 +169,8 @@ def main():
     os.umask(0o077)
     WORK.mkdir(parents=True, exist_ok=True)
     RECORDS.mkdir(parents=True, exist_ok=True)
-    http = http.server.ThreadingHTTPServer(("127.0.0.1", 18080), Endpoint)
-    threading.Thread(target=http.serve_forever, daemon=True).start()
+    endpoint = http.server.ThreadingHTTPServer(("127.0.0.1", 18080), Endpoint)
+    threading.Thread(target=endpoint.serve_forever, daemon=True).start()
     status = 0
     try:
         # Establish an active managed service before testing ENC additions.
@@ -175,10 +179,11 @@ def main():
         matrix += [("xray", "native", "mlkem768", False), ("mihomo", "native", "x25519", False), ("mihomo", "native", "x25519", True)]
         for index, case in enumerate(matrix):
             test_case(*case, index)
-    except Exception:
+    except Exception as error:
         # Do not print exception chains, argv, captured output or config data.
-        print("VLESS-ENC acceptance failed; inspect the safe case summary.", flush=True)
-        RESULTS.append({"result": "FAIL", "completed_cases": len(RESULTS)})
+        stage = str(error) if isinstance(error, AcceptanceFailure) else "unexpected error; details withheld"
+        print("VLESS-ENC acceptance failed at " + stage, flush=True)
+        RESULTS.append({"result": "FAIL", "stage": stage, "completed_cases": len(RESULTS)})
         status = 1
     finally:
         journal = subprocess.run(["journalctl", "-u", "shoes", "--no-pager", "-o", "cat"], capture_output=True, timeout=30)
@@ -197,7 +202,7 @@ def main():
             status = 1
         report = {"xray": "v26.6.27", "mihomo": "v1.19.33", "shoes": "v0.3.6", "cases": RESULTS, "artifact_secret_audit": status == 0}
         (RECORDS / "results.json").write_text(json.dumps(report, indent=2) + "\n")
-        http.shutdown()
+        endpoint.shutdown()
         subprocess.run(["systemctl", "stop", "shoes"], capture_output=True, timeout=30)
     return status
 

@@ -49,6 +49,11 @@ VLESS encryption generation failed: VLESS generator option requires a value
 | ping-rust-c-integrated-clippy2 | cargo clippy --locked --all-targets -- -D warnings 通过 | 9.59 s | 542612 KB | 0 |
 | ping-rust-c-harness-syntax | Python 互通脚本 py_compile 通过 | 0.05 s | 12984 KB | 0 |
 | ping-rust-c-integrated-test | 完整 cargo test 被磁盘守护中止，测试结果未验证 | 18.03 s | 717472 KB | 75 |
+| ping-rust-c-clean-test | 完整 cargo test：224 单元测试和 3 集成测试通过；3 单元、2 集成 ignored | 106.09 s | 727908 KB | 0 |
+| ping-rust-c-final-fmt | cargo fmt --all -- --check 通过 | 0.45 s | 56012 KB | 0 |
+| ping-rust-c-final-clippy | 编译检查结束后磁盘守护返回 75，不能记为任务通过 | 48.42 s | 568476 KB | 75 |
+| ping-rust-c-final-clippy-cold | 从空缓存运行 clippy --locked --all-targets -- -D warnings 通过 | 65.12 s | 571680 KB | 0 |
+| ping-rust-c-release-policy-red | 新增旧协议重启策略回归测试按预期失败：0 passed、1 failed | 226.04 s | 1117720 KB | 101 |
 
 最后一项实际调用校验过的 shoes 二进制，覆盖 native、xorpub、random 各自的 x25519 和 mlkem768，共 6 次生成；输出仅在进程内解析，没有打印生成凭据。它验证密钥生成，不证明代理互通。
 
@@ -91,8 +96,18 @@ VLESS encryption generation failed: VLESS generator option requires a value
 
 历史兼容夹具未修改。原有“夹具覆盖所有预设”断言保留，向待比较的协议列表增加独立 `vless-enc/state.json` 夹具，以覆盖第 14 项；原有 13 种协议的语义比较和凭据重生成断言均保留。
 
-热重载接入说明：原流程仅允许固定源码 pin。本阶段新增完整来源记录的 v0.3.6 Release 资格（精确 tag/version，加上启动前重新核对的二进制摘要），供实际 Release 二进制完成 VLESS-ENC MainPID 验收。缺少来源或摘要、摘要不匹配、其他 Release 和错误 pin 继续拒绝；原有拒绝路径断言未放宽。互通 CI 的来源记录如实标为 `github-release`，没有伪装成源码 pin。
+热重载接入说明：原流程仅允许固定源码 pin。本阶段仅在新增 VLESS-ENC 时增加完整来源记录的 v0.3.6 Release 资格（精确 tag/version，加上启动前重新核对的二进制摘要），供实际 Release 二进制完成 MainPID 验收。其他协议的 Release 重启策略保持不变。缺少来源或摘要、摘要不匹配、其他 Release 和错误 pin 继续拒绝；原有拒绝路径断言未放宽。互通 CI 的来源记录如实标为 `github-release`，没有伪装成源码 pin。
 
 ## 建议
 
 最终报告需明确区分真实密钥生成测试和 Xray/Mihomo 流量互通测试；客户端版本要求应由后者的实际结果填写。
+
+## 后续验证记录（尚未最终交付）
+
+- 完整测试 `ping-rust-c-clean-test` 结束时 target 为 1,050,275,840 B（1002M），根分区可用 4,470,177,792 B。
+- `ping-rust-c-final-fmt` 结束时 target 为 1,050,275,840 B，根分区可用 4,470,157,312 B。
+- `ping-rust-c-final-clippy` 的 `[job]` 退出码为 75；结束时 target 为 1,236,729,856 B（1.2G），根分区可用 4,281,593,856 B。当轮立即停止，未自行清理。
+- 再次续跑先确认没有 cargo/rustc 或活动 job，仅删除 `~/cargo-target`；删除前可用 4,283,596,800 B，删除后可用 5,520,326,656 B。空缓存 clippy 结束时 target 为 455,897,088 B（435M），根分区可用 5,064,273,920 B。没有更改 Cargo 配置或关闭磁盘守护。
+- draft PR #38 已创建。首个互通 run `40802351107` 因验收脚本漏入提交失败；补交后 run `40802760541` 在建立端点时因 Python 模块名被局部变量遮蔽失败，尚未执行九项流量用例。两次失败均不能记为互通通过。
+- 原有 Release 生命周期验收检测到热重载资格扩大改变了旧协议的重启策略（run `40802760562`，job `123214472447`）；保留该验收断言，补回归测试后修正代码。
+- 新增策略回归测试在修复前按预期失败。结束时 target 为 832,258,048 B（794M），根分区可用 4,687,896,576 B。本阶段新增的 Release 资格测试改为显式传入“新增 VLESS-ENC”操作标记，三条资格断言保持原要求；main 已有测试和断言均未修改。完整测试使用 `cargo test --locked --release`，减少 debug 测试产物与 clippy 缓存叠加的磁盘占用，未更改 Cargo 配置。
