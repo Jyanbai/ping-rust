@@ -26,8 +26,16 @@ class ReleaseMetadataTest(unittest.TestCase):
 
     def test_readme_downgrade_example_and_version_history(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("sudo ping-rust self-update --version v0.2.2 --allow-downgrade", readme)
+        self.assertRegex(readme, r"(?m)^sudo ping-rust self-update --version v0\.2\.2$")
+        self.assertIn("sudo ping-rust update --method release --allow-downgrade", readme)
         self.assertIn("v0.2.2 将默认安装的 shoes 固定为经过验证的 v0.2.7", readme)
+
+    def test_readme_self_update_commands_have_no_allow_downgrade(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertNotRegex(
+            readme,
+            r"(?m)^[^\n]*\b(?:ping-rust|prs)\s+self-update\b[^\n]*--allow-downgrade\b",
+        )
 
     def test_release_notes_state_verified_reality_clients_and_downgrade_limit(self):
         notes = (ROOT / "docs" / f"RELEASE_NOTES_v{VERSION}.md").read_text(encoding="utf-8")

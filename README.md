@@ -455,12 +455,14 @@ sudo ping-rust self-update
 
 主菜单 `6) 更新` 打开统一更新中心：可以更新 ping-rust、安装 ping-rust 已验证的 shoes 固定版本，或检查 ping-rust、shoes 与 upstream 状态。推荐使用验证过的固定提交；GitHub Release 是高级选项。
 
-`update` 只更新 shoes 内核；`self-update` 更新 ping-rust 本身。已知较低的 GitHub Release 默认会被拒绝，只有明确使用 `--allow-downgrade` 才会允许：
+`update` 只更新 shoes 内核；`self-update` 更新 ping-rust 本身。`--allow-downgrade` 只用于 `update`，即 shoes 内核降级；安装已知较低的 shoes GitHub Release 时需要显式使用该参数：
 
 ```bash
-sudo ping-rust self-update --version v0.2.2 --allow-downgrade
+sudo ping-rust self-update --version v0.2.2
 sudo ping-rust update --method release --allow-downgrade
 ```
+
+已添加 VLESS-ENC 节点时不能降级到 v0.2.x，详见[发版说明的降级限制](docs/RELEASE_NOTES_v0.3.0.md#降级限制)。
 
 成功自更新后当前旧进程会退出，请重新运行 ping-rust。shoes 安装来源记录在 `/var/lib/ping-rust/shoes-install.json`；legacy 安装没有来源记录时显示为 unknown。定期运行的 `shoes-upstream-drift` workflow 会构建并验证 cfal/shoes master，但不会自动修改生产 pin。
 
