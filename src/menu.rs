@@ -1341,7 +1341,6 @@ fn prompt_vless_enc_auth() -> Result<Option<config::VlessEncAuth>> {
 }
 
 fn prompt_vless_enc_options() -> Result<crate::vless_encryption::Options> {
-    println!("VLESS-ENC 不套 TLS；安全性完全依赖 VLESS Encryption。");
     let mode = prompt_vless_enc_mode()?.context("已取消添加 VLESS-ENC")?;
     let auth = prompt_vless_enc_auth()?.context("已取消添加 VLESS-ENC")?;
     let vision = Confirm::with_theme(&ColorfulTheme::default())
