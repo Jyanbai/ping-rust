@@ -191,7 +191,7 @@ const PRESETS: &[PresetDescriptor] = &[
         protocol: Protocol::VlessEnc,
         menu_number: 14,
         menu_label: "VLESS-ENC",
-        advanced_label: "VLESS-ENC（不套 TLS）",
+        advanced_label: "VLESS-ENC",
         slug: "vless-enc",
         display_prefix: "VLESS-ENC",
         tcp_required: true,
