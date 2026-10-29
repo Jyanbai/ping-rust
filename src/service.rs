@@ -102,6 +102,17 @@ impl HotReloadReadiness {
     }
 }
 
+fn hot_reload_supported(shoes: &installer::ShoesProvenance) -> bool {
+    // load_provenance verifies that the installed binary still matches its digest.
+    (shoes.source == "verified-pin" && shoes.revision.as_deref() == Some(installer::verified_pin()))
+        || (shoes.source == "github-release"
+            && shoes.release_tag.as_deref() == Some("v0.3.6")
+            && shoes.version.as_deref() == Some("0.3.6")
+            && shoes.binary_sha256.as_ref().is_some_and(|digest| {
+                digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+            }))
+}
+
 fn hot_reload_unavailable_reason(
     was_active: bool,
     unit_matches: bool,
@@ -112,9 +123,7 @@ fn hot_reload_unavailable_reason(
         Some(HotReloadReason::ServiceNotRunning)
     } else if !unit_matches {
         Some(HotReloadReason::UnitModified)
-    } else if shoes.source != "verified-pin"
-        || shoes.revision.as_deref() != Some(installer::verified_pin())
-    {
+    } else if !hot_reload_supported(shoes) {
         Some(HotReloadReason::ShoesSourceUnsupported(shoes.clone()))
     } else if !drop_ins.is_empty() && drop_ins != "-" {
         Some(HotReloadReason::DropInPresent)
@@ -267,9 +276,7 @@ pub fn capture_hot_reload_snapshot(snapshot: &ServiceSnapshot) -> Result<HotRelo
         ));
     }
     let shoes = installer::load_provenance();
-    if shoes.source != "verified-pin"
-        || shoes.revision.as_deref() != Some(installer::verified_pin())
-    {
+    if !hot_reload_supported(&shoes) {
         return Ok(HotReloadReadiness::Unavailable(
             HotReloadReason::ShoesSourceUnsupported(shoes),
         ));
@@ -576,6 +583,23 @@ fn ensure_systemctl() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vless_enc_verified_v036_release_can_hot_reload_but_incomplete_metadata_cannot() {
+        let mut release = installer::ShoesProvenance {
+            source: "github-release".into(),
+            release_tag: Some("v0.3.6".into()),
+            version: Some("0.3.6".into()),
+            binary_sha256: Some("a".repeat(64)),
+            ..Default::default()
+        };
+        assert!(hot_reload_unavailable_reason(true, true, &release, "").is_none());
+        release.release_tag = Some("v0.3.7".into());
+        assert!(hot_reload_unavailable_reason(true, true, &release, "").is_some());
+        release.release_tag = Some("v0.3.6".into());
+        release.binary_sha256 = None;
+        assert!(hot_reload_unavailable_reason(true, true, &release, "").is_some());
+    }
 
     fn pin_provenance() -> installer::ShoesProvenance {
         installer::ShoesProvenance {

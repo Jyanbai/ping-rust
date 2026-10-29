@@ -1,0 +1,123 @@
+name: VLESS-ENC interoperability
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  clients:
+    name: Pinned Xray and Mihomo VLESS-ENC matrix
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Build interoperability binary
+        run: cargo build --locked --release
+      - name: Download pinned clients and shoes with checksum verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          directory="$RUNNER_TEMP/vless-enc-binaries"
+          mkdir -p "$directory"
+          curl -fsSL --retry 3 --proto '=https' --tlsv1.2 \
+            https://github.com/cfal/shoes/releases/download/v0.3.6/shoes-x86_64-unknown-linux-musl.tar.gz \
+            -o "$directory/shoes.tar.gz"
+          echo "d09a9f5915ae8c3fc933bd86c025f2d8878d45e1dee8f0e2bb404c920de8c707  $directory/shoes.tar.gz" | sha256sum --check --strict
+          tar -xzf "$directory/shoes.tar.gz" -C "$directory"
+          sudo install -m 0755 "$directory/shoes" /usr/local/bin/shoes
+          # Record the same honest Release provenance as the installer. The
+          # archive above was checksum verified; runtime rechecks this binary digest.
+          sudo python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          os.umask(0o077)
+          root = Path('/var/lib/ping-rust')
+          root.mkdir(parents=True, exist_ok=True, mode=0o700)
+          record = {'source': 'github-release', 'version': '0.3.6', 'revision': None,
+                    'release_tag': 'v0.3.6', 'binary_sha256': hashlib.sha256(Path('/usr/local/bin/shoes').read_bytes()).hexdigest()}
+          (root / 'shoes-install.json').write_text(json.dumps(record))
+          (root / 'shoes-install.json').chmod(0o600)
+          PY
+          curl -fsSL --retry 3 --proto '=https' --tlsv1.2 \
+            https://github.com/XTLS/Xray-core/releases/download/v26.6.27/Xray-linux-64.zip \
+            -o "$directory/xray.zip"
+          echo "b3e5902d06d6282fe53cfa2fc426058b9aeaa429b2c812e20887cd47f26d08bf  $directory/xray.zip" | sha256sum --check --strict
+          unzip -oq "$directory/xray.zip" xray -d "$directory"
+          chmod 0755 "$directory/xray"
+          curl -fsSL --retry 3 --proto '=https' --tlsv1.2 \
+            https://github.com/MetaCubeX/mihomo/releases/download/v1.19.33/mihomo-linux-amd64-v1-v1.19.33.gz \
+            -o "$directory/mihomo.gz"
+          echo "8ec92e7b2fdc6b853ba00156bab7e4e965c8b0d843b8c4ac8ab98795f02ad524  $directory/mihomo.gz" | sha256sum --check --strict
+          gzip -dc "$directory/mihomo.gz" > "$directory/mihomo"
+          chmod 0755 "$directory/mihomo"
+          "$directory/shoes" --version
+          "$directory/xray" version | head -n 1
+          "$directory/mihomo" -v
+      - name: Nine proxy cases, endpoint receipts, MainPID and credential audits
+        shell: bash
+        run: |
+          set -euo pipefail
+          trap 'sudo chmod -R a+rX "$RUNNER_TEMP/vless-enc-records" 2>/dev/null || true' EXIT
+          sudo env PING_RUST="$PWD/target/release/ping-rust" \
+            XRAY="$RUNNER_TEMP/vless-enc-binaries/xray" \
+            MIHOMO="$RUNNER_TEMP/vless-enc-binaries/mihomo" \
+            WORK="$RUNNER_TEMP/vless-enc-runtime" \
+            RECORDS="$RUNNER_TEMP/vless-enc-records" \
+            python3 scripts/ci/vless-encryption-acceptance.py
+          sudo chmod -R a+rX "$RUNNER_TEMP/vless-enc-records"
+      - name: Upload audited records only
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: vless-enc-records
+          path: ${{ runner.temp }}/vless-enc-records
+          if-no-files-found: error
+
+  secret-audit:
+    name: VLESS-ENC artifact and uploaded job log secret audit
+    needs: clients
+    if: always()
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: vless-enc-records
+          path: records
+      - name: Inspect exact uploaded artifact and completed client job log
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          job_id="$(gh api "repos/$GH_REPO/actions/runs/$RUN_ID/jobs" --jq '.jobs[] | select(.name == "Pinned Xray and Mihomo VLESS-ENC matrix") | .id')"
+          test -n "$job_id"
+          gh api "repos/$GH_REPO/actions/jobs/$job_id/logs" > completed-job.log
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          import re
+          forbidden = re.compile(rb'mlkem768x25519plus\.(?:native|xorpub|random)\.600s\.[A-Za-z0-9_-]+')
+          paths = [Path('completed-job.log')] + [p for p in Path('records').rglob('*') if p.is_file()]
+          for path in paths:
+              if forbidden.search(path.read_bytes()):
+                  raise SystemExit('decryption detected; content withheld')
+          report = json.loads(Path('records/results.json').read_text())
+          assert report['artifact_secret_audit']
+          assert len(report['cases']) == 9
+          assert all(case['result'] == 'PASS' and case['endpoint_requests'] == 1 and case['main_pid_unchanged'] for case in report['cases'])
+          print('Uploaded artifact and completed job log: no decryption strings; all nine cases passed.')
+          PY

@@ -85,6 +85,11 @@ pub fn stored_share_uri(profile: &ManagedProfile, override_server: Option<&str>)
 }
 
 pub fn render(profile: &ManagedProfile, format: ClientFormat, server: &str) -> Result<String> {
+    if matches!(profile.credentials, Credentials::VlessEnc { .. })
+        && matches!(format, ClientFormat::SingBox | ClientFormat::Nekobox)
+    {
+        bail!("sing-box 和 NekoBox 暂不支持 VLESS Encryption；请使用 Mihomo 或 Xray");
+    }
     profile.validate_h2mux()?;
     let server = normalize_server_address(server)?;
     match format {
@@ -105,6 +110,23 @@ fn clash_meta(profile: &ManagedProfile, server: &str) -> Result<String> {
         bail!("当前 Mihomo H2MUX 存在已知兼容问题；请使用 sing-box 导出，或关闭 H2MUX preference 后导出普通 Mihomo 节点");
     }
     let proxy = match &profile.credentials {
+        Credentials::VlessEnc {
+            user_id,
+            encryption,
+            vision,
+            udp_enabled,
+            ..
+        } => {
+            let mut proxy = json!({
+                "name": profile.name, "type": "vless", "server": server,
+                "port": profile.port, "uuid": user_id, "network": "tcp",
+                "udp": udp_enabled, "tls": false, "encryption": encryption,
+            });
+            if *vision {
+                proxy["flow"] = json!("xtls-rprx-vision");
+            }
+            proxy
+        }
         Credentials::Reality {
             user_id,
             public_key,
@@ -395,6 +417,7 @@ fn sing_box(profile: &ManagedProfile, server: &str) -> Result<String> {
         .context("生成 sing-box ShadowTLS JSON 失败");
     }
     let mut outbound: Value = match &profile.credentials {
+        Credentials::VlessEnc { .. } => bail!("sing-box 暂不支持 VLESS Encryption"),
         Credentials::Reality {
             user_id,
             public_key,
@@ -630,6 +653,26 @@ pub fn share_uri(profile: &ManagedProfile, server: &str) -> Result<String> {
     let host = authority_host(&server);
     let fragment = encode(&profile.display_name());
     match &profile.credentials {
+        Credentials::VlessEnc {
+            user_id,
+            encryption,
+            vision,
+            ..
+        } => {
+            let mut query = Serializer::new(String::new());
+            query
+                .append_pair("encryption", encryption)
+                .append_pair("security", "none")
+                .append_pair("type", "tcp");
+            if *vision {
+                query.append_pair("flow", "xtls-rprx-vision");
+            }
+            Ok(format!(
+                "vless://{user_id}@{host}:{}?{}#{fragment}",
+                profile.port,
+                query.finish()
+            ))
+        }
         Credentials::Reality {
             user_id,
             public_key,

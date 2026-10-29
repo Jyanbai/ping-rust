@@ -16,6 +16,7 @@ mod tls;
 mod trojan_reality;
 mod trojan_tls;
 mod tuic;
+pub(super) mod vless_enc;
 mod vless_tls_vision;
 mod vless_ws_tls;
 mod vmess_ws_tls;
@@ -186,6 +187,17 @@ const PRESETS: &[PresetDescriptor] = &[
         udp_required: false,
         generator: naiveproxy::generate,
     },
+    PresetDescriptor {
+        protocol: Protocol::VlessEnc,
+        menu_number: 14,
+        menu_label: "VLESS-ENC",
+        advanced_label: "VLESS-ENC（不套 TLS）",
+        slug: "vless-enc",
+        display_prefix: "VLESS-ENC",
+        tcp_required: true,
+        udp_required: false,
+        generator: vless_enc::generate,
+    },
 ];
 
 pub(super) fn all() -> &'static [PresetDescriptor] {
@@ -234,6 +246,7 @@ mod tests {
             Protocol::Socks5,
             Protocol::Snell,
             Protocol::NaiveProxy,
+            Protocol::VlessEnc,
         ];
         assert_eq!(PRESETS.len(), expected.len());
         for (index, (preset, protocol)) in PRESETS.iter().zip(expected).enumerate() {

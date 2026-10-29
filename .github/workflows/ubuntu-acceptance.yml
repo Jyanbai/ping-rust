@@ -695,7 +695,7 @@ jobs:
           spawn $env(PRS_COMMAND)
           wait_for {请选择 \[0-10\]} main-menu
           send "1\r"
-          wait_for {请选择 \[0-13\]} protocol-menu
+          wait_for {请选择 \[0-14\]} protocol-menu
           send "$env(PROTOCOL_NUMBER)\r"
           if {$env(PROTOCOL_NUMBER) == "3"} {
             wait_for {Shadowsocks 模式} shadowsocks-mode-menu
@@ -703,6 +703,14 @@ jobs:
           }
           wait_for {输入端口} port-prompt
           send "$env(MENU_PORT)\r"
+          if {$env(PROTOCOL_NUMBER) == "14"} {
+            wait_for {VLESS Encryption 外观} encryption-mode
+            send "1\r"
+            wait_for {VLESS Encryption 认证} encryption-auth
+            send "1\r"
+            wait_for {开启 Vision} encryption-vision
+            send "n\r"
+          }
           if {$env(PROTOCOL_NUMBER) == "3"} {
             wait_for {请选择加密方式} shadowsocks-cipher-menu
             send "\r"
@@ -716,12 +724,34 @@ jobs:
             wait_for "$env(SHARE_SCHEME)://" share-uri
             wait_for {二维码 \(QR\)} add-qr-heading
             wait_for {▀|▄|█} add-qr-blocks
+            if {$env(PROTOCOL_NUMBER) == "14"} {
+              wait_for {重新生成密钥} encryption-regeneration
+              send "n\r"
+            }
           }
           expect { eof {} timeout { puts stderr "timeout waiting for add exit"; exit 23 } }
           EXPECT
           }
 
           run_menu_add 4 25448 vless
+          enc_pid_before="$(sudo systemctl show shoes.service -p MainPID --value)"
+          run_menu_add 14 25466 vless
+          test "$(sudo systemctl show shoes.service -p MainPID --value)" = "$enc_pid_before"
+          sudo python3 - <<'PY'
+          import json
+          from pathlib import Path
+          import stat
+          profile = Path('/etc/shoes/profiles/VLESS-ENC-25466.yaml')
+          assert stat.S_IMODE(profile.stat().st_mode) == 0o600
+          assert stat.S_IMODE(Path('/etc/shoes/config.yaml').stat().st_mode) == 0o600
+          text = profile.read_text()
+          assert 'type: vless' in text and 'decryption:' in text
+          assert 'tls_targets:' not in text and 'reality_targets:' not in text
+          state = Path('/etc/shoes/ping-rust-state.json').read_text()
+          assert 'decryption' not in state
+          assert any(p['port'] == 25466 and 'VlessEnc' in p['credentials'] for p in json.loads(state)['profiles'])
+          print('VLESS-ENC numeric PTY, 0600 runtime files, public state and unchanged MainPID: PASS')
+          PY
           run_menu_add 3 25449 ss
           sudo env PRS_COMMAND="$PRS" expect <<'EXPECT'
           log_user 0
@@ -729,7 +759,7 @@ jobs:
           spawn $env(PRS_COMMAND)
           expect -re {请选择 \[0-10\]}
           send "1\r"
-          expect -re {请选择 \[0-13\]}
+          expect -re {请选择 \[0-14\]}
           send "3\r"
           expect {Shadowsocks 模式}
           send "2\r"
@@ -782,7 +812,7 @@ jobs:
           spawn $env(PRS_COMMAND)
           expect -re {请选择 \[0-10\]}
           send "1\r"
-          expect -re {请选择 \[0-13\]}
+          expect -re {请选择 \[0-14\]}
           send "13\r"
           expect {输入端口}
           send "25464\r"
