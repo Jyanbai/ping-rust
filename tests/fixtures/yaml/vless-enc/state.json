@@ -1,0 +1,23 @@
+{
+  "schema_version": 2,
+  "profiles": [
+    {
+      "self_signed_certificate": false,
+      "certificate_key_path": null,
+      "name": "golden-vless-enc",
+      "port": 24444,
+      "id": "b85798ef-e9dc-46a4-9a87-8da4499d36d0",
+      "credentials": {
+        "VlessEnc": {
+          "auth": "x25519",
+          "encryption": "mlkem768x25519plus.native.0rtt.BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+          "mode": "native",
+          "vision": false,
+          "user_id": "b85798ef-e9dc-46a4-9a87-8da4499d36d0",
+          "udp_enabled": true
+        }
+      },
+      "certificate_path": null
+    }
+  ]
+}

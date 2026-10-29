@@ -172,6 +172,8 @@ pub enum Command {
 
 #[derive(Debug, Args)]
 pub struct AddArgs {
+    #[command(flatten)]
+    pub vless_enc: crate::vless_encryption::Options,
     #[arg(value_enum)]
     pub protocol: Protocol,
     /// 快速添加位置参数端口，例如 `prs add reality 443`
@@ -232,6 +234,8 @@ pub struct AddArgs {
 
 #[derive(Debug, Args)]
 pub struct GenerateArgs {
+    #[command(flatten)]
+    vless_enc: crate::vless_encryption::Options,
     /// 配置显示名称
     #[arg(long)]
     name: Option<String>,
@@ -361,6 +365,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
         Command::Generate(args) => {
             let GenerateArgs {
+                vless_enc,
                 name,
                 protocol,
                 port,
@@ -424,6 +429,9 @@ pub async fn run(cli: Cli) -> Result<()> {
             {
                 bail!("NaiveProxy --padding 不需要参数，且不能与 --no-padding 并用");
             }
+            if protocol == Protocol::VlessEnc {
+                vless_enc.warn();
+            }
             let shadowsocks_cipher = cipher.unwrap_or_default();
             let snell_cipher = if matches!(protocol, Protocol::Snell) {
                 cipher
@@ -455,6 +463,9 @@ pub async fn run(cli: Cli) -> Result<()> {
                 certificate: cert,
                 certificate_key: key,
                 options: GenerationOptions {
+                    vless_enc_mode: vless_enc.mode,
+                    vless_enc_auth: vless_enc.auth,
+                    vless_enc_vision: vless_enc.vision,
                     reality_short_id: short_id,
                     reality_max_time_diff,
                     udp_enabled: udp || !disable_udp,
@@ -799,6 +810,7 @@ async fn run_add(mut args: AddArgs) -> Result<()> {
     }
     ensure_shoes_for_add(args.yes).await?;
     let result = fast_add::execute(fast_add::AddRequest {
+        vless_enc: args.vless_enc,
         name: args.name,
         protocol: args.protocol,
         port: args.port.or(args.legacy_port),
@@ -861,6 +873,7 @@ pub(crate) async fn bootstrap_default_reality() -> Result<bool> {
     let server_address = fast_add::resolve_server_address(None).await?;
     let result = fast_add::execute(fast_add::AddRequest {
         name: Some("reality-default".to_owned()),
+        vless_enc: Default::default(),
         protocol: Protocol::Reality,
         port: None,
         server_address: Some(server_address),
@@ -933,6 +946,25 @@ fn profile_details_lines(profile: &config::ManagedProfile, share_uri: Option<&st
     )];
     let address = profile.server_address.as_deref().unwrap_or("未保存");
     match &profile.credentials {
+        config::Credentials::VlessEnc {
+            user_id,
+            encryption,
+            mode,
+            auth,
+            vision,
+            ..
+        } => {
+            lines.push(format!("地址：{address}"));
+            lines.push(format!("端口：{}", profile.port));
+            lines.push(format!("UUID：{user_id}"));
+            lines.push(format!(
+                "模式：{} / {} / Vision={vision}",
+                mode.as_str(),
+                auth.as_str()
+            ));
+            lines.push(format!("Encryption：{encryption}"));
+            lines.push("不套 TLS；安全性完全依赖 VLESS Encryption。".to_owned());
+        }
         config::Credentials::Reality {
             user_id,
             public_key,
@@ -1257,7 +1289,10 @@ fn profile_details_lines(profile: &config::ManagedProfile, share_uri: Option<&st
     lines
 }
 
-fn profile_details_text(profile: &config::ManagedProfile, share_uri: Option<&str>) -> String {
+pub(crate) fn profile_details_text(
+    profile: &config::ManagedProfile,
+    share_uri: Option<&str>,
+) -> String {
     let mut lines = profile_details_lines(profile, share_uri);
     lines.push("------------- END -------------".to_owned());
     lines.join("\n")
@@ -1277,6 +1312,9 @@ fn profile_details_with_qr_text(
 }
 
 fn terminal_qr_text(value: &str) -> Result<String> {
+    if value.len() > 1200 {
+        bail!("二维码内容过长（超过 1200 字节），终端二维码过密，可能无法扫描；请复制分享链接");
+    }
     let code = QrCode::new(value.as_bytes()).context("二维码内容过长，无法编码")?;
     Ok(code.render::<unicode::Dense1x2>().quiet_zone(true).build())
 }
@@ -1542,6 +1580,15 @@ pub async fn show_info(selector: Option<&str>) -> Result<()> {
             };
             println!("配置数量：{}", profiles.len());
             for profile in profiles {
+                if matches!(profile.credentials, config::Credentials::VlessEnc { .. }) {
+                    let uri = profile
+                        .server_address
+                        .as_deref()
+                        .map(|server| client::share_uri(profile, server))
+                        .transpose()?;
+                    println!("{}", profile_details_text(profile, uri.as_deref()));
+                    continue;
+                }
                 for line in profile.naive_certificate_details() {
                     println!("  {line}");
                 }
@@ -1646,6 +1693,23 @@ pub fn print_credentials(result: &config::GenerationResult) {
     );
     println!("配置 ID：{}", result.profile_id);
     match &result.credentials {
+        config::Credentials::VlessEnc {
+            user_id,
+            encryption,
+            mode,
+            auth,
+            vision,
+            ..
+        } => {
+            println!("协议：VLESS-ENC");
+            println!("UUID：{user_id}");
+            println!(
+                "模式：{} / {} / Vision={vision}",
+                mode.as_str(),
+                auth.as_str()
+            );
+            println!("Encryption：{encryption}");
+        }
         config::Credentials::Reality {
             user_id,
             private_key,
@@ -1887,6 +1951,44 @@ fn print_certificate_notice(result: &config::GenerationResult) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn vless_enc_cli_defaults_and_advanced_options() {
+        use clap::Parser;
+        let cli = super::Cli::try_parse_from(["prs", "add", "vless-enc"]).unwrap();
+        let Some(super::Command::Add(args)) = cli.command else {
+            panic!("add expected")
+        };
+        assert_eq!(args.protocol, crate::config::Protocol::VlessEnc);
+        assert_eq!(args.vless_enc.mode, crate::config::VlessEncMode::Native);
+        assert_eq!(args.vless_enc.auth, crate::config::VlessEncAuth::X25519);
+        assert!(!args.vless_enc.vision);
+        let cli = super::Cli::try_parse_from([
+            "prs",
+            "generate",
+            "vless-enc",
+            "--encryption-mode",
+            "random",
+            "--encryption-auth",
+            "mlkem768",
+            "--vision",
+        ])
+        .unwrap();
+        let Some(super::Command::Generate(args)) = cli.command else {
+            panic!("generate expected")
+        };
+        assert_eq!(args.vless_enc.mode, crate::config::VlessEncMode::Random);
+        assert_eq!(args.vless_enc.auth, crate::config::VlessEncAuth::Mlkem768);
+        assert!(args.vless_enc.vision);
+        assert!(super::Cli::try_parse_from([
+            "prs",
+            "add",
+            "vless-enc",
+            "--encryption-mode",
+            "sudoku"
+        ])
+        .is_err());
+        assert!(super::terminal_qr_text(&"x".repeat(1201)).is_err());
+    }
     use super::*;
 
     #[test]

@@ -250,9 +250,7 @@ jobs:
             || { echo "error: failure output unexpectedly large (${#err} bytes)" >&2; exit 1; }
           rm -rf -- "$asset_root" "$install_root"
       - run: cargo fmt --all -- --check
-      - run: cargo test --locked
-      - name: Install stable shoes for chain traffic acceptance
-        if: matrix.os == 'ubuntu-24.04'
+      - name: Install stable shoes for unit and chain traffic acceptance
         shell: bash
         env:
           SHOES_ARCHIVE_SHA256: d09a9f5915ae8c3fc933bd86c025f2d8878d45e1dee8f0e2bb404c920de8c707
@@ -267,6 +265,10 @@ jobs:
           mkdir -p "$directory"
           tar -xzf "$archive" -C "$directory"
           test -x "$directory/shoes"
+      - name: Unit and integration tests
+        env:
+          PING_RUST_TEST_SHOES: ${{ runner.temp }}/shoes-v0.3.6/shoes
+        run: cargo test --locked
       - name: Prove stable shoes chain traffic has no direct fallback
         if: matrix.os == 'ubuntu-24.04'
         env:
@@ -419,9 +421,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: ${{ matrix.name }}
-      - run: cargo test --locked
-      - name: Install stable shoes for chain traffic acceptance
-        if: matrix.name == 'Debian 12'
+      - name: Install stable shoes for unit and chain traffic acceptance
         shell: bash
         env:
           SHOES_ARCHIVE_SHA256: d09a9f5915ae8c3fc933bd86c025f2d8878d45e1dee8f0e2bb404c920de8c707
@@ -436,6 +436,10 @@ jobs:
           mkdir -p "$directory"
           tar -xzf "$archive" -C "$directory"
           test -x "$directory/shoes"
+      - name: Unit and integration tests
+        env:
+          PING_RUST_TEST_SHOES: ${{ runner.temp }}/shoes-v0.3.6/shoes
+        run: cargo test --locked
       - name: Prove stable shoes chain traffic has no direct fallback
         if: matrix.name == 'Debian 12'
         env:

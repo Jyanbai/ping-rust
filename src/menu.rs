@@ -3,7 +3,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use colored::Colorize;
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, Password};
 
@@ -60,6 +60,9 @@ const SHOES_UPDATE_ITEMS: [&str; 2] = [
 
 #[derive(Clone, Copy)]
 enum ChangeAction {
+    VlessEncMode,
+    VlessEncAuth,
+    VlessEncVision,
     H2Mux,
     Port,
     Name,
@@ -286,6 +289,21 @@ async fn change_config_menu() -> Result<()> {
         (ChangeAction::RegenerateCredentials, "重新生成全部协议凭据"),
     ];
     match profile.protocol() {
+        Protocol::VlessEnc => {
+            actions[3] = (
+                ChangeAction::RegenerateCredentials,
+                "重新生成 VLESS Encryption 密钥",
+            );
+            actions.push((
+                ChangeAction::VlessEncMode,
+                "更改 VLESS Encryption 外观（重新生成密钥）",
+            ));
+            actions.push((
+                ChangeAction::VlessEncAuth,
+                "更改 VLESS Encryption 认证（重新生成密钥）",
+            ));
+            actions.push((ChangeAction::VlessEncVision, "开启或关闭 Vision"));
+        }
         Protocol::Reality => actions.push((ChangeAction::RealityServerName, "更改 SNI")),
         Protocol::Hysteria2 | Protocol::Tuic => {
             actions.push((ChangeAction::Password, "更改密码"));
@@ -348,6 +366,29 @@ async fn change_config_menu() -> Result<()> {
     };
     let action = actions[action_index].0;
     let change = match action {
+        ChangeAction::VlessEncMode => {
+            let Some(mode) = prompt_vless_enc_mode()? else {
+                return Ok(());
+            };
+            ProfileChange::VlessEncMode(mode)
+        }
+        ChangeAction::VlessEncAuth => {
+            let Some(auth) = prompt_vless_enc_auth()? else {
+                return Ok(());
+            };
+            ProfileChange::VlessEncAuth(auth)
+        }
+        ChangeAction::VlessEncVision => {
+            let Credentials::VlessEnc { vision, .. } = &profile.credentials else {
+                bail!("配置协议不一致");
+            };
+            ProfileChange::VlessEncVision(
+                Confirm::with_theme(&ColorfulTheme::default())
+                    .with_prompt("开启 Vision？")
+                    .default(*vision)
+                    .interact()?,
+            )
+        }
         ChangeAction::H2Mux => {
             let Some(options) = prompt_h2mux_options(&profile.h2mux)? else {
                 return Ok(());
@@ -658,6 +699,9 @@ async fn change_config_menu() -> Result<()> {
     );
     if let Some(server) = result.profile.server_address.as_deref() {
         match client::share_uri(&result.profile, server) {
+            Ok(uri) if result.profile.protocol() == Protocol::VlessEnc => {
+                cli::print_share_uri_with_qr(&uri)
+            }
             Ok(uri) => println!("\n{uri}\n"),
             Err(error) => eprintln!("分享链接生成失败：{error:#}"),
         }
@@ -1084,6 +1128,7 @@ async fn fast_add_config_menu() -> Result<MenuControl> {
         cli::ensure_shoes_for_add(false).await?;
         let server_address = resolve_menu_server_address().await?;
         let result = fast_add::execute(fast_add::AddRequest {
+            vless_enc: Default::default(),
             name: None,
             protocol,
             port,
@@ -1254,6 +1299,76 @@ fn prepare_shadowsocks_password(
     }
 }
 
+fn prompt_vless_enc_mode() -> Result<Option<config::VlessEncMode>> {
+    let Some(index) = select_numbered(
+        "VLESS Encryption 外观",
+        &[
+            "native（默认）",
+            "xorpub（混淆公钥）",
+            "random（关闭 TCP splice）",
+        ],
+    )?
+    else {
+        return Ok(None);
+    };
+    let mode = [
+        config::VlessEncMode::Native,
+        config::VlessEncMode::Xorpub,
+        config::VlessEncMode::Random,
+    ][index];
+    if mode == config::VlessEncMode::Random {
+        println!("提示：random 会关闭 TCP splice。");
+    }
+    Ok(Some(mode))
+}
+
+fn prompt_vless_enc_auth() -> Result<Option<config::VlessEncAuth>> {
+    let Some(index) = select_numbered(
+        "VLESS Encryption 认证",
+        &[
+            "x25519（默认）",
+            "mlkem768（链接约 1.6 KB，二维码可能无法扫描）",
+        ],
+    )?
+    else {
+        return Ok(None);
+    };
+    let auth = [config::VlessEncAuth::X25519, config::VlessEncAuth::Mlkem768][index];
+    if auth == config::VlessEncAuth::Mlkem768 {
+        println!("提示：mlkem768 分享链接约 1.6 KB，二维码可能无法扫描。");
+    }
+    Ok(Some(auth))
+}
+
+fn prompt_vless_enc_options() -> Result<crate::vless_encryption::Options> {
+    println!("VLESS-ENC 不套 TLS；安全性完全依赖 VLESS Encryption。");
+    let mode = prompt_vless_enc_mode()?.context("已取消添加 VLESS-ENC")?;
+    let auth = prompt_vless_enc_auth()?.context("已取消添加 VLESS-ENC")?;
+    let vision = Confirm::with_theme(&ColorfulTheme::default())
+        .with_prompt("开启 Vision？")
+        .default(false)
+        .interact()?;
+    Ok(crate::vless_encryption::Options { mode, auth, vision })
+}
+
+async fn offer_vless_enc_regeneration(profile: &config::ManagedProfile) -> Result<()> {
+    if profile.protocol() != Protocol::VlessEnc {
+        return Ok(());
+    }
+    while Confirm::with_theme(&ColorfulTheme::default())
+        .with_prompt("重新生成密钥？（会使刚才的分享链接失效）")
+        .default(false)
+        .interact()?
+    {
+        let result =
+            deployment::update_and_activate(profile.id, ProfileChange::RegenerateCredentials)
+                .await?;
+        let uri = client::stored_share_uri(&result.profile, None)?;
+        cli::print_profile_details_with_qr(&result.profile, Some(&uri));
+    }
+    Ok(())
+}
+
 async fn deploy_fast_config(
     protocol: Protocol,
     port: Option<u16>,
@@ -1263,6 +1378,11 @@ async fn deploy_fast_config(
 ) -> Result<MenuControl> {
     let server_address = resolve_menu_server_address().await?;
     let result = fast_add::execute(fast_add::AddRequest {
+        vless_enc: if protocol == Protocol::VlessEnc {
+            prompt_vless_enc_options()?
+        } else {
+            Default::default()
+        },
         name: None,
         protocol,
         port,
@@ -1283,6 +1403,7 @@ async fn deploy_fast_config(
     })
     .await?;
     cli::print_add_result(&result);
+    offer_vless_enc_regeneration(&result.generation.profile).await?;
     Ok(control_after_success(1))
 }
 
@@ -1324,6 +1445,12 @@ async fn advanced_add_config_menu() -> Result<()> {
         })
         .interact_text()?;
     let mut options = GenerationOptions::default();
+    if protocol == Protocol::VlessEnc {
+        let selected = prompt_vless_enc_options()?;
+        options.vless_enc_mode = selected.mode;
+        options.vless_enc_auth = selected.auth;
+        options.vless_enc_vision = selected.vision;
+    }
     let mut shadowtls_server_name = None;
     if matches!(protocol, Protocol::Shadowsocks) {
         let Some(mode) = select_numbered(
@@ -1528,7 +1655,7 @@ async fn advanced_add_config_menu() -> Result<()> {
         shadowtls_server_name.unwrap_or_else(|| config::DEFAULT_SNI.to_owned())
     } else if matches!(
         protocol,
-        Protocol::Shadowsocks | Protocol::Snell | Protocol::Socks5
+        Protocol::Shadowsocks | Protocol::Snell | Protocol::Socks5 | Protocol::VlessEnc
     ) {
         config::DEFAULT_SNI.to_owned()
     } else {
@@ -1601,6 +1728,7 @@ async fn advanced_add_config_menu() -> Result<()> {
         }
     }
     println!("{}", "配置验证通过，服务已启动。".green());
+    offer_vless_enc_regeneration(&result.profile).await?;
     Ok(())
 }
 

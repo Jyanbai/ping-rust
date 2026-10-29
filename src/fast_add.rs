@@ -22,6 +22,7 @@ const ADDRESS_ENDPOINTS: &[&str] = &[
 ];
 
 pub struct AddRequest {
+    pub vless_enc: crate::vless_encryption::Options,
     pub name: Option<String>,
     pub protocol: Protocol,
     pub port: Option<u16>,
@@ -59,7 +60,15 @@ pub async fn execute(request: AddRequest) -> Result<AddResult> {
         request.protocol,
         config::AnyTlsMode::Tls,
     );
-    let mut options = GenerationOptions::default();
+    let mut options = GenerationOptions {
+        vless_enc_mode: request.vless_enc.mode,
+        vless_enc_auth: request.vless_enc.auth,
+        vless_enc_vision: request.vless_enc.vision,
+        ..Default::default()
+    };
+    if request.protocol == Protocol::VlessEnc {
+        request.vless_enc.warn();
+    }
     if matches!(request.protocol, Protocol::Shadowsocks) {
         options.shadowsocks_cipher = request.shadowsocks_cipher.unwrap_or_default();
         options.shadowsocks_password = request.shadowsocks_password;

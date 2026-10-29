@@ -8,6 +8,7 @@ use std::{
 };
 
 use crate::h2mux::H2MuxOptions;
+pub use crate::vless_encryption::{VlessEncAuth, VlessEncMode};
 use anyhow::{bail, Context, Result};
 use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
@@ -37,6 +38,8 @@ mod validation;
 
 #[cfg(test)]
 mod naive_certificate_tests;
+#[cfg(test)]
+mod vless_encryption_tests;
 #[cfg(test)]
 mod yaml_fixture_tests;
 
@@ -102,6 +105,8 @@ pub enum Protocol {
     Snell,
     #[value(name = "naiveproxy", alias = "naive")]
     NaiveProxy,
+    #[value(name = "vless-enc")]
+    VlessEnc,
 }
 
 impl Protocol {
@@ -340,6 +345,9 @@ pub(crate) fn generated_socks5_username() -> String {
 
 #[derive(Clone, Debug)]
 pub struct GenerationOptions {
+    pub vless_enc_mode: VlessEncMode,
+    pub vless_enc_auth: VlessEncAuth,
+    pub vless_enc_vision: bool,
     pub reality_short_id: Option<String>,
     pub reality_max_time_diff: u64,
     pub udp_enabled: bool,
@@ -371,6 +379,9 @@ pub struct GenerationOptions {
 impl Default for GenerationOptions {
     fn default() -> Self {
         Self {
+            vless_enc_mode: VlessEncMode::default(),
+            vless_enc_auth: VlessEncAuth::default(),
+            vless_enc_vision: false,
             reality_short_id: None,
             reality_max_time_diff: 60_000,
             udp_enabled: true,
@@ -415,6 +426,9 @@ pub struct GenerationRequest {
 }
 
 pub enum ProfileChange {
+    VlessEncMode(VlessEncMode),
+    VlessEncAuth(VlessEncAuth),
+    VlessEncVision(bool),
     H2Mux(H2MuxOptions),
     Name(String),
     Port(u16),
@@ -472,6 +486,14 @@ pub(crate) struct ChainProxyUpdateResult {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub enum Credentials {
+    VlessEnc {
+        user_id: Uuid,
+        encryption: String,
+        mode: VlessEncMode,
+        auth: VlessEncAuth,
+        vision: bool,
+        udp_enabled: bool,
+    },
     Reality {
         user_id: Uuid,
         private_key: String,
@@ -652,6 +674,7 @@ impl ManagedProfile {
 
     pub fn protocol(&self) -> Protocol {
         match &self.credentials {
+            Credentials::VlessEnc { .. } => Protocol::VlessEnc,
             Credentials::Reality { .. } => Protocol::Reality,
             Credentials::Hysteria2 { .. } => Protocol::Hysteria2,
             Credentials::Tuic { .. } => Protocol::Tuic,
@@ -682,6 +705,7 @@ impl ManagedProfile {
 
     pub fn protocol_name(&self) -> &'static str {
         match &self.credentials {
+            Credentials::VlessEnc { .. } => "VLESS-ENC",
             Credentials::Reality { .. } => "VLESS-Reality-Vision",
             Credentials::Hysteria2 { .. } => "Hysteria2",
             Credentials::Tuic { .. } => "TUIC v5",
@@ -713,6 +737,7 @@ impl ManagedProfile {
 
     pub fn server_name(&self) -> &str {
         match &self.credentials {
+            Credentials::VlessEnc { .. } => "-",
             Credentials::Reality { server_name, .. }
             | Credentials::Hysteria2 { server_name, .. }
             | Credentials::Tuic { server_name, .. }
@@ -1178,6 +1203,15 @@ fn apply_profile_change(
     change: ProfileChange,
 ) -> Result<()> {
     match change {
+        ProfileChange::VlessEncMode(mode) => {
+            update_vless_enc(server, profile, Some(mode), None, None)?
+        }
+        ProfileChange::VlessEncAuth(auth) => {
+            update_vless_enc(server, profile, None, Some(auth), None)?
+        }
+        ProfileChange::VlessEncVision(vision) => {
+            update_vless_enc(server, profile, None, None, Some(vision))?
+        }
         ProfileChange::H2Mux(options) => profile.h2mux = options,
         ProfileChange::Name(name) => profile.name = name.trim().to_owned(),
         ProfileChange::Port(port) => {
@@ -1687,11 +1721,53 @@ fn apply_profile_change(
     Ok(())
 }
 
+fn update_vless_enc(
+    server: &mut ServerConfig,
+    profile: &mut ManagedProfile,
+    new_mode: Option<VlessEncMode>,
+    new_auth: Option<VlessEncAuth>,
+    new_vision: Option<bool>,
+) -> Result<()> {
+    let (
+        ServerProtocol::Vless {
+            decryption,
+            vision: server_vision,
+            ..
+        },
+        Credentials::VlessEnc {
+            encryption,
+            mode,
+            auth,
+            vision,
+            ..
+        },
+    ) = (&mut server.protocol, &mut profile.credentials)
+    else {
+        bail!("只有 VLESS-ENC 配置支持此操作");
+    };
+    if let Some(enabled) = new_vision {
+        *server_vision = enabled;
+        *vision = enabled;
+    } else {
+        let selected_mode = new_mode.unwrap_or(*mode);
+        let selected_auth = new_auth.unwrap_or(*auth);
+        let pair = crate::vless_encryption::generate(selected_mode, selected_auth)?;
+        *decryption = pair.decryption;
+        *encryption = pair.encryption;
+        *mode = selected_mode;
+        *auth = selected_auth;
+    }
+    Ok(())
+}
+
 fn regenerate_profile_credentials(
     server: &mut ServerConfig,
     profile: &mut ManagedProfile,
 ) -> Result<()> {
     match &mut profile.credentials {
+        Credentials::VlessEnc { .. } => {
+            update_vless_enc(server, profile, None, None, None)?;
+        }
         Credentials::Reality {
             user_id,
             private_key,
@@ -2091,6 +2167,42 @@ fn ensure_servers_match_state(servers: &[ServerConfig], profiles: &[ManagedProfi
             );
         }
         let protocol_matches = match (&server.protocol, profile.protocol()) {
+            (
+                ServerProtocol::Vless {
+                    user_id,
+                    decryption,
+                    vision,
+                    udp_enabled,
+                },
+                Protocol::VlessEnc,
+            ) => {
+                if let Credentials::VlessEnc {
+                    user_id: state_user,
+                    encryption,
+                    mode,
+                    auth,
+                    vision: state_vision,
+                    udp_enabled: state_udp,
+                } = &profile.credentials
+                {
+                    let pair = format!("encryption: {encryption}\ndecryption: {decryption}\n");
+                    user_id == state_user
+                        && vision == state_vision
+                        && udp_enabled == state_udp
+                        && server.transport.is_none()
+                        && server.quic_settings.is_none()
+                        && profile.certificate_path.is_none()
+                        && profile.certificate_key_path.is_none()
+                        && crate::vless_encryption::parse_output(
+                            pair.as_bytes(),
+                            mode.as_str(),
+                            auth.as_str(),
+                        )
+                        .is_ok()
+                } else {
+                    false
+                }
+            }
             (ServerProtocol::Hysteria2 { .. }, Protocol::Hysteria2)
             | (ServerProtocol::Tuic { .. }, Protocol::Tuic)
             | (ServerProtocol::Shadowsocks { .. }, Protocol::Shadowsocks)
@@ -2514,6 +2626,13 @@ fn validate_naive_fallback(path: &str) -> Result<()> {
 }
 
 fn validate_request(request: &GenerationRequest) -> Result<()> {
+    if request.protocol != Protocol::VlessEnc
+        && (request.options.vless_enc_mode != VlessEncMode::Native
+            || request.options.vless_enc_auth != VlessEncAuth::X25519
+            || request.options.vless_enc_vision)
+    {
+        bail!("VLESS Encryption 参数仅适用于 VLESS-ENC");
+    }
     if request.port == 0 {
         bail!("端口必须在 1..=65535 范围内");
     }
@@ -2524,7 +2643,7 @@ fn validate_request(request: &GenerationRequest) -> Result<()> {
     }
     if !matches!(
         request.protocol,
-        Protocol::Shadowsocks | Protocol::Snell | Protocol::Socks5
+        Protocol::Shadowsocks | Protocol::Snell | Protocol::Socks5 | Protocol::VlessEnc
     ) || (matches!(request.protocol, Protocol::Shadowsocks)
         && request.options.shadowsocks_mode == ShadowsocksMode::ShadowTlsV3)
     {
@@ -2768,6 +2887,13 @@ pub(crate) async fn validate_with_binary(binary: &Path, config_path: &Path) -> R
         .await
         .context("无法启动 shoes 配置校验")?;
     if !output.status.success() {
+        if fs::read(config_path).is_ok_and(|content| {
+            content
+                .windows(b"decryption".len())
+                .any(|word| word == b"decryption")
+        }) {
+            bail!("shoes 拒绝 VLESS Encryption 配置；为保护服务端密钥，已隐藏校验输出");
+        }
         bail!(
             "shoes 拒绝生成的配置：{}",
             String::from_utf8_lossy(&output.stderr).trim()

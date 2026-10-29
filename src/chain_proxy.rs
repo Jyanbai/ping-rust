@@ -470,12 +470,15 @@ fn parse_shadowsocks(input: &str) -> Result<ChainNode> {
 
 fn parse_vless(input: &str) -> Result<ChainNode> {
     let url = Url::parse(input).context("VLESS 分享链接格式无效")?;
+    let query = query_map(&url);
+    if url
+        .query_pairs()
+        .any(|(name, value)| name == "encryption" && value != "none")
+    {
+        bail!("暂不支持 VLESS Encryption 作为链式出口");
+    }
     let user_id = decode_component(url.username())?;
     Uuid::parse_str(&user_id).context("VLESS 用户 ID 必须是有效 UUID")?;
-    let query = query_map(&url);
-    if query.get("encryption").is_some_and(|value| value != "none") {
-        bail!("VLESS encryption 只支持 none");
-    }
     let transport = query.get("type").map(String::as_str).unwrap_or("tcp");
     let security = query.get("security").map(String::as_str).unwrap_or("none");
     let flow = query.get("flow").map(String::as_str).unwrap_or("");
@@ -971,6 +974,33 @@ async fn test_proxy_yaml(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vless_encryption_chain_rejects_every_non_none_parameter() {
+        let user = Uuid::new_v4();
+        for query in [
+            "encryption=mlkem768x25519plus.native.0rtt.public",
+            "encryption=",
+            "encryption=invalid",
+            "encryption=invalid&encryption=none",
+            "encryption=none&encryption=invalid",
+            "encryption=%6eative",
+        ] {
+            let uri = format!("vless://{user}@example.test:443?{query}&security=none&type=tcp");
+            let error = parse_share_uri(&uri).expect_err("encrypted chain must fail");
+            assert_eq!(error.to_string(), "暂不支持 VLESS Encryption 作为链式出口");
+            assert!(!error.to_string().contains("public"));
+        }
+        for query in ["", "encryption=none", "encryption=none&encryption=none"] {
+            let uri = format!("vless://{user}@example.test:443?{query}");
+            assert!(parse_share_uri(&uri).is_ok());
+        }
+        let invalid_user = "vless://invalid@example.test:443?encryption=encrypted";
+        assert_eq!(
+            parse_share_uri(invalid_user).unwrap_err().to_string(),
+            "暂不支持 VLESS Encryption 作为链式出口"
+        );
+    }
 
     #[test]
     fn parses_socks_and_http_credentials() {

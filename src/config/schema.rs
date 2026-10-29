@@ -73,6 +73,13 @@ pub(super) struct QuicSettings {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub(super) enum ServerProtocol {
+    Vless {
+        user_id: Uuid,
+        udp_enabled: bool,
+        decryption: String,
+        #[serde(default, skip_serializing_if = "is_false")]
+        vision: bool,
+    },
     Tls {
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         tls_targets: BTreeMap<String, TlsTarget>,

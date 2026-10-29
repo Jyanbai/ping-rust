@@ -102,6 +102,10 @@ impl HotReloadReadiness {
     }
 }
 
+fn hot_reload_supported(shoes: &installer::ShoesProvenance) -> bool {
+    shoes.source == "verified-pin" && shoes.revision.as_deref() == Some(installer::verified_pin())
+}
+
 fn hot_reload_unavailable_reason(
     was_active: bool,
     unit_matches: bool,
@@ -112,9 +116,7 @@ fn hot_reload_unavailable_reason(
         Some(HotReloadReason::ServiceNotRunning)
     } else if !unit_matches {
         Some(HotReloadReason::UnitModified)
-    } else if shoes.source != "verified-pin"
-        || shoes.revision.as_deref() != Some(installer::verified_pin())
-    {
+    } else if !hot_reload_supported(shoes) {
         Some(HotReloadReason::ShoesSourceUnsupported(shoes.clone()))
     } else if !drop_ins.is_empty() && drop_ins != "-" {
         Some(HotReloadReason::DropInPresent)
@@ -267,27 +269,14 @@ pub fn capture_hot_reload_snapshot(snapshot: &ServiceSnapshot) -> Result<HotRelo
         ));
     }
     let shoes = installer::load_provenance();
-    if shoes.source != "verified-pin"
-        || shoes.revision.as_deref() != Some(installer::verified_pin())
-    {
-        return Ok(HotReloadReadiness::Unavailable(
-            HotReloadReason::ShoesSourceUnsupported(shoes),
-        ));
-    }
     let drop_ins = systemctl_show_value("DropInPaths")?;
-    if !drop_ins.is_empty() && drop_ins != "-" {
-        return Ok(HotReloadReadiness::Unavailable(
-            HotReloadReason::DropInPresent,
-        ));
+    let reason = hot_reload_unavailable_reason(snapshot.was_active, true, &shoes, &drop_ins);
+    if let Some(reason) = reason {
+        return Ok(HotReloadReadiness::Unavailable(reason));
     }
     let main_pid = snapshot
         .main_pid
         .context("shoes.service active but MainPID is unavailable")?;
-    if let Some(reason) =
-        hot_reload_unavailable_reason(snapshot.was_active, true, &shoes, &drop_ins)
-    {
-        return Ok(HotReloadReadiness::Unavailable(reason));
-    }
     let snapshot = HotReloadSnapshot {
         main_pid,
         listening_ports: listening_ports(main_pid)?,
@@ -576,6 +565,47 @@ fn ensure_systemctl() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn complete_release_metadata_does_not_change_existing_protocol_restart_policy() {
+        let release = installer::ShoesProvenance {
+            source: "github-release".into(),
+            release_tag: Some("v0.3.6".into()),
+            version: Some("0.3.6".into()),
+            binary_sha256: Some("a".repeat(64)),
+            ..Default::default()
+        };
+        assert!(matches!(
+            hot_reload_unavailable_reason(true, true, &release, ""),
+            Some(HotReloadReason::ShoesSourceUnsupported(_))
+        ));
+    }
+
+    #[test]
+    fn adding_vless_enc_release_requires_controlled_restart_even_with_complete_metadata() {
+        let mut release = installer::ShoesProvenance {
+            source: "github-release".into(),
+            release_tag: Some("v0.3.6".into()),
+            version: Some("0.3.6".into()),
+            binary_sha256: Some("a".repeat(64)),
+            ..Default::default()
+        };
+        assert!(matches!(
+            hot_reload_unavailable_reason(true, true, &release, ""),
+            Some(HotReloadReason::ShoesSourceUnsupported(_))
+        ));
+        release.release_tag = Some("v0.3.7".into());
+        assert!(matches!(
+            hot_reload_unavailable_reason(true, true, &release, ""),
+            Some(HotReloadReason::ShoesSourceUnsupported(_))
+        ));
+        release.release_tag = Some("v0.3.6".into());
+        release.binary_sha256 = None;
+        assert!(matches!(
+            hot_reload_unavailable_reason(true, true, &release, ""),
+            Some(HotReloadReason::ShoesSourceUnsupported(_))
+        ));
+    }
 
     fn pin_provenance() -> installer::ShoesProvenance {
         installer::ShoesProvenance {
