@@ -356,6 +356,13 @@ async fn install_locked_inner(
     }
 }
 
+fn unknown_shoes_source_message(target: &str) -> String {
+    format!(
+        "无法确认当前 shoes 的安装来源（缺少或无法核对 /var/lib/ping-rust/shoes-install.json，常见于由 v0.1.x 安装、之后只做过 self-update 的实例），因此无法证明 GitHub Release {} 不会造成降级。如确认没有手动替换过 /usr/local/bin/shoes，可加 --allow-downgrade 继续；安装成功后会记录来源，之后更新不再需要该参数。",
+        target
+    )
+}
+
 async fn install_release(destination: &Path, allow_downgrade: bool) -> Result<InstallReport> {
     let client = Client::builder()
         .user_agent(concat!("ping-rust/", env!("CARGO_PKG_VERSION")))
@@ -388,7 +395,7 @@ async fn install_release(destination: &Path, allow_downgrade: bool) -> Result<In
                 known.version.unwrap_or_default()
             );
         }
-        bail!("当前 shoes 来源未知，无法证明目标 Release 不会造成降级；请使用 --allow-downgrade 明确允许安装。")
+        bail!(unknown_shoes_source_message(&release.tag_name))
     }
 
     let mut failures = Vec::new();
@@ -733,6 +740,22 @@ pub fn uninstall_binary() -> Result<bool> {
 mod tests {
     use super::*;
     use std::io::Read;
+
+    #[test]
+    fn unknown_shoes_source_guidance_explains_one_time_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("shoes");
+        std::fs::write(&destination, b"installed shoes").unwrap();
+        assert!(destination.is_file());
+        assert!(!dir.path().join("shoes-install.json").exists());
+        assert!(!downgrade_allowed(None, Some("v0.3.6"), false));
+        let message = unknown_shoes_source_message("v0.3.6");
+        assert!(
+            message.contains("无法确认当前 shoes 的安装来源"),
+            "{message}"
+        );
+        assert!(message.contains("安装成功后会记录来源"), "{message}");
+    }
 
     fn release_provenance(version: &str) -> ShoesProvenance {
         ShoesProvenance {

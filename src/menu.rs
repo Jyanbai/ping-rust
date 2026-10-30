@@ -1764,7 +1764,7 @@ async fn shoes_update_menu() -> Result<()> {
             let prompt = if needs_override {
                 match known.version.as_deref() {
                     Some(current) => format!("GitHub Release {target} 低于当前已知 shoes {current}。明确允许降级？"),
-                    None => format!("当前 shoes 版本/来源未知，无法证明 GitHub Release {target} 不会降级。明确允许安装？"),
+                    None => format!("无法确认当前 shoes 的安装来源（常见于由 v0.1.x 安装的实例）。确认没有手动替换过 shoes 后，允许安装 GitHub Release {target}？安装成功后会记录来源。"),
                 }
             } else {
                 format!("安装 shoes GitHub Release {target}（高级选项）？")
