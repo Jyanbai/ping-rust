@@ -466,6 +466,8 @@ sudo ping-rust update --method release --allow-downgrade
 
 成功自更新后当前旧进程会退出，请重新运行 ping-rust。shoes 安装来源记录在 `/var/lib/ping-rust/shoes-install.json`；legacy 安装没有来源记录时显示为 unknown。定期运行的 `shoes-upstream-drift` workflow 会构建并验证 cfal/shoes master，但不会自动修改生产 pin。
 
+从 v0.1.x 安装、之后只做过 `self-update` 的实例没有来源记录，执行 `sudo ping-rust update --method release` 时会提示无法确认安装来源。如确认没有手动替换过 `/usr/local/bin/shoes`，可执行 `sudo ping-rust update --method release --allow-downgrade`；安装成功后会记录来源，之后的更新不再需要该参数。也可以在菜单 `6) 更新` 中确认后继续。
+
 自更新支持 Linux x86_64/aarch64，下载对应 musl 静态包，校验 GitHub API digest 与 `SHA256SUMS`，确认新二进制版本后才替换当前程序。程序位于 `/usr/local/bin` 时通常需要 `sudo`；用户目录内可写的 cargo 安装则不需要。
 
 多个配置使用不同端口。查看 ID 后删除：

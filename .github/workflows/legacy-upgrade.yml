@@ -1,0 +1,52 @@
+name: Legacy instance upgrade
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - src/**
+      - Cargo.toml
+      - Cargo.lock
+      - .github/workflows/legacy-upgrade.yml
+      - scripts/ci/legacy-upgrade.sh
+  push:
+    branches: [main]
+    paths:
+      - src/**
+      - Cargo.toml
+      - Cargo.lock
+      - .github/workflows/legacy-upgrade.yml
+      - scripts/ci/legacy-upgrade.sh
+
+permissions:
+  contents: read
+
+env:
+  GITHUB_TOKEN: ${{ github.token }}
+
+jobs:
+  legacy-upgrade:
+    name: ${{ matrix.scenario }} Ubuntu 24.04 upgrade
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: true
+      max-parallel: 1
+      matrix:
+        scenario: [L1, C2]
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Install current source under test
+        shell: bash
+        run: |
+          set -euo pipefail
+          current_root="$RUNNER_TEMP/ping-rust-current"
+          cargo install --path . --locked --root "$current_root"
+          printf 'NEW_PING_RUST=%s\n' "$current_root/bin/ping-rust" >> "$GITHUB_ENV"
+      - name: Exercise official legacy Release upgrade
+        shell: bash
+        run: |
+          sudo --preserve-env=GITHUB_TOKEN,NEW_PING_RUST,GITHUB_STEP_SUMMARY \
+            bash scripts/ci/legacy-upgrade.sh '${{ matrix.scenario }}'
