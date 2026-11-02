@@ -658,6 +658,7 @@ ping-rust/
 
 
 
+
 ### shoes v0.3.6 兼容说明
 
 v0.3.0 起，默认 shoes Release 和源码 pin 同步到 v0.3.6（commit `3737e07467387044e677ae7cf8b1c16d291f1b68`）。v0.3.6 修复了 REALITY 对最小 28 字节 `EncryptedExtensions` 目标的握手失败，并更新了 watcher：配置父目录由 watcher 监听，上游源码去抖窗口为 5 秒（背景资料约称 3 秒）。ping-rust 的热重载超时设置为 10 秒，覆盖该窗口。
