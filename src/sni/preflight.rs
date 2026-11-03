@@ -87,7 +87,7 @@ async fn run_with(
     let temporary = Temporary::new()?;
     // 保留在 timeout future 外，整体超时取消操作后仍能在目录析构前脱敏日志。
     let mut secrets = Vec::new();
-    tokio::time::timeout(timeout, async {
+    match tokio::time::timeout(timeout, async {
         if !binary.is_file() {
             bail!("未找到 shoes，请先运行 prs install 后重新检测");
         }
@@ -134,13 +134,18 @@ async fn run_with(
             .timeout(timeout)
             .redirect(reqwest::redirect::Policy::none())
             .build()?;
-        let response = client.get(url).send().await.with_context(|| {
-            format!(
-                "经 shoes 的请求失败，请更换候选或检查 VPS 出站网络；{}",
-                temporary.log_notice(&secrets)
-            )
-        })?;
+        let response = match client.get(url).send().await {
+            Ok(response) => response,
+            Err(error) => {
+                temporary.settle_log().await;
+                return Err(anyhow::Error::new(error).context(format!(
+                    "经 shoes 的请求失败，请更换候选或检查 VPS 出站网络；{}",
+                    temporary.log_notice(&secrets)
+                )));
+            }
+        };
         if response.status() != reqwest::StatusCode::NO_CONTENT {
+            temporary.settle_log().await;
             bail!(
                 "shoes 请求返回 {}，预期 204，请检查探测地址或更换候选；{}",
                 response.status(),
@@ -150,12 +155,16 @@ async fn run_with(
         Ok(())
     })
     .await
-    .with_context(|| {
-        format!(
-            "shoes 本机预检整体超时（10 秒），请检查网络或更换候选；{}",
-            temporary.log_notice(&secrets)
-        )
-    })?
+    {
+        Ok(result) => result,
+        Err(_) => {
+            temporary.settle_log().await;
+            bail!(
+                "shoes 本机预检整体超时（10 秒），请检查网络或更换候选；{}",
+                temporary.log_notice(&secrets)
+            )
+        }
+    }
 }
 
 #[cfg(test)]
@@ -177,6 +186,10 @@ mod tests {
             self.task.abort();
         }
     }
+
+    /// 预检先占住空闲端口、释放后再启动 shoes。正式路径逐个候选串行检测；
+    /// cargo 并行跑测试时，另一个用例可能在释放间隙拿到同一端口，所以需要 shoes 的用例串行执行。
+    static SHOES_E2E: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     fn shoes() -> Option<PathBuf> {
         let binary = std::env::var_os("PING_RUST_TEST_SHOES")
@@ -368,6 +381,7 @@ mod tests {
         let Some(binary) = shoes() else {
             return;
         };
+        let _serial = SHOES_E2E.lock().await;
         let target = tls_target(&rustls::version::TLS13).await;
         // shoes v0.3.6 的 Reality dest 必须是域名，IP 会被拒绝（REALITY requires a hostname destination）。
         let target_address = format!("localhost:{}", target.address.port());
@@ -391,6 +405,7 @@ mod tests {
         let Some(binary) = shoes() else {
             return;
         };
+        let _serial = SHOES_E2E.lock().await;
         let target = tls_target(&rustls::version::TLS12).await;
         let origin = origin().await;
         // 用域名，确保失败原因是 TLS1.2 目标，而不是 Reality 拒绝 IP dest。
@@ -419,6 +434,7 @@ mod tests {
         let Some(binary) = shoes() else {
             return;
         };
+        let _serial = SHOES_E2E.lock().await;
         let target = tls_target(&rustls::version::TLS13).await;
         let origin = origin().await;
         let error = run_with(
@@ -442,6 +458,7 @@ mod tests {
         let Some(binary) = shoes() else {
             return;
         };
+        let _serial = SHOES_E2E.lock().await;
         // 直接观察预检使用的相同 RAII 资源；目标不响应时外层 deadline 取消操作。
         let temporary = Temporary::new().unwrap();
         let directory = temporary.path();

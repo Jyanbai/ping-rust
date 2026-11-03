@@ -100,6 +100,30 @@ impl Temporary {
         );
         Ok(())
     }
+    /// shoes 先断开失败的连接、后写 ERROR 日志；读取摘要前先等日志写完：
+    /// 至少等 200 毫秒，之后日志大小连续 100 毫秒不变即返回，最多等 1 秒。
+    pub(super) async fn settle_log(&self) {
+        let path = self.path().join("process.log");
+        let size = || std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        let start = tokio::time::Instant::now();
+        let mut last = size();
+        let mut unchanged = Duration::ZERO;
+        while start.elapsed() < Duration::from_secs(1) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let current = size();
+            if current == last {
+                unchanged += Duration::from_millis(50);
+            } else {
+                last = current;
+                unchanged = Duration::ZERO;
+            }
+            if start.elapsed() >= Duration::from_millis(200)
+                && unchanged >= Duration::from_millis(100)
+            {
+                break;
+            }
+        }
+    }
     pub(super) fn log_notice(&self, secrets: &[String]) -> String {
         let log = std::fs::read_to_string(self.path().join("process.log")).unwrap_or_default();
         // 先替换较长凭据，避免有重叠时只替换掉其中一部分；必须在截断之前脱敏。
@@ -253,6 +277,23 @@ mod tests {
         for secret in secrets {
             assert!(!notice.contains(secret));
         }
+    }
+
+    #[tokio::test]
+    async fn settle_log_waits_for_late_error_lines() {
+        // 模拟 shoes 断开连接后稍晚才写 ERROR 行。
+        let temporary = Temporary::new().unwrap();
+        temporary
+            .spawn(
+                Path::new("/bin/sh"),
+                &[
+                    "-c".as_ref(),
+                    "echo 'INFO ready'; sleep 0.15; echo 'ERROR late diagnostic'".as_ref(),
+                ],
+            )
+            .unwrap();
+        temporary.settle_log().await;
+        assert!(temporary.log_notice(&[]).contains("ERROR late diagnostic"));
     }
 
     #[test]
