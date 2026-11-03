@@ -121,21 +121,32 @@ check_tls() {
   if grep -q 'Verify return code: 0 (ok)' <<<"$out"; then CERT=PASS; else CERT=FAIL; fi
 }
 
-# Sets REDIRECT and CF_HEADER to PASS/FAIL and HTTP_CODE.
+# Sets REDIRECT and CF_HEADER to PASS/FAIL, HTTP_CODE and HTTP_NOTE (the
+# failure reason). Some CDNs throttle datacenter clients at random, so a
+# request that gets no response at all is retried before it counts.
 check_http() {
-  local d="$1" result redirect host
-  result="$(curl --noproxy '' --silent --show-error --output /dev/null \
-    --dump-header "$LOG/${d}-headers.txt" --max-time 15 --user-agent "$UA" \
-    --write-out '%{http_code} %{redirect_url}' "https://${d}/" 2>"$LOG/${d}-curl.txt")" \
-    || result="000 "
+  local d="$1" result="000 " redirect host attempt
+  for attempt in 1 2 3; do
+    result="$(curl --noproxy '' --silent --show-error --output /dev/null \
+      --dump-header "$LOG/${d}-headers.txt" --max-time 15 --user-agent "$UA" \
+      --write-out '%{http_code} %{redirect_url}' "https://${d}/" 2>"$LOG/${d}-curl-${attempt}.txt")" \
+      || result="000 "
+    [ "${result%% *}" = 000 ] || break
+    sleep 2
+  done
   HTTP_CODE="${result%% *}"
   redirect="${result#* }"
   REDIRECT=PASS
+  HTTP_NOTE=""
   if [[ "$HTTP_CODE" == 3* ]]; then
-    host="$(sed -E 's#^[A-Za-z][A-Za-z0-9+.-]*://([^/:?#]+).*#\1#' <<<"$redirect" | tr 'A-Z' 'a-z')"
-    if [ "$host" != "$d" ]; then REDIRECT=FAIL; fi
+    host="$(sed -E 's#^[A-Za-z][A-Za-z0-9+.-]*://([^/:?#]+).*#\1#' <<<"$redirect" | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9.-')"
+    if [ "$host" != "$d" ]; then
+      REDIRECT=FAIL
+      HTTP_NOTE="跳转到其他主机（HTTP ${HTTP_CODE} → ${host}）"
+    fi
   elif [ "$HTTP_CODE" = 000 ]; then
     REDIRECT=FAIL
+    HTTP_NOTE="HTTP 请求 3 次都没有响应（$(tail -n 1 "$LOG/${d}-curl-${attempt}.txt" | tr -d '|')）"
   fi
   CF_HEADER=PASS
   if grep -Eiq '^(cf-ray:|server: *cloudflare)' "$LOG/${d}-headers.txt" 2>/dev/null; then
@@ -308,7 +319,7 @@ for d in "${domains[@]}"; do
     [ "$TLS13" = PASS ] || reasons+=("不支持 TLS 1.3")
     [ "$H2" = PASS ] || reasons+=("未协商出 h2")
     [ "$CERT" = PASS ] || reasons+=("证书校验失败")
-    [ "$REDIRECT" = PASS ] || reasons+=("跳转到其他主机或请求失败（HTTP ${HTTP_CODE}）")
+    [ "$REDIRECT" = PASS ] || reasons+=("$HTTP_NOTE")
     { [ "$CF_HEADER" = PASS ] && [ "$CF_ASN" = PASS ]; } || reasons+=("在 Cloudflare 上")
     [ "$REALITY" = PASS ] || reasons+=("Reality 端到端失败")
     [ "$CAMOUFLAGE" = PASS ] || reasons+=("伪装证书校验失败")
