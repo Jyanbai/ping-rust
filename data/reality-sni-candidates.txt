@@ -1,0 +1,24 @@
+# Reality / ShadowTLS 默认目标名单（issue #62）
+#
+# 格式：每行一个域名；# 之后为注释；空行忽略。
+# 用途：新建 Reality / ShadowTLS v3 节点时默认从这里选择目标（issue #63）。
+# 收录条件：大型机构站点，流量扛得住；在大陆没被封锁；不在 Cloudflare 上；
+# 并通过 .github/workflows/reality-sni-candidates.yml 的全部硬条件实测。
+# 修改本文件的 PR 会自动触发实测。
+
+www.amazon.com
+aws.amazon.com
+www.ebay.com
+www.paypal.com
+dl.google.com
+addons.mozilla.org
+www.microsoft.com
+www.apple.com
+www.tesla.com
+www.nvidia.com
+www.samsung.com
+www.sony.com
+www.oracle.com
+www.intel.com
+www.cisco.com
+www.visa.com
