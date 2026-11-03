@@ -83,6 +83,9 @@ Remove-Item Env:CODEX_HOME
 | 变量 | 默认 | 作用 |
 |---|---|---|
 | `CODEX_MODEL` | 空（用套餐默认模型） | 指定 Codex 使用的模型 |
+| `CODEX_REASONING_EFFORT` | 空（用模型默认强度） | 推理强度，如 `medium`、`high`，可选值取决于模型；只能是小写字母 |
+
+两个变量的请求值会打印在运行日志和 job summary 里。`codex exec --json` 不会报告实际使用的模型，所以这里记录的是请求值。Codex CLI 不在本地校验这两个值（不认识的强度会原样发给服务端），写错时会不会报错由服务端决定，改完后看一次运行结果确认。
 
 ## 凭据怎么保持有效
 

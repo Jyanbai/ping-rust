@@ -372,6 +372,7 @@ jobs:
         shell: bash
         env:
           CODEX_MODEL: ${{ vars.CODEX_MODEL }}
+          CODEX_REASONING_EFFORT: ${{ vars.CODEX_REASONING_EFFORT }}
           CARGO_NET_OFFLINE: 'true'
         run: |
           set -uo pipefail
@@ -383,6 +384,18 @@ jobs:
             --ignore-rules --ephemeral --json
             -o "$RUNNER_TEMP/last-message.md")
           [ -z "$CODEX_MODEL" ] || args+=(-m "$CODEX_MODEL")
+          if [ -n "$CODEX_REASONING_EFFORT" ]; then
+            # 值会拼进 TOML 字符串，只接受小写字母，防止注入其他配置项。
+            if ! [[ "$CODEX_REASONING_EFFORT" =~ ^[a-z]+$ ]]; then
+              echo "::error::CODEX_REASONING_EFFORT 只能是小写字母（如 high），当前值无效"
+              exit 1
+            fi
+            args+=(-c "model_reasoning_effort=\"$CODEX_REASONING_EFFORT\"")
+          fi
+          # codex exec --json 不输出实际使用的模型，这里记录的是请求的设置。
+          settings="模型：${CODEX_MODEL:-套餐默认}；推理强度：${CODEX_REASONING_EFFORT:-模型默认}"
+          echo "Codex 设置（请求值）：$settings"
+          echo "**Codex 设置（请求值）**：$settings" >> "$GITHUB_STEP_SUMMARY"
           # 完整事件流和 stderr 只写文件，不进公开日志。
           # `shell: bash` 实际是 `bash -eo pipefail`：失败时必须用 `|| rc=$?` 接住，
           # 否则脚本在这里直接退出，后面的 token 遮蔽和失败原因都不会执行。
