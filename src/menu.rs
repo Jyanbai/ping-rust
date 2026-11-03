@@ -264,6 +264,18 @@ where
     }
 }
 
+/// state 文件不存在（新装机器、取消了首次默认部署）表示还没有节点，不是读取失败。
+fn summary_state(
+    path: &std::path::Path,
+    load: impl FnOnce() -> Result<config::ManagedState>,
+) -> Result<config::ManagedState> {
+    if path.exists() {
+        load()
+    } else {
+        Ok(config::ManagedState::default())
+    }
+}
+
 fn node_summary(state: Result<config::ManagedState>) -> String {
     let state = match state {
         Ok(state) => state,
@@ -278,18 +290,12 @@ fn node_summary(state: Result<config::ManagedState>) -> String {
     let count = state.profiles.len();
     let mut lines = vec![format!("节点（{count}）：")];
     for profile in state.profiles.iter().take(5) {
-        let protocol = match &profile.credentials {
-            Credentials::Reality { .. } => "VLESS-REALITY",
-            Credentials::Shadowsocks {
-                cipher,
-                shadowtls: None,
-                ..
-            } if cipher.is_2022() => "Shadowsocks 2022",
-            _ => profile.protocol_name(),
-        };
+        // 与查看配置、分享信息使用同一个协议名，不另起一套显示名。
         lines.push(format!(
-            "  · {}  {protocol}  {}",
-            profile.name, profile.port
+            "  · {}  {}  {}",
+            profile.name,
+            profile.protocol_name(),
+            profile.port
         ));
     }
     if count > 5 {
@@ -324,7 +330,11 @@ pub async fn run() -> Result<()> {
         };
         println!("shoes: {shoes_status}");
         println!("项目: https://github.com/Jyanbai/ping-rust");
-        println!("{}\n", node_summary(config::load_state()));
+        let state = summary_state(
+            std::path::Path::new(crate::utils::STATE_FILE),
+            config::load_state,
+        );
+        println!("{}\n", node_summary(state));
         let selected = match select_keyed("", MAIN_MENU_ITEMS) {
             Err(error) if control_after_error(&error) == MenuControl::Exit => return Ok(()),
             result => result?,
@@ -2283,7 +2293,12 @@ mod tests {
         let three = node_summary(Ok(state.clone()));
         assert_eq!(
             three,
-            "节点（3）：\n  · reality-20443  VLESS-REALITY  20443\n  · ss-31002  Shadowsocks 2022  31002\n  · hy2-40001  Hysteria2  40001"
+            format!(
+                "节点（3）：\n  · reality-20443  {}  20443\n  · ss-31002  {}  31002\n  · hy2-40001  {}  40001",
+                state.profiles[0].protocol_name(),
+                state.profiles[1].protocol_name(),
+                state.profiles[2].protocol_name(),
+            )
         );
         for index in 4..=6 {
             let mut profile = state.profiles[0].clone();
@@ -2299,7 +2314,7 @@ mod tests {
                 .count(),
             5
         );
-        assert!(six.contains("  · node-5  VLESS-REALITY  20445"));
+        assert!(six.contains("  · node-5  VLESS-Reality-Vision  20445"));
         assert!(!six.contains("node-6"));
         assert!(six.ends_with("…共 6 个，进入 3) 查看配置"));
         for summary in [three, six] {
@@ -2320,6 +2335,20 @@ mod tests {
                 assert!(!summary.contains(secret), "节点摘要泄露了测试凭据");
             }
         }
+    }
+
+    #[test]
+    fn missing_state_file_means_no_nodes_not_read_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("ping-rust-state.json");
+        let state = summary_state(&missing, || anyhow::bail!("读取管理状态失败"));
+        assert_eq!(node_summary(state), "节点：暂无，选择 1) 添加配置");
+        std::fs::write(&missing, "{").unwrap();
+        let state = summary_state(&missing, || anyhow::bail!("管理状态 JSON 已损坏"));
+        assert_eq!(
+            node_summary(state),
+            "节点：无法读取（管理状态 JSON 已损坏）"
+        );
     }
 
     #[test]
