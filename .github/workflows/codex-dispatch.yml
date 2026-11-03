@@ -336,7 +336,20 @@ jobs:
           # shellcheck source=/dev/null
           . "$RUNNER_TEMP/codex-lib.sh"
           # 顺带让 Codex 按需刷新 token；--env 也会校验 CODEX_ENV 是否存在。
-          codex cloud list --env "$CODEX_ENV" --limit 1 >/dev/null
+          if ! codex cloud list --env "$CODEX_ENV" --limit 1 >/dev/null; then
+            mask_tokens
+            echo "::group::诊断信息"
+            # 只打印不敏感的字段：套餐类型，以及 codex 写在 error.log 里的请求状态码。
+            payload="$(jq -r '.tokens.id_token // ""' "$CODEX_HOME/auth.json" | cut -d. -f2 | tr '_-' '/+')"
+            while [ $(( ${#payload} % 4 )) -ne 0 ]; do payload="${payload}="; done
+            plan="$(base64 -d <<<"$payload" 2>/dev/null \
+              | jq -r '."https://api.openai.com/auth".chatgpt_plan_type // empty' 2>/dev/null || true)"
+            echo "登录账号的套餐类型：${plan:-未知}"
+            grep -hE '\] (startup|env):' "$CODEX_REPO_HINT/error.log" 2>/dev/null || echo "（没有 error.log）"
+            echo "::endgroup::"
+            echo "::error::Codex 找不到云端环境「$CODEX_ENV」。检查：环境是否已发布（Save and publish）、CLI 登录的是否是建环境的那个账号 / 工作区。"
+            exit 1
+          fi
           mask_tokens
           echo "✅ Codex 登录有效，云端环境「$CODEX_ENV」可用。"
           # 每次都真写一次 environment secret，确认 CODEX_BOT_TOKEN 有写回权限且没过期，
