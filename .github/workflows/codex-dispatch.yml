@@ -319,6 +319,11 @@ jobs:
           # Codex 运行前保存一份 .git，之后用它生成 diff，不信任工作区里可能被改动的 .git。
           cp -a work/.git "$RUNNER_TEMP/pristine.git"
           echo "base_sha=$(git -C work rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          # Ubuntu 24.04 默认限制非特权 user namespace，Codex 的 bubblewrap 沙箱会报
+          # "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted"。runner 是一次性的，放开即可。
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
           # 沙箱里不能联网，先把 Rust 依赖下载好（cargo fetch 不会执行 build script）。
           if [ -f work/Cargo.toml ]; then
             (cd work && cargo fetch --locked) || echo "::warning::cargo fetch 失败，Codex 将无法离线编译"
