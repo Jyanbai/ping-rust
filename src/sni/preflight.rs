@@ -339,11 +339,13 @@ mod tests {
             return;
         };
         let target = tls_target(&rustls::version::TLS13).await;
+        // shoes v0.3.6 的 Reality dest 必须是域名，IP 会被拒绝（REALITY requires a hostname destination）。
+        let target_address = format!("localhost:{}", target.address.port());
         for mode in [Mode::Reality, Mode::ShadowTls] {
             let origin = origin().await;
             run_with(
                 "example.com",
-                &target.address.to_string(),
+                &target_address,
                 mode,
                 &binary,
                 &format!("http://{}/generate_204", origin.address),
@@ -361,9 +363,10 @@ mod tests {
         };
         let target = tls_target(&rustls::version::TLS12).await;
         let origin = origin().await;
+        // 用域名，确保失败原因是 TLS1.2 目标，而不是 Reality 拒绝 IP dest。
         let error = run_with(
             "example.com",
-            &target.address.to_string(),
+            &format!("localhost:{}", target.address.port()),
             Mode::Reality,
             &binary,
             &format!("http://{}/generate_204", origin.address),
