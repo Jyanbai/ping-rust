@@ -191,7 +191,7 @@ pub struct AddArgs {
     /// 客户端连接使用的服务器公网 IP 或域名
     #[arg(long)]
     pub server_address: Option<String>,
-    /// Reality SNI 或 TLS 证书名称
+    /// Reality/ShadowTLS SNI 或 TLS 证书名称；未指定时自动检测选择 SNI
     #[arg(long)]
     pub server_name: Option<String>,
     /// shoes 未安装时自动确认安装
@@ -245,7 +245,7 @@ pub struct GenerateArgs {
     port: u16,
     #[arg(long)]
     output: Option<PathBuf>,
-    /// Reality 系列 SNI 或 QUIC/TLS 证书域名；Reality 未指定时随机选择非 Apple 大厂域名
+    /// Reality/ShadowTLS SNI 或 QUIC/TLS 证书域名；generate 未指定时从名单随机选，不检测连通性
     #[arg(long)]
     server_name: Option<String>,
     /// Reality fallback，格式为 host:port
@@ -449,7 +449,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             if matches!(protocol, Protocol::AnyTls) && anytls_users.is_empty() {
                 anytls_users.push(config::generated_anytls_user("default"));
             }
-            let server_name = config::resolve_server_name(server_name, protocol, anytls_mode);
+            let server_name = generated_server_name(server_name, protocol, anytls_mode, shadowtls);
             let output = output.unwrap_or_else(|| PathBuf::from(crate::utils::CONFIG_FILE));
             let managed = output == Path::new(crate::utils::CONFIG_FILE);
             let request = GenerationRequest {
@@ -733,6 +733,20 @@ pub(crate) async fn update_shoes_with_options(
     Ok(report)
 }
 
+fn generated_server_name(
+    explicit: Option<String>,
+    protocol: Protocol,
+    anytls_mode: AnyTlsMode,
+    shadowtls: bool,
+) -> String {
+    if protocol.uses_reality(anytls_mode) || (protocol == Protocol::Shadowsocks && shadowtls) {
+        eprintln!("SNI：未做连通性检测（generate）；部署时可用 prs add 自动检测选择");
+        explicit.unwrap_or_else(|| config::random_reality_server_name().to_owned())
+    } else {
+        config::resolve_server_name(explicit, protocol, anytls_mode)
+    }
+}
+
 async fn run_add(args: AddArgs) -> Result<()> {
     match run_add_inner(args).await {
         Err(error) if input::is_back(&error) => Ok(()),
@@ -817,6 +831,7 @@ async fn run_add_inner(mut args: AddArgs) -> Result<()> {
     }
     ensure_shoes_for_add(args.yes).await?;
     let result = fast_add::execute(fast_add::AddRequest {
+        interactive: true,
         vless_enc: args.vless_enc,
         name: args.name,
         protocol: args.protocol,
@@ -920,6 +935,7 @@ async fn bootstrap_default_reality_with_menu(menu: bool) -> Result<bool> {
         ensure_shoes_for_add(true).await?;
     }
     let result = fast_add::execute(fast_add::AddRequest {
+        interactive: menu,
         name: Some("reality-default".to_owned()),
         vless_enc: Default::default(),
         protocol: Protocol::Reality,
@@ -1373,7 +1389,7 @@ fn terminal_qr_or_url_text(value: &str) -> (String, Option<String>) {
     }
 }
 
-fn share_uri_with_qr_text(uri: &str) -> Result<String> {
+pub(crate) fn share_uri_with_qr_text(uri: &str) -> Result<String> {
     Ok([
         "------------- 链接 (URL) -------------".to_owned(),
         uri.to_owned(),
@@ -1998,6 +2014,35 @@ fn print_certificate_notice(result: &config::GenerationResult) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn generate_sni_selection_is_offline_for_every_target_protocol() {
+        let candidates = config::reality_server_names();
+        for (protocol, mode, shadowtls) in [
+            (Protocol::Reality, AnyTlsMode::Tls, false),
+            (Protocol::TrojanReality, AnyTlsMode::Tls, false),
+            (Protocol::AnyTls, AnyTlsMode::Reality, false),
+            (Protocol::Shadowsocks, AnyTlsMode::Tls, true),
+        ] {
+            for _ in 0..8 {
+                assert!(candidates
+                    .contains(&generated_server_name(None, protocol, mode, shadowtls).as_str()));
+            }
+            assert_eq!(
+                generated_server_name(
+                    Some("manual.example.com".to_owned()),
+                    protocol,
+                    mode,
+                    shadowtls
+                ),
+                "manual.example.com"
+            );
+        }
+        assert_eq!(
+            generated_server_name(None, Protocol::AnyTls, AnyTlsMode::Tls, false),
+            config::DEFAULT_SNI
+        );
+    }
+
     #[test]
     fn vless_enc_cli_defaults_and_advanced_options() {
         use clap::Parser;

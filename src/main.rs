@@ -13,6 +13,7 @@ mod operations;
 mod performance;
 mod self_update;
 mod service;
+mod sni_probe;
 mod utils;
 mod vless_encryption;
 mod yaml;

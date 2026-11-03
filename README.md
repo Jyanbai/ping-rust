@@ -56,7 +56,7 @@ bash <(curl --proto '=https' --tlsv1.2 -fsSL \
 - 生成经过固定 shoes schema 验证的协议预设；每项均是可直接部署的完整协议栈
 - `prs` 数字菜单与 `prs add/a` 快捷命令：自动端口、自动凭据，部署完成后输出分享链接或完整手动连接参数
 - 在 Rust 内生成 X25519 Reality 密钥、UUID、short ID、随机密码和自签名证书
-- Reality 未显式指定 SNI 时，从与本地 233boy 脚本一致的 Amazon、eBay、PayPal、Cloudflare 域名列表中随机选择（不含 Apple）；客户端指纹与该脚本一致固定为 `chrome`
+- 新建 Reality / ShadowTLS v3 未指定 SNI 时，并行检测内置候选名单，从握手最快的至多 3 个可用目标中随机选择；客户端指纹固定为 `chrome`
 - 在同目录候选文件上调用 `shoes --dry-run`，通过后才原子提交并启用 systemd 服务
 - systemd unit 限制内核调优、内核模块、控制组、地址族、可执行内存和非原生 ABI；Ubuntu/Debian 验收会实际启动加固后的 shoes
 - 多配置添加、列表、删除、端口冲突保护
@@ -290,7 +290,7 @@ VMess WebSocket TLS、非 Vision VLESS WebSocket TLS 和 Trojan TLS 可在“更
 
 sing-box 导出会携带 `multiplex.protocol=h2mux`；固定 shoes 上的 VMess/VLESS WebSocket TLS 和 Trojan TLS 已通过本地 TCP、并发流、half-close 与大 payload 验证，sing-box 1.14.2 已通过导出配置检查及 Trojan H2MUX 数据面测试。Mihomo H2MUX 存在已知兼容问题，开启偏好时拒绝 Mihomo 导出；NekoBox、普通分享 URI 与 QR 仍可用于普通连接，但不携带 H2MUX 设置。VLESS Vision、Shadowsocks、SS2022 + ShadowTLS、Snell v3 及其它协议不提供 H2MUX 开关。H2MUX UDP 尚未验证或启用；Pool、Chain 和路由语义不受该偏好影响。
 
-首次安装流程是：`install.sh → 自动安装 ping-rust/shoes → 自动随机端口部署 VLESS-REALITY → 复制 URL`，中间零输入。Reality 未指定 SNI 时会从 `www.amazon.com`、`www.ebay.com`、`www.paypal.com`、`www.cloudflare.com`、`dash.cloudflare.com`、`aws.amazon.com` 中随机选择；列表不含 Apple，客户端指纹固定为本地 233boy 脚本使用的 `chrome`。后续日常流程是：`prs → 1 → 选择协议 → 输入端口/直接回车随机`；Shadowsocks 会额外选择加密方式和密码，SS 2022 密码不符合所选 cipher 的 Base64 密钥长度时会警告并自动替换。其余协议自动生成 UUID、密码、Reality 密钥、WebSocket 路径或证书。SOCKS5 快速添加默认生成安全随机用户名和密码并启用 UDP ASSOCIATE；Snell v3 快速添加默认使用 `aes-128-gcm`，生成随机密码并启用 UDP-over-TCP。NaiveProxy 要求明确选择受信任证书或自签名测试模式，不会静默生成生产自签名配置。添加或查看配置成功后直接退出 `prs`；主菜单输入 `0` 退出，任意子菜单输入 `0` 返回主菜单。自动端口从 `20000..=65535` 的高位范围选择；菜单协议选择固定使用连续编号 `1..=13`。信息只会在配置通过 `shoes --dry-run`、原子写入、systemd 启动且确认为 active 后输出；失败会恢复原配置和服务状态。
+首次安装流程是：`install.sh → 自动安装 ping-rust/shoes → 自动随机端口部署 VLESS-REALITY → 复制 URL`，中间零输入。Reality 未指定 SNI 时会自动检测内置名单并选择可用目标（规则见下文）；客户端指纹固定为 `chrome`。后续日常流程是：`prs → 1 → 选择协议 → 输入端口/直接回车随机`；Shadowsocks 会额外选择加密方式和密码，SS 2022 密码不符合所选 cipher 的 Base64 密钥长度时会警告并自动替换。其余协议自动生成 UUID、密码、Reality 密钥、WebSocket 路径或证书。SOCKS5 快速添加默认生成安全随机用户名和密码并启用 UDP ASSOCIATE；Snell v3 快速添加默认使用 `aes-128-gcm`，生成随机密码并启用 UDP-over-TCP。NaiveProxy 要求明确选择受信任证书或自签名测试模式，不会静默生成生产自签名配置。添加或查看配置成功后直接退出 `prs`；主菜单输入 `0` 退出，任意子菜单输入 `0` 返回主菜单。自动端口从 `20000..=65535` 的高位范围选择；菜单协议选择固定使用连续编号 `1..=13`。信息只会在配置通过 `shoes --dry-run`、原子写入、systemd 启动且确认为 active 后输出；失败会恢复原配置和服务状态。
 
 非交互方式：
 
@@ -305,6 +305,12 @@ sudo prs add ss 8388
 # 自动随机端口也可显式写出；指定公网地址可跳过自动探测
 sudo prs add reality --random-port --server-address 203.0.113.10
 ```
+
+新建 VLESS Reality、Trojan Reality、AnyTLS Reality 和 Shadowsocks + ShadowTLS v3 时，未指定 SNI 会并行检测编译时内置的 [`data/reality-sni-candidates.txt`](data/reality-sni-candidates.txt)。每个候选从系统 DNS 解析到 TLS 握手整体限时 3 秒；只提供 TLS 1.3 和 `h2`，要求协商 `h2`，并用内置公共根证书校验证书链和域名。检测不发送 HTTP 请求。通过后，从握手最快的 3 个候选中随机选 1 个；不足 3 个时从全部通过者中随机选。ShadowTLS 默认握手目标为 `<选中域名>:443`。
+
+可用 `sudo prs add reality --server-name target.example.com` 或菜单手动输入覆盖 SNI。显式指定时只检测一次，失败在 stderr 警告，仍使用指定值；普通 TLS 证书名称不检测。菜单 `2. 更改配置` 支持三种 Reality 的“更改 SNI”，以及 ShadowTLS 的 SNI 修改；默认的 `<旧域名>:443` 目标会同步改名，自定义目标保留，修改仍走备份、原子提交、服务验证和失败回滚。升级不会自动修改已有节点的 SNI 或客户端配置。
+
+终端会显示逐个候选结果和选中域名；非交互时只在 stderr 输出一行选择摘要，`--plain` 的 stdout 仍只输出分享链接。全部候选失败时，终端允许输入经过格式校验的 SNI（失败仍只警告）或输入 `0` 取消；非终端及安装器的 `bootstrap` 不读 stdin，直接提示用 `prs add reality --server-name <域名>` 重试。`prs generate` 不进行连通性检测：未指定时从同一名单随机选，并在 stderr 提示“未做连通性检测”。AnyTLS Reality 的标准分享 URI/二维码和 Mihomo 导出、ShadowTLS 的标准分享 URI/二维码继续明确拒绝；这些组合请使用支持的客户端配置导出。
 
 高级用户原有的 `generate` 命令全部保留，可精细指定 cipher、证书、Reality fallback、AnyTLS 用户等参数。
 
@@ -662,7 +668,7 @@ ping-rust/
 
 v0.3.0 起，默认 shoes Release 和源码 pin 同步到 v0.3.6（commit `3737e07467387044e677ae7cf8b1c16d291f1b68`）。v0.3.6 修复了 REALITY 对最小 28 字节 `EncryptedExtensions` 目标的握手失败，并更新了 watcher：配置父目录由 watcher 监听，上游源码去抖窗口为 5 秒（背景资料约称 3 秒）。ping-rust 的热重载超时设置为 10 秒，覆盖该窗口。
 
-REALITY 外部握手验收使用 Xray 26.x 客户端，兼容客户端至少需要 Xray 25.5.16；链式代理的 Reality 出口不再模拟 Chrome 指纹。默认的六个 SNI 目标为 `www.amazon.com`、`www.ebay.com`、`www.paypal.com`、`www.cloudflare.com`、`dash.cloudflare.com` 和 `aws.amazon.com`，每个目标都应单独记录握手结果。
+REALITY 外部握手验收使用 Xray 26.x 客户端，兼容客户端至少需要 Xray 25.5.16；链式代理的 Reality 出口不再模拟 Chrome 指纹。默认 SNI 目标来自 [`data/reality-sni-candidates.txt`](data/reality-sni-candidates.txt)，每个目标都应单独记录握手结果。
 
 Snell v3 新节点默认 `aes-128-gcm`。CI 中 Mihomo v1.19.33 经代理请求仅该 cipher 通过；Mihomo 客户端仅支持 `aes-128-gcm`。已有节点保持原 cipher，不会在升级时自动修改。已有的 chacha20 或 aes-256 Snell 节点若使用 Mihomo 客户端，需要改为 `aes-128-gcm` 并重新导出客户端配置。该测试不能判断 shoes salt 改动的影响。
 

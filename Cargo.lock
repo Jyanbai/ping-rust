@@ -942,6 +942,7 @@ dependencies = [
  "rand 0.9.5",
  "rcgen",
  "reqwest",
+ "rustls",
  "semver",
  "serde",
  "serde-saphyr",
@@ -951,8 +952,10 @@ dependencies = [
  "tempfile",
  "time",
  "tokio",
+ "tokio-rustls",
  "url",
  "uuid",
+ "webpki-roots",
  "x25519-dalek",
 ]
 

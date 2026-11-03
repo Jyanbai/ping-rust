@@ -67,18 +67,25 @@ pub(crate) use validation::{
 
 pub const DEFAULT_SNI: &str = "www.cloudflare.com";
 pub const REALITY_FINGERPRINT: &str = "chrome";
-pub const REALITY_SERVER_NAMES: &[&str] = &[
-    "www.amazon.com",
-    "www.ebay.com",
-    "www.paypal.com",
-    "www.cloudflare.com",
-    "dash.cloudflare.com",
-    "aws.amazon.com",
-];
+pub const REALITY_SERVER_NAMES: &str = include_str!("../data/reality-sni-candidates.txt");
 
-fn random_reality_server_name() -> &'static str {
-    let index = rand::rng().random_range(0..REALITY_SERVER_NAMES.len());
-    REALITY_SERVER_NAMES[index]
+fn parse_server_names(source: &str) -> Vec<&str> {
+    source
+        .lines()
+        .filter_map(|line| {
+            let name = line.split('#').next().unwrap_or_default().trim();
+            (!name.is_empty()).then_some(name)
+        })
+        .collect()
+}
+
+pub(crate) fn reality_server_names() -> Vec<&'static str> {
+    parse_server_names(REALITY_SERVER_NAMES)
+}
+
+pub(crate) fn random_reality_server_name() -> &'static str {
+    let names = reality_server_names();
+    names[rand::rng().random_range(0..names.len())]
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -1324,8 +1331,19 @@ fn apply_profile_change(
             }
         }
         ProfileChange::RealityServerName(new_name) => {
-            let Credentials::Reality { server_name, .. } = &mut profile.credentials else {
-                bail!("只有 VLESS-Reality 配置支持更改 SNI");
+            let server_name = match &mut profile.credentials {
+                Credentials::Reality { server_name, .. }
+                | Credentials::Trojan {
+                    server_name,
+                    security: TlsSecurity::Reality { .. },
+                    ..
+                }
+                | Credentials::AnyTls {
+                    server_name,
+                    security: AnyTlsSecurity::Reality { .. },
+                    ..
+                } => server_name,
+                _ => bail!("只有 Reality 配置支持更改 SNI"),
             };
             let ServerProtocol::Tls {
                 reality_targets, ..
@@ -2973,31 +2991,230 @@ mod tests {
     }
 
     #[test]
-    fn reality_defaults_match_the_local_233boy_source() {
+    fn reality_candidates_exclude_cloudflare() {
+        assert!(reality_server_names()
+            .iter()
+            .all(|name| !name.contains("cloudflare")));
+    }
+
+    #[test]
+    fn sni_is_consistent_across_server_state_uri_qr_and_client_exports() {
+        use crate::client::{self, ClientFormat};
+        use serde_json::Value;
+        let sni = "target.example.com";
+        for protocol in [
+            Protocol::Reality,
+            Protocol::TrojanReality,
+            Protocol::AnyTls,
+            Protocol::Shadowsocks,
+        ] {
+            let mut req = request(protocol, PathBuf::from("unused.yaml"));
+            req.server_name = sni.to_owned();
+            if protocol == Protocol::AnyTls {
+                req.options.anytls_mode = AnyTlsMode::Reality;
+                req.options
+                    .anytls_users
+                    .push(generated_anytls_user("default"));
+            }
+            if protocol == Protocol::Shadowsocks {
+                req.options.shadowsocks_mode = ShadowsocksMode::ShadowTlsV3;
+            }
+            validate_request(&req).unwrap();
+            let (server, credentials, _, _) =
+                generate_parts(&req, Path::new("."), Uuid::nil()).unwrap();
+            let profile = ManagedProfile {
+                h2mux: Default::default(),
+                id: Uuid::nil(),
+                name: "sni-consistency".to_owned(),
+                port: 443,
+                server_address: Some("203.0.113.10".to_owned()),
+                credentials,
+                certificate_path: None,
+                certificate_key_path: None,
+                self_signed_certificate: false,
+                naive_certificate_validity: None,
+            };
+            assert_eq!(profile.server_name(), sni);
+            let ServerProtocol::Tls {
+                reality_targets,
+                shadowtls_targets,
+                ..
+            } = &server.protocol
+            else {
+                panic!("expected TLS");
+            };
+            if protocol == Protocol::Shadowsocks {
+                let target = &shadowtls_targets[sni];
+                assert_eq!(target.handshake.address, format!("{sni}:443"));
+                let Credentials::Shadowsocks {
+                    shadowtls: Some(shadowtls),
+                    ..
+                } = &profile.credentials
+                else {
+                    panic!("expected ShadowTLS");
+                };
+                assert_eq!(shadowtls.server_name, sni);
+                assert_eq!(shadowtls.handshake_address, target.handshake.address);
+            } else {
+                assert_eq!(reality_targets[sni].dest, format!("{sni}:443"));
+            }
+            validate_yaml(&crate::yaml::to_string(&vec![server]).unwrap()).unwrap();
+            let sing: Value = serde_json::from_str(
+                &client::render(&profile, ClientFormat::SingBox, "203.0.113.10").unwrap(),
+            )
+            .unwrap();
+            let outbound_type = match protocol {
+                Protocol::Reality => "vless",
+                Protocol::TrojanReality => "trojan",
+                Protocol::AnyTls => "anytls",
+                Protocol::Shadowsocks => "shadowtls",
+                _ => unreachable!(),
+            };
+            let outbound = sing["outbounds"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|o| o["type"] == outbound_type)
+                .unwrap();
+            assert_eq!(outbound["tls"]["server_name"], sni);
+            if protocol == Protocol::AnyTls {
+                assert!(
+                    client::render(&profile, ClientFormat::ClashMeta, "203.0.113.10")
+                        .unwrap_err()
+                        .to_string()
+                        .contains("Reality")
+                );
+            } else {
+                let clash: Value = crate::yaml::from_str(
+                    &client::render(&profile, ClientFormat::ClashMeta, "203.0.113.10").unwrap(),
+                )
+                .unwrap();
+                let proxy = &clash["proxies"][0];
+                assert_eq!(
+                    match protocol {
+                        Protocol::Reality => &proxy["servername"],
+                        Protocol::Shadowsocks => &proxy["plugin-opts"]["host"],
+                        _ => &proxy["sni"],
+                    },
+                    sni
+                );
+            }
+            match protocol {
+                Protocol::AnyTls | Protocol::Shadowsocks => {
+                    // 这两种组合没有标准 URI，二维码入口必须同样明确拒绝。
+                    let error = client::stored_share_uri(&profile, None)
+                        .unwrap_err()
+                        .to_string();
+                    assert!(error.contains("Reality") || error.contains("ShadowTLS"));
+                }
+                _ => {
+                    let uri = client::stored_share_uri(&profile, None).unwrap();
+                    let parsed = url::Url::parse(&uri).unwrap();
+                    assert_eq!(
+                        parsed.query_pairs().find(|(k, _)| k == "sni").unwrap().1,
+                        sni
+                    );
+                    let qr = qrcode::QrCode::new(uri.as_bytes())
+                        .unwrap()
+                        .render::<qrcode::render::unicode::Dense1x2>()
+                        .quiet_zone(true)
+                        .build();
+                    let output = crate::cli::share_uri_with_qr_text(&uri).unwrap();
+                    assert!(output.contains(&format!("\n{uri}\n")));
+                    assert!(output.contains(&qr));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn all_reality_sni_changes_preserve_custom_destinations() {
+        for protocol in [Protocol::Reality, Protocol::TrojanReality, Protocol::AnyTls] {
+            for custom_dest in [false, true] {
+                let mut req = request(protocol, PathBuf::from("unused.yaml"));
+                if protocol == Protocol::AnyTls {
+                    req.options.anytls_mode = AnyTlsMode::Reality;
+                    req.options
+                        .anytls_users
+                        .push(generated_anytls_user("default"));
+                }
+                if custom_dest {
+                    req.reality_dest = Some("fallback.example.com:8443".to_owned());
+                }
+                validate_request(&req).unwrap();
+                let (mut server, credentials, _, _) =
+                    generate_parts(&req, Path::new("."), Uuid::nil()).unwrap();
+                let mut profile = ManagedProfile {
+                    h2mux: Default::default(),
+                    id: Uuid::nil(),
+                    name: "sni-test".to_owned(),
+                    port: 443,
+                    server_address: None,
+                    credentials,
+                    certificate_path: None,
+                    certificate_key_path: None,
+                    self_signed_certificate: false,
+                    naive_certificate_validity: None,
+                };
+                apply_profile_change(
+                    &mut server,
+                    &mut profile,
+                    ProfileChange::RealityServerName("new.example.com".to_owned()),
+                )
+                .unwrap();
+                assert_eq!(profile.server_name(), "new.example.com");
+                let ServerProtocol::Tls {
+                    reality_targets, ..
+                } = &server.protocol
+                else {
+                    panic!("expected TLS");
+                };
+                assert_eq!(reality_targets.len(), 1);
+                assert_eq!(
+                    reality_targets["new.example.com"].dest,
+                    if custom_dest {
+                        "fallback.example.com:8443"
+                    } else {
+                        "new.example.com:443"
+                    }
+                );
+                validate_yaml(&crate::yaml::to_string(&vec![server]).unwrap()).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn reality_defaults_match_candidate_file() {
+        let names = reality_server_names();
+        assert!(names.len() >= 5);
         assert_eq!(
-            REALITY_SERVER_NAMES,
-            [
-                "www.amazon.com",
-                "www.ebay.com",
-                "www.paypal.com",
-                "www.cloudflare.com",
-                "dash.cloudflare.com",
-                "aws.amazon.com",
-            ]
+            names.len(),
+            names
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
         );
-        assert!(REALITY_SERVER_NAMES
+        for name in &names {
+            validate_server_name(name).unwrap();
+            assert!(!name.to_ascii_lowercase().contains("cloudflare"));
+        }
+        assert!(names
             .iter()
             .all(|name| !name.to_ascii_lowercase().contains("apple")));
+        assert_eq!(
+            parse_server_names("# comment\n example.com # inline\n\n  www.example.com \n"),
+            vec!["example.com", "www.example.com"]
+        );
         assert_eq!(REALITY_FINGERPRINT, "chrome");
 
         for _ in 0..64 {
             let selected = resolve_server_name(None, Protocol::Reality, AnyTlsMode::Tls);
-            assert!(REALITY_SERVER_NAMES.contains(&selected.as_str()));
+            assert!(names.contains(&selected.as_str()));
         }
         let anytls_reality = resolve_server_name(None, Protocol::AnyTls, AnyTlsMode::Reality);
-        assert!(REALITY_SERVER_NAMES.contains(&anytls_reality.as_str()));
+        assert!(names.contains(&anytls_reality.as_str()));
         let trojan_reality = resolve_server_name(None, Protocol::TrojanReality, AnyTlsMode::Tls);
-        assert!(REALITY_SERVER_NAMES.contains(&trojan_reality.as_str()));
+        assert!(names.contains(&trojan_reality.as_str()));
     }
 
     #[test]

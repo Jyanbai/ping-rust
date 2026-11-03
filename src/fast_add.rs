@@ -22,6 +22,7 @@ const ADDRESS_ENDPOINTS: &[&str] = &[
 ];
 
 pub struct AddRequest {
+    pub interactive: bool,
     pub vless_enc: crate::vless_encryption::Options,
     pub name: Option<String>,
     pub protocol: Protocol,
@@ -55,11 +56,18 @@ pub async fn execute(request: AddRequest) -> Result<AddResult> {
 
     let server_address = resolve_server_address(request.server_address.as_deref()).await?;
     let port = select_port(request.protocol, request.port)?;
-    let server_name = config::resolve_server_name(
-        request.server_name,
-        request.protocol,
-        config::AnyTlsMode::Tls,
-    );
+    let probes_sni = request.protocol.uses_reality(config::AnyTlsMode::Tls)
+        || (request.protocol == Protocol::Shadowsocks
+            && request.shadowsocks_mode == ShadowsocksMode::ShadowTlsV3);
+    let server_name = if probes_sni {
+        crate::sni_probe::resolve(request.server_name, request.interactive).await?
+    } else {
+        config::resolve_server_name(
+            request.server_name,
+            request.protocol,
+            config::AnyTlsMode::Tls,
+        )
+    };
     let mut options = GenerationOptions {
         vless_enc_mode: request.vless_enc.mode,
         vless_enc_auth: request.vless_enc.auth,
