@@ -9,8 +9,8 @@ use crate::{
     cli,
     client::{self, ClientFormat},
     config::{
-        self, AnyTlsMode, AnyTlsUser, Credentials, GenerationOptions, GenerationRequest,
-        ProfileChange, Protocol, ShadowsocksCipher, SnellCipher,
+        self, AnyTlsMode, AnyTlsSecurity, AnyTlsUser, Credentials, GenerationOptions,
+        GenerationRequest, ProfileChange, Protocol, ShadowsocksCipher, SnellCipher,
     },
     deployment, fast_add,
     h2mux::H2MuxOptions,
@@ -341,6 +341,16 @@ pub async fn run() -> Result<()> {
     }
 }
 
+async fn prompt_probed_sni(label: &str) -> Result<String> {
+    let explicit = input::checked_text(
+        format!("{label}（留空自动检测选择）"),
+        None,
+        true,
+        config::validate_server_name,
+    )?;
+    crate::sni_probe::resolve((!explicit.is_empty()).then_some(explicit), true).await
+}
+
 async fn change_config_menu() -> Result<()> {
     let state = config::load_state()?;
     if state.profiles.is_empty() {
@@ -382,7 +392,9 @@ async fn change_profile_menu(profile: &config::ManagedProfile) -> Result<()> {
             ));
             actions.push((ChangeAction::VlessEncVision, "开启或关闭 Vision"));
         }
-        Protocol::Reality => actions.push((ChangeAction::RealityServerName, "更改 SNI")),
+        Protocol::Reality | Protocol::TrojanReality => {
+            actions.push((ChangeAction::RealityServerName, "更改 SNI"))
+        }
         Protocol::Hysteria2 | Protocol::Tuic => {
             actions.push((ChangeAction::Password, "更改密码"));
         }
@@ -428,11 +440,19 @@ async fn change_profile_menu(profile: &config::ManagedProfile) -> Result<()> {
         }
         Protocol::AnyTls => {
             actions.push((ChangeAction::AnyTlsUserPassword, "更改用户密码"));
+            if matches!(
+                profile.credentials,
+                Credentials::AnyTls {
+                    security: AnyTlsSecurity::Reality { .. },
+                    ..
+                }
+            ) {
+                actions.push((ChangeAction::RealityServerName, "更改 SNI"));
+            }
         }
         Protocol::VlessTlsVision
         | Protocol::VlessWsTls
         | Protocol::TrojanTls
-        | Protocol::TrojanReality
         | Protocol::VmessWsTls => {}
     }
     if profile.h2mux_eligible() {
@@ -553,6 +573,7 @@ async fn change_profile_menu(profile: &config::ManagedProfile) -> Result<()> {
                 false,
                 config::validate_server_name,
             )?;
+            crate::sni_probe::check_manual(&server_name).await;
             ProfileChange::RealityServerName(server_name)
         }
         ChangeAction::ShadowsocksCipher => {
@@ -610,6 +631,7 @@ async fn change_profile_menu(profile: &config::ManagedProfile) -> Result<()> {
                 false,
                 config::validate_server_name,
             )?;
+            crate::sni_probe::check_manual(&server_name).await;
             ProfileChange::ShadowTlsServerName(server_name)
         }
         ChangeAction::ShadowTlsHandshake => {
@@ -1153,6 +1175,7 @@ async fn fast_add_config_menu_once() -> Result<MenuControl> {
         cli::ensure_shoes_for_add(false).await?;
         let server_address = resolve_menu_server_address().await?;
         let result = fast_add::execute(fast_add::AddRequest {
+            interactive: true,
             vless_enc: Default::default(),
             name: None,
             protocol,
@@ -1418,6 +1441,7 @@ async fn deploy_fast_config(
     };
     let server_address = resolve_menu_server_address().await?;
     let result = fast_add::execute(fast_add::AddRequest {
+        interactive: true,
         vless_enc,
         name: None,
         protocol,
@@ -1525,12 +1549,7 @@ async fn advanced_add_config_menu() -> Result<()> {
             options.shadowsocks_password = (!password.is_empty()).then_some(password);
             let shadow_password = input::password("ShadowTLS 密码（留空则安全生成）", true)?;
             options.shadowtls_password = (!shadow_password.is_empty()).then_some(shadow_password);
-            let sni = input::checked_text(
-                "ShadowTLS SNI",
-                Some(config::DEFAULT_SNI),
-                false,
-                config::validate_server_name,
-            )?;
+            let sni = prompt_probed_sni("ShadowTLS SNI").await?;
             shadowtls_server_name = Some(sni.clone());
             let handshake = input::checked_text(
                 "Handshake destination（host:port）",
@@ -1633,20 +1652,18 @@ async fn advanced_add_config_menu() -> Result<()> {
     let server_name = if matches!(protocol, Protocol::Shadowsocks)
         && options.shadowsocks_mode == config::ShadowsocksMode::ShadowTlsV3
     {
-        shadowtls_server_name.unwrap_or_else(|| config::DEFAULT_SNI.to_owned())
+        shadowtls_server_name.context("缺少已检测的 ShadowTLS SNI")?
     } else if matches!(
         protocol,
         Protocol::Shadowsocks | Protocol::Snell | Protocol::Socks5 | Protocol::VlessEnc
     ) {
         config::DEFAULT_SNI.to_owned()
+    } else if reality_outer {
+        prompt_probed_sni("Reality SNI").await?
     } else {
         let default_server_name = config::resolve_server_name(None, protocol, options.anytls_mode);
         input::checked_text(
-            if reality_outer {
-                "Reality SNI"
-            } else {
-                "证书域名/服务器名称"
-            },
+            "证书域名/服务器名称",
             Some(&(default_server_name)),
             false,
             config::validate_server_name,
