@@ -384,9 +384,11 @@ jobs:
             -o "$RUNNER_TEMP/last-message.md")
           [ -z "$CODEX_MODEL" ] || args+=(-m "$CODEX_MODEL")
           # 完整事件流和 stderr 只写文件，不进公开日志。
+          # `shell: bash` 实际是 `bash -eo pipefail`：失败时必须用 `|| rc=$?` 接住，
+          # 否则脚本在这里直接退出，后面的 token 遮蔽和失败原因都不会执行。
+          rc=0
           codex "${args[@]}" - < "$RUNNER_TEMP/prompt.txt" \
-            > "$RUNNER_TEMP/codex-events.jsonl" 2> "$RUNNER_TEMP/codex-stderr.log"
-          rc=$?
+            > "$RUNNER_TEMP/codex-events.jsonl" 2> "$RUNNER_TEMP/codex-stderr.log" || rc=$?
           # 运行中如果刷新了 token，新 token 也要遮蔽。
           jq -r '.tokens // {} | .[] | strings | select(length >= 16)' "$CODEX_HOME/auth.json" > "$RUNNER_TEMP/new-tokens.txt" || true
           while IFS= read -r t; do printf '::add-mask::%s\n' "$t"; done < "$RUNNER_TEMP/new-tokens.txt"
@@ -446,9 +448,9 @@ jobs:
         run: |
           set -uo pipefail
           # 一次最小的调用：验证登录可用，并让 Codex 按需刷新 token。
+          rc=0
           codex exec -s read-only --skip-git-repo-check --ephemeral \
-            -o "$RUNNER_TEMP/selfcheck.txt" "只回复 OK" > /dev/null 2> "$RUNNER_TEMP/selfcheck.err"
-          rc=$?
+            -o "$RUNNER_TEMP/selfcheck.txt" "只回复 OK" > /dev/null 2> "$RUNNER_TEMP/selfcheck.err" || rc=$?
           jq -r '.tokens // {} | .[] | strings | select(length >= 16)' "$CODEX_HOME/auth.json" \
             | while IFS= read -r t; do printf '::add-mask::%s\n' "$t"; done
           if [ "$rc" -ne 0 ]; then
