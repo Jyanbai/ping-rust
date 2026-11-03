@@ -68,6 +68,7 @@ enum ChangeAction {
     RegenerateCredentials,
     Password,
     RealityServerName,
+    RecommendSni,
     ShadowsocksCipher,
     ShadowTlsPassword,
     ShadowTlsServerName,
@@ -341,14 +342,90 @@ pub async fn run() -> Result<()> {
     }
 }
 
-async fn prompt_probed_sni(label: &str) -> Result<String> {
-    let explicit = input::checked_text(
-        format!("{label}（留空自动检测选择）"),
-        None,
-        true,
-        config::validate_server_name,
-    )?;
-    crate::sni_probe::resolve((!explicit.is_empty()).then_some(explicit), true).await
+async fn prompt_probed_sni(label: &str, mode: crate::sni::Mode) -> Result<String> {
+    loop {
+        println!("\n{label}\n1) 自动选择（默认）\n2) 检测与推荐\n3) 手动输入\n0) 返回");
+        let choice =
+            input::validated_text("选择 SNI 方式", Some("1"), false, |value| match value {
+                "1" | "2" | "3" => Ok(value.to_owned()),
+                _ => bail!("请输入 1、2 或 3"),
+            })?;
+        match choice.as_str() {
+            "1" => return crate::sni_probe::resolve(None, true).await,
+            "2" => match recommend_sni(mode).await {
+                Ok(Some(domain)) => return Ok(domain),
+                Ok(None) => continue,
+                Err(error) if input::is_back(&error) => continue,
+                Err(error) => return Err(error),
+            },
+            _ => {
+                let domain = input::checked_text(label, None, false, config::validate_server_name)?;
+                return crate::sni_probe::resolve(Some(domain), true).await;
+            }
+        }
+    }
+}
+
+async fn recommend_sni(mode: crate::sni::Mode) -> Result<Option<String>> {
+    use crate::sni;
+    loop {
+        let Some(source) = select_numbered(
+            "检测与推荐 SNI：选择候选来源",
+            &[
+                "默认名单",
+                "现有节点的 SNI",
+                "输入域名（空格分隔）",
+                "在自己电脑上扫描并导入 CSV（推荐）",
+                "在 VPS 上扫描（需确认风险）",
+            ],
+        )?
+        else {
+            return Ok(None);
+        };
+        let candidates = match source {
+            0 | 1 => sni::defaults(Some(mode))?
+                .into_iter()
+                .filter(|c| (c.source == "默认名单") == (source == 0))
+                .collect(),
+            2 => input::validated_text("输入 SNI 域名，空格分隔", None, false, |value| {
+                sni::manual(value, mode)
+            })?,
+            3 => {
+                match sni::local_scanner_command().await {
+                    Ok(command) => println!("在自己电脑上运行（需先安装 RealiTLScanner v0.2.3）：\n{command}"),
+                    Err(error) => println!("{error:#}\n在自己电脑上运行（将占位符换成 VPS IPv4）：\nRealiTLScanner -addr <VPS 的 IPv4>/24 -port 443 -thread 5 -timeout 5 -out out.csv"),
+                }
+                println!("上传 out.csv 到 VPS 后输入路径。该 XTLS 项目采用 MPL-2.0 许可。导入不在 VPS 上运行扫描器。");
+                let path = input::file_path("CSV 文件路径")?;
+                let subnet = input::validated_text(
+                    "CSV 实际扫描的 IPv4/24 网段",
+                    None,
+                    false,
+                    str::parse::<sni::Subnet>,
+                )?;
+                sni::import(std::path::Path::new(&path), subnet, mode)?
+            }
+            _ => sni::scan(false, mode).await?,
+        };
+        let reports = sni::check(candidates).await;
+        sni::print_reports(&reports);
+        if reports.is_empty() {
+            println!("没有候选，请选择其他来源。");
+            continue;
+        }
+        println!("输入通过条目的编号选择 SNI，输入 0 返回上一步。");
+        loop {
+            let choice = read_menu_choice(reports.len())?;
+            match parse_numbered_choice(&choice, reports.len()) {
+                Some(Some(index)) => match sni::selected(&reports, index) {
+                    Ok(domain) => return Ok(Some(domain)),
+                    Err(error) => println!("{error}"),
+                },
+                Some(None) => break,
+                None => println!("无效编号，请重新输入。"),
+            }
+        }
+    }
 }
 
 async fn change_config_menu() -> Result<()> {
@@ -393,7 +470,8 @@ async fn change_profile_menu(profile: &config::ManagedProfile) -> Result<()> {
             actions.push((ChangeAction::VlessEncVision, "开启或关闭 Vision"));
         }
         Protocol::Reality | Protocol::TrojanReality => {
-            actions.push((ChangeAction::RealityServerName, "更改 SNI"))
+            actions.push((ChangeAction::RealityServerName, "更改 SNI"));
+            actions.push((ChangeAction::RecommendSni, "检测与推荐 SNI"));
         }
         Protocol::Hysteria2 | Protocol::Tuic => {
             actions.push((ChangeAction::Password, "更改密码"));
@@ -409,6 +487,7 @@ async fn change_profile_menu(profile: &config::ManagedProfile) -> Result<()> {
                 actions.push((ChangeAction::Password, "更改 SS2022 密钥"));
                 actions.push((ChangeAction::ShadowTlsPassword, "更改 ShadowTLS 密码"));
                 actions.push((ChangeAction::ShadowTlsServerName, "更改 ShadowTLS SNI"));
+                actions.push((ChangeAction::RecommendSni, "检测与推荐 SNI"));
                 actions.push((ChangeAction::ShadowTlsHandshake, "更改握手目标"));
             } else {
                 actions.push((ChangeAction::Password, "更改密码"));
@@ -448,6 +527,7 @@ async fn change_profile_menu(profile: &config::ManagedProfile) -> Result<()> {
                 }
             ) {
                 actions.push((ChangeAction::RealityServerName, "更改 SNI"));
+                actions.push((ChangeAction::RecommendSni, "检测与推荐 SNI"));
             }
         }
         Protocol::VlessTlsVision
@@ -564,6 +644,39 @@ async fn change_profile_menu(profile: &config::ManagedProfile) -> Result<()> {
                 }
             } else {
                 ProfileChange::Password(password)
+            }
+        }
+        ChangeAction::RecommendSni => {
+            let shadowtls = matches!(
+                profile.credentials,
+                Credentials::Shadowsocks {
+                    shadowtls: Some(_),
+                    ..
+                }
+            );
+            let mode = if shadowtls {
+                crate::sni::Mode::ShadowTls
+            } else {
+                crate::sni::Mode::Reality
+            };
+            let Some(domain) = recommend_sni(mode).await? else {
+                return Ok(());
+            };
+            if !input::confirm(
+                format!("确认将 SNI 更改为 {domain}？客户端配置也需要同步更新"),
+                false,
+            )? {
+                return Ok(());
+            }
+            let backup = operations::backup(Some(std::path::PathBuf::from(format!(
+                "/var/backups/ping-rust-sni-{}.tar.gz",
+                uuid::Uuid::new_v4()
+            ))))?;
+            println!("配置备份：{}", backup.display());
+            if shadowtls {
+                ProfileChange::ShadowTlsServerName(domain)
+            } else {
+                ProfileChange::RealityServerName(domain)
             }
         }
         ChangeAction::RealityServerName => {
@@ -1439,8 +1552,15 @@ async fn deploy_fast_config(
     } else {
         Default::default()
     };
+    let server_name = if protocol.uses_reality(AnyTlsMode::Tls) {
+        Some(prompt_probed_sni("Reality SNI", crate::sni::Mode::Reality).await?)
+    } else if shadowsocks_mode == config::ShadowsocksMode::ShadowTlsV3 {
+        Some(prompt_probed_sni("ShadowTLS SNI", crate::sni::Mode::ShadowTls).await?)
+    } else {
+        None
+    };
     let server_address = resolve_menu_server_address().await?;
-    let result = fast_add::execute(fast_add::AddRequest {
+    let request = fast_add::AddRequest {
         interactive: true,
         vless_enc,
         name: None,
@@ -1460,8 +1580,12 @@ async fn deploy_fast_config(
         naive_password: None,
         naive_padding: true,
         naive_fallback: None,
-    })
-    .await?;
+    };
+    let result = if let Some(server_name) = server_name {
+        fast_add::execute_with_sni(request, server_name).await?
+    } else {
+        fast_add::execute(request).await?
+    };
     cli::print_add_result(&result);
     offer_vless_enc_regeneration(&result.generation.profile).await?;
     Ok(control_after_success(1))
@@ -1549,7 +1673,7 @@ async fn advanced_add_config_menu() -> Result<()> {
             options.shadowsocks_password = (!password.is_empty()).then_some(password);
             let shadow_password = input::password("ShadowTLS 密码（留空则安全生成）", true)?;
             options.shadowtls_password = (!shadow_password.is_empty()).then_some(shadow_password);
-            let sni = prompt_probed_sni("ShadowTLS SNI").await?;
+            let sni = prompt_probed_sni("ShadowTLS SNI", crate::sni::Mode::ShadowTls).await?;
             shadowtls_server_name = Some(sni.clone());
             let handshake = input::checked_text(
                 "Handshake destination（host:port）",
@@ -1659,7 +1783,7 @@ async fn advanced_add_config_menu() -> Result<()> {
     ) {
         config::DEFAULT_SNI.to_owned()
     } else if reality_outer {
-        prompt_probed_sni("Reality SNI").await?
+        prompt_probed_sni("Reality SNI", crate::sni::Mode::Reality).await?
     } else {
         let default_server_name = config::resolve_server_name(None, protocol, options.anytls_mode);
         input::checked_text(

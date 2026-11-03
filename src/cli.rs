@@ -50,6 +50,11 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// 可选的 SNI 检测与推荐，只输出结果，不更改配置
+    Sni {
+        #[command(subcommand)]
+        command: crate::sni::Command,
+    },
     /// 打开数字菜单（不带子命令时的默认行为）
     Menu,
     /// 首次安装时零输入部署默认 VLESS-REALITY
@@ -327,6 +332,7 @@ pub enum PortKind {
 
 pub async fn run(cli: Cli) -> Result<()> {
     match cli.command.unwrap_or(Command::Menu) {
+        Command::Sni { command } => crate::sni::run(command).await,
         Command::Menu => menu::run().await,
         Command::Bootstrap => {
             if !bootstrap_default_reality().await? {
