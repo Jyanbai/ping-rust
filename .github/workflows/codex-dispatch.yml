@@ -232,6 +232,9 @@ jobs:
           - 不要执行 git commit / git push / 新建分支，只修改文件；提交由 workflow 负责。
           - 不要修改 .github/workflows/ 和 .github/actions/ 下的任何文件（这类改动会被自动拒绝）。
           - 改动保持最小，只做任务要求的事。
+          - 不要新建 PR 说明、报告之类的文档文件（例如 docs/PR_*.md）。任务要求写进 PR 描述的
+            内容（清单、例外、验证记录、终端输出等）全部写在最终回复里：新开 PR 时最终回复就是
+            PR 描述，在已有 PR 上继续修改时它会贴进 PR 评论。
           - 最终回复用中文：第一行是一句不超过 60 个字符的提交标题（不要加引号或 Markdown），
             空一行后写明改了什么、跑了哪些检查、结果如何。
           RULES
@@ -622,7 +625,8 @@ jobs:
               printf '由 Codex 生成（[运行日志](%s)）' "$RUN_URL"
               [ -z "$COMMENT_URL" ] || printf '，触发评论：%s' "$COMMENT_URL"
               printf '\n\n### Codex 总结\n\n'
-              head -c 6000 "$result/summary.md"
+              # GitHub 的 PR 描述上限是 65536 字符；总结要承载 issue 要求的清单和记录。
+              head -c 60000 "$result/summary.md"
             } > "$body"
             pr_url="$(gh pr create --repo "$REPO" --base "$CHECKOUT_REF" --head "$PUSH_BRANCH" \
               --title "$title" --body-file "$body")"
@@ -654,7 +658,7 @@ jobs:
           summary="$RUNNER_TEMP/codex-result/summary.md"
           body="🤖 Codex 任务结果："$'\n\n'"$result"
           if [ -s "$summary" ]; then
-            body+=$'\n\n<details><summary>Codex 总结</summary>\n\n'"$(head -c 3000 "$summary")"$'\n\n</details>'
+            body+=$'\n\n<details><summary>Codex 总结</summary>\n\n'"$(head -c 60000 "$summary")"$'\n\n</details>'
           fi
           body+=$'\n\n'"[运行日志]($RUN_URL)"
           gh api -X PATCH "repos/$REPO/issues/comments/$COMMENT_ID" -f body="$body" >/dev/null
