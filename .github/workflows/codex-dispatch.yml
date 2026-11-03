@@ -300,8 +300,19 @@ jobs:
           fi
           sha256sum "$home/auth.json" | cut -d' ' -f1 > "$RUNNER_TEMP/auth.seed.sha256"
 
+          # codex cloud 查找云端环境时，先按当前目录 git remote 指向的仓库查（by-repo），
+          # 再查全局列表；私有环境只在 by-repo 结果里。所以准备一个只有 remote、
+          # 没有任何代码的空仓库，让所有 codex 命令都在这里运行。
+          hint="$RUNNER_TEMP/codex-repo-hint"
+          git init -q "$hint"
+          git -C "$hint" remote add origin "https://github.com/$REPO.git"
+          echo "CODEX_REPO_HINT=$hint" >> "$GITHUB_ENV"
+
           # 刷新后的新 token 不在原 secret 里，GitHub 不会自动遮蔽；每次调用 Codex 后都遮蔽一遍。
           cat > "$RUNNER_TEMP/codex-lib.sh" <<'LIB'
+          codex() {
+            (cd "$CODEX_REPO_HINT" && command codex "$@")
+          }
           mask_tokens() {
             local t
             while IFS= read -r t; do
@@ -549,4 +560,4 @@ jobs:
       - name: Remove local credentials
         if: always()
         shell: bash
-        run: rm -rf "$RUNNER_TEMP/codex-home" "$RUNNER_TEMP/codex-lib.sh"
+        run: rm -rf "$RUNNER_TEMP/codex-home" "$RUNNER_TEMP/codex-lib.sh" "$RUNNER_TEMP/codex-repo-hint"
