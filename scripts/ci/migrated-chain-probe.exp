@@ -15,9 +15,7 @@ proc choice {value} { send -- "$value\r" }
 
 spawn $binary
 wait_for {请选择 \[0-10\]} "main menu"
-choice 9
-wait_for {请选择 \[0-9\]} "operations menu"
-choice 1
+choice 8
 wait_for {Chain Proxy 2\.0} "chain menu"
 choice 7
 wait_for {测试节点} "test menu"

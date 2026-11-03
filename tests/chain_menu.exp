@@ -35,9 +35,7 @@ proc send_choice {value} {
 
 spawn $binary
 expect_or_fail {请选择 \[0-10\]} "main menu"
-send_choice 9
-expect_or_fail {运维工具} "operations menu"
-send_choice 1
+send_choice 8
 expect_or_fail {Chain Proxy 2.0} "chain menu"
 
 switch -- $action {

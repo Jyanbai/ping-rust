@@ -183,6 +183,10 @@ $ sudo prs
 ------------- ping-rust v0.3.0 -------------
 shoes: running
 项目: https://github.com/Jyanbai/ping-rust
+节点（3）：
+  · reality-20443  VLESS-REALITY  20443
+  · ss-31002  Shadowsocks 2022  31002
+  · hy2-40001  Hysteria2  40001
 
 1) 添加配置
 2) 更改配置
@@ -191,9 +195,9 @@ shoes: running
 5) 运行管理
 6) 更新
 7) 卸载
-8) 帮助
-9) 其他
-10) 关于
+8) 链式代理
+9) 工具
+10) 帮助与关于
 0) 退出
 
 请选择 [0-10]: 1
@@ -232,6 +236,25 @@ vless://...security=reality...pbk=...&sid=...#VLESS-REALITY-25448
 ------------- END -------------
 ```
 
+主菜单 1–7 保持原位置和功能，8–10 调整如下，方便老用户查找：
+
+| 原位置 | 新位置 |
+|---|---|
+| 1–4 | 不变 |
+| 5) 运行管理 | 不变，末尾新增“查看日志” |
+| 6) 更新 | 不变，统一提供 ping-rust 更新入口 |
+| 7) 卸载 | 不变 |
+| 8) 帮助 | 10) 帮助与关于 |
+| 9) 其他 → 链式代理 | 8) 链式代理 |
+| 9) 其他 → 查看日志 | 5) 运行管理 → 7) 查看日志 |
+| 9) 其他 → 其余工具 | 9) 工具（顺序见下） |
+| 9) 其他 → 更新 ping-rust | 删除重复入口，使用 6) 更新 |
+| 10) 关于 | 10) 帮助与关于 |
+
+`9) 工具` 按顺序提供：1) 导出客户端配置、2) 高级添加配置、3) SNI 检测、4) SNI 扫描、5) 端口检查、6) 开启 BBR、7) 备份配置、8) 恢复配置，输入 0 返回。SNI 检测可输入空格分隔的域名，直接回车则检测默认名单和现有节点；SNI 扫描复用 `prs sni scan` 的确认流程。两者只输出结果，不修改节点配置。
+
+主界面节点摘要只显示配置名称、协议和端口，最多列出 5 个；更多节点可进入 `3) 查看配置`。没有节点或读取 state 失败时显示提示，菜单仍可使用。`10) 帮助与关于` 汇总版本、项目链接和常用命令。
+
 菜单 `2. 更改配置` 会先选择现有配置，再按协议提供端口、名称、公网地址、凭据、Reality SNI、Shadowsocks/Snell cipher、Snell/SOCKS5 UDP 开关或 AnyTLS 用户密码等修改项。新配置必须通过真实 `shoes --dry-run` 才会原子提交；应用失败时自动恢复修改前的配置与 systemd 状态。Snell v3 没有统一标准分享 URI，因此成功后显示完整手动连接参数，不生成伪 URI 或二维码。
 
 ### Hot Reload
@@ -254,7 +277,7 @@ sudo ping-rust update --method cargo
 
 ### 链式代理 2.0
 
-从主菜单进入 `9) 其他 → 1) 链式代理`：
+从主菜单进入 `8) 链式代理`：
 
 ```text
 ------------- Chain Proxy 2.0 -------------
@@ -274,7 +297,7 @@ sudo ping-rust update --method cargo
 
 配置按 **Nodes → Pools → Chains → Routing Rules → Default Route** 组合。Chain 可以包含有序的多跳；Pool 在某一 hop 内轮询节点；多条完整 Chain 可以通过 whole-chain round-robin 轮询。规则支持 IPv4/IPv6 CIDR、精确主机名和通配主机名，并提供 DIRECT、BLOCK、Chain 和多 Chain 轮询目标。默认路由覆盖未匹配规则的 IPv4 与 IPv6 流量。
 
-Pool 与多 Chain 轮询只表示连接分布，不提供健康检查、自动故障切换或延迟选择。可在 `9) 其他 → 1) 链式代理 → 7) 测试节点 / Chain → 3) 测试 Pool 内全部节点` 手动逐个排查。
+Pool 与多 Chain 轮询只表示连接分布，不提供健康检查、自动故障切换或延迟选择。可在 `8) 链式代理 → 7) 测试节点 / Chain → 3) 测试 Pool 内全部节点` 手动逐个排查。
 
 当前支持 SOCKS5、HTTP/HTTPS、Shadowsocks、VLESS TCP/TLS/Reality/WebSocket、Trojan TLS/WebSocket，以及由 ping-rust 生成的 VMess WebSocket TLS 分享链接。由于当前 shoes 内核没有对应客户端实现，Hysteria2、TUIC、WireGuard/WARP 不能作为链式出口；ping-rust 会返回明确错误，不生成近似配置。HTTP、SOCKS5 和 Trojan 出口不支持 UDP-over-TCP，启用或切换时会再次警告；相关 UDP 请求会失败，不会自动回退直连。
 
@@ -537,7 +560,7 @@ sudo /usr/local/bin/shoes --dry-run /etc/shoes/config.yaml
 - Hysteria2/TUIC 失败：确认 UDP 端口已放行，并检查证书域名。
 - Shadowsocks 2022 导入失败：确认客户端 cipher 使用标准名称，且 Base64 密钥解码长度与 AES-128（16 字节）或 AES-256/ChaCha20（32 字节）一致。
 - AnyTLS 失败：确认选择的 TLS/Reality 模式、SNI、密码与证书校验设置一致；AnyTLS+Reality 请使用 sing-box 导出。
-- 链式节点显示端口可达但不能使用：进入 `9) 其他 → 1) 链式代理 → 7) 测试节点 / Chain → 1) 测试节点`；新版测试会验证密码/UUID、TLS/Reality 握手和真实 HTTP 出口，不再只测 TCP 端口。
+- 链式节点显示端口可达但不能使用：进入 `8) 链式代理 → 7) 测试节点 / Chain → 1) 测试节点`；新版测试会验证密码/UUID、TLS/Reality 握手和真实 HTTP 出口，不再只测 TCP 端口。
 - `systemctl` 不存在：当前系统不是 systemd 环境，服务管理功能无法使用。
 - GitHub API 请求支持可选 `GITHUB_TOKEN` 或 `GH_TOKEN`（前者优先，空值忽略）。使用 sudo 时可执行 `sudo --preserve-env=GITHUB_TOKEN,GH_TOKEN ping-rust ...`；token 仅发送到 `api.github.com`，不会用于 Release 资产下载。403、429、5xx 与连接失败最多尝试 3 次并退避；尊重服务端等待提示，超过 120 秒等待上限则停止并明确报错。历史 CI 缺少底层输出时不能据此判定为限流。
 - 自更新提示权限不足：若当前程序位于 `/usr/local/bin`，改用 `sudo ping-rust self-update`；不要手工覆盖正在更新的文件。

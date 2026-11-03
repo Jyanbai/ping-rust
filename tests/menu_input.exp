@@ -19,6 +19,10 @@ proc expect_or_fail {pattern stage} {
 }
 proc send_choice {value} { send -- "$value\r" }
 proc main_menu {} { expect_or_fail {请选择 \[0-10\]: } "main menu" }
+proc tools_menu {} {
+    expect_or_fail {工具:} "tools menu"
+    expect_or_fail {请选择 \[0-8\]: } "tools prompt"
+}
 proc choose_profile {} {
     global profile_count
     if {$profile_count > 1} {
@@ -49,6 +53,25 @@ proc successful_exit {} {
 }
 
 spawn $binary
+expect_or_fail {8\) 链式代理\r?\n9\) 工具\r?\n10\) 帮助与关于} "reorganized main menu"
+main_menu
+send_choice 9
+expect_or_fail {工具:} "tools menu"
+expect_or_fail {1\) 导出客户端配置\r?\n2\) 高级添加配置\r?\n3\) SNI 检测\r?\n4\) SNI 扫描} "tools order"
+expect_or_fail {请选择 \[0-8\]: } "tools prompt"
+send_choice 3
+expect_or_fail {输入 SNI 域名，空格分隔[^\r\n]*（输入 0 返回）：} "SNI check prompt"
+send_choice 0
+tools_menu
+send_choice 4
+expect_or_fail {确认在 VPS 上扫描？只有输入 y 才执行（默认：N，输入 0 返回）：} "SNI scan confirmation"
+send_choice 0
+tools_menu
+send_choice 4
+expect_or_fail {确认在 VPS 上扫描？只有输入 y 才执行（默认：N，输入 0 返回）：} "SNI scan declined"
+send_choice n
+tools_menu
+send_choice 0
 main_menu
 send_choice 2
 choose_profile

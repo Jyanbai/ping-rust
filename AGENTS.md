@@ -4,7 +4,7 @@
 
 ## 项目
 
-ping-rust 是纯 Rust 编写的 [shoes](https://github.com/cfal/shoes) 代理内核安装与管理工具。交互照搬 233boy 脚本的数字菜单（`sudo prs`），也提供 `prs add reality`、`prs info`、`prs url`、`prs qr` 等命令。界面、文档、提交说明以中文为主。
+ping-rust 是纯 Rust 编写的 [shoes](https://github.com/cfal/shoes) 代理内核安装与管理工具。提供交互式数字菜单（`sudo prs`），也提供 `prs add reality`、`prs info`、`prs url`、`prs qr` 等命令。界面、文档、提交说明以中文为主。
 
 运行时文件：`/usr/local/bin/shoes`、`/etc/shoes/config.yaml`（聚合配置）、`/etc/shoes/ping-rust-state.json`（受管状态）、`/etc/shoes/profiles/`（每个节点一份）。
 
@@ -50,7 +50,7 @@ cargo test --locked
 - **旧版磁盘状态夹具不改**：`tests/fixtures/yaml/compat/`、`tests/fixtures/yaml/chain-v2/` 记录的是旧版本写出的文件，用来证明新版本还能读。新格式放进新目录（如 `chain-v036/`、`vless-enc/`）。`golden/` 只在导出格式有意改变时重新生成，并在 PR 里说明。
 - **向后兼容**：新版本写出的 state 必须能被 v0.2.1 读取（`backward-compat.yml` 会检查）。
 - **已有节点不动**：升级 ping-rust 不得自动改变已有节点的端口、凭据、SNI 或客户端配置。
-- **主菜单不动**：主菜单 1–10 的编号和文字与 233boy 保持一致。
+- **主菜单可以调整**：改动主菜单编号或文字的 PR 必须在描述里给出新旧编号对照，并同步更新 README 和 `tests/menu_input.exp`。
 - **非交互路径不读 stdin**：`ping-rust bootstrap`、`install-self` 可能在 `curl | bash` 里运行，绝不能等待用户输入。
 - **自更新兼容**：`ping-rust --version` 的 stdout 必须保持 `ping-rust X.Y.Z` 这一行，commit 等额外信息写到 stderr。旧版本的 self-update 依赖这一点。
 - **一致性**：服务端配置、分享链接、二维码、各客户端导出必须一致。某种客户端不支持时明确拒绝并说明原因，不能静默生成一个不一样的配置。
