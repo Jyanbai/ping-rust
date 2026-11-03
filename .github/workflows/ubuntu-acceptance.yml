@@ -197,10 +197,12 @@ jobs:
           print(query.get('sni', [''])[0], query.get('fp', [''])[0])
           PY
           )
-          case "$reality_sni" in
-            www.amazon.com|www.ebay.com|www.paypal.com|www.cloudflare.com|dash.cloudflare.com|aws.amazon.com) ;;
-            *) echo "unexpected Reality SNI: $reality_sni" >&2; exit 1 ;;
-          esac
+          # The default SNI is chosen from the built-in candidate list (#63).
+          if ! sed -e 's/#.*//' -e 's/[[:space:]]//g' data/reality-sni-candidates.txt \
+              | grep -v '^$' | grep -Fxq -- "$reality_sni"; then
+            echo "unexpected Reality SNI: $reality_sni" >&2
+            exit 1
+          fi
           test "$reality_fingerprint" = chrome \
             || { echo "unexpected Reality fingerprint: $reality_fingerprint" >&2; exit 1; }
           info_output="$(sudo "$PING_RUST" info)"
