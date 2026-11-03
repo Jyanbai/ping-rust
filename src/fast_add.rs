@@ -49,6 +49,19 @@ pub struct AddResult {
 }
 
 pub async fn execute(request: AddRequest) -> Result<AddResult> {
+    execute_inner(request, None).await
+}
+
+/// 菜单已完成自动选择、手动检测或完整推荐检测，复用结果而不重复探测。
+pub(crate) async fn execute_with_sni(
+    request: AddRequest,
+    server_name: String,
+) -> Result<AddResult> {
+    config::validate_server_name(&server_name)?;
+    execute_inner(request, Some(server_name)).await
+}
+
+async fn execute_inner(request: AddRequest, checked_sni: Option<String>) -> Result<AddResult> {
     utils::require_linux_root()?;
     if !Path::new(utils::SHOES_BIN).is_file() {
         bail!("shoes 尚未安装；请先运行 ping-rust install，或为 add 添加 --yes 自动安装");
@@ -59,7 +72,9 @@ pub async fn execute(request: AddRequest) -> Result<AddResult> {
     let probes_sni = request.protocol.uses_reality(config::AnyTlsMode::Tls)
         || (request.protocol == Protocol::Shadowsocks
             && request.shadowsocks_mode == ShadowsocksMode::ShadowTlsV3);
-    let server_name = if probes_sni {
+    let server_name = if let Some(server_name) = checked_sni {
+        server_name
+    } else if probes_sni {
         crate::sni_probe::resolve(request.server_name, request.interactive).await?
     } else {
         config::resolve_server_name(

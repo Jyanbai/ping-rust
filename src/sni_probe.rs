@@ -220,6 +220,10 @@ pub(crate) async fn check_manual(domain: &str) {
     }
 }
 
+pub(crate) async fn check(domain: &str) -> ProbeResult {
+    probe(domain, public_tls_config()).await
+}
+
 pub(crate) async fn resolve(explicit: Option<String>, interactive: bool) -> Result<String> {
     if let Some(domain) = explicit {
         config::validate_server_name(&domain)?;

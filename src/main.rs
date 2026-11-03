@@ -13,6 +13,7 @@ mod operations;
 mod performance;
 mod self_update;
 mod service;
+mod sni;
 mod sni_probe;
 mod utils;
 mod vless_encryption;
@@ -61,6 +62,7 @@ fn is_interrupted(error: &anyhow::Error) -> bool {
 }
 
 fn restore_cursor_and_exit() -> ! {
+    sni::cleanup_on_interrupt();
     let _ = restore_cursor(&mut std::io::stdout());
     std::process::exit(130)
 }

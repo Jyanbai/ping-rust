@@ -308,6 +308,8 @@ sudo prs add reality --random-port --server-address 203.0.113.10
 
 新建 VLESS Reality、Trojan Reality、AnyTLS Reality 和 Shadowsocks + ShadowTLS v3 时，未指定 SNI 会并行检测编译时内置的 [`data/reality-sni-candidates.txt`](data/reality-sni-candidates.txt)。每个候选从系统 DNS 解析到 TLS 握手整体限时 3 秒；只提供 TLS 1.3 和 `h2`，要求协商 `h2`，并用内置公共根证书校验证书链和域名。检测不发送 HTTP 请求。通过后，从握手最快的 3 个候选中随机选 1 个；不足 3 个时从全部通过者中随机选。ShadowTLS 默认握手目标为 `<选中域名>:443`。
 
+菜单 SNI 一步可选“自动选择（默认）”“检测与推荐”“手动输入”。可选检测会额外验证 HTTPS 跳转、Cloudflare 和真实 shoes 本机数据面；`prs sni check [域名...]`、`prs sni scan` 只输出结果，不改配置。支持导入自己电脑上的 RealiTLScanner CSV；VPS 扫描需明确接受风险。操作及风险见 wiki [SNI 选择](docs/wiki/SNI-选择.md)。
+
 可用 `sudo prs add reality --server-name target.example.com` 或菜单手动输入覆盖 SNI。显式指定时只检测一次，失败在 stderr 警告，仍使用指定值；普通 TLS 证书名称不检测。菜单 `2. 更改配置` 支持三种 Reality 的“更改 SNI”，以及 ShadowTLS 的 SNI 修改；默认的 `<旧域名>:443` 目标会同步改名，自定义目标保留，修改仍走备份、原子提交、服务验证和失败回滚。升级不会自动修改已有节点的 SNI 或客户端配置。
 
 终端会显示逐个候选结果和选中域名；非交互时只在 stderr 输出一行选择摘要，`--plain` 的 stdout 仍只输出分享链接。全部候选失败时，终端允许输入经过格式校验的 SNI（失败仍只警告）或输入 `0` 取消；非终端及安装器的 `bootstrap` 不读 stdin，直接提示用 `prs add reality --server-name <域名>` 重试。`prs generate` 不进行连通性检测：未指定时从同一名单随机选，并在 stderr 提示“未做连通性检测”。AnyTLS Reality 的标准分享 URI/二维码和 Mihomo 导出、ShadowTLS 的标准分享 URI/二维码继续明确拒绝；这些组合请使用支持的客户端配置导出。
