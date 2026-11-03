@@ -57,10 +57,12 @@ use schema::{
     ServerConfig, ServerProtocol, ServerRule, ShadowTlsHandshake, ShadowTlsTarget,
 };
 use transaction::{read_optional, CredentialCleanup, ManagedRollback, ProfileDirectorySnapshot};
-pub(crate) use validation::validate_shadowsocks_password;
 use validation::{
-    validate_anytls_users, validate_host_port, validate_padding_scheme, validate_reality_short_id,
-    validate_server_name, validate_websocket_path,
+    validate_anytls_users, validate_padding_scheme, validate_reality_short_id,
+    validate_websocket_path,
+};
+pub(crate) use validation::{
+    validate_host_port, validate_server_name, validate_shadowsocks_password,
 };
 
 pub const DEFAULT_SNI: &str = "www.cloudflare.com";
@@ -2075,7 +2077,7 @@ fn anytls_users_mut(server: &mut ServerConfig) -> Result<&mut Vec<AnyTlsUser>> {
     Ok(users)
 }
 
-fn validate_profile_name(
+pub(crate) fn validate_profile_name(
     name: &str,
     profiles: &[ManagedProfile],
     except_id: Option<Uuid>,
@@ -2618,7 +2620,7 @@ fn validate_naive_component(label: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_naive_fallback(path: &str) -> Result<()> {
+pub(crate) fn validate_naive_fallback(path: &str) -> Result<()> {
     if !path.starts_with('/') || path.chars().any(char::is_control) {
         bail!("NaiveProxy fallback 必须是绝对静态文件目录路径");
     }

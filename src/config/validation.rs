@@ -16,7 +16,7 @@ pub(super) fn validate_websocket_path(path: &str) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn validate_server_name(value: &str) -> Result<()> {
+pub(crate) fn validate_server_name(value: &str) -> Result<()> {
     if value.trim().is_empty()
         || value.len() > 253
         || value.contains(char::is_whitespace)
@@ -129,7 +129,7 @@ pub(super) fn validate_padding_scheme(scheme: &[String]) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn validate_host_port(value: &str) -> Result<()> {
+pub(crate) fn validate_host_port(value: &str) -> Result<()> {
     let (host, port) = if let Some(bracketed) = value.strip_prefix('[') {
         let (host, port) = bracketed
             .split_once("]:")

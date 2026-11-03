@@ -3,10 +3,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crate::menu::input;
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use colored::Colorize;
-use dialoguer::{theme::ColorfulTheme, Confirm, Input};
 use qrcode::{render::unicode, QrCode};
 use uuid::Uuid;
 
@@ -733,7 +733,14 @@ pub(crate) async fn update_shoes_with_options(
     Ok(report)
 }
 
-async fn run_add(mut args: AddArgs) -> Result<()> {
+async fn run_add(args: AddArgs) -> Result<()> {
+    match run_add_inner(args).await {
+        Err(error) if input::is_back(&error) => Ok(()),
+        result => result,
+    }
+}
+
+async fn run_add_inner(mut args: AddArgs) -> Result<()> {
     if args.shadowtls && !matches!(args.protocol, Protocol::Shadowsocks) {
         bail!("--shadowtls 仅适用于 Shadowsocks");
     }
@@ -766,35 +773,35 @@ async fn run_add(mut args: AddArgs) -> Result<()> {
         }
         if !args.yes && io::stdin().is_terminal() {
             if args.server_name.is_none() {
-                args.server_name = Some(
-                    Input::<String>::with_theme(&ColorfulTheme::default())
-                        .with_prompt("NaiveProxy 域名 / SNI")
-                        .interact_text()?,
-                );
+                args.server_name = Some(input::checked_text(
+                    "NaiveProxy 域名 / SNI",
+                    None,
+                    false,
+                    config::validate_server_name,
+                )?);
             }
             if !args.self_signed && args.cert.is_none() {
-                println!("TLS 证书模式:\n1) 使用已有受信任证书（推荐）\n2) 自签名证书（仅测试，不推荐）\n0) 返回");
-                let choice = Input::<String>::with_theme(&ColorfulTheme::default())
-                    .with_prompt("请选择 [0-2]")
-                    .default("1".to_owned())
-                    .interact_text()?;
-                match choice.trim() {
-                    "1" => {
-                        let cert = Input::<String>::with_theme(&ColorfulTheme::default())
-                            .with_prompt("PEM 证书路径")
-                            .interact_text()?;
-                        let key = Input::<String>::with_theme(&ColorfulTheme::default())
-                            .with_prompt("PEM 私钥路径")
-                            .interact_text()?;
+                let choice = crate::menu::select_keyed(
+                    "TLS 证书模式",
+                    &[
+                        (1, "使用已有受信任证书（推荐）"),
+                        (2, "自签名证书（仅测试，不推荐）"),
+                        (0, "返回"),
+                    ],
+                )?;
+                match choice {
+                    1 => {
+                        let cert = input::file_path("PEM 证书路径")?;
+                        let key = input::file_path("PEM 私钥路径")?;
                         args.cert = Some(cert.into());
                         args.key = Some(key.into());
                     }
-                    "2" => {
+                    2 => {
                         args.self_signed = true;
                         println!("警告：自签名证书仅供测试，不推荐用于生产环境。");
                     }
-                    "0" => return Ok(()),
-                    _ => bail!("NaiveProxy TLS 证书模式编号无效"),
+                    0 => return Ok(()),
+                    _ => unreachable!("菜单编号已验证"),
                 }
             }
         }
@@ -886,10 +893,18 @@ async fn bootstrap_default_reality_with_menu(menu: bool) -> Result<bool> {
             || fast_add::resolve_server_address(None),
             std::io::stdin().is_terminal(),
             || {
-                Ok(dialoguer::Input::<String>::new()
-                    .with_prompt("请输入 VPS 公网域名或 IP（直接回车跳过默认部署）")
-                    .allow_empty(true)
-                    .interact_text()?)
+                input::validated_text(
+                    "请输入 VPS 公网域名或 IP（直接回车跳过默认部署）",
+                    None,
+                    true,
+                    |value| {
+                        if value.is_empty() {
+                            Ok(String::new())
+                        } else {
+                            client::normalize_server_address(value)
+                        }
+                    },
+                )
             },
         )
         .await?;
@@ -1387,10 +1402,10 @@ pub(crate) async fn ensure_shoes_for_add(yes: bool) -> Result<()> {
     }
     let approved = yes
         || (io::stdin().is_terminal()
-            && Confirm::with_theme(&ColorfulTheme::default())
-                .with_prompt("shoes 尚未安装，是否从 GitHub Release 自动安装并继续？")
-                .default(true)
-                .interact()?);
+            && input::confirm(
+                "shoes 尚未安装，是否从 GitHub Release 自动安装并继续？",
+                true,
+            )?);
     if !approved {
         bail!("shoes 尚未安装；请先运行 ping-rust install，或添加 --yes 自动安装");
     }

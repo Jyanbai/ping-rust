@@ -1,11 +1,8 @@
-use std::{
-    io::{self, Write},
-    time::Duration,
-};
+use std::{io, time::Duration};
 
 use anyhow::{bail, Context, Result};
 use colored::Colorize;
-use dialoguer::{theme::ColorfulTheme, Confirm, Input, Password};
+use input::MenuEof;
 
 use crate::{
     chain_proxy::{self, ChainNode, ChainProxyChange},
@@ -23,6 +20,7 @@ use crate::{
 };
 
 mod chain;
+pub(crate) mod input;
 
 const MAIN_MENU_ITEMS: &[(usize, &str)] = &[
     (1, "添加配置"),
@@ -100,16 +98,6 @@ enum PortChoice {
     Fixed(u16),
 }
 
-#[derive(Debug)]
-struct MenuEof;
-
-impl std::fmt::Display for MenuEof {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("输入已结束")
-    }
-}
-impl std::error::Error for MenuEof {}
-
 fn control_after_error(error: &anyhow::Error) -> MenuControl {
     if error.chain().any(|cause| {
         cause.is::<MenuEof>()
@@ -182,17 +170,7 @@ fn parse_port_choice(value: &str) -> Option<PortChoice> {
 }
 
 fn read_menu_choice(max: usize) -> Result<String> {
-    print!("请选择 [0-{max}]: ");
-    io::stdout().flush().context("输出菜单提示失败")?;
-    let mut value = String::new();
-    if io::stdin()
-        .read_line(&mut value)
-        .context("读取菜单输入失败")?
-        == 0
-    {
-        return Err(MenuEof.into());
-    }
-    Ok(value)
+    input::read_menu_choice(&mut io::stdin().lock(), &mut io::stdout(), max)
 }
 
 fn select_numbered<T: AsRef<str>>(prompt: &str, items: &[T]) -> Result<Option<usize>> {
@@ -214,7 +192,7 @@ fn select_numbered<T: AsRef<str>>(prompt: &str, items: &[T]) -> Result<Option<us
     }
 }
 
-fn select_keyed(prompt: &str, items: &[(usize, &str)]) -> Result<usize> {
+pub(crate) fn select_keyed(prompt: &str, items: &[(usize, &str)]) -> Result<usize> {
     if !prompt.is_empty() {
         println!("\n{prompt}:\n");
     }
@@ -277,7 +255,13 @@ where
 }
 
 pub async fn run() -> Result<()> {
-    cli::bootstrap_default_reality_for_menu().await?;
+    match cli::bootstrap_default_reality_for_menu().await {
+        Err(error) if input::is_back(&error) => {}
+        Err(error) if control_after_error(&error) == MenuControl::Exit => return Ok(()),
+        result => {
+            result?;
+        }
+    }
     config::ensure_profile_files().await?;
     loop {
         println!(
@@ -293,7 +277,10 @@ pub async fn run() -> Result<()> {
         };
         println!("shoes: {shoes_status}");
         println!("项目: https://github.com/Jyanbai/ping-rust\n");
-        let selected = select_keyed("", MAIN_MENU_ITEMS)?;
+        let selected = match select_keyed("", MAIN_MENU_ITEMS) {
+            Err(error) if control_after_error(&error) == MenuControl::Exit => return Ok(()),
+            result => result?,
+        };
         let result = async {
             match selected {
                 0 => {
@@ -342,7 +329,7 @@ pub async fn run() -> Result<()> {
                     crate::restore_cursor_and_exit();
                 }
                 let control = control_after_error(&error);
-                if control == MenuControl::Continue {
+                if control == MenuControl::Continue && !input::is_back(&error) {
                     eprintln!("{}", format!("错误：{error:#}").red());
                 }
                 control
@@ -364,6 +351,15 @@ async fn change_config_menu() -> Result<()> {
         return Ok(());
     };
     let profile = state.profiles[selected].clone();
+    loop {
+        match change_profile_menu(&profile).await {
+            Err(error) if input::is_back(&error) => continue,
+            result => return result,
+        }
+    }
+}
+
+async fn change_profile_menu(profile: &config::ManagedProfile) -> Result<()> {
     let mut actions = vec![
         (ChangeAction::Port, "更改端口"),
         (ChangeAction::Name, "更改配置名称"),
@@ -464,12 +460,7 @@ async fn change_config_menu() -> Result<()> {
             let Credentials::VlessEnc { vision, .. } = &profile.credentials else {
                 bail!("配置协议不一致");
             };
-            ProfileChange::VlessEncVision(
-                Confirm::with_theme(&ColorfulTheme::default())
-                    .with_prompt("开启 Vision？")
-                    .default(*vision)
-                    .interact()?,
-            )
+            ProfileChange::VlessEncVision(input::confirm("开启 Vision？", *vision)?)
         }
         ChangeAction::H2Mux => {
             let Some(options) = prompt_h2mux_options(&profile.h2mux)? else {
@@ -478,18 +469,16 @@ async fn change_config_menu() -> Result<()> {
             ProfileChange::H2Mux(options)
         }
         ChangeAction::Port => {
-            let value = Input::<String>::with_theme(&ColorfulTheme::default())
-                .with_prompt(format!(
-                    "输入新端口（直接回车保持 {}，输入 r 随机分配，输入 0 返回）",
-                    profile.port
-                ))
-                .allow_empty(true)
-                .validate_with(|value: &String| {
+            let value = input::validated_text(
+                "输入新端口（输入 r 随机分配）",
+                Some(&profile.port.to_string()),
+                false,
+                |value| {
                     parse_port_change(value)
-                        .map(|_| ())
-                        .ok_or("请输入 1 到 65535、r 或 0")
-                })
-                .interact_text()?;
+                        .map(|_| value.to_owned())
+                        .context("请输入 1 到 65535、r 或 0")
+                },
+            )?;
             let requested = match parse_port_change(&value).expect("端口输入已验证") {
                 PortChoice::Back => {
                     println!("端口未更改。");
@@ -507,17 +496,22 @@ async fn change_config_menu() -> Result<()> {
             ProfileChange::Port(port)
         }
         ChangeAction::Name => {
-            let name = Input::<String>::with_theme(&ColorfulTheme::default())
-                .with_prompt("新配置名称")
-                .default(profile.name.clone())
-                .interact_text()?;
+            let name = input::checked_text("新配置名称", Some(&profile.name), false, |name| {
+                config::validate_profile_name(
+                    name,
+                    &config::load_state()?.profiles,
+                    Some(profile.id),
+                )
+            })?;
             ProfileChange::Name(name)
         }
         ChangeAction::ServerAddress => {
-            let value = Input::<String>::with_theme(&ColorfulTheme::default())
-                .with_prompt("VPS 公网域名或 IP（留空自动检测）")
-                .allow_empty(true)
-                .interact_text()?;
+            let value = input::checked_text(
+                "VPS 公网域名或 IP（留空自动检测）",
+                None,
+                true,
+                |value| client::normalize_server_address(value).map(|_| ()),
+            )?;
             let address = if value.trim().is_empty() {
                 fast_add::resolve_server_address(None).await?
             } else {
@@ -526,20 +520,14 @@ async fn change_config_menu() -> Result<()> {
             ProfileChange::ServerAddress(Some(address))
         }
         ChangeAction::RegenerateCredentials => {
-            if !Confirm::with_theme(&ColorfulTheme::default())
-                .with_prompt("确认重新生成凭据？旧分享链接将立即失效")
-                .default(false)
-                .interact()?
+            if !input::confirm("确认重新生成凭据？旧分享链接将立即失效", false)?
             {
                 return Ok(());
             }
             ProfileChange::RegenerateCredentials
         }
         ChangeAction::Password => {
-            let password = Password::with_theme(&ColorfulTheme::default())
-                .with_prompt("新密码（留空安全随机生成）")
-                .allow_empty_password(true)
-                .interact()?;
+            let password = input::password("新密码（留空安全随机生成）", true)?;
             if matches!(profile.protocol(), Protocol::NaiveProxy) {
                 ProfileChange::NaivePassword(if password.is_empty() {
                     config::generated_password()
@@ -559,10 +547,12 @@ async fn change_config_menu() -> Result<()> {
             }
         }
         ChangeAction::RealityServerName => {
-            let server_name = Input::<String>::with_theme(&ColorfulTheme::default())
-                .with_prompt("新 SNI")
-                .default(profile.server_name().to_owned())
-                .interact_text()?;
+            let server_name = input::checked_text(
+                "新 SNI",
+                Some(profile.server_name()),
+                false,
+                config::validate_server_name,
+            )?;
             ProfileChange::RealityServerName(server_name)
         }
         ChangeAction::ShadowsocksCipher => {
@@ -599,10 +589,7 @@ async fn change_config_menu() -> Result<()> {
             ProfileChange::ShadowsocksCipher(ciphers[selected])
         }
         ChangeAction::ShadowTlsPassword => {
-            let password = Password::with_theme(&ColorfulTheme::default())
-                .with_prompt("ShadowTLS 密码（留空安全随机生成）")
-                .allow_empty_password(true)
-                .interact()?;
+            let password = input::password("ShadowTLS 密码（留空安全随机生成）", true)?;
             ProfileChange::ShadowTlsPassword(if password.is_empty() {
                 config::generated_password()
             } else {
@@ -617,10 +604,12 @@ async fn change_config_menu() -> Result<()> {
             else {
                 anyhow::bail!("配置协议与管理状态不一致");
             };
-            let server_name = Input::<String>::with_theme(&ColorfulTheme::default())
-                .with_prompt("ShadowTLS SNI")
-                .default(shadowtls.server_name.clone())
-                .interact_text()?;
+            let server_name = input::checked_text(
+                "ShadowTLS SNI",
+                Some(&shadowtls.server_name),
+                false,
+                config::validate_server_name,
+            )?;
             ProfileChange::ShadowTlsServerName(server_name)
         }
         ChangeAction::ShadowTlsHandshake => {
@@ -631,10 +620,12 @@ async fn change_config_menu() -> Result<()> {
             else {
                 anyhow::bail!("配置协议与管理状态不一致");
             };
-            let handshake = Input::<String>::with_theme(&ColorfulTheme::default())
-                .with_prompt("Handshake destination（host:port）")
-                .default(shadowtls.handshake_address.clone())
-                .interact_text()?;
+            let handshake = input::checked_text(
+                "Handshake destination（host:port）",
+                Some(&shadowtls.handshake_address),
+                false,
+                config::validate_host_port,
+            )?;
             ProfileChange::ShadowTlsHandshake(handshake)
         }
         ChangeAction::SnellCipher => {
@@ -650,20 +641,14 @@ async fn change_config_menu() -> Result<()> {
             let Some(current) = username else {
                 anyhow::bail!("无认证 SOCKS5 请先切换为用户名密码认证");
             };
-            let username = Input::<String>::with_theme(&ColorfulTheme::default())
-                .with_prompt("SOCKS5 用户名")
-                .default(current.clone())
-                .interact_text()?;
+            let username = input::text("SOCKS5 用户名", Some(current), false)?;
             ProfileChange::Socks5Username(username)
         }
         ChangeAction::Socks5Authentication => {
             let Credentials::Socks5 { username, .. } = &profile.credentials else {
                 anyhow::bail!("配置协议与管理状态不一致");
             };
-            let enabled = Confirm::with_theme(&ColorfulTheme::default())
-                .with_prompt("启用用户名 + 密码认证？")
-                .default(username.is_some())
-                .interact()?;
+            let enabled = input::confirm("启用用户名 + 密码认证？", username.is_some())?;
             if !enabled {
                 println!("警告：SOCKS5 无认证且无传输加密，公开到公网可能被第三方滥用。");
             }
@@ -680,10 +665,7 @@ async fn change_config_menu() -> Result<()> {
                 }
                 _ => anyhow::bail!("配置协议与管理状态不一致"),
             };
-            let enabled = Confirm::with_theme(&ColorfulTheme::default())
-                .with_prompt(prompt)
-                .default(*udp_enabled)
-                .interact()?;
+            let enabled = input::confirm(prompt, *udp_enabled)?;
             if profile.protocol() == Protocol::NaiveProxy {
                 ProfileChange::NaiveUdpEnabled(enabled)
             } else {
@@ -708,10 +690,7 @@ async fn change_config_menu() -> Result<()> {
             let Some(index) = select_numbered("选择 AnyTLS 用户", &user_labels)? else {
                 return Ok(());
             };
-            let password = Password::with_theme(&ColorfulTheme::default())
-                .with_prompt("新密码（留空安全随机生成）")
-                .allow_empty_password(true)
-                .interact()?;
+            let password = input::password("新密码（留空安全随机生成）", true)?;
             let password = if password.is_empty() {
                 config::generated_password()
             } else {
@@ -723,51 +702,46 @@ async fn change_config_menu() -> Result<()> {
             let Credentials::NaiveProxy { username, .. } = &profile.credentials else {
                 anyhow::bail!("配置协议与管理状态不一致");
             };
-            ProfileChange::NaiveUsername(
-                Input::<String>::with_theme(&ColorfulTheme::default())
-                    .with_prompt("NaiveProxy 用户名")
-                    .default(username.clone())
-                    .interact_text()?,
-            )
+            ProfileChange::NaiveUsername(input::text("NaiveProxy 用户名", Some(username), false)?)
         }
         ChangeAction::RegenerateNaiveCertificate => {
             return cli::regenerate_test_certificate(profile.id).await;
         }
-        ChangeAction::NaiveServerName => ProfileChange::NaiveServerName(
-            Input::<String>::with_theme(&ColorfulTheme::default())
-                .with_prompt("NaiveProxy SNI")
-                .default(profile.server_name().to_owned())
-                .interact_text()?,
-        ),
+        ChangeAction::NaiveServerName => ProfileChange::NaiveServerName(input::checked_text(
+            "NaiveProxy SNI",
+            Some(profile.server_name()),
+            false,
+            config::validate_server_name,
+        )?),
         ChangeAction::NaivePadding => {
             let Credentials::NaiveProxy { padding, .. } = &profile.credentials else {
                 anyhow::bail!("配置协议与管理状态不一致");
             };
-            ProfileChange::NaivePadding(
-                Confirm::with_theme(&ColorfulTheme::default())
-                    .with_prompt("启用 NaiveProxy padding？")
-                    .default(*padding)
-                    .interact()?,
-            )
+            ProfileChange::NaivePadding(input::confirm("启用 NaiveProxy padding？", *padding)?)
         }
         ChangeAction::NaiveFallback => {
             let Credentials::NaiveProxy { fallback, .. } = &profile.credentials else {
                 anyhow::bail!("配置协议与管理状态不一致");
             };
-            let value = Input::<String>::with_theme(&ColorfulTheme::default())
-                .with_prompt("静态 fallback 绝对路径（留空关闭）")
-                .with_initial_text(fallback.clone().unwrap_or_default())
-                .allow_empty(true)
-                .interact_text()?;
+            let value = input::validated_text(
+                "静态 fallback 绝对路径（输入 - 关闭）",
+                fallback.as_deref(),
+                true,
+                |value| {
+                    if value == "-" {
+                        return Ok(String::new());
+                    }
+                    if !value.is_empty() {
+                        config::validate_naive_fallback(value)?;
+                    }
+                    Ok(value.to_owned())
+                },
+            )?;
             ProfileChange::NaiveFallback((!value.trim().is_empty()).then_some(value))
         }
         ChangeAction::NaiveCertificate => {
-            let cert = Input::<String>::with_theme(&ColorfulTheme::default())
-                .with_prompt("PEM 证书路径")
-                .interact_text()?;
-            let key = Input::<String>::with_theme(&ColorfulTheme::default())
-                .with_prompt("PEM 私钥路径")
-                .interact_text()?;
+            let cert = input::file_path("PEM 证书路径")?;
+            let key = input::file_path("PEM 私钥路径")?;
             ProfileChange::NaiveCertificate {
                 certificate: cert.into(),
                 key: key.into(),
@@ -835,11 +809,7 @@ async fn delete_config_menu() -> Result<()> {
         return Ok(());
     };
     let profile = &state.profiles[selected];
-    if !Confirm::with_theme(&ColorfulTheme::default())
-        .with_prompt(format!("确认删除 {}？", profile.config_file_name()))
-        .default(false)
-        .interact()?
-    {
+    if !input::confirm(format!("确认删除 {}？", profile.config_file_name()), false)? {
         return Ok(());
     }
     let deleted = deployment::delete_and_activate(profile.id).await?;
@@ -848,6 +818,15 @@ async fn delete_config_menu() -> Result<()> {
 }
 
 async fn operations_menu() -> Result<MenuControl> {
+    loop {
+        match operations_menu_once().await {
+            Err(error) if input::is_back(&error) => continue,
+            result => return result,
+        }
+    }
+}
+
+async fn operations_menu_once() -> Result<MenuControl> {
     let Some(selected) = select_numbered("运维工具", &OPERATIONS_MENU_ITEMS)? else {
         return Ok(MenuControl::Continue);
     };
@@ -863,19 +842,12 @@ async fn operations_menu() -> Result<MenuControl> {
         1 => advanced_add_config_menu().await,
         2 => service::logs(100),
         3 => {
-            let port = Input::<u16>::with_theme(&ColorfulTheme::default())
-                .with_prompt("检查端口")
-                .default(443)
-                .interact_text()?;
+            let port = input::port("检查端口", Some(443))?;
             cli::print_port_status(port, operations::check_port(port, true, true));
             Ok(())
         }
         4 => {
-            if Confirm::with_theme(&ColorfulTheme::default())
-                .with_prompt("写入 sysctl 配置并启用 BBR？")
-                .default(true)
-                .interact()?
-            {
+            if input::confirm("写入 sysctl 配置并启用 BBR？", false)? {
                 operations::enable_bbr()?;
                 println!("{}", "BBR 已启用。".green());
             }
@@ -888,14 +860,8 @@ async fn operations_menu() -> Result<MenuControl> {
             Ok(())
         }
         6 => {
-            let archive = Input::<String>::with_theme(&ColorfulTheme::default())
-                .with_prompt("备份文件路径")
-                .interact_text()?;
-            if Confirm::with_theme(&ColorfulTheme::default())
-                .with_prompt("恢复会替换当前配置，继续？")
-                .default(false)
-                .interact()?
-            {
+            let archive = input::file_path("备份文件路径")?;
+            if input::confirm("恢复会替换当前配置，继续？", false)? {
                 let rollback = operations::restore(std::path::Path::new(&archive)).await?;
                 println!("{}", "恢复成功。".green());
                 if let Some(path) = rollback {
@@ -917,13 +883,7 @@ async fn chain_proxy_menu() -> Result<()> {
 async fn add_chain_node() -> Result<()> {
     println!("支持：SOCKS5、HTTP(S)、Shadowsocks、VLESS（TCP/TLS/Reality/WS）、Trojan（TLS/WS）");
     println!("不支持：Hysteria2、TUIC、WireGuard/WARP、未经验证的分享链接格式");
-    let uri = Input::<String>::with_theme(&ColorfulTheme::default())
-        .with_prompt("粘贴分享链接（输入 0 返回）")
-        .interact_text()?;
-    if uri.trim() == "0" {
-        return Ok(());
-    }
-    let parsed = chain_proxy::parse_share_uri(&uri)?;
+    let parsed = input::validated_text("粘贴分享链接", None, false, chain_proxy::parse_share_uri)?;
     println!(
         "识别结果：{} | {} | {}",
         parsed.name,
@@ -933,10 +893,12 @@ async fn add_chain_node() -> Result<()> {
     if !parsed.supports_udp_over_tcp() {
         println!("提示：该节点不支持 UDP-over-TCP；UDP 请求将失败，不会回退直连。");
     }
-    let name = Input::<String>::with_theme(&ColorfulTheme::default())
-        .with_prompt("节点名称")
-        .default(parsed.name.clone())
-        .interact_text()?;
+    let name = input::checked_text(
+        "节点名称",
+        Some(&parsed.name),
+        false,
+        chain_proxy::validate_node_name,
+    )?;
     let node = parsed.with_name(name)?;
     deployment::update_chain_proxy(ChainProxyChange::Add(node.clone())).await?;
     println!("{} {}", "节点已添加：".green(), node.name);
@@ -971,10 +933,10 @@ async fn select_chain_exit() -> Result<()> {
     let node = &state.chain_proxy.nodes[index];
     if state.chain_proxy.enabled
         && !node.supports_udp_over_tcp()
-        && !Confirm::with_theme(&ColorfulTheme::default())
-            .with_prompt("所选出口不支持 UDP-over-TCP，UDP 请求将失败；仍要切换？")
-            .default(false)
-            .interact()?
+        && !input::confirm(
+            "所选出口不支持 UDP-over-TCP，UDP 请求将失败；仍要切换？",
+            false,
+        )?
     {
         return Ok(());
     }
@@ -1050,45 +1012,26 @@ fn prompt_h2mux_options(current: &H2MuxOptions) -> Result<Option<H2MuxOptions>> 
     if action == 0 {
         return Ok(Some(H2MuxOptions::default()));
     }
-    let mut options = H2MuxOptions {
-        enabled: true,
-        ..H2MuxOptions::default()
-    };
-    if action == 1 {
-        options.max_connections = Input::<u32>::with_theme(&ColorfulTheme::default())
-            .with_prompt("Max connections")
-            .default(if current.max_connections > 0 {
-                current.max_connections
-            } else {
-                4
-            })
-            .interact_text()?;
-        options.min_streams = Input::<u32>::with_theme(&ColorfulTheme::default())
-            .with_prompt("Min streams")
-            .default(if current.min_streams > 0 {
-                current.min_streams
-            } else {
-                4
-            })
-            .interact_text()?;
-    } else {
-        options.max_connections = 0;
-        options.min_streams = 0;
-        options.max_streams = Input::<u32>::with_theme(&ColorfulTheme::default())
-            .with_prompt("Max streams")
-            .default(if current.max_streams > 0 {
-                current.max_streams
-            } else {
-                8
-            })
-            .interact_text()?;
+    loop {
+        let mut options = H2MuxOptions {
+            enabled: true,
+            ..H2MuxOptions::default()
+        };
+        if action == 1 {
+            options.max_connections = input::number("Max connections", current.max_connections)?;
+            options.min_streams = input::number("Min streams", current.min_streams)?;
+        } else {
+            options.max_connections = 0;
+            options.min_streams = 0;
+            options.max_streams = input::number("Max streams", current.max_streams)?;
+        }
+        options.padding = input::confirm("启用 H2MUX padding？", current.padding)?;
+        if let Err(error) = options.validate() {
+            println!("错误！{error:#}");
+            continue;
+        }
+        return Ok(Some(options));
     }
-    options.padding = Confirm::with_theme(&ColorfulTheme::default())
-        .with_prompt("启用 H2MUX padding？")
-        .default(current.padding)
-        .interact()?;
-    options.validate()?;
-    Ok(Some(options))
 }
 
 async fn delete_chain_node() -> Result<()> {
@@ -1101,11 +1044,7 @@ async fn delete_chain_node() -> Result<()> {
         return Ok(());
     };
     let node = &state.chain_proxy.nodes[index];
-    if !Confirm::with_theme(&ColorfulTheme::default())
-        .with_prompt(format!("确认删除链式节点 {}？", node.name))
-        .default(false)
-        .interact()?
-    {
+    if !input::confirm(format!("确认删除链式节点 {}？", node.name), false)? {
         return Ok(());
     }
     deployment::update_chain_proxy(ChainProxyChange::Delete(node.id)).await?;
@@ -1134,9 +1073,9 @@ fn export_menu() -> Result<()> {
         1 => ClientFormat::SingBox,
         _ => ClientFormat::Nekobox,
     };
-    let server = Input::<String>::with_theme(&ColorfulTheme::default())
-        .with_prompt("VPS 公网域名或 IP")
-        .interact_text()?;
+    let server = input::checked_text("VPS 公网域名或 IP", None, false, |value| {
+        client::normalize_server_address(value).map(|_| ())
+    })?;
     let content = client::render(&state.profiles[selected], format, &server)?;
     println!("\n{content}\n");
     if state.profiles[selected].h2mux.enabled && matches!(format, ClientFormat::Nekobox) {
@@ -1154,6 +1093,15 @@ fn export_menu() -> Result<()> {
 }
 
 async fn fast_add_config_menu() -> Result<MenuControl> {
+    loop {
+        match fast_add_config_menu_once().await {
+            Err(error) if input::is_back(&error) => continue,
+            result => return result,
+        }
+    }
+}
+
+async fn fast_add_config_menu_once() -> Result<MenuControl> {
     let protocol_items = protocol_menu_items();
     let protocol_number = select_keyed("选择协议", &protocol_items)?;
     if protocol_number == 0 {
@@ -1173,24 +1121,20 @@ async fn fast_add_config_menu() -> Result<MenuControl> {
     } else {
         config::ShadowsocksMode::Plain
     };
-    let port = loop {
-        print!("\n请输入端口（直接回车随机，输入 0 返回）: ");
-        io::stdout().flush().context("输出端口提示失败")?;
-        let mut value = String::new();
-        if io::stdin().read_line(&mut value).context("读取端口失败")? == 0 {
-            return Err(MenuEof.into());
-        }
-        match parse_port_choice(&value) {
-            Some(PortChoice::Back) => return Ok(MenuControl::Continue),
-            Some(PortChoice::Random) => break None,
-            Some(PortChoice::Fixed(port)) => break Some(port),
-            None => println!("错误! 请输入 1..=65535 的端口、直接回车随机，或输入 0 返回。"),
-        }
+    let port = input::validated_text(
+        "请输入端口（直接回车随机）",
+        None,
+        true,
+        |value| parse_port_choice(value).context("请输入 1 到 65535 的端口"),
+    )?;
+    let port = match port {
+        PortChoice::Back => return Ok(MenuControl::Continue),
+        PortChoice::Random => None,
+        PortChoice::Fixed(port) => Some(port),
     };
     if protocol == Protocol::NaiveProxy {
-        let server_name = Input::<String>::with_theme(&ColorfulTheme::default())
-            .with_prompt("请输入域名/SNI")
-            .interact_text()?;
+        let server_name =
+            input::checked_text("请输入域名/SNI", None, false, config::validate_server_name)?;
         let Some(mode) = select_numbered(
             "TLS 证书模式",
             &["已有受信任证书（推荐）", "自签名测试模式（不推荐）"],
@@ -1199,12 +1143,8 @@ async fn fast_add_config_menu() -> Result<MenuControl> {
             return Ok(MenuControl::Continue);
         };
         let (certificate, certificate_key) = if mode == 0 {
-            let cert = Input::<String>::with_theme(&ColorfulTheme::default())
-                .with_prompt("PEM 证书路径")
-                .interact_text()?;
-            let key = Input::<String>::with_theme(&ColorfulTheme::default())
-                .with_prompt("PEM 私钥路径")
-                .interact_text()?;
+            let cert = input::file_path("PEM 证书路径")?;
+            let key = input::file_path("PEM 私钥路径")?;
             (Some(cert.into()), Some(key.into()))
         } else {
             println!("警告：自签名证书仅供测试，不推荐用于生产环境。");
@@ -1240,10 +1180,7 @@ async fn fast_add_config_menu() -> Result<MenuControl> {
         let Some(cipher) = select_shadowsocks_cipher(shadowsocks_mode)? else {
             return Ok(MenuControl::Continue);
         };
-        let entered_password = Password::with_theme(&ColorfulTheme::default())
-            .with_prompt("请设置密码（留空安全随机生成，输入 0 返回）")
-            .allow_empty_password(true)
-            .interact()?;
+        let entered_password = input::password("请设置密码（留空安全随机生成）", true)?;
         if entered_password == "0" {
             return Ok(MenuControl::Continue);
         }
@@ -1427,10 +1364,7 @@ fn prompt_vless_enc_auth() -> Result<Option<config::VlessEncAuth>> {
 
 fn prompt_vless_enc_options() -> Result<Option<crate::vless_encryption::Options>> {
     prompt_vless_enc_options_with(prompt_vless_enc_mode, prompt_vless_enc_auth, || {
-        Ok(Confirm::with_theme(&ColorfulTheme::default())
-            .with_prompt("开启 Vision？")
-            .default(false)
-            .interact()?)
+        input::confirm("开启 Vision？", false)
     })
 }
 
@@ -1457,11 +1391,7 @@ async fn offer_vless_enc_regeneration(profile: &config::ManagedProfile) -> Resul
     if profile.protocol() != Protocol::VlessEnc {
         return Ok(());
     }
-    while Confirm::with_theme(&ColorfulTheme::default())
-        .with_prompt("重新生成密钥？（会使刚才的分享链接失效）")
-        .default(false)
-        .interact()?
-    {
+    while input::confirm("重新生成密钥？（会使刚才的分享链接失效）", false)? {
         let result =
             deployment::update_and_activate(profile.id, ProfileChange::RegenerateCredentials)
                 .await?;
@@ -1518,9 +1448,10 @@ async fn resolve_menu_server_address() -> Result<String> {
         Ok(address) => Ok(address),
         Err(error) => {
             eprintln!("自动检测公网地址失败：{error:#}");
-            let entered = Input::<String>::with_theme(&ColorfulTheme::default())
-                .with_prompt("请输入 VPS 公网域名或 IP")
-                .interact_text()?;
+            let entered =
+                input::checked_text("请输入 VPS 公网域名或 IP", None, false, |value| {
+                    client::normalize_server_address(value).map(|_| ())
+                })?;
             fast_add::resolve_server_address(Some(&entered)).await
         }
     }
@@ -1535,21 +1466,10 @@ async fn advanced_add_config_menu() -> Result<()> {
     };
     let protocol =
         Protocol::from_menu_number(selected + 1).context("协议菜单与中央注册表不一致")?;
-    let name = Input::<String>::with_theme(&ColorfulTheme::default())
-        .with_prompt("配置名称")
-        .default(protocol.slug().to_owned())
-        .interact_text()?;
-    let port = Input::<u16>::with_theme(&ColorfulTheme::default())
-        .with_prompt("监听端口")
-        .default(443)
-        .validate_with(|value: &u16| {
-            if *value > 0 {
-                Ok(())
-            } else {
-                Err("端口必须大于 0")
-            }
-        })
-        .interact_text()?;
+    let name = input::checked_text("配置名称", Some(protocol.slug()), false, |name| {
+        config::validate_profile_name(name, &config::load_state()?.profiles, None)
+    })?;
+    let port = input::port("监听端口", Some(443))?;
     let mut options = GenerationOptions::default();
     if protocol == Protocol::VlessEnc {
         let Some(selected) = prompt_vless_enc_options()? else {
@@ -1601,25 +1521,23 @@ async fn advanced_add_config_menu() -> Result<()> {
             _ => ShadowsocksCipher::Chacha20IetfPoly1305,
         };
         if options.shadowsocks_mode == config::ShadowsocksMode::ShadowTlsV3 {
-            let password = Password::with_theme(&ColorfulTheme::default())
-                .with_prompt("SS2022 密钥（留空则安全生成）")
-                .allow_empty_password(true)
-                .interact()?;
+            let password = input::password("SS2022 密钥（留空则安全生成）", true)?;
             options.shadowsocks_password = (!password.is_empty()).then_some(password);
-            let shadow_password = Password::with_theme(&ColorfulTheme::default())
-                .with_prompt("ShadowTLS 密码（留空则安全生成）")
-                .allow_empty_password(true)
-                .interact()?;
+            let shadow_password = input::password("ShadowTLS 密码（留空则安全生成）", true)?;
             options.shadowtls_password = (!shadow_password.is_empty()).then_some(shadow_password);
-            let sni = Input::<String>::with_theme(&ColorfulTheme::default())
-                .with_prompt("ShadowTLS SNI")
-                .default(config::DEFAULT_SNI.to_owned())
-                .interact_text()?;
+            let sni = input::checked_text(
+                "ShadowTLS SNI",
+                Some(config::DEFAULT_SNI),
+                false,
+                config::validate_server_name,
+            )?;
             shadowtls_server_name = Some(sni.clone());
-            let handshake = Input::<String>::with_theme(&ColorfulTheme::default())
-                .with_prompt("Handshake destination（host:port）")
-                .default(format!("{sni}:443"))
-                .interact_text()?;
+            let handshake = input::checked_text(
+                "Handshake destination（host:port）",
+                Some(&(format!("{sni}:443"))),
+                false,
+                config::validate_host_port,
+            )?;
             options.shadowtls_handshake = Some(handshake);
             options.udp_enabled = false;
         }
@@ -1629,15 +1547,9 @@ async fn advanced_add_config_menu() -> Result<()> {
             return Ok(());
         };
         options.snell_cipher = cipher;
-        let password = Password::with_theme(&ColorfulTheme::default())
-            .with_prompt("Snell v3 密码（留空则安全随机生成）")
-            .allow_empty_password(true)
-            .interact()?;
+        let password = input::password("Snell v3 密码（留空则安全随机生成）", true)?;
         options.snell_password = (!password.is_empty()).then_some(password);
-        options.udp_enabled = Confirm::with_theme(&ColorfulTheme::default())
-            .with_prompt("启用 Snell UDP-over-TCP？")
-            .default(true)
-            .interact()?;
+        options.udp_enabled = input::confirm("启用 Snell UDP-over-TCP？", true)?;
     }
     if matches!(protocol, Protocol::Socks5) {
         let Some(authentication) =
@@ -1646,24 +1558,15 @@ async fn advanced_add_config_menu() -> Result<()> {
             return Ok(());
         };
         if authentication == 0 {
-            let username = Input::<String>::with_theme(&ColorfulTheme::default())
-                .with_prompt("SOCKS5 用户名（留空则安全随机生成）")
-                .allow_empty(true)
-                .interact_text()?;
+            let username = input::text("SOCKS5 用户名（留空则安全随机生成）", None, true)?;
             options.socks5_username = (!username.is_empty()).then_some(username);
-            let password = Password::with_theme(&ColorfulTheme::default())
-                .with_prompt("SOCKS5 密码（留空则安全随机生成）")
-                .allow_empty_password(true)
-                .interact()?;
+            let password = input::password("SOCKS5 密码（留空则安全随机生成）", true)?;
             options.socks5_password = (!password.is_empty()).then_some(password);
         } else {
             options.socks5_no_auth = true;
             println!("警告：SOCKS5 无认证且无传输加密，公开到公网可能被第三方滥用。");
         }
-        options.udp_enabled = Confirm::with_theme(&ColorfulTheme::default())
-            .with_prompt("启用 UDP ASSOCIATE？")
-            .default(true)
-            .interact()?;
+        options.udp_enabled = input::confirm("启用 UDP ASSOCIATE？", true)?;
     }
     if matches!(protocol, Protocol::AnyTls) {
         let Some(mode) =
@@ -1681,14 +1584,8 @@ async fn advanced_add_config_menu() -> Result<()> {
             } else {
                 format!("user{}", options.anytls_users.len() + 1)
             };
-            let user_name = Input::<String>::with_theme(&ColorfulTheme::default())
-                .with_prompt("AnyTLS 用户名")
-                .default(default_name)
-                .interact_text()?;
-            let password = Password::with_theme(&ColorfulTheme::default())
-                .with_prompt("AnyTLS 密码（留空则安全随机生成）")
-                .allow_empty_password(true)
-                .interact()?;
+            let user_name = input::text("AnyTLS 用户名", Some(&default_name), false)?;
+            let password = input::password("AnyTLS 密码（留空则安全随机生成）", true)?;
             options.anytls_users.push(if password.is_empty() {
                 config::generated_anytls_user(user_name)
             } else {
@@ -1697,63 +1594,39 @@ async fn advanced_add_config_menu() -> Result<()> {
                     password,
                 }
             });
-            if !Confirm::with_theme(&ColorfulTheme::default())
-                .with_prompt("继续添加 AnyTLS 用户？")
-                .default(false)
-                .interact()?
-            {
+            if !input::confirm("继续添加 AnyTLS 用户？", false)? {
                 break;
             }
         }
-        if Confirm::with_theme(&ColorfulTheme::default())
-            .with_prompt("使用推荐 padding_scheme？")
-            .default(true)
-            .interact()?
-        {
+        if input::confirm("使用推荐 padding_scheme？", true)? {
             options.anytls_padding_scheme = Some(vec![
                 "stop=8".to_owned(),
                 "0=30-30".to_owned(),
                 "1=50-100".to_owned(),
             ]);
         }
-        if Confirm::with_theme(&ColorfulTheme::default())
-            .with_prompt("配置认证失败 fallback？")
-            .default(false)
-            .interact()?
-        {
-            options.anytls_fallback = Some(
-                Input::<String>::with_theme(&ColorfulTheme::default())
-                    .with_prompt("AnyTLS fallback（host:port）")
-                    .default("127.0.0.1:80".to_owned())
-                    .interact_text()?,
-            );
+        if input::confirm("配置认证失败 fallback？", false)? {
+            options.anytls_fallback = Some(input::checked_text(
+                "AnyTLS fallback（host:port）",
+                Some("127.0.0.1:80"),
+                false,
+                config::validate_host_port,
+            )?);
         }
     }
     if protocol == Protocol::NaiveProxy {
-        let username = Input::<String>::with_theme(&ColorfulTheme::default())
-            .with_prompt("NaiveProxy 用户名（留空安全随机生成）")
-            .allow_empty(true)
-            .interact_text()?;
+        let username = input::text("NaiveProxy 用户名（留空安全随机生成）", None, true)?;
         options.naive_username = (!username.is_empty()).then_some(username);
-        let password = Password::with_theme(&ColorfulTheme::default())
-            .with_prompt("NaiveProxy 密码（留空安全随机生成）")
-            .allow_empty_password(true)
-            .interact()?;
+        let password = input::password("NaiveProxy 密码（留空安全随机生成）", true)?;
         options.naive_password = (!password.is_empty()).then_some(password);
-        options.naive_padding = Confirm::with_theme(&ColorfulTheme::default())
-            .with_prompt("启用 NaiveProxy padding？")
-            .default(true)
-            .interact()?;
-        if Confirm::with_theme(&ColorfulTheme::default())
-            .with_prompt("配置静态 fallback 目录？")
-            .default(false)
-            .interact()?
-        {
-            options.naive_fallback = Some(
-                Input::<String>::with_theme(&ColorfulTheme::default())
-                    .with_prompt("fallback 绝对路径")
-                    .interact_text()?,
-            );
+        options.naive_padding = input::confirm("启用 NaiveProxy padding？", true)?;
+        if input::confirm("配置静态 fallback 目录？", false)? {
+            options.naive_fallback = Some(input::checked_text(
+                "fallback 绝对路径",
+                None,
+                false,
+                config::validate_naive_fallback,
+            )?);
         }
     }
     let reality_outer = protocol.uses_reality(options.anytls_mode);
@@ -1768,42 +1641,39 @@ async fn advanced_add_config_menu() -> Result<()> {
         config::DEFAULT_SNI.to_owned()
     } else {
         let default_server_name = config::resolve_server_name(None, protocol, options.anytls_mode);
-        Input::<String>::with_theme(&ColorfulTheme::default())
-            .with_prompt(if reality_outer {
+        input::checked_text(
+            if reality_outer {
                 "Reality SNI"
             } else {
                 "证书域名/服务器名称"
-            })
-            .default(default_server_name)
-            .interact_text()?
+            },
+            Some(&(default_server_name)),
+            false,
+            config::validate_server_name,
+        )?
     };
     let reality_dest = if reality_outer {
-        Some(
-            Input::<String>::with_theme(&ColorfulTheme::default())
-                .with_prompt("Reality fallback")
-                .default(format!("{server_name}:443"))
-                .interact_text()?,
-        )
+        Some(input::checked_text(
+            "Reality fallback",
+            Some(&(format!("{server_name}:443"))),
+            false,
+            config::validate_host_port,
+        )?)
     } else {
         None
     };
     let needs_certificate = protocol.requires_certificate(options.anytls_mode);
     let (certificate, certificate_key) = if needs_certificate
-        && Confirm::with_theme(&ColorfulTheme::default())
-            .with_prompt(if protocol == Protocol::NaiveProxy {
+        && input::confirm(
+            if protocol == Protocol::NaiveProxy {
                 "使用已有受信任 PEM 证书和私钥？（推荐）"
             } else {
                 "使用已有 PEM 证书和私钥？（否则自动生成自签名证书）"
-            })
-            .default(protocol == Protocol::NaiveProxy)
-            .interact()?
-    {
-        let cert = Input::<String>::with_theme(&ColorfulTheme::default())
-            .with_prompt("PEM 证书路径")
-            .interact_text()?;
-        let key = Input::<String>::with_theme(&ColorfulTheme::default())
-            .with_prompt("PEM 私钥路径")
-            .interact_text()?;
+            },
+            protocol == Protocol::NaiveProxy,
+        )? {
+        let cert = input::file_path("PEM 证书路径")?;
+        let key = input::file_path("PEM 私钥路径")?;
         (Some(cert.into()), Some(key.into()))
     } else {
         if protocol == Protocol::NaiveProxy {
@@ -1878,11 +1748,7 @@ async fn shoes_update_menu() -> Result<()> {
             } else {
                 format!("安装 shoes GitHub Release {target}（高级选项）？")
             };
-            if !Confirm::with_theme(&ColorfulTheme::default())
-                .with_prompt(prompt)
-                .default(false)
-                .interact()?
-            {
+            if !input::confirm(prompt, false)? {
                 return Ok(());
             }
             cli::update_shoes_with_options(InstallMethod::Release, needs_override).await?
@@ -1911,17 +1777,10 @@ fn service_menu() -> Result<()> {
 }
 
 fn uninstall_menu() -> Result<()> {
-    if !Confirm::with_theme(&ColorfulTheme::default())
-        .with_prompt("确认卸载 shoes？默认保留 /etc/shoes 配置")
-        .default(false)
-        .interact()?
-    {
+    if !input::confirm("确认卸载 shoes？默认保留 /etc/shoes 配置", false)? {
         return Ok(());
     }
-    let purge = Confirm::with_theme(&ColorfulTheme::default())
-        .with_prompt("同时永久删除 /etc/shoes 配置与凭据？")
-        .default(false)
-        .interact()?;
+    let purge = input::confirm("同时永久删除 /etc/shoes 配置与凭据？", false)?;
     crate::utils::require_linux_root()?;
     let _lock = crate::utils::exclusive_lock(std::path::Path::new(crate::utils::LOCK_FILE))?;
     let unit_removed = service::uninstall_unit()?;
@@ -1947,7 +1806,7 @@ mod tests {
             control_after_error(&anyhow::Error::new(MenuEof).context("读取")),
             MenuControl::Exit
         );
-        let eof = dialoguer::Error::from(io::Error::from(io::ErrorKind::UnexpectedEof));
+        let eof = io::Error::from(io::ErrorKind::UnexpectedEof);
         assert_eq!(
             control_after_error(&anyhow::Error::new(eof)),
             MenuControl::Exit
