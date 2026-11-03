@@ -143,15 +143,17 @@ check_http() {
   fi
 }
 
-# Sets ASN_INFO, CNAMES and CF_ASN (PASS/FAIL), MAINLAND (是/否/未知).
+# Sets DNS_OK and CF_ASN (PASS/FAIL), ASN_INFO, CNAMES, MAINLAND (是/否/未知).
 check_dns() {
   local d="$1" answers ip origin asn first_asn="" ecs_ips cc any_cn=0 any_ip=0
   answers="$(dig +short +time=3 +tries=2 A "$d" 2>/dev/null)" || true
   printf '%s\n' "$answers" >"$LOG/${d}-dns.txt"
   CNAMES="$(grep -v -E '^[0-9.]+$' <<<"$answers" | sed 's/\.$//' | paste -sd ' ' - || true)"
   CF_ASN=PASS
+  DNS_OK=FAIL
   while read -r ip; do
     is_ipv4 "$ip" || continue
+    DNS_OK=PASS
     origin="$(ip_origin "$ip")"
     asn="${origin%%|*}"
     [ -n "$first_asn" ] || first_asn="$asn"
@@ -286,14 +288,19 @@ failed=0
 index=0
 for d in "${domains[@]}"; do
   index=$((index + 1))
-  TLS13=FAIL H2=FAIL CERT=FAIL REDIRECT=FAIL CF_HEADER=FAIL CF_ASN=FAIL
+  DNS_OK=FAIL TLS13=FAIL H2=FAIL CERT=FAIL REDIRECT=FAIL CF_HEADER=FAIL CF_ASN=FAIL
   REALITY=FAIL CAMOUFLAGE=FAIL SHADOWTLS=FAIL HTTP_CODE=000
   ASN_INFO="-" CNAMES="" MAINLAND="-"
   reasons=()
+  if [[ "$d" =~ $domain_re ]]; then
+    check_dns "$d"
+  fi
   if [[ ! "$d" =~ $domain_re ]]; then
     reasons+=("域名格式无效")
+  elif [ "$DNS_OK" != PASS ]; then
+    # Nothing else can work without an address; report the root cause only.
+    reasons+=("DNS 解析不到 IPv4 地址")
   else
-    check_dns "$d"
     check_tls "$d"
     check_http "$d"
     check_reality "$d" "$index" $((26000 + index))

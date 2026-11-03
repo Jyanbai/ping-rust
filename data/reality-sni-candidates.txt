@@ -9,8 +9,6 @@
 www.amazon.com
 aws.amazon.com
 www.ebay.com
-www.paypal.com
-dl.google.com
 addons.mozilla.org
 www.microsoft.com
 www.apple.com
@@ -21,4 +19,5 @@ www.sony.com
 www.oracle.com
 www.intel.com
 www.cisco.com
-www.visa.com
+# 临时：验证不存在的域名会被判为不通过，验证后删除
+sni-check-nonexistent.invalid
