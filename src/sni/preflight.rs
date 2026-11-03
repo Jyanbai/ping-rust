@@ -20,7 +20,8 @@ fn configuration(
             (
                 json!({"type":"tls", "reality_targets":{(domain):{
                     "private_key":key.private_key, "short_ids":[sid], "dest":target,
-                    "max_time_diff":0, "vision":true,
+                    "max_time_diff":crate::config::GenerationOptions::default().reality_max_time_diff,
+                    "vision":true,
                     "protocol":{"type":"vless", "user_id":user, "udp_enabled":false}
                 }}}),
                 json!({"type":"reality", "public_key":key.public_key,
@@ -100,13 +101,19 @@ async fn run_with(
         )?;
         temporary.spawn(binary, &["--dry-run".as_ref(), path.as_os_str()])?;
         if !temporary.wait().await?.success() {
-            bail!("shoes 拒绝本机预检配置，请确认已安装项目固定版本的 shoes");
+            bail!(
+                "shoes 拒绝本机预检配置，请确认已安装项目固定版本的 shoes；{}",
+                temporary.log_notice()
+            );
         }
         drop((server, socks));
         temporary.spawn(binary, &[path.as_os_str()])?;
         loop {
             if let Some(status) = temporary.status()? {
-                bail!("临时 shoes 提前退出（{status}），请检查内核版本和端口权限");
+                bail!(
+                    "临时 shoes 提前退出（{status}），请检查内核版本和端口权限；{}",
+                    temporary.log_notice()
+                );
             }
             if tokio::net::TcpStream::connect(("127.0.0.1", socks_port))
                 .await
@@ -124,21 +131,28 @@ async fn run_with(
             .timeout(timeout)
             .redirect(reqwest::redirect::Policy::none())
             .build()?;
-        let response = client
-            .get(url)
-            .send()
-            .await
-            .context("经 shoes 的请求失败，请更换候选或检查 VPS 出站网络")?;
+        let response = client.get(url).send().await.with_context(|| {
+            format!(
+                "经 shoes 的请求失败，请更换候选或检查 VPS 出站网络；{}",
+                temporary.log_notice()
+            )
+        })?;
         if response.status() != reqwest::StatusCode::NO_CONTENT {
             bail!(
-                "shoes 请求返回 {}，预期 204，请检查探测地址或更换候选",
-                response.status()
+                "shoes 请求返回 {}，预期 204，请检查探测地址或更换候选；{}",
+                response.status(),
+                temporary.log_notice()
             );
         }
         Ok(())
     })
     .await
-    .context("shoes 本机预检整体超时（10 秒），请检查网络或更换候选")?
+    .with_context(|| {
+        format!(
+            "shoes 本机预检整体超时（10 秒），请检查网络或更换候选；{}",
+            temporary.log_notice()
+        )
+    })?
 }
 
 #[cfg(test)]
@@ -170,7 +184,57 @@ mod tests {
         binary.map(PathBuf::from)
     }
 
-    async fn tls_target(version: &'static rustls::SupportedProtocolVersion) -> Target {
+    #[test]
+    fn reality_preflight_uses_production_time_tolerance() {
+        let yaml = configuration(
+            "example.com",
+            "example.com:443",
+            Mode::Reality,
+            20001,
+            20002,
+        )
+        .unwrap();
+        let value: Value = crate::yaml::from_str(&yaml).unwrap();
+        let tolerance = value[0]["protocol"]["reality_targets"]["example.com"]["max_time_diff"]
+            .as_u64()
+            .unwrap();
+        assert_eq!(
+            tolerance,
+            crate::config::GenerationOptions::default().reality_max_time_diff
+        );
+        assert!(tolerance > 0);
+    }
+
+    #[test]
+    fn shadowtls_preflight_matches_server_and_client_credentials() {
+        let yaml = configuration(
+            "example.com",
+            "127.0.0.1:20003",
+            Mode::ShadowTls,
+            20001,
+            20002,
+        )
+        .unwrap();
+        let value: Value = crate::yaml::from_str(&yaml).unwrap();
+        let server = &value[0]["protocol"]["shadowtls_targets"]["example.com"];
+        let client = &value[1]["rules"][0]["client_chains"][0]["protocol"];
+        assert_eq!(server["handshake"]["address"], "127.0.0.1:20003");
+        assert_eq!(client["type"], "shadowtls");
+        assert_eq!(client["sni_hostname"], "example.com");
+        assert!(!server["password"].as_str().unwrap().is_empty());
+        assert!(server["password"] == client["password"]);
+        assert!(server["protocol"] == client["protocol"]);
+        assert_eq!(client["protocol"]["type"], "shadowsocks");
+        assert_eq!(client["protocol"]["udp_enabled"], false);
+        assert_eq!(client["protocol"]["cipher"], "2022-blake3-aes-128-gcm");
+        use base64::Engine;
+        let password = base64::engine::general_purpose::STANDARD
+            .decode(client["protocol"]["password"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(password.len(), 16);
+    }
+
+    fn tls_config(version: &'static rustls::SupportedProtocolVersion) -> rustls::ServerConfig {
         let rcgen::CertifiedKey { cert, key_pair } =
             rcgen::generate_simple_self_signed(vec!["example.com".to_owned()]).unwrap();
         let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(
@@ -185,7 +249,52 @@ mod tests {
         )
         .unwrap();
         config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-        let config = Arc::new(config);
+        config
+    }
+
+    #[test]
+    fn local_tls13_target_flight_matches_shoes_requirements() {
+        // 在内存中检查实际 TLS 记录，不依赖 shoes 或监听端口。
+        let client_config = rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .unwrap()
+        .with_root_certificates(rustls::RootCertStore::empty())
+        .with_no_client_auth();
+        let mut client = rustls::ClientConnection::new(
+            Arc::new(client_config),
+            "example.com".try_into().unwrap(),
+        )
+        .unwrap();
+        let mut hello = Vec::new();
+        client.write_tls(&mut hello).unwrap();
+        let mut server =
+            rustls::ServerConnection::new(Arc::new(tls_config(&rustls::version::TLS13))).unwrap();
+        server.read_tls(&mut hello.as_slice()).unwrap();
+        server.process_new_packets().unwrap();
+        let mut flight = Vec::new();
+        server.write_tls(&mut flight).unwrap();
+        let mut records = Vec::new();
+        let mut remaining = flight.as_slice();
+        while !remaining.is_empty() {
+            assert!(remaining.len() >= 5);
+            let length = u16::from_be_bytes([remaining[3], remaining[4]]) as usize;
+            records.push((remaining[0], length));
+            remaining = &remaining[5 + length..];
+        }
+        assert_eq!(records.len(), 3, "shoes v0.3.6 要求三条记录：{records:?}");
+        assert_eq!(records[0].0, 22);
+        assert_eq!(records[1], (20, 1));
+        assert_eq!(records[2].0, 23);
+        assert!(
+            records[2].1 > 512,
+            "shoes v0.3.6 要求合并加密记录大于 512 字节：{records:?}"
+        );
+    }
+
+    async fn tls_target(version: &'static rustls::SupportedProtocolVersion) -> Target {
+        let config = Arc::new(tls_config(version));
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let address = listener.local_addr().unwrap();
         let task = tokio::spawn(async move {

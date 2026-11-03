@@ -1,6 +1,7 @@
 //! 由 RAII 和全局 Ctrl+C 清理共同管理；不让主程序直接 exit 遗留子进程。
 use anyhow::{Context, Result};
 use std::{
+    fs::OpenOptions,
     path::{Path, PathBuf},
     process::Stdio,
     sync::{Arc, Mutex, Weak},
@@ -69,17 +70,42 @@ impl Temporary {
     pub(super) fn spawn(&self, binary: &Path, args: &[&std::ffi::OsStr]) -> Result<()> {
         let mut resources = self.0.lock().unwrap();
         resources.stop_child();
+        let mut options = OpenOptions::new();
+        options.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let log = options
+            .open(
+                resources
+                    .directory
+                    .as_ref()
+                    .unwrap()
+                    .path()
+                    .join("process.log"),
+            )
+            .context("创建临时检测日志失败，请检查临时目录权限和空间")?;
+        let stderr = log.try_clone().context("打开临时检测错误日志失败")?;
         resources.child = Some(
             Command::new(binary)
                 .args(args)
                 .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
+                .stdout(Stdio::from(log))
+                .stderr(Stdio::from(stderr))
                 .kill_on_drop(true)
                 .spawn()
                 .context("启动临时检测进程失败，请检查二进制权限和系统架构")?,
         );
         Ok(())
+    }
+    pub(super) fn log_notice(&self) -> String {
+        // 无法保证 shoes（包括配置解析错误）不会输出凭据，不能回显原始日志。
+        format!(
+            "临时 shoes 日志：{}（可能含凭据，不回显；预检结束自动清理，清理后不可查看）",
+            self.path().join("process.log").display()
+        )
     }
     pub(super) fn status(&self) -> Result<Option<std::process::ExitStatus>> {
         self.0
@@ -115,5 +141,61 @@ pub(crate) fn cleanup_on_interrupt() {
     let active = ACTIVE.lock().unwrap_or_else(|e| e.into_inner());
     for resource in active.iter().filter_map(Weak::upgrade) {
         resource.lock().unwrap_or_else(|e| e.into_inner()).clean();
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[tokio::test]
+    async fn process_logs_are_private_append_and_cleaned() {
+        let temporary = Temporary::new().unwrap();
+        let directory = temporary.path();
+        let log = directory.join("process.log");
+        for marker in ["dry-run", "request"] {
+            temporary
+                .spawn(
+                    Path::new("/bin/sh"),
+                    &[
+                        "-c".as_ref(),
+                        "printf '%s stdout\\n' \"$1\"; printf '%s stderr\\n' \"$1\" >&2".as_ref(),
+                        "probe".as_ref(),
+                        marker.as_ref(),
+                    ],
+                )
+                .unwrap();
+            assert!(temporary.wait().await.unwrap().success());
+        }
+        assert_eq!(
+            std::fs::read_to_string(&log).unwrap(),
+            "dry-run stdout\ndry-run stderr\nrequest stdout\nrequest stderr\n"
+        );
+        assert_eq!(
+            std::fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&log).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        drop(temporary);
+        assert!(!directory.exists());
+    }
+
+    #[test]
+    fn log_notice_does_not_expose_log_contents() {
+        let temporary = Temporary::new().unwrap();
+        let log = temporary.path().join("process.log");
+        let contents =
+            "private_key: test-private-key\nuser_id: test-user\npassword: test-password\n";
+        crate::utils::atomic_write(&log, contents.as_bytes(), 0o600).unwrap();
+        let notice = temporary.log_notice();
+        assert!(notice.contains(log.to_str().unwrap()));
+        assert!(notice.contains("清理后不可查看"));
+        for secret in ["test-private-key", "test-user", "test-password"] {
+            assert!(!notice.contains(secret));
+        }
     }
 }
