@@ -10,8 +10,6 @@ www.amazon.com
 aws.amazon.com
 www.ebay.com
 addons.mozilla.org
-www.microsoft.com
-www.apple.com
 www.tesla.com
 www.nvidia.com
 www.samsung.com
