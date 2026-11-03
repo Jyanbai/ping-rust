@@ -99,6 +99,20 @@ fn text(prompt: &str, default: Option<&str>) -> Result<String> {
     })
 }
 
+fn validated_text<T>(
+    prompt: &str,
+    default: Option<&str>,
+    parse: impl Fn(&str) -> Result<T>,
+) -> Result<T> {
+    loop {
+        let input = text(prompt, default)?;
+        match parse(&input) {
+            Ok(value) => return Ok(value),
+            Err(error) => println!("无效输入：{error:#}"),
+        }
+    }
+}
+
 fn target_label(state: &ChainProxyState, target: &RouteTarget) -> String {
     match target {
         RouteTarget::Direct => "DIRECT".to_owned(),
@@ -225,11 +239,12 @@ fn select_member_ids(state: &ChainProxyState) -> Result<Vec<Uuid>> {
             node.address()
         );
     }
-    let input = text("成员编号（逗号分隔）", None)?;
-    Ok(numbered_indices(&input, state.nodes.len(), 1)?
-        .into_iter()
-        .map(|index| state.nodes[index].id)
-        .collect())
+    Ok(validated_text("成员编号（逗号分隔）", None, |input| {
+        numbered_indices(input, state.nodes.len(), 1)
+    })?
+    .into_iter()
+    .map(|index| state.nodes[index].id)
+    .collect())
 }
 
 async fn pools_menu() -> Result<()> {
@@ -317,20 +332,25 @@ fn select_hops(state: &ChainProxyState) -> Result<Vec<ChainHop>> {
     for (index, label) in labels.iter().enumerate() {
         println!("{}) {}", index + 1, label);
     }
-    let input = text("按顺序输入 hop 编号（逗号分隔）", None)?;
-    let indices = input
-        .split(',')
-        .map(|part| {
-            let number = part
-                .trim()
-                .parse::<usize>()
-                .context("请输入逗号分隔的数字")?;
-            if number == 0 || number > labels.len() {
-                anyhow::bail!("编号 {number} 超出范围");
-            }
-            Ok(number - 1)
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let indices = validated_text(
+        "按顺序输入 hop 编号（逗号分隔）",
+        None,
+        |input| {
+            input
+                .split(',')
+                .map(|part| {
+                    let number = part
+                        .trim()
+                        .parse::<usize>()
+                        .context("请输入逗号分隔的数字")?;
+                    if number == 0 || number > labels.len() {
+                        anyhow::bail!("编号 {number} 超出范围");
+                    }
+                    Ok(number - 1)
+                })
+                .collect::<Result<Vec<_>>>()
+        },
+    )?;
     Ok(indices
         .into_iter()
         .map(|index| {
@@ -475,11 +495,14 @@ fn select_target(state: &ChainProxyState) -> Result<Option<RouteTarget>> {
                 for (index, chain) in state.chains.iter().enumerate() {
                     println!("{}) {}", index + 1, chain.name);
                 }
-                let input = text("Chain 编号（至少两个，逗号分隔）", None)?;
-                let ids = numbered_indices(&input, state.chains.len(), 2)?
-                    .into_iter()
-                    .map(|index| state.chains[index].id)
-                    .collect();
+                let ids = validated_text(
+                    "Chain 编号（至少两个，逗号分隔）",
+                    None,
+                    |input| numbered_indices(input, state.chains.len(), 2),
+                )?
+                .into_iter()
+                .map(|index| state.chains[index].id)
+                .collect();
                 Some(RouteTarget::RoundRobin(ids))
             }
             _ => unreachable!(),
@@ -540,7 +563,7 @@ async fn rules_menu() -> Result<()> {
             0 => return Ok(()),
             1 => {
                 let name = text("规则名称", None)?;
-                let masks = parse_masks(&text("Masks（逗号分隔）", None)?)?;
+                let masks = validated_text("Masks（逗号分隔）", None, parse_masks)?;
                 let Some(target) = select_target(&state)? else {
                     continue;
                 };
@@ -569,10 +592,11 @@ async fn rules_menu() -> Result<()> {
                         ..rule.clone()
                     })),
                     3 => Some(ChainProxyChange::UpdateRule(RoutingRule {
-                        masks: parse_masks(&text(
+                        masks: validated_text(
                             "Masks（逗号分隔）",
                             Some(&rule.masks.join(", ")),
-                        )?)?,
+                            parse_masks,
+                        )?,
                         ..rule.clone()
                     })),
                     4 => select_target(&state)?.map(|target| {

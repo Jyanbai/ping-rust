@@ -49,7 +49,7 @@ sha2 = "0.10"
 tar = "0.4"
 tempfile = "3.20"
 time = "0.3"
-tokio = { version = "1.47", features = ["macros", "process", "rt-multi-thread"] }
+tokio = { version = "1.47", features = ["macros", "process", "rt-multi-thread", "signal"] }
 uuid = { version = "1.17", features = ["serde", "v4"] }
 url = "2.5"
 x25519-dalek = { version = "2.0", features = ["getrandom", "static_secrets"] }

@@ -100,6 +100,46 @@ enum PortChoice {
     Fixed(u16),
 }
 
+#[derive(Debug)]
+struct MenuEof;
+
+impl std::fmt::Display for MenuEof {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("输入已结束")
+    }
+}
+impl std::error::Error for MenuEof {}
+
+fn control_after_error(error: &anyhow::Error) -> MenuControl {
+    if error.chain().any(|cause| {
+        cause.is::<MenuEof>()
+            || cause
+                .downcast_ref::<io::Error>()
+                .is_some_and(|e| e.kind() == io::ErrorKind::UnexpectedEof)
+    }) {
+        MenuControl::Exit
+    } else {
+        MenuControl::Continue
+    }
+}
+
+fn parse_port_change(input: &str) -> Option<PortChoice> {
+    match input.trim() {
+        "" | "0" => Some(PortChoice::Back),
+        "r" | "R" => Some(PortChoice::Random),
+        value => parse_port_choice(value),
+    }
+}
+
+fn parse_shadowsocks_mode(input: &str) -> Option<Option<config::ShadowsocksMode>> {
+    match input.trim() {
+        "" | "1" => Some(Some(config::ShadowsocksMode::Plain)),
+        "2" => Some(Some(config::ShadowsocksMode::ShadowTlsV3)),
+        "0" => Some(None),
+        _ => None,
+    }
+}
+
 fn control_after_success(main_menu_choice: usize) -> MenuControl {
     match main_menu_choice {
         1 | 3 => MenuControl::Exit,
@@ -150,7 +190,7 @@ fn read_menu_choice(max: usize) -> Result<String> {
         .context("读取菜单输入失败")?
         == 0
     {
-        anyhow::bail!("输入已结束");
+        return Err(MenuEof.into());
     }
     Ok(value)
 }
@@ -210,8 +250,34 @@ fn select_profile(profiles: &[config::ManagedProfile]) -> Result<Option<usize>> 
     select_numbered("请选择配置", &labels)
 }
 
+pub(crate) async fn bootstrap_address<F, Fut>(
+    detect: F,
+    terminal: bool,
+    prompt: impl FnOnce() -> Result<String>,
+) -> Result<Option<String>>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<String>>,
+{
+    match detect().await {
+        Ok(address) => Ok(Some(address)),
+        Err(error) if !terminal => {
+            Err(error.context("请运行 prs add reality --server-address <IP或域名>"))
+        }
+        Err(error) => {
+            eprintln!("自动检测公网地址失败：{error:#}");
+            let entered = prompt()?;
+            if entered.trim().is_empty() {
+                Ok(None)
+            } else {
+                client::normalize_server_address(&entered).map(Some)
+            }
+        }
+    }
+}
+
 pub async fn run() -> Result<()> {
-    cli::bootstrap_default_reality().await?;
+    cli::bootstrap_default_reality_for_menu().await?;
     config::ensure_profile_files().await?;
     loop {
         println!(
@@ -228,44 +294,60 @@ pub async fn run() -> Result<()> {
         println!("shoes: {shoes_status}");
         println!("项目: https://github.com/Jyanbai/ping-rust\n");
         let selected = select_keyed("", MAIN_MENU_ITEMS)?;
-        let control = match selected {
-            0 => {
-                println!("{}", "已退出。".green());
-                return Ok(());
+        let result = async {
+            match selected {
+                0 => {
+                    println!("{}", "已退出。".green());
+                    Ok(MenuControl::Exit)
+                }
+                1 => fast_add_config_menu().await,
+                2 => {
+                    change_config_menu().await?;
+                    Ok(MenuControl::Continue)
+                }
+                3 => view_config_menu(),
+                4 => {
+                    delete_config_menu().await?;
+                    Ok(MenuControl::Continue)
+                }
+                5 => {
+                    service_menu()?;
+                    Ok(MenuControl::Continue)
+                }
+                6 => update_menu().await,
+                7 => {
+                    uninstall_menu()?;
+                    Ok(MenuControl::Continue)
+                }
+                8 => {
+                    println!("常用命令：prs add reality、prs add ss、prs info、prs url、prs qr");
+                    println!("高级帮助：ping-rust --help");
+                    Ok(MenuControl::Continue)
+                }
+                9 => operations_menu().await,
+                10 => {
+                    println!("ping-rust {}", env!("CARGO_PKG_VERSION"));
+                    println!("Rust 实现的 shoes 菜单式安装与管理工具");
+                    println!("https://github.com/Jyanbai/ping-rust");
+                    Ok(MenuControl::Continue)
+                }
+                _ => anyhow::bail!("菜单返回了无效选项"),
             }
-            1 => fast_add_config_menu().await,
-            2 => {
-                change_config_menu().await?;
-                Ok(MenuControl::Continue)
+        }
+        .await;
+        let control = match result {
+            Ok(control) => control,
+            Err(error) => {
+                if crate::is_interrupted(&error) {
+                    crate::restore_cursor_and_exit();
+                }
+                let control = control_after_error(&error);
+                if control == MenuControl::Continue {
+                    eprintln!("{}", format!("错误：{error:#}").red());
+                }
+                control
             }
-            3 => view_config_menu(),
-            4 => {
-                delete_config_menu().await?;
-                Ok(MenuControl::Continue)
-            }
-            5 => {
-                service_menu()?;
-                Ok(MenuControl::Continue)
-            }
-            6 => update_menu().await,
-            7 => {
-                uninstall_menu()?;
-                Ok(MenuControl::Continue)
-            }
-            8 => {
-                println!("常用命令：prs add reality、prs add ss、prs info、prs url、prs qr");
-                println!("高级帮助：ping-rust --help");
-                Ok(MenuControl::Continue)
-            }
-            9 => operations_menu().await,
-            10 => {
-                println!("ping-rust {}", env!("CARGO_PKG_VERSION"));
-                println!("Rust 实现的 shoes 菜单式安装与管理工具");
-                println!("https://github.com/Jyanbai/ping-rust");
-                Ok(MenuControl::Continue)
-            }
-            _ => anyhow::bail!("菜单返回了无效选项"),
-        }?;
+        };
         if control == MenuControl::Exit {
             return Ok(());
         }
@@ -397,22 +479,24 @@ async fn change_config_menu() -> Result<()> {
         }
         ChangeAction::Port => {
             let value = Input::<String>::with_theme(&ColorfulTheme::default())
-                .with_prompt("输入新端口（直接回车自动选择随机端口）")
+                .with_prompt(format!(
+                    "输入新端口（直接回车保持 {}，输入 r 随机分配，输入 0 返回）",
+                    profile.port
+                ))
                 .allow_empty(true)
                 .validate_with(|value: &String| {
-                    if value.trim().is_empty() {
-                        return Ok(());
-                    }
-                    match value.trim().parse::<u16>() {
-                        Ok(port) if port > 0 => Ok(()),
-                        _ => Err("端口必须在 1..=65535 范围内，或直接回车"),
-                    }
+                    parse_port_change(value)
+                        .map(|_| ())
+                        .ok_or("请输入 1 到 65535、r 或 0")
                 })
                 .interact_text()?;
-            let requested = if value.trim().is_empty() {
-                None
-            } else {
-                Some(value.trim().parse::<u16>()?)
+            let requested = match parse_port_change(&value).expect("端口输入已验证") {
+                PortChoice::Back => {
+                    println!("端口未更改。");
+                    return Ok(());
+                }
+                PortChoice::Random => None,
+                PortChoice::Fixed(port) => Some(port),
             };
             let port = fast_add::select_port_for_update(
                 profile.protocol(),
@@ -1079,11 +1163,12 @@ async fn fast_add_config_menu() -> Result<MenuControl> {
         .with_context(|| format!("协议编号无效：{protocol_number}"))?;
     let shadowsocks_mode = if protocol == Protocol::Shadowsocks {
         println!("\nShadowsocks 模式:\n\n1) Shadowsocks 2022\n2) Shadowsocks 2022 + ShadowTLS v3（推荐）\n0) 返回\n");
-        match read_menu_choice(2)?.trim() {
-            "1" | "" => config::ShadowsocksMode::Plain,
-            "2" => config::ShadowsocksMode::ShadowTlsV3,
-            "0" => return Ok(MenuControl::Continue),
-            _ => anyhow::bail!("Shadowsocks 模式编号无效"),
+        loop {
+            match parse_shadowsocks_mode(&read_menu_choice(2)?) {
+                Some(Some(mode)) => break mode,
+                Some(None) => return Ok(MenuControl::Continue),
+                None => println!("无效序号；请输入 0 到 2 之间的数字。"),
+            }
         }
     } else {
         config::ShadowsocksMode::Plain
@@ -1093,7 +1178,7 @@ async fn fast_add_config_menu() -> Result<MenuControl> {
         io::stdout().flush().context("输出端口提示失败")?;
         let mut value = String::new();
         if io::stdin().read_line(&mut value).context("读取端口失败")? == 0 {
-            anyhow::bail!("输入已结束");
+            return Err(MenuEof.into());
         }
         match parse_port_choice(&value) {
             Some(PortChoice::Back) => return Ok(MenuControl::Continue),
@@ -1340,14 +1425,32 @@ fn prompt_vless_enc_auth() -> Result<Option<config::VlessEncAuth>> {
     Ok(Some(auth))
 }
 
-fn prompt_vless_enc_options() -> Result<crate::vless_encryption::Options> {
-    let mode = prompt_vless_enc_mode()?.context("已取消添加 VLESS-ENC")?;
-    let auth = prompt_vless_enc_auth()?.context("已取消添加 VLESS-ENC")?;
-    let vision = Confirm::with_theme(&ColorfulTheme::default())
-        .with_prompt("开启 Vision？")
-        .default(false)
-        .interact()?;
-    Ok(crate::vless_encryption::Options { mode, auth, vision })
+fn prompt_vless_enc_options() -> Result<Option<crate::vless_encryption::Options>> {
+    prompt_vless_enc_options_with(prompt_vless_enc_mode, prompt_vless_enc_auth, || {
+        Ok(Confirm::with_theme(&ColorfulTheme::default())
+            .with_prompt("开启 Vision？")
+            .default(false)
+            .interact()?)
+    })
+}
+
+fn prompt_vless_enc_options_with(
+    mode: impl FnOnce() -> Result<Option<config::VlessEncMode>>,
+    auth: impl FnOnce() -> Result<Option<config::VlessEncAuth>>,
+    vision: impl FnOnce() -> Result<bool>,
+) -> Result<Option<crate::vless_encryption::Options>> {
+    let Some(mode) = mode()? else {
+        return Ok(None);
+    };
+    let Some(auth) = auth()? else {
+        return Ok(None);
+    };
+    let vision = vision()?;
+    Ok(Some(crate::vless_encryption::Options {
+        mode,
+        auth,
+        vision,
+    }))
 }
 
 async fn offer_vless_enc_regeneration(profile: &config::ManagedProfile) -> Result<()> {
@@ -1375,13 +1478,17 @@ async fn deploy_fast_config(
     shadowsocks_password: Option<String>,
     shadowsocks_mode: config::ShadowsocksMode,
 ) -> Result<MenuControl> {
+    let vless_enc = if protocol == Protocol::VlessEnc {
+        let Some(options) = prompt_vless_enc_options()? else {
+            return Ok(MenuControl::Continue);
+        };
+        options
+    } else {
+        Default::default()
+    };
     let server_address = resolve_menu_server_address().await?;
     let result = fast_add::execute(fast_add::AddRequest {
-        vless_enc: if protocol == Protocol::VlessEnc {
-            prompt_vless_enc_options()?
-        } else {
-            Default::default()
-        },
+        vless_enc,
         name: None,
         protocol,
         port,
@@ -1445,7 +1552,9 @@ async fn advanced_add_config_menu() -> Result<()> {
         .interact_text()?;
     let mut options = GenerationOptions::default();
     if protocol == Protocol::VlessEnc {
-        let selected = prompt_vless_enc_options()?;
+        let Some(selected) = prompt_vless_enc_options()? else {
+            return Ok(());
+        };
         options.vless_enc_mode = selected.mode;
         options.vless_enc_auth = selected.auth;
         options.vless_enc_vision = selected.vision;
@@ -1831,6 +1940,89 @@ fn uninstall_menu() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn input_errors_and_cancellation_are_classified() {
+        assert_eq!(
+            control_after_error(&anyhow::Error::new(MenuEof).context("读取")),
+            MenuControl::Exit
+        );
+        let eof = dialoguer::Error::from(io::Error::from(io::ErrorKind::UnexpectedEof));
+        assert_eq!(
+            control_after_error(&anyhow::Error::new(eof)),
+            MenuControl::Exit
+        );
+        assert_eq!(
+            control_after_error(&anyhow::anyhow!("失败")),
+            MenuControl::Continue
+        );
+        assert!(prompt_vless_enc_options_with(
+            || Ok(None),
+            || panic!("cancelled"),
+            || panic!("cancelled")
+        )
+        .unwrap()
+        .is_none());
+        assert!(prompt_vless_enc_options_with(
+            || Ok(Some(config::VlessEncMode::default())),
+            || Ok(None),
+            || panic!("cancelled")
+        )
+        .unwrap()
+        .is_none());
+        assert_eq!(parse_shadowsocks_mode("3"), None);
+        assert_eq!(parse_shadowsocks_mode("bad"), None);
+        assert_eq!(parse_shadowsocks_mode("0"), Some(None));
+        assert_eq!(parse_shadowsocks_mode(""), parse_shadowsocks_mode("1"));
+    }
+
+    #[test]
+    fn changing_port_requires_explicit_random_choice() {
+        for input in ["", "0", "  "] {
+            assert_eq!(parse_port_change(input), Some(PortChoice::Back));
+        }
+        for input in ["r", "R"] {
+            assert_eq!(parse_port_change(input), Some(PortChoice::Random));
+        }
+        for port in [1, 443, 65535] {
+            assert_eq!(
+                parse_port_change(&port.to_string()),
+                Some(PortChoice::Fixed(port))
+            );
+        }
+        for input in ["65536", "-1", "abc"] {
+            assert_eq!(parse_port_change(input), None);
+        }
+    }
+
+    #[tokio::test]
+    async fn bootstrap_detection_fallback_respects_terminal() {
+        let failure = || async { anyhow::bail!("offline") };
+        assert!(bootstrap_address(failure, true, || Ok(String::new()))
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            bootstrap_address(failure, true, || Ok("example.com".into()))
+                .await
+                .unwrap(),
+            Some("example.com".into())
+        );
+        let error = bootstrap_address(failure, false, || panic!("must not read stdin"))
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("prs add reality --server-address <IP或域名>"));
+        assert_eq!(
+            bootstrap_address(
+                || async { Ok("203.0.113.1".into()) },
+                false,
+                || panic!("unneeded prompt")
+            )
+            .await
+            .unwrap(),
+            Some("203.0.113.1".into())
+        );
+    }
 
     #[test]
     fn update_center_numbers_are_stable_and_explicit() {
