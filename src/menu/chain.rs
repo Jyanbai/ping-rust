@@ -22,19 +22,32 @@ pub(super) async fn menu() -> Result<()> {
             (8, "查看当前拓扑"),
             (0, "返回"),
         ];
-        match select_keyed("", &items)? {
-            0 => return Ok(()),
-            1 => nodes_menu().await?,
-            2 => pools_menu().await?,
-            3 => chains_menu().await?,
-            4 => rules_menu().await?,
-            5 => change_default(&state).await?,
-            6 => deployment::update_chain_proxy(ChainProxyChange::SetEnabled(!state.enabled))
-                .await
-                .map(|_| ())?,
-            7 => test_menu(&state).await?,
-            8 => print_topology(&state),
-            _ => unreachable!(),
+        let selected_action = select_keyed("", &items)?;
+        if selected_action == 0 {
+            return Ok(());
+        }
+        let result: Result<()> = async {
+            match selected_action {
+                0 => return Ok(()),
+                1 => nodes_menu().await?,
+                2 => pools_menu().await?,
+                3 => chains_menu().await?,
+                4 => rules_menu().await?,
+                5 => change_default(&state).await?,
+                6 => deployment::update_chain_proxy(ChainProxyChange::SetEnabled(!state.enabled))
+                    .await
+                    .map(|_| ())?,
+                7 => test_menu(&state).await?,
+                8 => print_topology(&state),
+                _ => unreachable!(),
+            }
+            Ok(())
+        }
+        .await;
+        if let Err(error) = result {
+            if !input::is_back(&error) {
+                return Err(error);
+            }
         }
     }
 }
@@ -91,12 +104,7 @@ async fn test_menu(state: &ChainProxyState) -> Result<()> {
 }
 
 fn text(prompt: &str, default: Option<&str>) -> Result<String> {
-    let theme = ColorfulTheme::default();
-    let input = Input::<String>::with_theme(&theme).with_prompt(prompt);
-    Ok(match default {
-        Some(value) => input.default(value.to_owned()).interact_text()?,
-        None => input.interact_text()?,
-    })
+    input::checked_text(prompt, default, false, chain_proxy::validate_node_name)
 }
 
 fn validated_text<T>(
@@ -104,13 +112,7 @@ fn validated_text<T>(
     default: Option<&str>,
     parse: impl Fn(&str) -> Result<T>,
 ) -> Result<T> {
-    loop {
-        let input = text(prompt, default)?;
-        match parse(&input) {
-            Ok(value) => return Ok(value),
-            Err(error) => println!("无效输入：{error:#}"),
-        }
-    }
+    input::validated_text(prompt, default, false, parse)
 }
 
 fn target_label(state: &ChainProxyState, target: &RouteTarget) -> String {
@@ -174,54 +176,67 @@ async fn nodes_menu() -> Result<()> {
             (7, "配置节点 H2MUX"),
             (0, "返回"),
         ];
-        match select_keyed("节点管理", &items)? {
-            0 => return Ok(()),
-            1 => add_chain_node().await?,
-            2 => {
-                if let Some(index) = select_chain_node(&state.nodes, "选择节点")? {
-                    let node = &state.nodes[index];
-                    let name = text("新名称", Some(&node.name))?;
-                    deployment::update_chain_proxy(ChainProxyChange::RenameNode(node.id, name))
+        let selected_action = select_keyed("节点管理", &items)?;
+        if selected_action == 0 {
+            return Ok(());
+        }
+        let result: Result<()> = async {
+            match selected_action {
+                0 => return Ok(()),
+                1 => add_chain_node().await?,
+                2 => {
+                    if let Some(index) = select_chain_node(&state.nodes, "选择节点")? {
+                        let node = &state.nodes[index];
+                        let name = text("新名称", Some(&node.name))?;
+                        deployment::update_chain_proxy(ChainProxyChange::RenameNode(node.id, name))
+                            .await?;
+                    }
+                }
+                3 => test_chain_node().await?,
+                4 => delete_chain_node().await?,
+                5 => print_chain_nodes(&state.nodes, state.active().map(|node| node.id)),
+                6 => select_chain_exit().await?,
+                7 => {
+                    let eligible = state
+                        .nodes
+                        .iter()
+                        .filter(|node| node.h2mux_eligible())
+                        .collect::<Vec<_>>();
+                    if eligible.is_empty() {
+                        println!("没有支持 H2MUX 的链式节点。");
+                        return Ok(());
+                    }
+                    let labels = eligible
+                        .iter()
+                        .map(|node| {
+                            format!(
+                                "{} | {} | H2MUX: {}",
+                                node.name,
+                                node.protocol_name(),
+                                h2mux_status(&node.h2mux)
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    let Some(index) = select_numbered("选择节点", &labels)? else {
+                        return Ok(());
+                    };
+                    let node = eligible[index];
+                    if let Some(options) = prompt_h2mux_options(&node.h2mux)? {
+                        deployment::update_chain_proxy(ChainProxyChange::SetNodeH2Mux(
+                            node.id, options,
+                        ))
                         .await?;
+                    }
                 }
+                _ => unreachable!(),
             }
-            3 => test_chain_node().await?,
-            4 => delete_chain_node().await?,
-            5 => print_chain_nodes(&state.nodes, state.active().map(|node| node.id)),
-            6 => select_chain_exit().await?,
-            7 => {
-                let eligible = state
-                    .nodes
-                    .iter()
-                    .filter(|node| node.h2mux_eligible())
-                    .collect::<Vec<_>>();
-                if eligible.is_empty() {
-                    println!("没有支持 H2MUX 的链式节点。");
-                    continue;
-                }
-                let labels = eligible
-                    .iter()
-                    .map(|node| {
-                        format!(
-                            "{} | {} | H2MUX: {}",
-                            node.name,
-                            node.protocol_name(),
-                            h2mux_status(&node.h2mux)
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                let Some(index) = select_numbered("选择节点", &labels)? else {
-                    continue;
-                };
-                let node = eligible[index];
-                if let Some(options) = prompt_h2mux_options(&node.h2mux)? {
-                    deployment::update_chain_proxy(ChainProxyChange::SetNodeH2Mux(
-                        node.id, options,
-                    ))
-                    .await?;
-                }
+            Ok(())
+        }
+        .await;
+        if let Err(error) = result {
+            if !input::is_back(&error) {
+                return Err(error);
             }
-            _ => unreachable!(),
         }
     }
 }
@@ -271,45 +286,58 @@ async fn pools_menu() -> Result<()> {
                 (0, "返回"),
             ],
         )?;
-        match action {
-            0 => return Ok(()),
-            1 => {
-                let name = text("Pool 名称", None)?;
-                let members = select_member_ids(&state)?;
-                deployment::update_chain_proxy(ChainProxyChange::AddPool(ChainPool {
-                    id: Uuid::new_v4(),
-                    name,
-                    members,
-                }))
-                .await?;
+        let selected_action = action;
+        if selected_action == 0 {
+            return Ok(());
+        }
+        let result: Result<()> = async {
+            match selected_action {
+                0 => return Ok(()),
+                1 => {
+                    let name = text("Pool 名称", None)?;
+                    let members = select_member_ids(&state)?;
+                    deployment::update_chain_proxy(ChainProxyChange::AddPool(ChainPool {
+                        id: Uuid::new_v4(),
+                        name,
+                        members,
+                    }))
+                    .await?;
+                }
+                2..=4 => {
+                    let labels = state
+                        .pools
+                        .iter()
+                        .map(|pool| pool.name.as_str())
+                        .collect::<Vec<_>>();
+                    let Some(index) = select_numbered("选择 Pool", &labels)? else {
+                        return Ok(());
+                    };
+                    let pool = &state.pools[index];
+                    let change = match action {
+                        2 => ChainProxyChange::UpdatePool(ChainPool {
+                            id: pool.id,
+                            name: pool.name.clone(),
+                            members: select_member_ids(&state)?,
+                        }),
+                        3 => ChainProxyChange::UpdatePool(ChainPool {
+                            id: pool.id,
+                            name: text("新名称", Some(&pool.name))?,
+                            members: pool.members.clone(),
+                        }),
+                        4 => ChainProxyChange::DeletePool(pool.id),
+                        _ => unreachable!(),
+                    };
+                    deployment::update_chain_proxy(change).await?;
+                }
+                _ => unreachable!(),
             }
-            2..=4 => {
-                let labels = state
-                    .pools
-                    .iter()
-                    .map(|pool| pool.name.as_str())
-                    .collect::<Vec<_>>();
-                let Some(index) = select_numbered("选择 Pool", &labels)? else {
-                    continue;
-                };
-                let pool = &state.pools[index];
-                let change = match action {
-                    2 => ChainProxyChange::UpdatePool(ChainPool {
-                        id: pool.id,
-                        name: pool.name.clone(),
-                        members: select_member_ids(&state)?,
-                    }),
-                    3 => ChainProxyChange::UpdatePool(ChainPool {
-                        id: pool.id,
-                        name: text("新名称", Some(&pool.name))?,
-                        members: pool.members.clone(),
-                    }),
-                    4 => ChainProxyChange::DeletePool(pool.id),
-                    _ => unreachable!(),
-                };
-                deployment::update_chain_proxy(change).await?;
+            Ok(())
+        }
+        .await;
+        if let Err(error) = result {
+            if !input::is_back(&error) {
+                return Err(error);
             }
-            _ => unreachable!(),
         }
     }
 }
@@ -404,82 +432,95 @@ async fn chains_menu() -> Result<()> {
                 (0, "返回"),
             ],
         )?;
-        match action {
-            0 => return Ok(()),
-            1 => {
-                let name = text("Chain 名称", None)?;
-                let hops = select_hops(&state)?;
-                deployment::update_chain_proxy(ChainProxyChange::AddChain(ChainDefinition {
-                    id: Uuid::new_v4(),
-                    name,
-                    hops,
-                }))
-                .await?;
-            }
-            2..=8 => {
-                let labels = state
-                    .chains
-                    .iter()
-                    .map(|chain| chain.name.as_str())
-                    .collect::<Vec<_>>();
-                let Some(index) = select_numbered("选择 Chain", &labels)? else {
-                    continue;
-                };
-                let chain = &state.chains[index];
-                let change = match action {
-                    2 => ChainProxyChange::UpdateChain(ChainDefinition {
-                        id: chain.id,
-                        name: chain.name.clone(),
-                        hops: select_hops(&state)?,
-                    }),
-                    3 => ChainProxyChange::UpdateChain(ChainDefinition {
-                        id: chain.id,
-                        name: text("新名称", Some(&chain.name))?,
-                        hops: chain.hops.clone(),
-                    }),
-                    4 => ChainProxyChange::DeleteChain(chain.id),
-                    5 => {
-                        let selected = select_hops(&state)?;
-                        let mut hops = chain.hops.clone();
-                        hops.extend(selected);
-                        ChainProxyChange::UpdateChain(ChainDefinition {
+        let selected_action = action;
+        if selected_action == 0 {
+            return Ok(());
+        }
+        let result: Result<()> = async {
+            match selected_action {
+                0 => return Ok(()),
+                1 => {
+                    let name = text("Chain 名称", None)?;
+                    let hops = select_hops(&state)?;
+                    deployment::update_chain_proxy(ChainProxyChange::AddChain(ChainDefinition {
+                        id: Uuid::new_v4(),
+                        name,
+                        hops,
+                    }))
+                    .await?;
+                }
+                2..=8 => {
+                    let labels = state
+                        .chains
+                        .iter()
+                        .map(|chain| chain.name.as_str())
+                        .collect::<Vec<_>>();
+                    let Some(index) = select_numbered("选择 Chain", &labels)? else {
+                        return Ok(());
+                    };
+                    let chain = &state.chains[index];
+                    let change = match action {
+                        2 => ChainProxyChange::UpdateChain(ChainDefinition {
                             id: chain.id,
                             name: chain.name.clone(),
-                            hops,
-                        })
-                    }
-                    6..=8 => {
-                        let labels = chain
-                            .hops
-                            .iter()
-                            .enumerate()
-                            .map(|(index, hop)| {
-                                format!("{}. {}", index + 1, hop_label(&state, hop))
+                            hops: select_hops(&state)?,
+                        }),
+                        3 => ChainProxyChange::UpdateChain(ChainDefinition {
+                            id: chain.id,
+                            name: text("新名称", Some(&chain.name))?,
+                            hops: chain.hops.clone(),
+                        }),
+                        4 => ChainProxyChange::DeleteChain(chain.id),
+                        5 => {
+                            let selected = select_hops(&state)?;
+                            let mut hops = chain.hops.clone();
+                            hops.extend(selected);
+                            ChainProxyChange::UpdateChain(ChainDefinition {
+                                id: chain.id,
+                                name: chain.name.clone(),
+                                hops,
                             })
-                            .collect::<Vec<_>>();
-                        let Some(position) = select_numbered("选择 hop", &labels)? else {
-                            continue;
-                        };
-                        let mut hops = chain.hops.clone();
-                        match action {
-                            6 => {
-                                hops.remove(position);
-                            }
-                            7 if position > 0 => hops.swap(position, position - 1),
-                            8 if position + 1 < hops.len() => hops.swap(position, position + 1),
-                            _ => continue,
                         }
-                        ChainProxyChange::UpdateChain(ChainDefinition {
-                            id: chain.id,
-                            name: chain.name.clone(),
-                            hops,
-                        })
-                    }
-                    _ => unreachable!(),
-                };
-                deployment::update_chain_proxy(change).await?;
+                        6..=8 => {
+                            let labels = chain
+                                .hops
+                                .iter()
+                                .enumerate()
+                                .map(|(index, hop)| {
+                                    format!("{}. {}", index + 1, hop_label(&state, hop))
+                                })
+                                .collect::<Vec<_>>();
+                            let Some(position) = select_numbered("选择 hop", &labels)? else {
+                                return Ok(());
+                            };
+                            let mut hops = chain.hops.clone();
+                            match action {
+                                6 => {
+                                    hops.remove(position);
+                                }
+                                7 if position > 0 => hops.swap(position, position - 1),
+                                8 if position + 1 < hops.len() => hops.swap(position, position + 1),
+                                _ => return Ok(()),
+                            }
+                            ChainProxyChange::UpdateChain(ChainDefinition {
+                                id: chain.id,
+                                name: chain.name.clone(),
+                                hops,
+                            })
+                        }
+                        _ => unreachable!(),
+                    };
+                    deployment::update_chain_proxy(change).await?;
+                }
+                _ => unreachable!(),
             }
-            _ => unreachable!(),
+            Ok(())
+        }
+        .await;
+        if let Err(error) = result {
+            if !input::is_back(&error) {
+                return Err(error);
+            }
         }
     }
 }
@@ -559,74 +600,87 @@ async fn rules_menu() -> Result<()> {
                 (0, "返回"),
             ],
         )?;
-        match action {
-            0 => return Ok(()),
-            1 => {
-                let name = text("规则名称", None)?;
-                let masks = validated_text("Masks（逗号分隔）", None, parse_masks)?;
-                let Some(target) = select_target(&state)? else {
-                    continue;
-                };
-                deployment::update_chain_proxy(ChainProxyChange::AddRule(RoutingRule {
-                    id: Uuid::new_v4(),
-                    name,
-                    enabled: true,
-                    masks,
-                    target,
-                }))
-                .await?;
-            }
-            2..=8 => {
-                let labels = state
-                    .rules
-                    .iter()
-                    .map(|rule| rule.name.as_str())
-                    .collect::<Vec<_>>();
-                let Some(index) = select_numbered("选择规则", &labels)? else {
-                    continue;
-                };
-                let rule = &state.rules[index];
-                let change = match action {
-                    2 => Some(ChainProxyChange::UpdateRule(RoutingRule {
-                        name: text("新名称", Some(&rule.name))?,
-                        ..rule.clone()
-                    })),
-                    3 => Some(ChainProxyChange::UpdateRule(RoutingRule {
-                        masks: validated_text(
-                            "Masks（逗号分隔）",
-                            Some(&rule.masks.join(", ")),
-                            parse_masks,
-                        )?,
-                        ..rule.clone()
-                    })),
-                    4 => select_target(&state)?.map(|target| {
-                        ChainProxyChange::UpdateRule(RoutingRule {
-                            target,
-                            ..rule.clone()
-                        })
-                    }),
-                    5 => Some(ChainProxyChange::UpdateRule(RoutingRule {
-                        enabled: !rule.enabled,
-                        ..rule.clone()
-                    })),
-                    6 if index > 0 => {
-                        let mut rules = state.rules.clone();
-                        rules.swap(index, index - 1);
-                        Some(ChainProxyChange::SetRules(rules))
-                    }
-                    7 if index + 1 < state.rules.len() => {
-                        let mut rules = state.rules.clone();
-                        rules.swap(index, index + 1);
-                        Some(ChainProxyChange::SetRules(rules))
-                    }
-                    8 => Some(ChainProxyChange::DeleteRule(rule.id)),
-                    _ => None,
-                };
-                if let Some(change) = change {
-                    deployment::update_chain_proxy(change).await?;
+        let selected_action = action;
+        if selected_action == 0 {
+            return Ok(());
+        }
+        let result: Result<()> = async {
+            match selected_action {
+                0 => return Ok(()),
+                1 => {
+                    let name = text("规则名称", None)?;
+                    let masks = validated_text("Masks（逗号分隔）", None, parse_masks)?;
+                    let Some(target) = select_target(&state)? else {
+                        return Ok(());
+                    };
+                    deployment::update_chain_proxy(ChainProxyChange::AddRule(RoutingRule {
+                        id: Uuid::new_v4(),
+                        name,
+                        enabled: true,
+                        masks,
+                        target,
+                    }))
+                    .await?;
                 }
+                2..=8 => {
+                    let labels = state
+                        .rules
+                        .iter()
+                        .map(|rule| rule.name.as_str())
+                        .collect::<Vec<_>>();
+                    let Some(index) = select_numbered("选择规则", &labels)? else {
+                        return Ok(());
+                    };
+                    let rule = &state.rules[index];
+                    let change = match action {
+                        2 => Some(ChainProxyChange::UpdateRule(RoutingRule {
+                            name: text("新名称", Some(&rule.name))?,
+                            ..rule.clone()
+                        })),
+                        3 => Some(ChainProxyChange::UpdateRule(RoutingRule {
+                            masks: validated_text(
+                                "Masks（逗号分隔）",
+                                Some(&rule.masks.join(", ")),
+                                parse_masks,
+                            )?,
+                            ..rule.clone()
+                        })),
+                        4 => select_target(&state)?.map(|target| {
+                            ChainProxyChange::UpdateRule(RoutingRule {
+                                target,
+                                ..rule.clone()
+                            })
+                        }),
+                        5 => Some(ChainProxyChange::UpdateRule(RoutingRule {
+                            enabled: !rule.enabled,
+                            ..rule.clone()
+                        })),
+                        6 if index > 0 => {
+                            let mut rules = state.rules.clone();
+                            rules.swap(index, index - 1);
+                            Some(ChainProxyChange::SetRules(rules))
+                        }
+                        7 if index + 1 < state.rules.len() => {
+                            let mut rules = state.rules.clone();
+                            rules.swap(index, index + 1);
+                            Some(ChainProxyChange::SetRules(rules))
+                        }
+                        8 => Some(ChainProxyChange::DeleteRule(rule.id)),
+                        _ => None,
+                    };
+                    if let Some(change) = change {
+                        deployment::update_chain_proxy(change).await?;
+                    }
+                }
+                _ => unreachable!(),
             }
-            _ => unreachable!(),
+            Ok(())
+        }
+        .await;
+        if let Err(error) = result {
+            if !input::is_back(&error) {
+                return Err(error);
+            }
         }
     }
 }

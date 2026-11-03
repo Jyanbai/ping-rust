@@ -1,0 +1,119 @@
+#!/usr/bin/expect -f
+# 运行条件见 tests/menu_input_e2e.rs；不创建、删除或更改节点。
+set timeout 30
+log_user 1
+if {$argc != 3} {
+    puts stderr "usage: menu_input.exp <ping-rust> <first-profile-port> <profile-count>"
+    exit 2
+}
+set binary [lindex $argv 0]
+set port [lindex $argv 1]
+set profile_count [lindex $argv 2]
+
+proc expect_or_fail {pattern stage} {
+    expect {
+        -re $pattern { return }
+        eof { puts stderr "menu ended during $stage"; exit 1 }
+        timeout { puts stderr "menu timed out during $stage"; exit 1 }
+    }
+}
+proc send_choice {value} { send -- "$value\r" }
+proc main_menu {} { expect_or_fail {请选择 \[0-10\]: } "main menu" }
+proc choose_profile {} {
+    global profile_count
+    if {$profile_count > 1} {
+        expect_or_fail {请选择配置:} "profile selector"
+        expect_or_fail {请选择 \[0-[0-9]+\]: } "profile selection prompt"
+        send_choice 1
+    }
+}
+proc change_menu {} {
+    expect_or_fail {选择更改项目:} "change menu"
+    expect_or_fail {1\) 更改端口\r?\n2\) 更改配置名称} "unchanged change actions"
+    expect_or_fail {请选择 \[0-[0-9]+\]: } "change action prompt"
+}
+proc port_prompt {} {
+    global port
+    expect_or_fail "输入新端口（输入 r 随机分配）（默认：$port，输入 0 返回）：" "port prompt"
+}
+proc successful_exit {} {
+    expect {
+        eof {}
+        timeout { puts stderr "EOF did not exit menu"; exit 1 }
+    }
+    set result [wait]
+    if {[lindex $result 2] != 0 || [lindex $result 3] != 0} {
+        puts stderr "menu exited unsuccessfully: $result"
+        exit 1
+    }
+}
+
+spawn $binary
+main_menu
+send_choice 2
+choose_profile
+change_menu
+send_choice 1
+port_prompt
+send_choice 0
+change_menu
+
+send_choice 2
+expect_or_fail {新配置名称（默认：[^\r\n]+，输入 0 返回）：} "rename prompt"
+send_choice 0
+change_menu
+
+send_choice 1
+port_prompt
+send_choice 65536
+expect_or_fail {错误！请输入 1 到 65535、r 或 0} "invalid port rejection"
+port_prompt
+send_choice 0
+change_menu
+send_choice 0
+main_menu
+
+send_choice 4
+choose_profile
+expect_or_fail {确认删除 [^\r\n]+？ \[y/N\]（输入 0 返回）：} "destructive confirmation defaults to no"
+send_choice ""
+main_menu
+# 默认 N 后还能再次选中同一配置；Rust 调用方另行比较磁盘文件。
+send_choice 2
+choose_profile
+change_menu
+send_choice 0
+main_menu
+send -- "\004"
+successful_exit
+
+# EOF 在文本框内也正常退出。
+spawn $binary
+main_menu
+send_choice 2
+choose_profile
+change_menu
+send_choice 2
+expect_or_fail {新配置名称（默认：[^\r\n]+，输入 0 返回）：} "rename before EOF"
+send -- "\004"
+successful_exit
+
+# 阻塞读取期间 Ctrl+C 仍须恢复光标并以 130 退出。
+spawn $binary
+main_menu
+send_choice 2
+choose_profile
+change_menu
+send_choice 2
+expect_or_fail {新配置名称（默认：[^\r\n]+，输入 0 返回）：} "rename before Ctrl+C"
+send -- "\003"
+expect_or_fail {\x1b\[\?25h\r?\n} "cursor restored after Ctrl+C"
+expect {
+    eof {}
+    timeout { puts stderr "Ctrl+C did not exit menu"; exit 1 }
+}
+set result [wait]
+if {[lindex $result 2] != 0 || [lindex $result 3] != 130} {
+    puts stderr "Ctrl+C did not exit with 130: $result"
+    exit 1
+}

@@ -739,7 +739,7 @@ fn validate_shadowsocks(cipher: &str, password: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_node_name(name: &str) -> Result<()> {
+pub(crate) fn validate_node_name(name: &str) -> Result<()> {
     let name = name.trim();
     if name.is_empty() || name.len() > 64 || name.chars().any(char::is_control) {
         bail!("链式节点名称必须为 1..=64 个非控制字符");
