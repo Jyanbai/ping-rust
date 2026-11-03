@@ -517,9 +517,14 @@ jobs:
 
       - name: Run v0.2.2 to v0.3.6 migration acceptance
         shell: bash
+        env:
+          # `ping-rust update` queries the GitHub API; unauthenticated requests
+          # from shared runner IPs are rate limited (HTTP 403) at random.
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           docker exec \
+            --env GITHUB_TOKEN \
             --env NEW_PING_RUST=/opt/ping-rust-current/bin/ping-rust \
             ping-rust-debian-upgrade \
             bash /workspace/scripts/ci/shoes-upgrade-acceptance.sh
