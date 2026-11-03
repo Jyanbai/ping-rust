@@ -1,19 +1,22 @@
 # Codex Dispatch：在 GitHub 上用评论给 Codex 派任务
 
-`.github/workflows/codex-dispatch.yml` 让仓库所有者用一条评论把任务交给 Codex 云端：
+`.github/workflows/codex-dispatch.yml` 让仓库所有者用一条评论把任务交给 Codex，Codex 直接在 GitHub Actions 的 runner 上写代码：
 
 | 在哪里评论 | 写法 | 结果 |
 |---|---|---|
 | PR | `/codex <要改什么>` | Codex 在该 PR 的分支上继续改，结果推到**同一个 PR** |
 | issue | `/codex [补充要求]` | Codex 从 `main` 开始实现这个 issue，推到新分支并开新 PR（`Closes #issue`） |
 | Actions 页面 | Run workflow，填 `prompt`（可选 `pr` / `base`） | 同上，不用留评论 |
-| Actions 页面 | Run workflow，`prompt` 留空 | 只做自检：Codex 登录、云端环境、凭据写回权限 |
+| Actions 页面 | Run workflow，`prompt` 留空 | 只做自检：Codex 登录、凭据写回权限 |
 
 - 只接受仓库所有者本人的评论或手动触发，其他人评论 `/codex` 不会有反应。
 - `/codex` 必须在一行的开头（允许前面有 `[via Claude]`）。
 - 收到命令后，workflow 会给评论加 👀，再回一条带 Codex 任务链接的评论，完成后更新为结果（推送的 commit 或新 PR 的链接）。
 - 同一个 PR / issue 的任务会排队，一次只跑一个。注意 GitHub 只保留一个排队中的任务：排队时再发一条，前一条排队中的会被取消。
-- 每个任务都会消耗 ChatGPT 套餐里 Codex 云端任务的额度。GitHub Actions 分钟数对公开仓库免费。
+- 每个任务消耗 ChatGPT 套餐里 Codex 的本地消息额度（和在电脑上用 Codex 是同一个池子）。GitHub Actions 分钟数对公开仓库免费。
+- Codex 在沙箱里不能联网。Rust 依赖会预先下载，所以它能跑 `cargo build/test --offline`；需要外网或 Xray / Mihomo 的测试跑不了，推送后由 CI 完整测试。
+
+为什么不用 Codex 云端环境（`codex cloud exec`）：网页上建的云端环境，Codex CLI 和 GitHub 上的 `@codex` 目前都查不到（接口返回空列表），所以改为在 runner 上直接运行 `codex exec`。
 
 ## 一次性配置
 
@@ -70,33 +73,36 @@ Remove-Item Env:CODEX_HOME
 
 合并到 `main` 之后，到 Actions → Codex Dispatch → Run workflow，`prompt` 留空直接运行。它会：
 
-- 检查 `CODEX_AUTH_JSON` 能否登录 Codex，`CODEX_ENV` 指向的云端环境是否存在；
+- 用 `CODEX_AUTH_JSON` 让 Codex 回复一句 OK，确认登录可用（会用掉一条消息额度）；
 - 用 `CODEX_BOT_TOKEN` 真写一次 environment secret `CODEX_WRITEBACK_CHECK`，确认写回权限没问题。
 
-全绿再开始用 `/codex`。之后每天的定时任务也跑同样的自检，token 过期或权限不对会直接显示失败。
+全绿再开始用 `/codex`。之后每 3 天的定时任务也跑同样的自检，token 过期或权限不对会直接显示失败。
 
 ### 5.（可选）environment 变量
 
 | 变量 | 默认 | 作用 |
 |---|---|---|
-| `CODEX_ENV` | `ping-rust` | Codex 云端环境的名字或 ID |
-| `CODEX_POLL_MINUTES` | `80` | 最多等 Codex 多少分钟 |
+| `CODEX_MODEL` | 空（用套餐默认模型） | 指定 Codex 使用的模型 |
 
 ## 凭据怎么保持有效
 
-Codex 在 `auth.json` 的 `last_refresh` 超过约 8 天时会自动刷新 token。workflow 每次运行后，如果文件变了，就用 `CODEX_BOT_TOKEN` 把新的 `auth.json` 写回 `CODEX_AUTH_JSON`。另外每天有一个定时任务跑一遍自检，保证长时间不派任务时凭据也会被刷新。
+Codex 在 `auth.json` 的 `last_refresh` 超过约 8 天时会自动刷新 token。workflow 每次运行后，如果文件变了，就用 `CODEX_BOT_TOKEN` 把新的 `auth.json` 写回 `CODEX_AUTH_JSON`。另外每 3 天有一个定时任务跑一遍自检，保证长时间不派任务时凭据也会被刷新。
 
 如果日志里出现 401、`Not signed in`、`refresh_token_reused`，说明凭据失效了（被撤销、过期，或两个任务同时刷新），重做第 3 步即可。
 
 ## 安全说明
 
-OpenAI 的指南（Maintain Codex account auth in CI/CD）不建议在公开仓库里用 ChatGPT 登录凭据。本仓库是公开的，所以 workflow 做了这些限制：
+OpenAI 的指南（Maintain Codex account auth in CI/CD）不建议在公开仓库里用 ChatGPT 登录凭据。本仓库是公开的，所以 workflow 分成两个 job，并做了这些限制：
+
+- **codex job**（持有 Codex 凭据）：Codex 的命令在沙箱里运行，只能写工作区和 `~/.cargo`，不能联网；推送用的 `CODEX_BOT_TOKEN` 只在写回凭据的步骤里出现，Codex 运行的步骤拿不到。Codex 的完整输出只写文件、不打日志；生成的 diff 和总结里只要出现任何 token 就中止。diff 用 Codex 运行前保存的 `.git` 副本生成，不受工作区里被改动的 git 配置影响。
+- **push job**（不接触 Codex 凭据）：只下载 diff、检查路径、`git apply`、提交和推送。
+
+其他限制：
 
 1. 只接受仓库所有者的评论和手动触发；
-2. 持有凭据的 job 不运行仓库里的任何代码，只做 `git apply` / commit / push；
-3. 两个 secret 都放在只允许 `main` 部署的 environment 里；
-4. `CODEX_BOT_TOKEN` 没有 Workflows 权限，并且改动 `.github/workflows/` 或 `.github/actions/` 的 diff 会被直接拒绝；
-5. 评论和 issue 内容只通过环境变量传给脚本，不做 `${{ }}` 插值；
-6. 刷新后的 token 在日志里会被遮蔽，job 结束时删除本地凭据文件。
+2. 两个 secret 都放在只允许 `main` 部署的 environment 里；
+3. `CODEX_BOT_TOKEN` 没有 Workflows 权限，并且改动 `.github/workflows/` 或 `.github/actions/` 的 diff 会被直接拒绝；
+4. 评论和 issue 内容只通过环境变量传给脚本，不做 `${{ }}` 插值；
+5. job 结束时删除本地凭据文件。
 
 公开仓库的 Actions 日志任何人都能看，所以不要往 `/codex` 评论里写任何敏感信息。对别人开的 issue 用 `/codex` 前，先确认 issue 内容可信，因为它会原样交给 Codex。
