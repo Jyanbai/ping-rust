@@ -11,8 +11,8 @@ fn configuration(
     mode: Mode,
     server_port: u16,
     socks_port: u16,
-) -> Result<String> {
-    let (server, client) = match mode {
+) -> Result<(String, Vec<String>)> {
+    let (server, client, secrets) = match mode {
         Mode::Reality => {
             let key = crate::config::generate_reality_keypair();
             let user = uuid::Uuid::new_v4().to_string();
@@ -28,6 +28,7 @@ fn configuration(
                     "short_id":sid, "sni_hostname":domain, "vision":true,
                     "protocol":{"type":"vless", "user_id":user, "udp_enabled":false}
                 }),
+                vec![key.private_key, key.public_key, user, sid],
             )
         }
         Mode::ShadowTls => {
@@ -41,6 +42,7 @@ fn configuration(
                     "password":password, "handshake":{"address":target}, "protocol":inner
                 }}}),
                 json!({"type":"shadowtls", "password":password, "sni_hostname":domain, "protocol":inner}),
+                vec![password, ss_password],
             )
         }
     };
@@ -50,7 +52,8 @@ fn configuration(
         {"address":format!("127.0.0.1:{socks_port}"), "protocol":{"type":"socks", "udp_enabled":false},
          "rules":[{"masks":["0.0.0.0/0", "::/0"], "action":"allow", "client_chains":[{"address":format!("127.0.0.1:{server_port}"), "protocol":client}]}]}
     ]);
-    crate::yaml::to_string(&config).context("生成 SNI 本机预检配置失败")
+    let yaml = crate::yaml::to_string(&config).context("生成 SNI 本机预检配置失败")?;
+    Ok((yaml, secrets))
 }
 
 pub(super) async fn run(domain: &str, mode: Mode) -> Result<()> {
@@ -82,6 +85,8 @@ async fn run_with(
     // 与 Chain 测试一样：私有目录、dry-run、kill_on_drop、等待 SOCKS 入口、经代理请求。
     // 外层 deadline 包括 dry-run、启动和 HTTP，取消 future 也会析构 Temporary。
     let temporary = Temporary::new()?;
+    // 保留在 timeout future 外，整体超时取消操作后仍能在目录析构前脱敏日志。
+    let mut secrets = Vec::new();
     tokio::time::timeout(timeout, async {
         if !binary.is_file() {
             bail!("未找到 shoes，请先运行 prs install 后重新检测");
@@ -94,16 +99,14 @@ async fn run_with(
         let server_port = server.local_addr()?.port();
         let socks_port = socks.local_addr()?.port();
         let path = temporary.path().join("probe.yaml");
-        crate::utils::atomic_write(
-            &path,
-            configuration(domain, target, mode, server_port, socks_port)?.as_bytes(),
-            0o600,
-        )?;
+        let (yaml, credentials) = configuration(domain, target, mode, server_port, socks_port)?;
+        secrets = credentials;
+        crate::utils::atomic_write(&path, yaml.as_bytes(), 0o600)?;
         temporary.spawn(binary, &["--dry-run".as_ref(), path.as_os_str()])?;
         if !temporary.wait().await?.success() {
             bail!(
                 "shoes 拒绝本机预检配置，请确认已安装项目固定版本的 shoes；{}",
-                temporary.log_notice()
+                temporary.log_notice(&secrets)
             );
         }
         drop((server, socks));
@@ -112,7 +115,7 @@ async fn run_with(
             if let Some(status) = temporary.status()? {
                 bail!(
                     "临时 shoes 提前退出（{status}），请检查内核版本和端口权限；{}",
-                    temporary.log_notice()
+                    temporary.log_notice(&secrets)
                 );
             }
             if tokio::net::TcpStream::connect(("127.0.0.1", socks_port))
@@ -134,14 +137,14 @@ async fn run_with(
         let response = client.get(url).send().await.with_context(|| {
             format!(
                 "经 shoes 的请求失败，请更换候选或检查 VPS 出站网络；{}",
-                temporary.log_notice()
+                temporary.log_notice(&secrets)
             )
         })?;
         if response.status() != reqwest::StatusCode::NO_CONTENT {
             bail!(
                 "shoes 请求返回 {}，预期 204，请检查探测地址或更换候选；{}",
                 response.status(),
-                temporary.log_notice()
+                temporary.log_notice(&secrets)
             );
         }
         Ok(())
@@ -150,7 +153,7 @@ async fn run_with(
     .with_context(|| {
         format!(
             "shoes 本机预检整体超时（10 秒），请检查网络或更换候选；{}",
-            temporary.log_notice()
+            temporary.log_notice(&secrets)
         )
     })?
 }
@@ -186,7 +189,7 @@ mod tests {
 
     #[test]
     fn reality_preflight_uses_production_time_tolerance() {
-        let yaml = configuration(
+        let (yaml, _) = configuration(
             "example.com",
             "example.com:443",
             Mode::Reality,
@@ -207,7 +210,7 @@ mod tests {
 
     #[test]
     fn shadowtls_preflight_matches_server_and_client_credentials() {
-        let yaml = configuration(
+        let (yaml, _) = configuration(
             "example.com",
             "127.0.0.1:20003",
             Mode::ShadowTls,
@@ -232,6 +235,33 @@ mod tests {
             .decode(client["protocol"]["password"].as_str().unwrap())
             .unwrap();
         assert_eq!(password.len(), 16);
+    }
+
+    #[test]
+    fn configurations_return_all_credentials_for_redaction() {
+        for mode in [Mode::Reality, Mode::ShadowTls] {
+            let (yaml, secrets) =
+                configuration("example.com", "example.com:443", mode, 20001, 20002).unwrap();
+            let value: Value = crate::yaml::from_str(&yaml).unwrap();
+            let client = &value[1]["rules"][0]["client_chains"][0]["protocol"];
+            let expected = match mode {
+                Mode::Reality => vec![
+                    &value[0]["protocol"]["reality_targets"]["example.com"]["private_key"],
+                    &client["public_key"],
+                    &client["protocol"]["user_id"],
+                    &client["short_id"],
+                ],
+                Mode::ShadowTls => vec![&client["password"], &client["protocol"]["password"]],
+            };
+            assert_eq!(
+                secrets,
+                expected
+                    .into_iter()
+                    .map(|value| value.as_str().unwrap())
+                    .collect::<Vec<_>>()
+            );
+            assert!(secrets.iter().all(|secret| !secret.is_empty()));
+        }
     }
 
     fn tls_config(version: &'static rustls::SupportedProtocolVersion) -> rustls::ServerConfig {
@@ -378,6 +408,33 @@ mod tests {
             error.to_string().contains("经 shoes") || error.to_string().contains("超时"),
             "必须在握手/请求阶段失败：{error:#}"
         );
+        assert!(
+            error.to_string().contains("ProtocolVersion"),
+            "应附上 shoes 的 TLS 版本错误：{error:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_sni_preflight_rejects_reality_ip_destination() {
+        let Some(binary) = shoes() else {
+            return;
+        };
+        let target = tls_target(&rustls::version::TLS13).await;
+        let origin = origin().await;
+        let error = run_with(
+            "example.com",
+            &target.address.to_string(),
+            Mode::Reality,
+            &binary,
+            &format!("http://{}/generate_204", origin.address),
+            TIMEOUT,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("hostname destination"),
+            "应附上 shoes 拒绝 Reality IP dest 的原因：{error:#}"
+        );
     }
 
     #[tokio::test]
@@ -429,7 +486,8 @@ mod tests {
     #[test]
     fn configurations_only_listen_on_loopback_and_use_one_sni() {
         for mode in [Mode::Reality, Mode::ShadowTls] {
-            let yaml = configuration("example.com", "example.com:443", mode, 20001, 20002).unwrap();
+            let (yaml, _) =
+                configuration("example.com", "example.com:443", mode, 20001, 20002).unwrap();
             let value: Value = crate::yaml::from_str(&yaml).unwrap();
             assert_eq!(value[0]["address"], "127.0.0.1:20001");
             assert_eq!(value[1]["address"], "127.0.0.1:20002");
