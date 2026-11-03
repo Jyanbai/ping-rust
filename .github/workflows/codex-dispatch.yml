@@ -82,7 +82,8 @@ jobs:
     permissions:
       contents: read
       issues: write
-      pull-requests: read
+      # 在 PR 下贴状态评论（issues 接口）需要 pull-requests: write；只有发评论的步骤拿到 token。
+      pull-requests: write
     outputs:
       mode: ${{ steps.req.outputs.mode }}
       number: ${{ steps.req.outputs.number }}
@@ -545,6 +546,8 @@ jobs:
     permissions:
       contents: read
       issues: write
+      # 更新 PR 下的状态评论同样需要 pull-requests: write。
+      pull-requests: write
     steps:
       - name: Download result
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
