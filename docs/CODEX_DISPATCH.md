@@ -1,0 +1,92 @@
+# Codex Dispatch：在 GitHub 上用评论给 Codex 派任务
+
+`.github/workflows/codex-dispatch.yml` 让仓库所有者用一条评论把任务交给 Codex 云端：
+
+| 在哪里评论 | 写法 | 结果 |
+|---|---|---|
+| PR | `/codex <要改什么>` | Codex 在该 PR 的分支上继续改，结果推到**同一个 PR** |
+| issue | `/codex [补充要求]` | Codex 从 `main` 开始实现这个 issue，推到新分支并开新 PR（`Closes #issue`） |
+| Actions 页面 | Run workflow，填 `prompt`（可选 `pr` / `base`） | 同上，不用留评论 |
+
+- 只接受仓库所有者本人的评论或手动触发，其他人评论 `/codex` 不会有反应。
+- `/codex` 必须在一行的开头（允许前面有 `[via Claude]`）。
+- 收到命令后，workflow 会给评论加 👀，再回一条带 Codex 任务链接的评论，完成后更新为结果（推送的 commit 或新 PR 的链接）。
+- 同一个 PR / issue 的任务会排队，一次只跑一个。注意 GitHub 只保留一个排队中的任务：排队时再发一条，前一条排队中的会被取消。
+- 每个任务都会消耗 ChatGPT 套餐里 Codex 云端任务的额度。GitHub Actions 分钟数对公开仓库免费。
+
+## 一次性配置
+
+### 1. 新建 environment `codex`
+
+Settings → Environments → New environment，名字填 `codex`。
+
+在 **Deployment branches and tags** 里选 **Selected branches and tags**，添加规则 `main`。
+这样只有 `main` 上的 workflow 能读到下面两个 secret，PR 分支上的 workflow 读不到。
+
+### 2. 创建推送用的 token（`CODEX_BOT_TOKEN`）
+
+GitHub → Settings → Developer settings → Personal access tokens → **Fine-grained tokens** → Generate new token：
+
+- Repository access：Only select repositories → `Jyanbai/ping-rust`
+- Repository permissions：
+  - **Contents**：Read and write（推送分支）
+  - **Pull requests**：Read and write（开 PR）
+  - **Environments**：Read and write（把刷新后的登录凭据写回 secret）
+  - **不要**给 Workflows 权限，这样 Codex 的改动无法修改 `.github/workflows/`
+- 有效期按自己习惯设，过期后重新生成并替换即可
+
+把生成的 token 存为 environment `codex` 的 secret，名字是 `CODEX_BOT_TOKEN`。
+
+用 PAT 而不是 `GITHUB_TOKEN` 推送，是因为 `GITHUB_TOKEN` 推送和开的 PR 不会触发 CI 和审查 workflow。
+
+### 3. 生成 CI 专用的 Codex 登录（`CODEX_AUTH_JSON`）
+
+在自己的电脑上做一次（Windows PowerShell，需要已安装 Node.js）：
+
+```powershell
+npm install -g @openai/codex
+$env:CODEX_HOME = "$HOME\.codex-ci"
+New-Item -ItemType Directory -Force $env:CODEX_HOME | Out-Null
+Set-Content -Path "$env:CODEX_HOME\config.toml" -Value 'cli_auth_credentials_store = "file"'
+codex login --device-auth
+```
+
+按提示在浏览器或手机上完成登录。如果提示设备码登录不可用，把最后一行换成 `codex login`（会打开浏览器）。
+
+然后把凭据存进 secret，并删掉本地副本：
+
+```powershell
+Get-Content "$env:CODEX_HOME\auth.json" -Raw | gh secret set CODEX_AUTH_JSON --env codex --repo Jyanbai/ping-rust
+Remove-Item -Recurse -Force $env:CODEX_HOME
+Remove-Item Env:CODEX_HOME
+```
+
+没装 `gh` 的话：用记事本打开 `auth.json`，全选复制，粘到 Settings → Environments → codex → Add environment secret（名字 `CODEX_AUTH_JSON`），再删掉 `.codex-ci` 文件夹。
+
+为什么要单独的 `CODEX_HOME`：这样 CI 拿到的是一个独立的登录会话，不会和你电脑上 Codex 的会话共用 refresh token。refresh token 每用一次就会换新，两边共用会互相把对方挤掉。之后这份凭据只由 CI 使用和刷新，本地不要再留副本。
+
+### 4.（可选）environment 变量
+
+| 变量 | 默认 | 作用 |
+|---|---|---|
+| `CODEX_ENV` | `ping-rust` | Codex 云端环境的名字或 ID |
+| `CODEX_POLL_MINUTES` | `80` | 最多等 Codex 多少分钟 |
+
+## 凭据怎么保持有效
+
+Codex 在 `auth.json` 的 `last_refresh` 超过约 8 天时会自动刷新 token。workflow 每次运行后，如果文件变了，就用 `CODEX_BOT_TOKEN` 把新的 `auth.json` 写回 `CODEX_AUTH_JSON`。另外每天有一个定时任务跑一条轻量命令，保证长时间不派任务时凭据也会被刷新。
+
+如果日志里出现 401、`Not signed in`、`refresh_token_reused`，说明凭据失效了（被撤销、过期，或两个任务同时刷新），重做第 3 步即可。
+
+## 安全说明
+
+OpenAI 的指南（Maintain Codex account auth in CI/CD）不建议在公开仓库里用 ChatGPT 登录凭据。本仓库是公开的，所以 workflow 做了这些限制：
+
+1. 只接受仓库所有者的评论和手动触发；
+2. 持有凭据的 job 不运行仓库里的任何代码，只做 `git apply` / commit / push；
+3. 两个 secret 都放在只允许 `main` 部署的 environment 里；
+4. `CODEX_BOT_TOKEN` 没有 Workflows 权限，并且改动 `.github/workflows/` 或 `.github/actions/` 的 diff 会被直接拒绝；
+5. 评论和 issue 内容只通过环境变量传给脚本，不做 `${{ }}` 插值；
+6. 刷新后的 token 在日志里会被遮蔽，job 结束时删除本地凭据文件。
+
+公开仓库的 Actions 日志任何人都能看，所以不要往 `/codex` 评论里写任何敏感信息。对别人开的 issue 用 `/codex` 前，先确认 issue 内容可信，因为它会原样交给 Codex。
