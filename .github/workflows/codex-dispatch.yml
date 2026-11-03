@@ -28,8 +28,8 @@ on:
   workflow_dispatch:
     inputs:
       prompt:
-        description: 任务描述
-        required: true
+        description: 任务描述（留空 = 只做自检：Codex 登录、云端环境、凭据写回）
+        required: false
         type: string
       pr:
         description: 要继续修改的 PR 编号（留空则新开 PR）
@@ -100,6 +100,10 @@ jobs:
               exit 0
               ;;
             workflow_dispatch)
+              if [ -z "${IN_PROMPT//[[:space:]]/}" ]; then
+                echo "mode=maintenance" >> "$out"
+                exit 0
+              fi
               printf '%s\n' "$IN_PROMPT" > "$instr"
               if [ -n "$IN_PR" ]; then
                 [[ "$IN_PR" =~ ^[0-9]+$ ]] || { echo "::error::pr 必须是数字"; exit 1; }
@@ -311,16 +315,26 @@ jobs:
           mask_tokens
           echo "ok=true" >> "$GITHUB_OUTPUT"
 
-      - name: Keep auth fresh
+      - name: Self-check (auth, cloud environment, write-back)
         if: steps.req.outputs.mode == 'maintenance'
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.CODEX_BOT_TOKEN }}
         run: |
           set -euo pipefail
           # shellcheck source=/dev/null
           . "$RUNNER_TEMP/codex-lib.sh"
-          codex cloud list --limit 1 >/dev/null
+          # 顺带让 Codex 按需刷新 token；--env 也会校验 CODEX_ENV 是否存在。
+          codex cloud list --env "$CODEX_ENV" --limit 1 >/dev/null
           mask_tokens
-          echo "Codex 登录有效。"
+          echo "✅ Codex 登录有效，云端环境「$CODEX_ENV」可用。"
+          # 每次都真写一次 environment secret，确认 CODEX_BOT_TOKEN 有写回权限且没过期，
+          # 不要等到 token 真的刷新时才发现写不回去。
+          if ! date -u +%FT%TZ | gh secret set CODEX_WRITEBACK_CHECK --env codex --repo "$REPO"; then
+            echo "::error::CODEX_BOT_TOKEN 无法写 environment secret（权限不足或已过期），刷新后的凭据将无法保存。"
+            exit 1
+          fi
+          echo "✅ CODEX_BOT_TOKEN 可以写回 environment secret。"
 
       - name: Submit Codex cloud task
         id: submit

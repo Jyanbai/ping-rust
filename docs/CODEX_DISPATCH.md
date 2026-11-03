@@ -7,6 +7,7 @@
 | PR | `/codex <要改什么>` | Codex 在该 PR 的分支上继续改，结果推到**同一个 PR** |
 | issue | `/codex [补充要求]` | Codex 从 `main` 开始实现这个 issue，推到新分支并开新 PR（`Closes #issue`） |
 | Actions 页面 | Run workflow，填 `prompt`（可选 `pr` / `base`） | 同上，不用留评论 |
+| Actions 页面 | Run workflow，`prompt` 留空 | 只做自检：Codex 登录、云端环境、凭据写回权限 |
 
 - 只接受仓库所有者本人的评论或手动触发，其他人评论 `/codex` 不会有反应。
 - `/codex` 必须在一行的开头（允许前面有 `[via Claude]`）。
@@ -31,7 +32,7 @@ GitHub → Settings → Developer settings → Personal access tokens → **Fine
 - Repository permissions：
   - **Contents**：Read and write（推送分支）
   - **Pull requests**：Read and write（开 PR）
-  - **Environments**：Read and write（把刷新后的登录凭据写回 secret）
+  - **Environments**：Read and write（把刷新后的登录凭据写回 secret；GitHub REST 文档里 environment secret 的读写要求的就是这个权限）
   - **不要**给 Workflows 权限，这样 Codex 的改动无法修改 `.github/workflows/`
 - 有效期按自己习惯设，过期后重新生成并替换即可
 
@@ -65,7 +66,16 @@ Remove-Item Env:CODEX_HOME
 
 为什么要单独的 `CODEX_HOME`：这样 CI 拿到的是一个独立的登录会话，不会和你电脑上 Codex 的会话共用 refresh token。refresh token 每用一次就会换新，两边共用会互相把对方挤掉。之后这份凭据只由 CI 使用和刷新，本地不要再留副本。
 
-### 4.（可选）environment 变量
+### 4. 自检
+
+合并到 `main` 之后，到 Actions → Codex Dispatch → Run workflow，`prompt` 留空直接运行。它会：
+
+- 检查 `CODEX_AUTH_JSON` 能否登录 Codex，`CODEX_ENV` 指向的云端环境是否存在；
+- 用 `CODEX_BOT_TOKEN` 真写一次 environment secret `CODEX_WRITEBACK_CHECK`，确认写回权限没问题。
+
+全绿再开始用 `/codex`。之后每天的定时任务也跑同样的自检，token 过期或权限不对会直接显示失败。
+
+### 5.（可选）environment 变量
 
 | 变量 | 默认 | 作用 |
 |---|---|---|
@@ -74,7 +84,7 @@ Remove-Item Env:CODEX_HOME
 
 ## 凭据怎么保持有效
 
-Codex 在 `auth.json` 的 `last_refresh` 超过约 8 天时会自动刷新 token。workflow 每次运行后，如果文件变了，就用 `CODEX_BOT_TOKEN` 把新的 `auth.json` 写回 `CODEX_AUTH_JSON`。另外每天有一个定时任务跑一条轻量命令，保证长时间不派任务时凭据也会被刷新。
+Codex 在 `auth.json` 的 `last_refresh` 超过约 8 天时会自动刷新 token。workflow 每次运行后，如果文件变了，就用 `CODEX_BOT_TOKEN` 把新的 `auth.json` 写回 `CODEX_AUTH_JSON`。另外每天有一个定时任务跑一遍自检，保证长时间不派任务时凭据也会被刷新。
 
 如果日志里出现 401、`Not signed in`、`refresh_token_reused`，说明凭据失效了（被撤销、过期，或两个任务同时刷新），重做第 3 步即可。
 
