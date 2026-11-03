@@ -857,6 +857,14 @@ async fn run_add(mut args: AddArgs) -> Result<()> {
 }
 
 pub(crate) async fn bootstrap_default_reality() -> Result<bool> {
+    bootstrap_default_reality_with_menu(false).await
+}
+
+pub(crate) async fn bootstrap_default_reality_for_menu() -> Result<bool> {
+    bootstrap_default_reality_with_menu(true).await
+}
+
+async fn bootstrap_default_reality_with_menu(menu: bool) -> Result<bool> {
     if !bootstrap_required(
         Path::new(crate::utils::CONFIG_FILE),
         Path::new(crate::utils::STATE_FILE),
@@ -869,8 +877,33 @@ pub(crate) async fn bootstrap_default_reality() -> Result<bool> {
         "首次安装：自动部署 VLESS-REALITY".bright_cyan().bold()
     );
     println!("正在自动安装 shoes、选择随机端口并生成安全凭据……");
-    ensure_shoes_for_add(true).await?;
-    let server_address = fast_add::resolve_server_address(None).await?;
+    if !menu {
+        ensure_shoes_for_add(true).await?;
+    }
+    let server_address = if menu {
+        use std::io::IsTerminal;
+        let address = crate::menu::bootstrap_address(
+            || fast_add::resolve_server_address(None),
+            std::io::stdin().is_terminal(),
+            || {
+                Ok(dialoguer::Input::<String>::new()
+                    .with_prompt("请输入 VPS 公网域名或 IP（直接回车跳过默认部署）")
+                    .allow_empty(true)
+                    .interact_text()?)
+            },
+        )
+        .await?;
+        let Some(address) = address else {
+            println!("已跳过默认部署，可在菜单 1 中添加配置");
+            return Ok(false);
+        };
+        address
+    } else {
+        fast_add::resolve_server_address(None).await?
+    };
+    if menu {
+        ensure_shoes_for_add(true).await?;
+    }
     let result = fast_add::execute(fast_add::AddRequest {
         name: Some("reality-default".to_owned()),
         vless_enc: Default::default(),
