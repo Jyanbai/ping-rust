@@ -9,6 +9,8 @@
 | Actions 页面 | Run workflow，填 `prompt`（可选 `pr` / `base`） | 同上，不用留评论 |
 | Actions 页面 | Run workflow，`prompt` 留空 | 只做自检：Codex 登录、凭据写回权限 |
 
+> 本功能已于 2026-11-03 在真实 runner 上实测通过。
+
 - 只接受仓库所有者本人的评论或手动触发，其他人评论 `/codex` 不会有反应。
 - `/codex` 必须在一行的开头（允许前面有 `[via Claude]`）。
 - 收到命令后，workflow 会给评论加 👀，再回一条带 Codex 任务链接的评论，完成后更新为结果（推送的 commit 或新 PR 的链接）。
