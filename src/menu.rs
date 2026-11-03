@@ -30,22 +30,31 @@ const MAIN_MENU_ITEMS: &[(usize, &str)] = &[
     (5, "运行管理"),
     (6, "更新"),
     (7, "卸载"),
-    (8, "帮助"),
-    (9, "其他"),
-    (10, "关于"),
+    (8, "链式代理"),
+    (9, "工具"),
+    (10, "帮助与关于"),
     (0, "退出"),
 ];
 
-const OPERATIONS_MENU_ITEMS: [&str; 9] = [
-    "链式代理",
+const OPERATIONS_MENU_ITEMS: [&str; 8] = [
+    "导出客户端配置",
     "高级添加配置",
-    "查看日志",
+    "SNI 检测",
+    "SNI 扫描",
     "端口检查",
     "开启 BBR",
     "备份配置",
     "恢复配置",
-    "导出客户端配置",
-    "更新 ping-rust",
+];
+
+const SERVICE_MENU_ITEMS: [&str; 7] = [
+    "启动",
+    "停止",
+    "重启",
+    "状态",
+    "启用并启动",
+    "禁用",
+    "查看日志",
 ];
 
 const UPDATE_CENTER_ITEMS: [&str; 3] =
@@ -255,6 +264,46 @@ where
     }
 }
 
+/// state 文件不存在（新装机器、取消了首次默认部署）表示还没有节点，不是读取失败。
+fn summary_state(
+    path: &std::path::Path,
+    load: impl FnOnce() -> Result<config::ManagedState>,
+) -> Result<config::ManagedState> {
+    if path.exists() {
+        load()
+    } else {
+        Ok(config::ManagedState::default())
+    }
+}
+
+fn node_summary(state: Result<config::ManagedState>) -> String {
+    let state = match state {
+        Ok(state) => state,
+        Err(error) => {
+            let reason = error.to_string().lines().collect::<Vec<_>>().join(" ");
+            return format!("节点：无法读取（{reason}）");
+        }
+    };
+    if state.profiles.is_empty() {
+        return "节点：暂无，选择 1) 添加配置".to_owned();
+    }
+    let count = state.profiles.len();
+    let mut lines = vec![format!("节点（{count}）：")];
+    for profile in state.profiles.iter().take(5) {
+        // 与查看配置、分享信息使用同一个协议名，不另起一套显示名。
+        lines.push(format!(
+            "  · {}  {}  {}",
+            profile.name,
+            profile.protocol_name(),
+            profile.port
+        ));
+    }
+    if count > 5 {
+        lines.push(format!("…共 {count} 个，进入 3) 查看配置"));
+    }
+    lines.join("\n")
+}
+
 pub async fn run() -> Result<()> {
     match cli::bootstrap_default_reality_for_menu().await {
         Err(error) if input::is_back(&error) => {}
@@ -263,7 +312,10 @@ pub async fn run() -> Result<()> {
             result?;
         }
     }
-    config::ensure_profile_files().await?;
+    // 状态无法读取时仍提供工具、恢复等入口，节点摘要负责显示读取失败提示。
+    if config::load_state().is_ok() {
+        config::ensure_profile_files().await?;
+    }
     loop {
         println!(
             "\n------------- ping-rust v{} -------------",
@@ -277,7 +329,12 @@ pub async fn run() -> Result<()> {
             "not installed"
         };
         println!("shoes: {shoes_status}");
-        println!("项目: https://github.com/Jyanbai/ping-rust\n");
+        println!("项目: https://github.com/Jyanbai/ping-rust");
+        let state = summary_state(
+            std::path::Path::new(crate::utils::STATE_FILE),
+            config::load_state,
+        );
+        println!("{}\n", node_summary(state));
         let selected = match select_keyed("", MAIN_MENU_ITEMS) {
             Err(error) if control_after_error(&error) == MenuControl::Exit => return Ok(()),
             result => result?,
@@ -308,8 +365,7 @@ pub async fn run() -> Result<()> {
                     Ok(MenuControl::Continue)
                 }
                 8 => {
-                    println!("常用命令：prs add reality、prs add ss、prs info、prs url、prs qr");
-                    println!("高级帮助：ping-rust --help");
+                    chain_proxy_menu().await?;
                     Ok(MenuControl::Continue)
                 }
                 9 => operations_menu().await,
@@ -317,6 +373,15 @@ pub async fn run() -> Result<()> {
                     println!("ping-rust {}", env!("CARGO_PKG_VERSION"));
                     println!("Rust 实现的 shoes 菜单式安装与管理工具");
                     println!("https://github.com/Jyanbai/ping-rust");
+                    println!("常用命令：");
+                    println!("  prs add reality / prs add ss  添加配置");
+                    println!("  prs info / prs url / prs qr  查看配置、链接和二维码");
+                    println!(
+                        "  prs sni check [域名...]  检测 SNI（省略域名使用默认名单和现有节点）"
+                    );
+                    println!("  prs sni scan  扫描 SNI");
+                    println!("链式代理：prs → 8) 链式代理（节点、Pool、Chain、路由和测试）");
+                    println!("高级帮助：ping-rust --help");
                     Ok(MenuControl::Continue)
                 }
                 _ => anyhow::bail!("菜单返回了无效选项"),
@@ -962,53 +1027,74 @@ async fn operations_menu() -> Result<MenuControl> {
 }
 
 async fn operations_menu_once() -> Result<MenuControl> {
-    let Some(selected) = select_numbered("运维工具", &OPERATIONS_MENU_ITEMS)? else {
-        return Ok(MenuControl::Continue);
-    };
-    if selected == 8 {
-        return Ok(if cli::run_self_update(None, false).await? {
-            MenuControl::Exit
-        } else {
-            MenuControl::Continue
-        });
-    }
-    match selected {
-        0 => chain_proxy_menu().await,
-        1 => advanced_add_config_menu().await,
-        2 => service::logs(100),
-        3 => {
-            let port = input::port("检查端口", Some(443))?;
-            cli::print_port_status(port, operations::check_port(port, true, true));
-            Ok(())
-        }
-        4 => {
-            if input::confirm("写入 sysctl 配置并启用 BBR？", false)? {
-                operations::enable_bbr()?;
-                println!("{}", "BBR 已启用。".green());
+    loop {
+        let Some(selected) = select_numbered("工具", &OPERATIONS_MENU_ITEMS)? else {
+            return Ok(MenuControl::Continue);
+        };
+        match selected {
+            0 => export_menu(),
+            1 => advanced_add_config_menu().await,
+            2 => {
+                let command = input::validated_text(
+                    "输入 SNI 域名，空格分隔（直接回车检测默认名单和现有节点）",
+                    None,
+                    true,
+                    sni_check_command,
+                )?;
+                crate::sni::run(command).await
             }
-            Ok(())
-        }
-        5 => {
-            let path = operations::backup(None)?;
-            println!("备份已创建：{}", path.display());
-            println!("备份含私钥和密码，请安全保管。");
-            Ok(())
-        }
-        6 => {
-            let archive = input::file_path("备份文件路径")?;
-            if input::confirm("恢复会替换当前配置，继续？", false)? {
-                let rollback = operations::restore(std::path::Path::new(&archive)).await?;
-                println!("{}", "恢复成功。".green());
-                if let Some(path) = rollback {
-                    println!("原配置保留于：{}", path.display());
+            3 => {
+                crate::sni::run(crate::sni::Command::Scan {
+                    yes: false,
+                    protocol: crate::sni::Mode::Reality,
+                })
+                .await
+            }
+            4 => {
+                let port = input::port("检查端口", Some(443))?;
+                cli::print_port_status(port, operations::check_port(port, true, true));
+                Ok(())
+            }
+            5 => {
+                if input::confirm("写入 sysctl 配置并启用 BBR？", false)? {
+                    operations::enable_bbr()?;
+                    println!("{}", "BBR 已启用。".green());
                 }
+                Ok(())
             }
-            Ok(())
+            6 => {
+                let path = operations::backup(None)?;
+                println!("备份已创建：{}", path.display());
+                println!("备份含私钥和密码，请安全保管。");
+                Ok(())
+            }
+            7 => {
+                let archive = input::file_path("备份文件路径")?;
+                if input::confirm("恢复会替换当前配置，继续？", false)? {
+                    let rollback = operations::restore(std::path::Path::new(&archive)).await?;
+                    println!("{}", "恢复成功。".green());
+                    if let Some(path) = rollback {
+                        println!("原配置保留于：{}", path.display());
+                    }
+                }
+                Ok(())
+            }
+            _ => unreachable!("工具菜单编号已验证"),
+        }?;
+        if !matches!(selected, 2 | 3) {
+            return Ok(MenuControl::Continue);
         }
-        7 => export_menu(),
-        _ => unreachable!("运维菜单编号已验证"),
-    }?;
-    Ok(MenuControl::Continue)
+    }
+}
+
+fn sni_check_command(domains: &str) -> Result<crate::sni::Command> {
+    crate::sni::manual(domains, crate::sni::Mode::Reality)?;
+    Ok(crate::sni::Command::Check {
+        domains: domains.split_whitespace().map(str::to_owned).collect(),
+        csv: None,
+        subnet: None,
+        protocol: None,
+    })
 }
 
 async fn chain_proxy_menu() -> Result<()> {
@@ -1901,10 +1987,12 @@ async fn shoes_update_menu() -> Result<()> {
 }
 
 fn service_menu() -> Result<()> {
-    let choices = ["启动", "停止", "重启", "状态", "启用并启动", "禁用"];
-    let Some(selected) = select_numbered("服务管理", &choices)? else {
+    let Some(selected) = select_numbered("服务管理", &SERVICE_MENU_ITEMS)? else {
         return Ok(());
     };
+    if selected == 6 {
+        return service::logs(100);
+    }
     let action = match selected {
         0 => ServiceAction::Start,
         1 => ServiceAction::Stop,
@@ -2085,9 +2173,226 @@ mod tests {
     }
 
     #[test]
-    fn chain_proxy_is_the_first_other_tool() {
-        assert_eq!(OPERATIONS_MENU_ITEMS.first(), Some(&"链式代理"));
-        assert_eq!(OPERATIONS_MENU_ITEMS.len(), 9);
+    fn main_menu_numbers_and_labels_match_issue_76() {
+        assert_eq!(
+            MAIN_MENU_ITEMS,
+            &[
+                (1, "添加配置"),
+                (2, "更改配置"),
+                (3, "查看配置"),
+                (4, "删除配置"),
+                (5, "运行管理"),
+                (6, "更新"),
+                (7, "卸载"),
+                (8, "链式代理"),
+                (9, "工具"),
+                (10, "帮助与关于"),
+                (0, "退出"),
+            ]
+        );
+        let numbers: std::collections::HashSet<_> =
+            MAIN_MENU_ITEMS.iter().map(|(number, _)| number).collect();
+        let labels: std::collections::HashSet<_> =
+            MAIN_MENU_ITEMS.iter().map(|(_, label)| label).collect();
+        assert_eq!(numbers.len(), MAIN_MENU_ITEMS.len());
+        assert_eq!(labels.len(), MAIN_MENU_ITEMS.len());
+    }
+
+    #[test]
+    fn tools_menu_order_and_self_update_entry_are_explicit() {
+        assert_eq!(
+            OPERATIONS_MENU_ITEMS.as_slice(),
+            [
+                "导出客户端配置",
+                "高级添加配置",
+                "SNI 检测",
+                "SNI 扫描",
+                "端口检查",
+                "开启 BBR",
+                "备份配置",
+                "恢复配置",
+            ]
+        );
+        assert!(!OPERATIONS_MENU_ITEMS
+            .iter()
+            .any(|item| item.contains("更新 ping-rust")));
+        assert_eq!(
+            UPDATE_CENTER_ITEMS
+                .iter()
+                .filter(|item| item.contains("更新 ping-rust"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn service_menu_keeps_six_actions_and_appends_logs() {
+        assert_eq!(
+            SERVICE_MENU_ITEMS,
+            [
+                "启动",
+                "停止",
+                "重启",
+                "状态",
+                "启用并启动",
+                "禁用",
+                "查看日志"
+            ]
+        );
+    }
+
+    fn summary_profiles() -> Vec<config::ManagedProfile> {
+        let reality = config::ManagedProfile {
+            h2mux: Default::default(),
+            id: uuid::Uuid::nil(),
+            name: "reality-20443".into(),
+            port: 20443,
+            server_address: Some("203.0.113.1".into()),
+            credentials: Credentials::Reality {
+                user_id: uuid::Uuid::nil(),
+                private_key: "test-private-key".into(),
+                public_key: "test-public-key".into(),
+                short_id: "test-short-id".into(),
+                server_name: "sni.example.com".into(),
+            },
+            certificate_path: None,
+            certificate_key_path: None,
+            self_signed_certificate: false,
+            naive_certificate_validity: None,
+        };
+        let mut ss = reality.clone();
+        ss.name = "ss-31002".into();
+        ss.port = 31002;
+        ss.credentials = Credentials::Shadowsocks {
+            cipher: ShadowsocksCipher::Aes128Gcm2022,
+            password: "test-password".into(),
+            udp_enabled: true,
+            shadowtls: None,
+        };
+        let mut hy2 = reality.clone();
+        hy2.name = "hy2-40001".into();
+        hy2.port = 40001;
+        hy2.credentials = Credentials::Hysteria2 {
+            password: "test-password".into(),
+            server_name: "sni.example.com".into(),
+            alpn_protocols: vec!["h3".into()],
+        };
+        vec![reality, ss, hy2]
+    }
+
+    #[test]
+    fn node_summary_handles_empty_three_and_six_profiles_without_secrets() {
+        assert_eq!(
+            node_summary(Ok(config::ManagedState::default())),
+            "节点：暂无，选择 1) 添加配置"
+        );
+        let mut state = config::ManagedState {
+            profiles: summary_profiles(),
+            ..Default::default()
+        };
+        let three = node_summary(Ok(state.clone()));
+        assert_eq!(
+            three,
+            format!(
+                "节点（3）：\n  · reality-20443  {}  20443\n  · ss-31002  {}  31002\n  · hy2-40001  {}  40001",
+                state.profiles[0].protocol_name(),
+                state.profiles[1].protocol_name(),
+                state.profiles[2].protocol_name(),
+            )
+        );
+        for index in 4..=6 {
+            let mut profile = state.profiles[0].clone();
+            profile.name = format!("node-{index}");
+            profile.port = 20440 + index;
+            state.profiles.push(profile);
+        }
+        let six = node_summary(Ok(state));
+        assert!(six.starts_with("节点（6）：\n"));
+        assert_eq!(
+            six.lines()
+                .filter(|line| line.trim_start().starts_with('·'))
+                .count(),
+            5
+        );
+        assert!(six.contains("  · node-5  VLESS-Reality-Vision  20445"));
+        assert!(!six.contains("node-6"));
+        assert!(six.ends_with("…共 6 个，进入 3) 查看配置"));
+        for summary in [three, six] {
+            for line in summary.lines() {
+                assert!(!line.trim_start().starts_with(|c: char| c.is_ascii_digit()));
+            }
+            for secret in [
+                "00000000-0000-0000-0000-000000000000",
+                "test-private-key",
+                "test-public-key",
+                "test-short-id",
+                "test-password",
+                "sni.example.com",
+                "203.0.113.1",
+                "vless://",
+                "ss://",
+            ] {
+                assert!(!summary.contains(secret), "节点摘要泄露了测试凭据");
+            }
+        }
+    }
+
+    #[test]
+    fn missing_state_file_means_no_nodes_not_read_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("ping-rust-state.json");
+        let state = summary_state(&missing, || anyhow::bail!("读取管理状态失败"));
+        assert_eq!(node_summary(state), "节点：暂无，选择 1) 添加配置");
+        std::fs::write(&missing, "{").unwrap();
+        let state = summary_state(&missing, || anyhow::bail!("管理状态 JSON 已损坏"));
+        assert_eq!(
+            node_summary(state),
+            "节点：无法读取（管理状态 JSON 已损坏）"
+        );
+    }
+
+    #[test]
+    fn node_summary_read_failure_is_a_single_notice_line() {
+        let output = node_summary(Err(anyhow::anyhow!("管理状态 JSON 已损坏\n请恢复备份")));
+        assert_eq!(output, "节点：无法读取（管理状态 JSON 已损坏 请恢复备份）");
+        assert_eq!(output.lines().count(), 1);
+    }
+
+    #[test]
+    fn sni_tool_check_uses_cli_defaults_and_accepts_return() {
+        for (text, expected) in [
+            ("", vec![]),
+            (
+                "a.example.com b.example.com",
+                vec!["a.example.com", "b.example.com"],
+            ),
+        ] {
+            let crate::sni::Command::Check {
+                domains,
+                csv,
+                subnet,
+                protocol,
+            } = sni_check_command(text).unwrap()
+            else {
+                panic!("SNI 检测必须使用命令行 Check");
+            };
+            assert_eq!(domains, expected);
+            assert!(csv.is_none());
+            assert!(subnet.is_none());
+            assert!(protocol.is_none());
+        }
+        assert!(sni_check_command("https://example.com").is_err());
+        let error = input::read_text(
+            &mut io::Cursor::new(b"0\n"),
+            &mut Vec::new(),
+            "SNI 域名",
+            None,
+            true,
+            sni_check_command,
+        )
+        .unwrap_err();
+        assert!(input::is_back(&error));
+        assert_eq!(control_after_error(&error), MenuControl::Continue);
     }
 
     #[test]
