@@ -578,3 +578,59 @@ jobs:
           name: external-client-acceptance-records
           path: ${{ runner.temp }}/ping-rust-external-clients/logs
           if-no-files-found: warn
+
+  menu-input:
+    name: Menu input terminal regression
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Install expect
+        shell: bash
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends expect jq
+      - name: Install pinned shoes
+        shell: bash
+        env:
+          SHOES_ARCHIVE_SHA256: d09a9f5915ae8c3fc933bd86c025f2d8878d45e1dee8f0e2bb404c920de8c707
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/shoes-v0.3.6.tar.gz"
+          directory="$RUNNER_TEMP/shoes-v0.3.6"
+          curl --fail --location --retry 3 --proto '=https' --tlsv1.2 \
+            --output "$archive" \
+            https://github.com/cfal/shoes/releases/download/v0.3.6/shoes-x86_64-unknown-linux-musl.tar.gz
+          echo "$SHOES_ARCHIVE_SHA256  $archive" | sha256sum --check --strict
+          mkdir -p "$directory"
+          tar -xzf "$archive" -C "$directory"
+          sudo install -m 0755 "$directory/shoes" /usr/local/bin/shoes
+      - name: Build menu regression test
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Build as the runner user; only the finished binary runs as root, so
+          # the cached target directory never gets root-owned files.
+          test_bin="$(cargo test --locked --test menu_input_e2e --no-run --message-format=json \
+            | jq -r 'select(.reason == "compiler-artifact" and .target.name == "menu_input_e2e" and .executable != null) | .executable' \
+            | tail -n 1)"
+          test -x "$test_bin"
+          echo "test_bin=$test_bin" >> "$GITHUB_OUTPUT"
+      - name: Prepare one managed node
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /etc/shoes
+          # Output contains node credentials; keep it out of the log.
+          sudo target/debug/ping-rust generate reality --name menu-e2e --port 24431 \
+            --server-name www.amazon.com --dest www.amazon.com:443 \
+            --output /etc/shoes/config.yaml >/dev/null
+          sudo systemctl stop shoes.service 2>/dev/null || true
+          sudo test -s /etc/shoes/ping-rust-state.json
+      - name: Run menu input regression
+        shell: bash
+        env:
+          TEST_BIN: ${{ steps.build.outputs.test_bin }}
+        run: sudo env PING_RUST_MENU_E2E=1 NO_COLOR=1 "$TEST_BIN" --nocapture
