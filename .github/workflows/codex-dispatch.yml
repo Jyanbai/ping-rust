@@ -24,7 +24,8 @@ name: Codex Dispatch
 #   5. 用 Codex 运行前保存的 .git 副本生成 diff，不受工作区里被改动的 git 配置影响；
 #   6. CODEX_BOT_TOKEN 不给 Workflows 权限，改动 .github/workflows 或 .github/actions 的 diff
 #      直接拒绝；
-#   7. 外部输入只经环境变量传给脚本，不做 ${{ }} 插值。
+#   7. 外部输入只经环境变量传给脚本，不做 ${{ }} 插值；
+#   8. 不是仓库所有者创建的 issue，标题和正文不交给 Codex，只用所有者 /codex 评论里的要求。
 # 配置步骤见 docs/CODEX_DISPATCH.md。
 
 on:
@@ -213,6 +214,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          OWNER: ${{ github.repository_owner }}
           MODE: ${{ steps.req.outputs.mode }}
           NUMBER: ${{ steps.req.outputs.number }}
           BASE: ${{ steps.req.outputs.base }}
@@ -264,17 +266,36 @@ jobs:
               ;;
             issue)
               issue_json="$(gh api "repos/$REPO/issues/$NUMBER")"
-              title="$(jq -r '.title' <<<"$issue_json")"
-              body="$(jq -r '.body // ""' <<<"$issue_json")"
-              {
-                printf '请在 %s 仓库里实现 issue #%s「%s」。\n\n' "$REPO" "$NUMBER" "$title"
-                printf 'issue 内容：\n%s\n' "$body"
-                if [ -s "$instr" ]; then
-                  printf '\n补充要求：\n'
-                  cat "$instr"
+              author="$(jq -r '.user.login // ""' <<<"$issue_json")"
+              association="$(jq -r '.author_association // ""' <<<"$issue_json")"
+              if [ "$author" = "$OWNER" ] && [ "$association" = "OWNER" ]; then
+                title="$(jq -r '.title' <<<"$issue_json")"
+                body="$(jq -r '.body // ""' <<<"$issue_json")"
+                {
+                  printf '请在 %s 仓库里实现 issue #%s「%s」。\n\n' "$REPO" "$NUMBER" "$title"
+                  printf 'issue 内容：\n%s\n' "$body"
+                  if [ -s "$instr" ]; then
+                    printf '\n补充要求：\n'
+                    cat "$instr"
+                  fi
+                  cat "$rules"
+                } > "$prompt"
+              else
+                # 外部用户的标题和正文可能含提示注入，而且在所有者评论后仍可被修改；
+                # 这个 job 持有 Codex 凭据，所以只把所有者评论里的要求交给 Codex。
+                if [ ! -s "$instr" ]; then
+                  echo "::error::issue #$NUMBER 不是仓库所有者创建的，/codex 后面需要写明要做什么"
+                  gh api "repos/$REPO/issues/$NUMBER/comments" \
+                    -f body="⚠️ 这个 issue 不是仓库所有者创建的，它的标题和正文不会交给 Codex。请在 \`/codex\` 后面写明要做什么，例如：\`/codex 修复 README 里的失效链接\`" >/dev/null
+                  exit 1
                 fi
-                cat "$rules"
-              } > "$prompt"
+                {
+                  printf '请在 %s 仓库里处理 issue #%s。\n' "$REPO" "$NUMBER"
+                  printf '这个 issue 由外部用户创建，它的标题和正文没有提供给你，也不要设法获取；只按下面的要求修改：\n\n'
+                  cat "$instr"
+                  cat "$rules"
+                } > "$prompt"
+              fi
               {
                 echo "checkout_ref=$BASE"
                 echo "push_branch=codex/issue-$NUMBER-$RUN_ID"

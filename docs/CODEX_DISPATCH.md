@@ -5,7 +5,7 @@
 | 在哪里评论 | 写法 | 结果 |
 |---|---|---|
 | PR | `/codex <要改什么>` | Codex 在该 PR 的分支上继续改，结果推到**同一个 PR** |
-| issue | `/codex [补充要求]` | Codex 从 `main` 开始实现这个 issue，推到新分支并开新 PR（`Closes #issue`） |
+| issue | `/codex [补充要求]` | Codex 从 `main` 开始实现这个 issue，推到新分支并开新 PR（`Closes #issue`）。别人开的 issue 必须写明要求，见下文 |
 | Actions 页面 | Run workflow，填 `prompt`（可选 `pr` / `base`） | 同上，不用留评论 |
 | Actions 页面 | Run workflow，`prompt` 留空 | 只做自检：Codex 登录、凭据写回权限 |
 
@@ -108,6 +108,7 @@ OpenAI 的指南（Maintain Codex account auth in CI/CD）不建议在公开仓�
 2. 两个 secret 都放在只允许 `main` 部署的 environment 里；
 3. `CODEX_BOT_TOKEN` 没有 Workflows 权限，并且改动 `.github/workflows/` 或 `.github/actions/` 的 diff 会被直接拒绝；
 4. 评论和 issue 内容只通过环境变量传给脚本，不做 `${{ }}` 插值；
-5. job 结束时删除本地凭据文件。
+5. job 结束时删除本地凭据文件；
+6. 不是仓库所有者创建的 issue，标题和正文不会交给 Codex，只使用你 `/codex` 评论里写的要求；评论里没写要求时任务直接拒绝并回复说明。
 
-公开仓库的 Actions 日志任何人都能看，所以不要往 `/codex` 评论里写任何敏感信息。对别人开的 issue 用 `/codex` 前，先确认 issue 内容可信，因为它会原样交给 Codex。
+公开仓库的 Actions 日志任何人都能看，所以不要往 `/codex` 评论里写任何敏感信息。别人开的 issue 可能含有提示注入，作者也能在你评论之后修改正文，所以对这类 issue 请把要做的事完整写在 `/codex` 后面。
