@@ -112,7 +112,7 @@ Codex 在 `auth.json` 的 `last_refresh` 超过约 8 天时会自动刷新 token
 
 OpenAI 的指南（Maintain Codex account auth in CI/CD）不建议在公开仓库里用 ChatGPT 登录凭据。本仓库是公开的，所以 workflow 分成两个 job，并做了这些限制：
 
-- **codex job**（持有 Codex 凭据）：Codex 的命令在沙箱里运行，只能写工作区和 `~/.cargo`，不能联网；推送用的 `CODEX_BOT_TOKEN` 只在写回凭据的步骤里出现，Codex 运行的步骤拿不到。Codex 的完整输出只写文件、不打日志；生成的 diff 和总结里只要出现任何 token 就中止。diff 用 Codex 运行前保存的 `.git` 副本生成，不受工作区里被改动的 git 配置影响。
+- **codex job**（持有 Codex 凭据）：Codex 的命令在沙箱里运行（权限配置 `ci`，写在 CI 生成的 `$CODEX_HOME/config.toml` 里），只能写工作区和 `~/.cargo`，不能联网，并且读不到 `$RUNNER_TEMP`：Codex 凭据、用于遮蔽的 token 列表和 `.git` 副本都放在这里。每次运行 Codex 前，workflow 先用同一配置在沙箱里实测一次（不调用模型），凭据可读或工作区不可写就直接停止；推送用的 `CODEX_BOT_TOKEN` 只在写回凭据的步骤里出现，Codex 运行的步骤拿不到。Codex 的完整输出只写文件、不打日志；生成的 diff 和总结里只要出现任何 token 就中止。diff 用 Codex 运行前保存的 `.git` 副本生成，不受工作区里被改动的 git 配置影响。
 - **push job**（不接触 Codex 凭据）：只下载 diff、检查路径、`git apply`、提交和推送。
 
 其他限制：
