@@ -19,8 +19,9 @@ name: Codex Dispatch
 # 注意：OpenAI 的指南不建议在公开仓库使用 ChatGPT 登录凭据。这里的防护：
 #   1. 只接受仓库所有者本人的评论 / 手动触发，以及 codex-ci-fix.yml 带 pr 的派发；
 #   2. 凭据放在只允许 main 部署的 environment 里，PR 分支上的 workflow 拿不到；
-#   3. Codex 的命令在沙箱里运行：只能写工作区、不能联网；推送用的 token 不在这个 job 的
-#      Codex 步骤里；
+#   3. Codex 的命令在沙箱里运行（权限配置 ci）：只能写工作区和 ~/.cargo、不能联网，
+#      读不到 $RUNNER_TEMP（Codex 凭据、token 列表、.git 副本都在这里），运行前先实测；
+#      推送用的 token 不在这个 job 的 Codex 步骤里；
 #   4. Codex 的完整输出只写文件不打日志；diff 和最终总结里出现任何 token 就中止；
 #   5. 用 Codex 运行前保存的 .git 副本生成 diff，不受工作区里被改动的 git 配置影响；
 #   6. CODEX_BOT_TOKEN 不给 Workflows 权限，改动 .github/workflows 或 .github/actions 的 diff
@@ -352,11 +353,6 @@ jobs:
           # Codex 运行前保存一份 .git，之后用它生成 diff，不信任工作区里可能被改动的 .git。
           cp -a work/.git "$RUNNER_TEMP/pristine.git"
           echo "base_sha=$(git -C work rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          # Ubuntu 24.04 默认限制非特权 user namespace，Codex 的 bubblewrap 沙箱会报
-          # "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted"。runner 是一次性的，放开即可。
-          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
-            sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns=0
-          fi
           # 沙箱里不能联网，先把 Rust 依赖下载好（cargo fetch 不会执行 build script）。
           if [ -f work/Cargo.toml ]; then
             (cd work && cargo fetch --locked) || echo "::warning::cargo fetch 失败，Codex 将无法离线编译"
@@ -389,7 +385,18 @@ jobs:
           mkdir -p "$home"
           echo "CODEX_HOME=$home" >> "$GITHUB_ENV"
           printf '%s' "$CODEX_AUTH_JSON" > "$home/auth.json"
-          printf 'cli_auth_credentials_store = "file"\n' > "$home/config.toml"
+          # 权限配置 ci：在 :workspace（可写工作区和临时目录）基础上禁止读写整个 $RUNNER_TEMP
+          # （凭据、token 列表、.git 副本），允许写 ~/.cargo（离线编译要用），关闭网络。
+          # 不能再传 -s / sandbox_workspace_write，否则 Codex 会改用旧的沙箱设置、忽略这里。
+          {
+            printf 'cli_auth_credentials_store = "file"\n'
+            printf 'default_permissions = "ci"\n\n'
+            printf '[permissions.ci]\nextends = ":workspace"\n\n'
+            printf '[permissions.ci.filesystem]\n'
+            printf '"%s" = "deny"\n' "$RUNNER_TEMP"
+            printf '"%s" = "write"\n\n' "$HOME/.cargo"
+            printf '[permissions.ci.network]\nenabled = false\n'
+          } > "$home/config.toml"
           if ! jq -e '.auth_mode == "chatgpt" and ((.tokens.refresh_token // "") != "")' "$home/auth.json" >/dev/null; then
             echo "::error::CODEX_AUTH_JSON 不是有效的 ChatGPT 登录凭据，需要重新 seed（见 docs/CODEX_DISPATCH.md）"
             exit 1
@@ -399,9 +406,41 @@ jobs:
           while IFS= read -r t; do printf '::add-mask::%s\n' "$t"; done < "$RUNNER_TEMP/seed-tokens.txt"
           echo "ok=true" >> "$GITHUB_OUTPUT"
 
+      - name: Verify sandbox hides credentials
+        id: sandbox
+        if: steps.auth.outputs.ok == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Ubuntu 24.04 默认限制非特权 user namespace，Codex 的 bubblewrap 沙箱会报
+          # "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted"。runner 是一次性的，放开即可。
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          # 用和 Codex 相同的权限配置跑一条命令（不调用模型、不耗额度）：凭据和 $RUNNER_TEMP
+          # 必须读不到，工作区和 ~/.cargo 必须能写。任何一项不符合就不运行 Codex。
+          probe="$GITHUB_WORKSPACE/.codex-sandbox-probe"
+          rc=0
+          # shellcheck disable=SC2016 # 单引号里的 $1… 由沙箱内的 bash 展开
+          codex sandbox -P ci -C "$GITHUB_WORKSPACE" -- bash -c '
+            fail=0
+            if cat "$1" >/dev/null 2>&1; then echo "凭据文件可读"; fail=1; fi
+            if ls "$2" >/dev/null 2>&1; then echo "RUNNER_TEMP 可列出"; fail=1; fi
+            if ! touch "$3"; then echo "工作区不可写"; fail=1; fi
+            if ! touch "$4/.codex-sandbox-probe"; then echo "~/.cargo 不可写"; fail=1; fi
+            rm -f "$3" "$4/.codex-sandbox-probe"
+            exit "$fail"
+          ' probe "$CODEX_HOME/auth.json" "$RUNNER_TEMP" "$probe" "$HOME/.cargo" || rc=$?
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::Codex 沙箱没有按权限配置 ci 生效（exit $rc），已停止，不运行 Codex。"
+            exit 1
+          fi
+          echo "✅ 沙箱内读不到 Codex 凭据和 RUNNER_TEMP；工作区和 ~/.cargo 可写。"
+          echo "ok=true" >> "$GITHUB_OUTPUT"
+
       - name: Run Codex
         id: run
-        if: steps.prep.outcome == 'success' && steps.auth.outputs.ok == 'true'
+        if: steps.prep.outcome == 'success' && steps.sandbox.outputs.ok == 'true'
         shell: bash
         env:
           CODEX_MODEL: ${{ vars.CODEX_MODEL }}
@@ -409,10 +448,8 @@ jobs:
           CARGO_NET_OFFLINE: 'true'
         run: |
           set -uo pipefail
+          # 沙箱权限来自 $CODEX_HOME/config.toml 的 default_permissions = "ci"（见 Restore Codex auth）。
           args=(exec -C "$GITHUB_WORKSPACE/work"
-            -s workspace-write
-            --add-dir "$HOME/.cargo"
-            -c sandbox_workspace_write.network_access=false
             -c approval_policy='"never"'
             --ignore-rules --ephemeral --json
             -o "$RUNNER_TEMP/last-message.md")
