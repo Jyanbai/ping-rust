@@ -255,6 +255,22 @@ fn select_profile(profiles: &[config::ManagedProfile]) -> Result<Option<usize>> 
     select_numbered("请选择配置", &labels)
 }
 
+/// 菜单里的首次默认部署要先确认（回车 = 部署），放在公网地址探测和 shoes 下载之前：
+/// 部署失败后 state 仍不存在，每次进菜单都会重试，连不上 GitHub 时要白等几分钟。
+/// 标准输入不是终端时（脚本、管道）保持原来的直接部署；输入 0 等同于跳过。
+pub(crate) fn bootstrap_confirmed(
+    terminal: bool,
+    ask: impl FnOnce() -> Result<bool>,
+) -> Result<bool> {
+    if !terminal {
+        return Ok(true);
+    }
+    match ask() {
+        Err(error) if input::is_back(&error) => Ok(false),
+        result => result,
+    }
+}
+
 pub(crate) async fn bootstrap_address<F, Fut>(
     detect: F,
     terminal: bool,
@@ -2043,6 +2059,28 @@ fn uninstall_menu() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bootstrap_confirmation_only_asks_on_terminals_and_back_skips() {
+        assert!(bootstrap_confirmed(false, || unreachable!("非终端不应询问")).unwrap());
+        for (answer, expected) in [("\n", true), ("y\n", true), ("n\n", false), ("0\n", false)] {
+            let mut output = Vec::new();
+            let confirmed = bootstrap_confirmed(true, || {
+                input::read_confirm(&mut answer.as_bytes(), &mut output, "现在部署？", true)
+            })
+            .unwrap();
+            assert_eq!(confirmed, expected, "输入 {answer:?}");
+            assert_eq!(
+                String::from_utf8(output).unwrap(),
+                "现在部署？ [Y/n]（输入 0 返回）："
+            );
+        }
+        let eof = bootstrap_confirmed(true, || {
+            input::read_confirm(&mut &b""[..], &mut Vec::new(), "现在部署？", true)
+        })
+        .unwrap_err();
+        assert_eq!(control_after_error(&eof), MenuControl::Exit);
+    }
 
     #[test]
     fn bootstrap_failure_continues_to_main_menu_but_eof_and_interrupt_do_not() {

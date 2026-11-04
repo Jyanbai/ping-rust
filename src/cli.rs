@@ -904,6 +904,19 @@ async fn bootstrap_default_reality_with_menu(menu: bool) -> Result<bool> {
         "{}",
         "首次安装：自动部署 VLESS-REALITY".bright_cyan().bold()
     );
+    if menu {
+        use std::io::IsTerminal;
+        let confirmed = crate::menu::bootstrap_confirmed(std::io::stdin().is_terminal(), || {
+            input::confirm(
+                "现在部署？需要从 GitHub 下载 shoes，网络不通时可能要等几分钟",
+                true,
+            )
+        })?;
+        if !confirmed {
+            println!("已跳过默认部署，可在菜单 1 中添加配置");
+            return Ok(false);
+        }
+    }
     println!("正在自动安装 shoes、选择随机端口并生成安全凭据……");
     if !menu {
         ensure_shoes_for_add(true).await?;

@@ -173,7 +173,7 @@ vless://...security=reality...pbk=...&sid=...#VLESS-REALITY-30060
 ------------- END -------------
 ```
 
-安装脚本只在配置文件和管理状态都不存在时触发默认部署。Rust `bootstrap` 会自动下载 shoes、选择随机可用端口、生成 UUID/X25519 密钥/short ID、执行 `shoes --dry-run`、启动并确认 systemd 服务，然后输出可直接导入 v2rayN 的链接；检测到任何已有配置时绝不覆盖。通过 cargo 安装的用户第一次运行 `sudo prs` 时也会执行同一安全入口。
+安装脚本只在配置文件和管理状态都不存在时触发默认部署。Rust `bootstrap` 会自动下载 shoes、选择随机可用端口、生成 UUID/X25519 密钥/short ID、执行 `shoes --dry-run`、启动并确认 systemd 服务，然后输出可直接导入 v2rayN 的链接；检测到任何已有配置时绝不覆盖。通过 cargo 安装的用户第一次运行 `sudo prs` 时也会执行同一安全入口；在终端里会先确认一次（直接回车即部署，输入 `n` 跳过并进入主菜单），避免连不上 GitHub 时每次进菜单都要等待下载重试。
 
 部署完成后的常规菜单如下：
 
