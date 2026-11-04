@@ -2,6 +2,13 @@ name: Ubuntu 24.04 acceptance
 
 on:
   workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/ubuntu-acceptance.yml
+      - Cargo.toml
+      - Cargo.lock
+      - src/**
+      - scripts/install.sh
   push:
     branches: [main]
     paths:
@@ -10,6 +17,11 @@ on:
       - Cargo.lock
       - src/**
       - scripts/install.sh
+
+# 同一个 PR 连续推送时取消旧的运行，只测最新提交；push / 手动触发每次单独成组，互不取消。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
