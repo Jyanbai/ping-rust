@@ -1,0 +1,257 @@
+name: Codex CI Fix
+
+# codex/* 分支上的检查失败时，把失败日志派回 Codex，在同一个 PR 上修复。
+#
+#   1. 受监视的 workflow 每次结束（不论成败）都会触发一次检查；检查的是 PR 当前的最新提交，
+#      等它上面所有受监视的检查都跑完、且有失败时才汇总派发（最后结束的那个即使成功也会触发）；
+#   2. 每个 PR 最多自动派 CODEX_CI_FIX_MAX 次（默认 2），用尽后贴评论并打 needs-human 标签；
+#   3. 同一个提交只派一次（PR 评论里的隐藏标记记录已处理的提交）；
+#   4. PR 带 no-auto-fix 标签、或仓库变量 CODEX_CI_FIX=off 时不派。
+#
+# 派发方式：用 GITHUB_TOKEN 触发 codex-dispatch.yml 的 workflow_dispatch（GitHub 允许 GITHUB_TOKEN
+# 触发 workflow_dispatch）。codex-dispatch 只放行 github-actions[bot] 带 pr 参数的这一种手动触发。
+#
+# 安全：workflow_run 总是用 main 上的 workflow 文件运行，并持有可写 token，所以只处理本仓库
+# （非 fork）的 codex/* 分支；分支名、日志等外部内容只经环境变量和文件传给脚本。
+#
+# 手动触发（仓库所有者）：填 branch 和 sha，勾选 dry_run 只打印会派发的内容，不评论、不派发。
+
+on:
+  workflow_run:
+    # 与下面 env.WATCHED 保持一致。
+    workflows:
+      - CI
+      - Ubuntu 24.04 acceptance
+      - Chain proxy systemd acceptance
+      - Backward compatibility (v0.2.1 reads new files)
+      - VLESS-ENC interoperability
+      - shoes schema compatibility
+      - shoes source compatibility
+      - Legacy instance upgrade
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: codex/* 分支名
+        required: true
+        type: string
+      sha:
+        description: 要检查的提交（完整 SHA）
+        required: true
+        type: string
+      dry_run:
+        description: 只打印要派发的内容，不评论、不派发
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  dispatch:
+    if: >-
+      vars.CODEX_CI_FIX != 'off' && (
+        (
+          github.event_name == 'workflow_run' &&
+          github.event.workflow_run.head_repository.full_name == github.repository &&
+          startsWith(github.event.workflow_run.head_branch, 'codex/')
+        ) || (
+          github.event_name == 'workflow_dispatch' &&
+          github.actor == github.repository_owner
+        )
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      # 同一个分支串行处理：第二个到达的运行能看到第一个留下的标记，不会重复派发。
+      group: codex-ci-fix-${{ github.event.workflow_run.head_branch || inputs.branch }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      actions: write        # 读失败日志、触发 codex-dispatch
+      issues: write         # 打标签
+      pull-requests: write  # 在 PR 下评论
+    steps:
+      - name: Collect failures and dispatch Codex
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          OWNER: ${{ github.repository_owner }}
+          BRANCH: ${{ github.event.workflow_run.head_branch || inputs.branch }}
+          # workflow_run 时为空：检查 PR 当前的最新提交，而不是触发事件的提交（旧提交上
+          # 晚结束的运行不会让新提交的失败漏掉）。
+          INPUT_SHA: ${{ inputs.sha }}
+          DRY_RUN: ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '1' || '0' }}
+          MAX_ATTEMPTS: ${{ vars.CODEX_CI_FIX_MAX || '2' }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          WATCHED: |-
+            CI
+            Ubuntu 24.04 acceptance
+            Chain proxy systemd acceptance
+            Backward compatibility (v0.2.1 reads new files)
+            VLESS-ENC interoperability
+            shoes schema compatibility
+            shoes source compatibility
+            Legacy instance upgrade
+          # 每个失败 job 取报错前的行数；整个任务描述的字节上限（workflow_dispatch 输入有长度限制）。
+          EXCERPT_LINES: '60'
+          PROMPT_LIMIT: '20000'
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/ci-fix"
+          mkdir -p "$work"
+
+          [[ "$BRANCH" == codex/* ]] || { echo "分支 $BRANCH 不是 codex/*，跳过。"; exit 0; }
+          if [ -n "$INPUT_SHA" ] && ! [[ "$INPUT_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::sha 必须是 40 位十六进制"; exit 1
+          fi
+          [[ "$MAX_ATTEMPTS" =~ ^[0-9]+$ ]] || { echo "::error::CODEX_CI_FIX_MAX 必须是数字"; exit 1; }
+
+          # 1. 找到这个分支对应的 PR
+          state=open
+          [ "$DRY_RUN" = 1 ] && state=all
+          gh api "repos/$REPO/pulls?state=$state&head=$OWNER:$BRANCH&per_page=1" > "$work/pr.json"
+          pr="$(jq -r '.[0].number // ""' "$work/pr.json")"
+          [ -n "$pr" ] || { echo "分支 $BRANCH 没有打开的 PR，跳过。"; exit 0; }
+          head="$(jq -r '.[0].head.sha' "$work/pr.json")"
+          SHA="${INPUT_SHA:-$head}"
+          short="${SHA:0:7}"
+          if [ "$head" != "$SHA" ]; then
+            if [ "$DRY_RUN" = 1 ]; then
+              echo "::warning::PR #$pr 的最新提交是 ${head:0:7}，不是 $short（dry-run 继续）"
+            else
+              echo "PR #$pr 已有更新的提交 ${head:0:7}，跳过 $short。"
+              exit 0
+            fi
+          fi
+          if jq -e '.[0].labels[]? | select(.name == "no-auto-fix")' "$work/pr.json" >/dev/null; then
+            echo "PR #$pr 带 no-auto-fix 标签，跳过。"
+            exit 0
+          fi
+
+          # 2. 这个提交上受监视的检查：全部跑完才处理。同一个 workflow 按触发事件（push、
+          #    pull_request）各取最新一次；失败列表里同名的只留一个。
+          gh api --paginate "repos/$REPO/actions/runs?head_sha=$SHA&per_page=100" \
+            --jq '.workflow_runs[]' \
+            | jq -s --arg watched "$WATCHED" '
+                ($watched | split("\n") | map(select(length > 0))) as $w
+                | map(select(.name as $n | $w | index($n)))
+                | group_by([.name, .event])
+                | map(sort_by(.created_at) | last)
+              ' > "$work/runs.json"
+          pending="$(jq -r 'map(select(.status != "completed")) | map(.name) | join("、")' "$work/runs.json")"
+          if [ -n "$pending" ]; then
+            echo "还有检查没跑完（$pending），等最后一个结束时再处理。"
+            exit 0
+          fi
+          jq 'map(select(.conclusion == "failure" or .conclusion == "timed_out")) | unique_by(.name)' "$work/runs.json" > "$work/failed.json"
+          if [ "$(jq length "$work/failed.json")" -eq 0 ]; then
+            echo "$short 上受监视的检查都没有失败，跳过。"
+            exit 0
+          fi
+
+          # 3. 已处理过的提交、已用掉的次数（只认 github-actions[bot] 留下的标记）
+          gh api --paginate "repos/$REPO/issues/$pr/comments?per_page=100" \
+            --jq '.[] | select(.user.login == "github-actions[bot]") | .body' > "$work/bot-comments.txt"
+          if grep -qF "<!-- codex-ci-fix sha=$SHA -->" "$work/bot-comments.txt"; then
+            echo "$short 已经派发过，跳过。"
+            exit 0
+          fi
+          used="$(grep -cE '<!-- codex-ci-fix sha=[0-9a-f]{40} -->' "$work/bot-comments.txt" || true)"
+          attempt=$((used + 1))
+          names="$(jq -r 'map("`" + .name + "`") | join("、")' "$work/failed.json")"
+
+          if [ "$used" -ge "$MAX_ATTEMPTS" ]; then
+            if grep -qF '<!-- codex-ci-fix-stop -->' "$work/bot-comments.txt"; then
+              echo "已达到上限并通知过，跳过。"
+              exit 0
+            fi
+            body="⏸️ CI 在 \`$short\` 上仍然失败（$names）。自动修复已用满 $MAX_ATTEMPTS 次，需要人工处理。"
+            body+=$'\n\n'"想让 Codex 再试一次，直接评论 \`/codex <要求>\`。"$'\n\n'"[运行日志]($RUN_URL)"$'\n<!-- codex-ci-fix-stop -->'
+            if [ "$DRY_RUN" = 1 ]; then
+              printf '[dry-run] 会贴评论并打 needs-human 标签：\n%s\n' "$body"
+              exit 0
+            fi
+            gh api "repos/$REPO/issues/$pr/comments" -f body="$body" >/dev/null
+            gh api "repos/$REPO/issues/$pr/labels" -f 'labels[]=needs-human' >/dev/null \
+              || echo "::warning::needs-human 标签添加失败"
+            exit 0
+          fi
+
+          # 4. 汇总失败的 job 和日志摘录
+          prompt="$work/prompt.md"
+          excerpts="$work/excerpts.md"
+          : > "$excerpts"
+          {
+            printf 'CI 在这个 PR 的最新提交 %s 上失败了（第 %s/%s 次自动派发）。请找出根因并修复。\n\n' "$short" "$attempt" "$MAX_ATTEMPTS"
+            printf '要求：\n'
+            printf -- '- 先判断失败是本 PR 的代码问题，还是测试、CI 环境或网络的偶发问题。\n'
+            printf -- '- 按 AGENTS.md 修：不删除、不放宽已有断言；有意修改测试要在最终回复里逐条说明。\n'
+            printf -- '- 如果失败与本 PR 的改动无关，或必须改 .github/ 下的文件才能修，不要改代码，在最终回复里说明理由。\n'
+            printf -- '- 最终回复写明根因、改了什么、哪些检查在沙箱里跑不了（标"未验证"）。\n\n'
+            printf '失败的检查：\n'
+          } > "$prompt"
+
+          shown=0
+          while IFS=$'\t' read -r run_id run_name; do
+            gh api --paginate "repos/$REPO/actions/runs/$run_id/jobs?per_page=100" < /dev/null \
+              --jq '.jobs[] | select(.conclusion == "failure" or .conclusion == "timed_out")
+                    | [(.id | tostring), .name, ([.steps[]? | select(.conclusion == "failure") | .name] | join("、"))]
+                    | @tsv' > "$work/jobs.tsv"
+            while IFS=$'\t' read -r job_id job_name steps; do
+              printf -- '- %s / %s（失败步骤：%s）\n' "$run_name" "$job_name" "${steps:-未知}" >> "$prompt"
+              # 同一个失败常在多个系统的 job 上重复出现，只附前 3 个 job 的日志。
+              [ "$shown" -lt 3 ] || continue
+              shown=$((shown + 1))
+              log="$work/job-$job_id.log"
+              if ! gh api "repos/$REPO/actions/jobs/$job_id/logs" < /dev/null > "$log" 2>/dev/null; then
+                printf '\n### %s / %s\n\n（日志下载失败）\n' "$run_name" "$job_name" >> "$excerpts"
+                continue
+              fi
+              # 去掉 BOM、时间戳和 ANSI 颜色，取第一条 ##[error] 之前的最后若干行。
+              sed -e 's/^\xEF\xBB\xBF//' -e 's/^[0-9]\{4\}-[0-9-]*T[0-9:.]*Z //' \
+                  -e 's/\x1b\[[0-9;]*[A-Za-z]//g' "$log" \
+                | awk -v n="$EXCERPT_LINES" '
+                    # 找到第一条 ##[error] 后不再记录，但继续读完输入（提前退出会让 sed 收到 SIGPIPE）。
+                    stop { next }
+                    /^##\[endgroup\]/ { next }
+                    { sub(/^##\[group\]/, ""); c++; buf[c % n] = $0 }
+                    /^##\[error\]/ { stop = 1 }
+                    END {
+                      start = c - n + 1; if (start < 1) start = 1
+                      for (i = start; i <= c; i++) print buf[i % n]
+                    }' > "$log.excerpt"
+              {
+                printf '\n### %s / %s\n\n```text\n' "$run_name" "$job_name"
+                cat "$log.excerpt"
+                printf '```\n'
+              } >> "$excerpts"
+            done < "$work/jobs.tsv"
+          done < <(jq -r '.[] | [(.id | tostring), .name] | @tsv' "$work/failed.json")
+
+          {
+            printf '\n日志摘录（每个 job 只取第一条报错前的 %s 行，可能不完整；完整日志在 GitHub Actions 里）：\n' "$EXCERPT_LINES"
+            cat "$excerpts"
+          } >> "$prompt"
+          if [ "$(wc -c < "$prompt")" -gt "$PROMPT_LIMIT" ]; then
+            # 按字节截断后去掉被切开的半个 UTF-8 字符。
+            head -c "$PROMPT_LIMIT" "$prompt" | iconv -c -f UTF-8 -t UTF-8 > "$prompt.cut" || true
+            printf '\n\n（日志摘录过长，已截断）\n' >> "$prompt.cut"
+            mv "$prompt.cut" "$prompt"
+          fi
+
+          if [ "$DRY_RUN" = 1 ]; then
+            echo "[dry-run] 会在 PR #$pr 派发第 $attempt/$MAX_ATTEMPTS 次，任务描述如下："
+            cat "$prompt"
+            exit 0
+          fi
+
+          # 5. 先留标记再派发：并发到达的运行能看到标记，不会重复派发。
+          body="🔁 CI 在 \`$short\` 上失败（$names），第 $attempt/$MAX_ATTEMPTS 次自动派回 Codex。"
+          body+=$'\n\n'"不想自动修复就给 PR 打 \`no-auto-fix\` 标签。[运行日志]($RUN_URL)"$'\n'"<!-- codex-ci-fix sha=$SHA -->"
+          gh api "repos/$REPO/issues/$pr/comments" -f body="$body" >/dev/null
+          jq -n --arg pr "$pr" --rawfile prompt "$prompt" '{pr: $pr, prompt: $prompt}' \
+            | gh workflow run codex-dispatch.yml --repo "$REPO" --ref main --json
+          echo "已派发：PR #$pr，第 $attempt/$MAX_ATTEMPTS 次。"

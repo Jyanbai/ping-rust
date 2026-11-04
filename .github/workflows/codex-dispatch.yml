@@ -5,6 +5,7 @@ name: Codex Dispatch
 #   PR 下评论    → 在该 PR 的 head 分支上改，结果推到同一个 PR。
 #   issue 下评论 → 从 main 开始改，推到新分支并开新 PR（Closes #issue）。
 #   手动触发     → workflow_dispatch，参数 prompt / pr / base；prompt 留空 = 只做自检。
+#   CI 失败      → codex-ci-fix.yml 用 GITHUB_TOKEN 触发 workflow_dispatch（带 pr），派回同一个 PR。
 #   定时任务     → 每 3 天自检一次，顺便让 Codex 按需刷新 token 并写回 secret。
 #
 # 为什么不用 `codex cloud exec`：网页上建的 Codex 云端环境，CLI 和 GitHub 的 @codex
@@ -16,7 +17,7 @@ name: Codex Dispatch
 #   push  — 不接触 Codex 凭据。下载 diff，检查路径，git apply，用 CODEX_BOT_TOKEN 推送 / 开 PR。
 #
 # 注意：OpenAI 的指南不建议在公开仓库使用 ChatGPT 登录凭据。这里的防护：
-#   1. 只接受仓库所有者本人的评论 / 手动触发；
+#   1. 只接受仓库所有者本人的评论 / 手动触发，以及 codex-ci-fix.yml 带 pr 的派发；
 #   2. 凭据放在只允许 main 部署的 environment 里，PR 分支上的 workflow 拿不到；
 #   3. Codex 的命令在沙箱里运行：只能写工作区、不能联网；推送用的 token 不在这个 job 的
 #      Codex 步骤里；
@@ -61,8 +62,15 @@ env:
 
 jobs:
   codex:
+    # github-actions[bot] 的手动触发只来自 codex-ci-fix.yml（CI 失败后派回同一个 PR），必须带 pr。
+    # 其他 workflow 不要给 GITHUB_TOKEN `actions: write`，也不要用 pull_request_target，
+    # 否则这条路径会对它们开放。
     if: >-
       github.event_name == 'schedule' || (
+        github.event_name == 'workflow_dispatch' &&
+        github.actor == 'github-actions[bot]' &&
+        inputs.pr != ''
+      ) || (
         github.actor == github.repository_owner && (
           github.event_name == 'workflow_dispatch' || (
             github.event_name == 'issue_comment' &&

@@ -11,12 +11,25 @@
 
 > 本功能已于 2026-11-03 在真实 runner 上实测通过。
 
-- 只接受仓库所有者本人的评论或手动触发，其他人评论 `/codex` 不会有反应。
+- 只接受仓库所有者本人的评论或手动触发（以及下面"CI 失败后自动派回 Codex"的派发），其他人评论 `/codex` 不会有反应。
 - `/codex` 必须在一行的开头（允许前面有 `[via Claude]`）。
 - 收到命令后，workflow 会给评论加 👀，再回一条带 Codex 任务链接的评论，完成后更新为结果（推送的 commit 或新 PR 的链接）。
 - 同一个 PR / issue 的任务会排队，一次只跑一个。注意 GitHub 只保留一个排队中的任务：排队时再发一条，前一条排队中的会被取消。
 - 每个任务消耗 ChatGPT 套餐里 Codex 的本地消息额度（和在电脑上用 Codex 是同一个池子）。GitHub Actions 分钟数对公开仓库免费。
 - Codex 在沙箱里不能联网。Rust 依赖会预先下载，所以它能跑 `cargo build/test --offline`；需要外网或 Xray / Mihomo 的测试跑不了，推送后由 CI 完整测试。
+
+## CI 失败后自动派回 Codex
+
+`.github/workflows/codex-ci-fix.yml` 监视 `codex/*` 分支上的检查（CI、Ubuntu 验收、链式代理验收、向后兼容、VLESS-ENC、shoes schema / source、旧版升级）。这些 workflow 每次结束（不论成败）都会检查一次 PR 的最新提交：上面的检查全部跑完、且有失败时，它把失败的 job 名和日志摘录（每个 job 取第一条报错前的 60 行，最多附 3 个 job）整理成任务，派给 Codex 在**同一个 PR** 上修。
+
+- 每个 PR 最多自动派 2 次。用完后贴一条评论并打 `needs-human` 标签，之后仍可以手动 `/codex`。
+- 同一个提交只派一次；派发前会在 PR 下留一条带隐藏标记的评论，次数就是按这些评论数的。
+- 只处理本仓库的 `codex/*` 分支。人或 Claude 开的其他分支、fork 来的 PR 都不会被自动修改。
+- 不想自动修：给 PR 打 `no-auto-fix` 标签。整个关掉：仓库变量 `CODEX_CI_FIX` 设为 `off`。改次数：仓库变量 `CODEX_CI_FIX_MAX`。
+- Codex 判断失败和本 PR 无关（比如偶发网络问题）或必须改 `.github/` 才能修时，不改代码，只在 PR 下说明理由，循环到此结束。
+- 手动检查：Actions → Codex CI Fix → Run workflow，填分支和完整 SHA，勾着 `dry_run` 只在日志里打印会派发的任务，不评论、不派发。
+
+派发用的是 `GITHUB_TOKEN` 触发 `codex-dispatch.yml` 的 `workflow_dispatch`（GitHub 允许 `GITHUB_TOKEN` 触发这种事件）。`codex-dispatch.yml` 只放行 `github-actions[bot]` 带 `pr` 参数的这一种触发，所以**其他 workflow 不要给 `GITHUB_TOKEN` `actions: write`，也不要使用 `pull_request_target`**。
 
 为什么不用 Codex 云端环境（`codex cloud exec`）：网页上建的云端环境，Codex CLI 和 GitHub 上的 `@codex` 目前都查不到（接口返回空列表），所以改为在 runner 上直接运行 `codex exec`。
 
@@ -104,7 +117,7 @@ OpenAI 的指南（Maintain Codex account auth in CI/CD）不建议在公开仓�
 
 其他限制：
 
-1. 只接受仓库所有者的评论和手动触发；
+1. 只接受仓库所有者的评论和手动触发，以及 `codex-ci-fix.yml` 在 `codex/*` 分支 CI 失败后的派发；
 2. 两个 secret 都放在只允许 `main` 部署的 environment 里；
 3. `CODEX_BOT_TOKEN` 没有 Workflows 权限，并且改动 `.github/workflows/` 或 `.github/actions/` 的 diff 会被直接拒绝；
 4. 评论和 issue 内容只通过环境变量传给脚本，不做 `${{ }}` 插值；
