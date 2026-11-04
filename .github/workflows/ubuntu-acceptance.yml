@@ -705,8 +705,9 @@ jobs:
           }
           wait_for {输入端口} port-prompt
           send "$env(MENU_PORT)\r"
-          if {$env(PROTOCOL_NUMBER) == "4"} {
-            # #72 起菜单添加 Reality 会先选择 SNI 方式；回车 = 1 自动选择。
+          if {$env(PROTOCOL_NUMBER) in {4 9}} {
+            # #72 起菜单添加 Reality（4 VLESS-REALITY、9 Trojan-Reality）会先选择 SNI 方式；
+            # 回车 = 1 自动选择。
             wait_for {选择 SNI 方式} reality-sni-choice
             send "\r"
           }
