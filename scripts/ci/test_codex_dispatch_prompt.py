@@ -44,7 +44,10 @@ def step_script(name):
 
 class IssuePromptTest(unittest.TestCase):
     def run_issue(self, association, login, instruction):
-        work = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        # Ubuntu 22.04 自带 Python 3.10，没有 TestCase.enterContext。
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        work = Path(temporary.name)
         bin_dir = work / "bin"
         bin_dir.mkdir()
         gh = bin_dir / "gh"
