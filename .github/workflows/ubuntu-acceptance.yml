@@ -359,7 +359,8 @@ jobs:
           spawn $env(PRS_COMMAND)
           expect -re {请选择 \[0-10\]}
           send "9\r"
-          expect -re {运维工具}
+          # #77 起"9 其他（运维工具）"改为"9 工具"，第 2 项仍是高级添加配置。
+          expect -re {工具:}
           send "2\r"
           expect -re {选择协议}
           send "5\r"
@@ -705,6 +706,12 @@ jobs:
           }
           wait_for {输入端口} port-prompt
           send "$env(MENU_PORT)\r"
+          if {$env(PROTOCOL_NUMBER) in {4 9}} {
+            # #72 起菜单添加 Reality（4 VLESS-REALITY、9 Trojan-Reality）会先选择 SNI 方式；
+            # 回车 = 1 自动选择。
+            wait_for {选择 SNI 方式} reality-sni-choice
+            send "\r"
+          }
           if {$env(PROTOCOL_NUMBER) == "14"} {
             wait_for {VLESS Encryption 外观} encryption-mode
             send "1\r"
@@ -770,6 +777,9 @@ jobs:
           expect {请选择加密方式}
           send "\r"
           expect {请设置密码}
+          send "\r"
+          # #72 起菜单添加 ShadowTLS 会先选择 SNI 方式；回车 = 1 自动选择。
+          expect {选择 SNI 方式}
           send "\r"
           expect {传输/伪装}
           expect {ShadowTLS v3}
@@ -1010,7 +1020,10 @@ jobs:
           wait_for {请选择} profile-prompt
           send "$env(PROFILE_NUMBER)\r"
           wait_for {选择更改项目} change-menu
-          wait_for {请选择 \[0-5\]} change-prompt
+          # #72 起 Reality 节点的更改菜单多了"检测与推荐 SNI"，共 6 项；1 仍是更改端口。
+          wait_for {1\) 更改端口} change-port-item
+          wait_for {6\) 检测与推荐 SNI} change-recommend-sni-item
+          wait_for {请选择 \[0-6\]} change-prompt
           send "1\r"
           wait_for {输入新端口} port-prompt
           send "25450\r"
