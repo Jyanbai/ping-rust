@@ -359,7 +359,8 @@ jobs:
           spawn $env(PRS_COMMAND)
           expect -re {请选择 \[0-10\]}
           send "9\r"
-          expect -re {运维工具}
+          # #77 起"9 其他（运维工具）"改为"9 工具"，第 2 项仍是高级添加配置。
+          expect -re {工具:}
           send "2\r"
           expect -re {选择协议}
           send "5\r"
