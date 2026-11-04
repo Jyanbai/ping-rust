@@ -20,7 +20,7 @@
 
 ## CI 失败后自动派回 Codex
 
-`.github/workflows/codex-ci-fix.yml` 监视 `codex/*` 分支上的检查（CI、Ubuntu 验收、链式代理验收、向后兼容、VLESS-ENC、shoes schema / source、旧版升级）。某个提交上这些检查全部跑完、且有失败时，它把失败的 job 名和日志摘录（每个 job 取第一条报错前的 60 行，最多附 3 个 job）整理成任务，派给 Codex 在**同一个 PR** 上修。
+`.github/workflows/codex-ci-fix.yml` 监视 `codex/*` 分支上的检查（CI、Ubuntu 验收、链式代理验收、向后兼容、VLESS-ENC、shoes schema / source、旧版升级）。这些 workflow 每次结束（不论成败）都会检查一次 PR 的最新提交：上面的检查全部跑完、且有失败时，它把失败的 job 名和日志摘录（每个 job 取第一条报错前的 60 行，最多附 3 个 job）整理成任务，派给 Codex 在**同一个 PR** 上修。
 
 - 每个 PR 最多自动派 2 次。用完后贴一条评论并打 `needs-human` 标签，之后仍可以手动 `/codex`。
 - 同一个提交只派一次；派发前会在 PR 下留一条带隐藏标记的评论，次数就是按这些评论数的。

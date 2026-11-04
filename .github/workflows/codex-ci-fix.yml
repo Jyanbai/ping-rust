@@ -2,7 +2,8 @@ name: Codex CI Fix
 
 # codex/* 分支上的检查失败时，把失败日志派回 Codex，在同一个 PR 上修复。
 #
-#   1. 等这个提交上所有受监视的检查都跑完，再汇总一次（避免每个失败的 workflow 各派一次）；
+#   1. 受监视的 workflow 每次结束（不论成败）都会触发一次检查；检查的是 PR 当前的最新提交，
+#      等它上面所有受监视的检查都跑完、且有失败时才汇总派发（最后结束的那个即使成功也会触发）；
 #   2. 每个 PR 最多自动派 CODEX_CI_FIX_MAX 次（默认 2），用尽后贴评论并打 needs-human 标签；
 #   3. 同一个提交只派一次（PR 评论里的隐藏标记记录已处理的提交）；
 #   4. PR 带 no-auto-fix 标签、或仓库变量 CODEX_CI_FIX=off 时不派。
@@ -53,7 +54,6 @@ jobs:
       vars.CODEX_CI_FIX != 'off' && (
         (
           github.event_name == 'workflow_run' &&
-          contains(fromJSON('["failure","timed_out"]'), github.event.workflow_run.conclusion) &&
           github.event.workflow_run.head_repository.full_name == github.repository &&
           startsWith(github.event.workflow_run.head_branch, 'codex/')
         ) || (
@@ -80,7 +80,9 @@ jobs:
           REPO: ${{ github.repository }}
           OWNER: ${{ github.repository_owner }}
           BRANCH: ${{ github.event.workflow_run.head_branch || inputs.branch }}
-          SHA: ${{ github.event.workflow_run.head_sha || inputs.sha }}
+          # workflow_run 时为空：检查 PR 当前的最新提交，而不是触发事件的提交（旧提交上
+          # 晚结束的运行不会让新提交的失败漏掉）。
+          INPUT_SHA: ${{ inputs.sha }}
           DRY_RUN: ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '1' || '0' }}
           MAX_ATTEMPTS: ${{ vars.CODEX_CI_FIX_MAX || '2' }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -102,9 +104,10 @@ jobs:
           mkdir -p "$work"
 
           [[ "$BRANCH" == codex/* ]] || { echo "分支 $BRANCH 不是 codex/*，跳过。"; exit 0; }
-          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::sha 必须是 40 位十六进制"; exit 1; }
+          if [ -n "$INPUT_SHA" ] && ! [[ "$INPUT_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::sha 必须是 40 位十六进制"; exit 1
+          fi
           [[ "$MAX_ATTEMPTS" =~ ^[0-9]+$ ]] || { echo "::error::CODEX_CI_FIX_MAX 必须是数字"; exit 1; }
-          short="${SHA:0:7}"
 
           # 1. 找到这个分支对应的 PR
           state=open
@@ -113,6 +116,8 @@ jobs:
           pr="$(jq -r '.[0].number // ""' "$work/pr.json")"
           [ -n "$pr" ] || { echo "分支 $BRANCH 没有打开的 PR，跳过。"; exit 0; }
           head="$(jq -r '.[0].head.sha' "$work/pr.json")"
+          SHA="${INPUT_SHA:-$head}"
+          short="${SHA:0:7}"
           if [ "$head" != "$SHA" ]; then
             if [ "$DRY_RUN" = 1 ]; then
               echo "::warning::PR #$pr 的最新提交是 ${head:0:7}，不是 $short（dry-run 继续）"
