@@ -121,6 +121,23 @@ fn control_after_error(error: &anyhow::Error) -> MenuControl {
     }
 }
 
+/// 首次默认部署失败（连不上 GitHub、没有 systemd 等）时提示错误并照常进入主菜单，
+/// 否则 state 一直不存在，每次启动都会重跑部署并退出，工具、更新、恢复等入口全部不可用。
+/// 输入结束（EOF）仍退出菜单；Ctrl+C 中断仍交给 main 恢复光标后退出。
+fn control_after_bootstrap(result: Result<bool>) -> Result<MenuControl> {
+    match result {
+        Ok(_) => Ok(MenuControl::Continue),
+        Err(error) if input::is_back(&error) => Ok(MenuControl::Continue),
+        Err(error) if crate::is_interrupted(&error) => Err(error),
+        Err(error) if control_after_error(&error) == MenuControl::Exit => Ok(MenuControl::Exit),
+        Err(error) => {
+            eprintln!("{}", format!("首次默认部署失败：{error:#}").red());
+            eprintln!("已跳过默认部署并进入主菜单；可在菜单 1 中添加配置，或在菜单 9 中使用工具。");
+            Ok(MenuControl::Continue)
+        }
+    }
+}
+
 fn parse_port_change(input: &str) -> Option<PortChoice> {
     match input.trim() {
         "" | "0" => Some(PortChoice::Back),
@@ -305,12 +322,10 @@ fn node_summary(state: Result<config::ManagedState>) -> String {
 }
 
 pub async fn run() -> Result<()> {
-    match cli::bootstrap_default_reality_for_menu().await {
-        Err(error) if input::is_back(&error) => {}
-        Err(error) if control_after_error(&error) == MenuControl::Exit => return Ok(()),
-        result => {
-            result?;
-        }
+    if control_after_bootstrap(cli::bootstrap_default_reality_for_menu().await)?
+        == MenuControl::Exit
+    {
+        return Ok(());
     }
     // 状态无法读取时仍提供工具、恢复等入口，节点摘要负责显示读取失败提示。
     if config::load_state().is_ok() {
@@ -2028,6 +2043,49 @@ fn uninstall_menu() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bootstrap_failure_continues_to_main_menu_but_eof_and_interrupt_do_not() {
+        assert_eq!(
+            control_after_bootstrap(Ok(true)).unwrap(),
+            MenuControl::Continue
+        );
+        assert_eq!(
+            control_after_bootstrap(Ok(false)).unwrap(),
+            MenuControl::Continue
+        );
+        for failure in [
+            anyhow::anyhow!("请求 shoes 固定 Release v0.3.6 失败"),
+            anyhow::anyhow!("未找到 systemctl；当前系统可能未使用 systemd"),
+        ] {
+            assert_eq!(
+                control_after_bootstrap(Err(failure)).unwrap(),
+                MenuControl::Continue
+            );
+        }
+        let back = input::read_text(
+            &mut &b"0\n"[..],
+            &mut Vec::new(),
+            "公网地址",
+            None,
+            false,
+            |value| Ok(value.to_owned()),
+        )
+        .unwrap_err();
+        assert!(input::is_back(&back));
+        assert_eq!(
+            control_after_bootstrap(Err(back)).unwrap(),
+            MenuControl::Continue
+        );
+        assert_eq!(
+            control_after_bootstrap(Err(anyhow::Error::new(MenuEof).context("读取"))).unwrap(),
+            MenuControl::Exit
+        );
+        let interrupted = anyhow::Error::new(io::Error::from(io::ErrorKind::Interrupted));
+        assert!(crate::is_interrupted(
+            &control_after_bootstrap(Err(interrupted)).unwrap_err()
+        ));
+    }
 
     #[test]
     fn input_errors_and_cancellation_are_classified() {
