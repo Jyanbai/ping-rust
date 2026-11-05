@@ -615,11 +615,18 @@ jobs:
           set -euo pipefail
           # Build as the runner user; only the finished binary runs as root, so
           # the cached target directory never gets root-owned files.
-          test_bin="$(cargo test --locked --test menu_input_e2e --no-run --message-format=json \
-            | jq -r 'select(.reason == "compiler-artifact" and .target.name == "menu_input_e2e" and .executable != null) | .executable' \
-            | tail -n 1)"
+          artifacts="$(cargo test --locked --test menu_input_e2e --test menu_inconsistent_config \
+            --no-run --message-format=json)"
+          executable() {
+            jq -r --arg name "$1" 'select(.reason == "compiler-artifact" and .target.name == $name and .executable != null) | .executable' \
+              <<<"$artifacts" | tail -n 1
+          }
+          test_bin="$(executable menu_input_e2e)"
+          inconsistent_bin="$(executable menu_inconsistent_config)"
           test -x "$test_bin"
+          test -x "$inconsistent_bin"
           echo "test_bin=$test_bin" >> "$GITHUB_OUTPUT"
+          echo "inconsistent_bin=$inconsistent_bin" >> "$GITHUB_OUTPUT"
       - name: Prepare one managed node
         shell: bash
         run: |
@@ -635,4 +642,11 @@ jobs:
         shell: bash
         env:
           TEST_BIN: ${{ steps.build.outputs.test_bin }}
+        run: sudo env PING_RUST_MENU_E2E=1 NO_COLOR=1 "$TEST_BIN" --nocapture
+      # Runs after the input regression: it edits config.yaml to disagree with the
+      # state file and restores the original bytes when it finishes.
+      - name: Run inconsistent config menu regression
+        shell: bash
+        env:
+          TEST_BIN: ${{ steps.build.outputs.inconsistent_bin }}
         run: sudo env PING_RUST_MENU_E2E=1 NO_COLOR=1 "$TEST_BIN" --nocapture

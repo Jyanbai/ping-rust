@@ -138,6 +138,26 @@ fn control_after_bootstrap(result: Result<bool>) -> Result<MenuControl> {
     }
 }
 
+/// 启动时的节点文件检查（含旧版本迁移）失败——聚合配置被手动改过、与管理状态不一致、
+/// 缺失或未通过 shoes 校验——时提示原因并照常进入主菜单，否则 `sudo prs` 直接退出，
+/// 连 9) 工具 → 8) 恢复配置 都用不了。检查失败时不写入（提交失败会自行回滚）；
+/// 之后添加、更改、删除节点和修改链式代理在提交前都会再次检查一致性并单独报错。
+/// Ctrl+C 中断仍交给 main 恢复光标后退出。
+fn continue_after_profile_check(result: Result<bool>) -> Result<()> {
+    match result {
+        Ok(_) => Ok(()),
+        Err(error) if crate::is_interrupted(&error) => Err(error),
+        Err(error) => {
+            eprintln!("{}", format!("检查受管配置失败：{error:#}").red());
+            eprintln!(
+                "已进入主菜单，但添加、更改、删除节点和修改链式代理会继续报错；可在 9) 工具 → 8) 恢复配置 中恢复备份，或把 {} 改回与 ping-rust 管理状态一致。",
+                crate::utils::CONFIG_FILE
+            );
+            Ok(())
+        }
+    }
+}
+
 fn parse_port_change(input: &str) -> Option<PortChoice> {
     match input.trim() {
         "" | "0" => Some(PortChoice::Back),
@@ -345,7 +365,7 @@ pub async fn run() -> Result<()> {
     }
     // 状态无法读取时仍提供工具、恢复等入口，节点摘要负责显示读取失败提示。
     if config::load_state().is_ok() {
-        config::ensure_profile_files().await?;
+        continue_after_profile_check(config::ensure_profile_files().await)?;
     }
     loop {
         println!(
@@ -2122,6 +2142,25 @@ mod tests {
         let interrupted = anyhow::Error::new(io::Error::from(io::ErrorKind::Interrupted));
         assert!(crate::is_interrupted(
             &control_after_bootstrap(Err(interrupted)).unwrap_err()
+        ));
+    }
+
+    #[test]
+    fn profile_check_failure_continues_to_main_menu_but_interrupt_does_not() {
+        assert!(continue_after_profile_check(Ok(true)).is_ok());
+        assert!(continue_after_profile_check(Ok(false)).is_ok());
+        for failure in [
+            anyhow::anyhow!("第 1 项监听地址 0.0.0.0:24432 与管理状态端口 24431 不一致")
+                .context("旧版聚合配置与管理状态不一致，无法安全迁移节点文件"),
+            anyhow::anyhow!("读取配置 /etc/shoes/config.yaml 失败"),
+            anyhow::anyhow!("shoes --dry-run 拒绝了候选配置"),
+        ] {
+            assert!(continue_after_profile_check(Err(failure)).is_ok());
+        }
+        let interrupted = anyhow::Error::new(io::Error::from(io::ErrorKind::Interrupted))
+            .context("等待 shoes 校验");
+        assert!(crate::is_interrupted(
+            &continue_after_profile_check(Err(interrupted)).unwrap_err()
         ));
     }
 
