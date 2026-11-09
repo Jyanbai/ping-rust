@@ -68,11 +68,15 @@ jobs:
       group: codex-ci-fix-${{ github.event.workflow_run.head_branch || inputs.branch }}
       cancel-in-progress: false
     permissions:
-      contents: read
+      contents: read        # checkout 读日志摘录脚本
       actions: write        # 读失败日志、触发 codex-dispatch
       issues: write         # 打标签
       pull-requests: write  # 在 PR 下评论
     steps:
+      # workflow_run 时 checkout 的是默认分支（main），不是 codex/* 分支上的代码。
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
       - name: Collect failures and dispatch Codex
         shell: bash
         env:
@@ -205,29 +209,14 @@ jobs:
               # 同一个失败常在多个系统的 job 上重复出现，只附前 3 个 job 的日志。
               [ "$shown" -lt 3 ] || continue
               shown=$((shown + 1))
-              log="$work/job-$job_id.log"
-              if ! gh api "repos/$REPO/actions/jobs/$job_id/logs" < /dev/null > "$log" 2>/dev/null; then
-                printf '\n### %s / %s\n\n（日志下载失败）\n' "$run_name" "$job_name" >> "$excerpts"
-                continue
+              # 读取和摘录与 main-watch 共用：新版 gh 要加 --allow-escape-sequences 才肯输出带 ANSI
+              # 颜色的日志；去掉时间戳和颜色，取失败步骤里第一条 ##[error] 前的若干行，并脱敏。
+              # 下载失败时脚本写一段带原因的说明，仍以 0 退出。
+              if ! python3 scripts/ci/job_log_excerpt.py --job-id "$job_id" \
+                  --title="$run_name / $job_name" --lines "$EXCERPT_LINES" < /dev/null >> "$excerpts"; then
+                echo "::warning::$run_name / $job_name 的日志摘录失败"
+                printf '\n### %s / %s\n\n（日志摘录失败）\n' "$run_name" "$job_name" >> "$excerpts"
               fi
-              # 去掉 BOM、时间戳和 ANSI 颜色，取第一条 ##[error] 之前的最后若干行。
-              sed -e 's/^\xEF\xBB\xBF//' -e 's/^[0-9]\{4\}-[0-9-]*T[0-9:.]*Z //' \
-                  -e 's/\x1b\[[0-9;]*[A-Za-z]//g' "$log" \
-                | awk -v n="$EXCERPT_LINES" '
-                    # 找到第一条 ##[error] 后不再记录，但继续读完输入（提前退出会让 sed 收到 SIGPIPE）。
-                    stop { next }
-                    /^##\[endgroup\]/ { next }
-                    { sub(/^##\[group\]/, ""); c++; buf[c % n] = $0 }
-                    /^##\[error\]/ { stop = 1 }
-                    END {
-                      start = c - n + 1; if (start < 1) start = 1
-                      for (i = start; i <= c; i++) print buf[i % n]
-                    }' > "$log.excerpt"
-              {
-                printf '\n### %s / %s\n\n```text\n' "$run_name" "$job_name"
-                cat "$log.excerpt"
-                printf '```\n'
-              } >> "$excerpts"
             done < "$work/jobs.tsv"
           done < <(jq -r '.[] | [(.id | tostring), .name] | @tsv' "$work/failed.json")
 
