@@ -1,22 +1,22 @@
 name: TMP codex sandbox experiment
 
-# 临时实验（不会合并）：在 runner 上用和 codex-dispatch.yml 相同的 Codex CLI 版本与权限配置 ci，
-# 实测沙箱里能否执行 shoes、绑定 127.0.0.1、跑依赖 shoes 的测试。不使用任何 secret。
+# 临时实验（不会合并）：从本分支的 codex-dispatch.yml 原样抽出 "Restore Codex auth" 和
+# "Verify sandbox hides credentials" 两个步骤，用假凭据在 runner 上运行（不调用模型、不用 secret），
+# 并做两组反例：打开网络、去掉 deny 行，检查必须失败。
 
 on:
   push:
     branches: [claude/eager-stonebraker-c7ce22]
-    paths: ['.github/workflows/tmp-codex-sandbox-experiment.yml']
+    paths: ['.github/workflows/tmp-codex-sandbox-experiment.yml', '.github/workflows/codex-dispatch.yml']
 
 permissions:
   contents: read
 
 jobs:
-  probe:
+  verify-step:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 20
     env:
-      CODEX_CLI_VERSION: 0.166.0
       NO_COLOR: '1'
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
@@ -24,152 +24,88 @@ jobs:
           path: work
           persist-credentials: false
 
-      - name: Prepare workspace
+      - name: Extract steps from codex-dispatch.yml
         shell: bash
         run: |
           set -euo pipefail
-          (cd work && cargo fetch --locked)
-          cargo --version; rustc --version
-          echo "RUNNER_TOOL_CACHE=$RUNNER_TOOL_CACHE HOME=$HOME RUNNER_TEMP=$RUNNER_TEMP TMPDIR=${TMPDIR:-unset}"
+          mkdir -p "$GITHUB_WORKSPACE/steps"
+          for name in "Restore Codex auth" "Verify sandbox hides credentials"; do
+            python3 -c 'import sys; sys.path.insert(0, "work/scripts/ci"); import test_codex_dispatch_prompt as t; print(t.step_script(sys.argv[1]), end="")' \
+              "$name" > "$GITHUB_WORKSPACE/steps/${name// /-}.sh"
+          done
+          ls -la "$GITHUB_WORKSPACE/steps"
+          version="$(sed -nE 's/^  CODEX_CLI_VERSION: ([0-9.]+)$/\1/p' work/.github/workflows/codex-dispatch.yml)"
+          test -n "$version"
+          echo "CODEX_CLI_VERSION=$version" >> "$GITHUB_ENV"
 
-      - name: Install pinned shoes
-        shell: bash
-        run: |
-          set -euo pipefail
-          archive="$RUNNER_TEMP/shoes.tar.gz"
-          curl --fail --location --retry 3 --proto '=https' --tlsv1.2 --output "$archive" \
-            https://github.com/cfal/shoes/releases/download/v0.3.7/shoes-x86_64-unknown-linux-musl.tar.gz
-          echo "c594d7b30b474b6b3ab4cd30cc0996ba39aac2e66ffaadd725894037866a2705  $archive" | sha256sum --check --strict
-          dir="$RUNNER_TOOL_CACHE/ping-rust-ci/shoes-v0.3.7"
-          mkdir -p "$dir"
-          tar -xzf "$archive" -C "$dir"
-          ls -la "$dir"
-          "$dir/shoes" --version
-          echo "SHOES=$dir/shoes" >> "$GITHUB_ENV"
-
-      - name: Install Codex CLI
+      - name: Install Codex CLI (same version as codex-dispatch.yml)
         shell: bash
         run: npm install -g "@openai/codex@${CODEX_CLI_VERSION}" >/dev/null && codex --version
 
-      - name: Write codex config (fake auth)
+      - name: Run "Restore Codex auth" with fake credentials
+        shell: bash
+        env:
+          CODEX_AUTH_JSON: '{"auth_mode":"chatgpt","tokens":{"refresh_token":"fake-refresh-token-for-sandbox-probe"}}'
+          HAS_BOT_TOKEN: 'true'
+        run: bash -e -o pipefail "$GITHUB_WORKSPACE/steps/Restore-Codex-auth.sh"
+
+      - name: Run "Verify sandbox hides credentials" (must pass)
         shell: bash
         run: |
           set -euo pipefail
-          umask 077
-          home="$RUNNER_TEMP/codex-home"
-          mkdir -p "$home"
-          echo "CODEX_HOME=$home" >> "$GITHUB_ENV"
-          printf '{"auth_mode":"chatgpt","tokens":{"refresh_token":"fake-refresh-token-for-sandbox-probe"}}' > "$home/auth.json"
-          {
-            printf 'cli_auth_credentials_store = "file"\n'
-            printf 'default_permissions = "ci"\n\n'
-            printf '[permissions.ci]\nextends = ":workspace"\n\n'
-            printf '[permissions.ci.filesystem]\n'
-            printf '"%s" = "deny"\n' "$RUNNER_TEMP"
-            printf '"%s" = "write"\n\n' "$HOME/.cargo"
-            printf '[permissions.ci.network]\nenabled = false\n'
-          } > "$home/config.toml"
-          cat "$home/config.toml"
-          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
-            sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns=0
-          fi
+          cat "$CODEX_HOME/config.toml"
+          out="$(mktemp)"
+          GITHUB_OUTPUT="$out" bash -e -o pipefail "$GITHUB_WORKSPACE/steps/Verify-sandbox-hides-credentials.sh"
+          grep -qx 'ok=true' "$out"
+          echo "PASS: verify step succeeded with the real ci profile"
 
-      - name: Probe inside sandbox
+      - name: Negative — network enabled (must fail)
         shell: bash
-        env:
-          PING_RUST_TEST_SHOES_PROBE: inherited-ok
         run: |
-          set -uo pipefail
-          gh_ip="$(getent ahostsv4 github.com | awk 'NR==1{print $1}')"
-          echo "outside: github.com resolves to a v4 address: $([ -n "$gh_ip" ] && echo yes || echo no)"
-          cat > "$GITHUB_WORKSPACE/probe.sh" <<'PROBE'
-          set -u
-          echo "== id / ns"; id; ls -la /proc/self/ns/net 2>&1 | tail -1
-          echo "== interfaces"; cat /proc/net/dev 2>&1
-          echo "== env inherit: PING_RUST_TEST_SHOES_PROBE=${PING_RUST_TEST_SHOES_PROBE:-<missing>}"
-          echo "== shoes --version"; "$SHOES_ARG" --version; echo "rc=$?"
-          echo "== python loopback v4"
-          python3 -I - <<'PY'
+          set -u -o pipefail; set +e
+          cfg="$CODEX_HOME/config.toml"
+          cp "$cfg" "$cfg.bak"
+          sed -i 's/^enabled = false$/enabled = true/' "$cfg"
+          grep -q '^enabled = true$' "$cfg" || exit 1
+          log="$(mktemp)"
+          GITHUB_OUTPUT=/dev/null bash -e -o pipefail "$GITHUB_WORKSPACE/steps/Verify-sandbox-hides-credentials.sh" > "$log" 2>&1
+          rc=$?
+          cat "$log"
+          mv "$cfg.bak" "$cfg"
+          [ "$rc" -ne 0 ] || { echo "FAIL: verify step passed with network enabled"; exit 1; }
+          grep -q '沙箱里能访问外网（域名）' "$log" || { echo "FAIL: missing domain message"; exit 1; }
+          grep -q '沙箱里能访问外网（直连 IP）' "$log" || { echo "FAIL: missing direct IP message"; exit 1; }
+          echo "PASS: verify step rejects network-enabled profile (exit $rc)"
+
+      - name: Negative — RUNNER_TEMP deny removed (must fail)
+        shell: bash
+        run: |
+          set -u -o pipefail; set +e
+          cfg="$CODEX_HOME/config.toml"
+          cp "$cfg" "$cfg.bak"
+          sed -i '/" = "deny"$/d' "$cfg"
+          if grep -q '"deny"' "$cfg"; then exit 1; fi
+          log="$(mktemp)"
+          GITHUB_OUTPUT=/dev/null bash -e -o pipefail "$GITHUB_WORKSPACE/steps/Verify-sandbox-hides-credentials.sh" > "$log" 2>&1
+          rc=$?
+          cat "$log"
+          mv "$cfg.bak" "$cfg"
+          [ "$rc" -ne 0 ] || { echo "FAIL: verify step passed without deny"; exit 1; }
+          grep -q '凭据文件可读' "$log" || { echo "FAIL: missing credential message"; exit 1; }
+          echo "PASS: verify step rejects profile without RUNNER_TEMP deny (exit $rc)"
+
+      - name: Loopback inside the real ci profile (evidence for (b))
+        shell: bash
+        run: |
+          set -u -o pipefail; set +e
+          # shellcheck disable=SC2016
+          codex sandbox -P ci -C "$GITHUB_WORKSPACE" -- python3 -I -c '
           import socket
-          for fam, host in ((socket.AF_INET, "127.0.0.1"), (socket.AF_INET, "0.0.0.0"), (socket.AF_INET6, "::1")):
+          for fam, host in ((socket.AF_INET, "127.0.0.1"), (socket.AF_INET6, "::1")):
               try:
-                  srv = socket.socket(fam, socket.SOCK_STREAM)
-                  srv.bind((host, 0)); srv.listen(1)
-                  port = srv.getsockname()[1]
-                  target = "127.0.0.1" if host == "0.0.0.0" else host
-                  cli = socket.create_connection((target, port), timeout=5)
-                  conn, _ = srv.accept()
-                  cli.sendall(b"ping"); data = conn.recv(4)
-                  print(f"{host}: bind+connect OK ({data!r})")
-              except Exception as exc:
-                  print(f"{host}: FAILED {type(exc).__name__}: {exc}")
-          PY
-          echo "== shoes socks server on loopback"
-          port="$(python3 -I -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')"
-          dir="$(mktemp -d)"
-          printf -- '- address: 127.0.0.1:%s\n  protocol:\n    type: socks\n    udp_enabled: false\n  rules:\n  - allow-all-direct\n' "$port" > "$dir/config.yaml"
-          "$SHOES_ARG" "$dir/config.yaml" > "$dir/shoes.log" 2>&1 &
-          pid=$!
-          python3 -I - "$port" <<'PY'
-          import socket, sys, time
-          port = int(sys.argv[1])
-          deadline = time.time() + 10
-          while True:
-              try:
-                  s = socket.create_connection(("127.0.0.1", port), timeout=2)
-                  break
+                  s = socket.socket(fam, socket.SOCK_STREAM); s.bind((host, 0)); s.listen(1)
+                  print(host, "bind OK")
               except OSError as exc:
-                  if time.time() > deadline:
-                      print(f"shoes socks: connect FAILED {exc}"); sys.exit(0)
-                  time.sleep(0.2)
-          s.sendall(b"\x05\x01\x00")
-          print(f"shoes socks: greeting reply {s.recv(2)!r}")
-          PY
-          kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
-          echo "-- shoes log"; head -n 20 "$dir/shoes.log"
-          echo "== external network"
-          if curl -sS --max-time 10 -o /dev/null https://github.com 2>&1; then echo "curl github.com: REACHABLE"; else echo "curl github.com: blocked"; fi
-          python3 -I - "$GH_IP_ARG" <<'PY'
-          import socket, sys
-          try:
-              socket.create_connection((sys.argv[1], 443), timeout=5); print("raw ip:443 REACHABLE")
-          except Exception as exc:
-              print(f"raw ip:443 blocked ({type(exc).__name__}: {exc})")
-          PY
-          echo "== secrets"
-          if cat "$AUTH_ARG" >/dev/null 2>&1; then echo "auth.json READABLE"; else echo "auth.json denied"; fi
-          if ls "$RT_ARG" >/dev/null 2>&1; then echo "RUNNER_TEMP LISTABLE"; else echo "RUNNER_TEMP denied"; fi
-          echo "== writes"
-          touch /tmp/probe-w && echo "/tmp writable" || echo "/tmp NOT writable"
-          touch "$HOME/.cargo/probe-w" && echo "~/.cargo writable" || echo "~/.cargo NOT writable"
-          touch "$(dirname "$SHOES_ARG")/probe-w" 2>/dev/null && echo "shoes dir WRITABLE" || echo "shoes dir read-only"
-          rm -f /tmp/probe-w "$HOME/.cargo/probe-w"
-          PROBE
-          codex sandbox -P ci -C "$GITHUB_WORKSPACE" -- env \
-            SHOES_ARG="$SHOES" AUTH_ARG="$CODEX_HOME/auth.json" RT_ARG="$RUNNER_TEMP" GH_IP_ARG="$gh_ip" \
-            bash "$GITHUB_WORKSPACE/probe.sh"
+                  print(host, "->", type(exc).__name__, exc)
+          '
           echo "codex sandbox exit: $?"
-
-      - name: Full cargo test inside sandbox
-        shell: bash
-        run: |
-          set +e
-          summarize() {
-            echo "--- $1: exit $2"
-            grep -E '^test result:|^test .* FAILED$|skipped|未运行|Operation not permitted' "$3" | sort | uniq -c | sort -rn | head -n 80
-          }
-          for mode in none test-shoes both; do
-            case "$mode" in
-              none) extra=() ;;
-              test-shoes) extra=(PING_RUST_TEST_SHOES="$SHOES") ;;
-              both) extra=(PING_RUST_TEST_SHOES="$SHOES" PING_RUST_SHOES_E2E_BIN="$SHOES") ;;
-            esac
-            log="$GITHUB_WORKSPACE/full-$mode.log"
-            codex sandbox -P ci -C "$GITHUB_WORKSPACE/work" -- env CARGO_NET_OFFLINE=true "${extra[@]}"               cargo test --offline --no-fail-fast -- --nocapture > "$log" 2>&1
-            summarize "sandbox, env=$mode" "$?" "$log"
-          done
-          # 对照：沙箱外、同样的环境变量（证明失败来自沙箱，不是代码本身）
-          log="$GITHUB_WORKSPACE/full-outside.log"
-          (cd work && CARGO_NET_OFFLINE=true PING_RUST_TEST_SHOES="$SHOES" PING_RUST_SHOES_E2E_BIN="$SHOES"             cargo test --offline --no-fail-fast -- --nocapture > "$log" 2>&1)
-          summarize "outside sandbox, env=both" "$?" "$log"
-          exit 0
