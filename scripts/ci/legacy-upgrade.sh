@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 # Run each scenario on its own clean Ubuntu 24.04 systemd runner.
 set -euo pipefail
-scenario="${1:?L1 or C2 required}"
+scenario="${1:?L1, C2 or V3 required}"
 case "$scenario" in
   L1) old_tag=v0.1.20 ;;
   C2) old_tag=v0.2.2 ;;
+  # v0.3.0 installs shoes v0.3.6: the path most existing users take to a new pin.
+  V3) old_tag=v0.3.0 ;;
   *) exit 2 ;;
 esac
+pinned_shoes="$(sed -nE 's/^pub const SHOES_RELEASE_TAG: &str = "v([^"]+)";$/\1/p' src/installer.rs)"
+test -n "$pinned_shoes"
 . /etc/os-release
 test "$ID" = ubuntu
 test "$VERSION_ID" = 24.04
@@ -130,4 +134,7 @@ record 'normal-update stderr: no unknown-source guidance'
 assert_recorded
 record_source normal-update
 assert_runtime normal-update
+installed_shoes="$(/usr/local/bin/shoes --version | head -n 1)"
+record "normal-update: installed $installed_shoes (pinned $pinned_shoes)"
+test "$installed_shoes" = "shoes $pinned_shoes"
 record "$scenario: PASS"

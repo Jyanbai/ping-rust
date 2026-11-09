@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Reality SNI candidate check (issue #62). For every domain in the candidate
 # list: TLS 1.3 + h2 + certificate, no cross-host redirect, not on Cloudflare,
-# shoes v0.3.6 Reality end-to-end with Xray (chrome fingerprint), camouflage
+# shoes v0.3.7 Reality end-to-end with Xray (chrome fingerprint), camouflage
 # certificate on unauthenticated connections, and ShadowTLS v3 end-to-end with
 # Mihomo through ping-rust's own Clash Meta export. ASN, CNAME and a simulated
 # mainland resolution are recorded as annotations only. Every downloaded binary
@@ -12,7 +12,7 @@ PING_RUST="${PING_RUST:-target/release/ping-rust}"
 CANDIDATES="${CANDIDATES:-data/reality-sni-candidates.txt}"
 WORK="${WORK:-$RUNNER_TEMP/reality-sni-check}"
 SUMMARY="${GITHUB_STEP_SUMMARY:-/dev/null}"
-SHOES_SHA256=d09a9f5915ae8c3fc933bd86c025f2d8878d45e1dee8f0e2bb404c920de8c707
+SHOES_SHA256=c594d7b30b474b6b3ab4cd30cc0996ba39aac2e66ffaadd725894037866a2705
 XRAY_TAG=v26.6.27
 XRAY_SHA256=b3e5902d06d6282fe53cfa2fc426058b9aeaa429b2c812e20887cd47f26d08bf
 MIHOMO_TAG=v1.19.33
@@ -35,7 +35,7 @@ download_checked() {
 }
 
 download_checked \
-  "https://github.com/cfal/shoes/releases/download/v0.3.6/shoes-x86_64-unknown-linux-musl.tar.gz" \
+  "https://github.com/cfal/shoes/releases/download/v0.3.7/shoes-x86_64-unknown-linux-musl.tar.gz" \
   "$SHOES_SHA256" "$WORK/bin/shoes.tar.gz"
 tar -xzf "$WORK/bin/shoes.tar.gz" -C "$WORK/bin"
 SHOES="$WORK/bin/shoes"
@@ -293,7 +293,7 @@ if dups="$(printf '%s\n' "${domains[@]}" | sort | uniq -d)" && [ -n "$dups" ]; t
   exit 1
 fi
 
-echo "shoes v0.3.6, xray ${XRAY_TAG}: $($XRAY version 2>&1 | head -n 1), mihomo ${MIHOMO_TAG}"
+echo "shoes v0.3.7, xray ${XRAY_TAG}: $($XRAY version 2>&1 | head -n 1), mihomo ${MIHOMO_TAG}"
 rows=()
 failed=0
 index=0
@@ -342,7 +342,7 @@ done
 {
   echo "## Reality SNI 候选实测"
   echo
-  echo "shoes v0.3.6；Xray ${XRAY_TAG}（fingerprint chrome）；Mihomo ${MIHOMO_TAG}。共 ${#domains[@]} 个，不通过 ${failed} 个。"
+  echo "shoes v0.3.7；Xray ${XRAY_TAG}（fingerprint chrome）；Mihomo ${MIHOMO_TAG}。共 ${#domains[@]} 个，不通过 ${failed} 个。"
   echo
   echo "| 域名 | ASN/组织 | CNAME | TLS1.3 | h2 | 证书 | 跳转 | Cloudflare | Reality 端到端 | 伪装 | ShadowTLS 端到端 | 大陆解析 | 结论 | 失败原因 |"
   echo "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"

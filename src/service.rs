@@ -125,7 +125,8 @@ fn hot_reload_unavailable_reason(
     }
 }
 
-// shoes v0.3.6 debounces parent-directory watcher events for five seconds.
+// shoes (v0.3.6 and v0.3.7, RELOAD_DEBOUNCE in src/process.rs) debounces
+// parent-directory watcher events for five seconds.
 const HOT_RELOAD_TIMEOUT: Duration = Duration::from_secs(10);
 const HOT_RELOAD_POLL: Duration = Duration::from_millis(200);
 
@@ -749,7 +750,7 @@ mod tests {
 
     #[test]
     fn hot_reload_timeout_covers_shoes_v036_debounce_window() {
-        // shoes v0.3.6 uses a five-second quiet period for parent-directory events.
+        // shoes v0.3.6/v0.3.7 use a five-second quiet period for parent-directory events.
         assert!(HOT_RELOAD_TIMEOUT > Duration::from_secs(5));
     }
 

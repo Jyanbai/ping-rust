@@ -50,7 +50,7 @@ bash <(curl --proto '=https' --tlsv1.2 -fsSL \
 
 ## 功能
 
-- 默认安装经过验收的固定 shoes Release（当前 `v0.3.6`，见 `src/installer.rs` 的 `SHOES_RELEASE_TAG`），不跟随上游 latest；上游有更新 Release 时 Update Center 仅提示“未经验证”，不会自动安装
+- 默认安装经过验收的固定 shoes Release（当前 `v0.3.7`，见 `src/installer.rs` 的 `SHOES_RELEASE_TAG`），不跟随上游 latest；上游有更新 Release 时 Update Center 仅提示“未经验证”，不会自动安装
 - 从 GitHub Release 下载 shoes，自动匹配 x86_64/aarch64 与 GNU/musl，强制校验官方 SHA-256 digest；GNU 资产不兼容时安全回退 static musl
 - 使用 cargo 从与 schema CI 相同的 cfal/shoes 固定源码提交编译安装；低于 1 GiB 内存时自动单任务并关闭 LTO，避免换页风暴
 - 生成经过固定 shoes schema 验证的协议预设；每项均是可直接部署的完整协议栈
@@ -73,7 +73,7 @@ bash <(curl --proto '=https' --tlsv1.2 -fsSL \
 
 ### VLESS-ENC（v0.3.0）
 
-菜单第 **14** 项，或运行 `sudo prs add vless-enc`。默认使用 x25519、native、0rtt、600s，Vision 默认关闭。密钥由已安装的 shoes v0.3.6 生成。
+菜单第 **14** 项，或运行 `sudo prs add vless-enc`。默认使用 x25519、native、0rtt、600s，Vision 默认关闭。密钥由已安装的 shoes 生成。
 
 **此预设不套 TLS 或 Reality；安全性完全依赖 VLESS Encryption。** 服务端为原生 TCP，客户端为 `security=none&type=tcp`。decryption 只写入权限 0600 的节点 profile 和聚合运行配置；state、分享链接及客户端导出仅保存客户端 encryption。
 
@@ -259,7 +259,7 @@ vless://...security=reality...pbk=...&sid=...#VLESS-REALITY-25448
 
 ### Hot Reload
 
-热重载要求 shoes 来源为 `verified-pin`，revision 等于 `3737e07467387044e677ae7cf8b1c16d291f1b68`，服务已运行、unit 内容与加载路径未被修改、没有 drop-in。shoes v0.3.6 监听配置父目录，源码中的去抖窗口为 5 秒；默认一键安装使用 GitHub Release 来源，因此不启用 Verified Hot Reload。
+热重载要求 shoes 来源为 `verified-pin`，revision 等于 `ee44a397e6850193e86a1ae66639f037f963822d`（v0.3.7），服务已运行、unit 内容与加载路径未被修改、没有 drop-in。shoes v0.3.7 监听配置父目录，源码中的去抖窗口为 5 秒（`src/process.rs` 的 `RELOAD_DEBOUNCE`，与 v0.3.6 相同）；默认一键安装使用 GitHub Release 来源，因此不启用 Verified Hot Reload。
 
 在 `prs → 6) 更新 → shoes 内核` 中选择已验证固定 pin，或执行：
 
@@ -269,7 +269,7 @@ sudo ping-rust update --method cargo
 
 切换需要 Rust、C linker、Git 与构建依赖，会从源码编译 shoes，耗时取决于 CPU、磁盘和缓存。低于 1 GiB 内存不建议编译；需为编译预留内存、swap 和磁盘空间，实测耗时与峰值见验收记录。安装成功后 provenance 才记录为 `verified-pin`。切回 Release 不会启用热重载；已知降级仍需明确允许。
 
-满足前置条件时，新增监听、修改监听端口和删除非最后节点会尝试 shoes 原生配置热重载。ping-rust 通过同一目录内的原子替换触发父目录 watcher，等待时间高于 v0.3.6 的去抖窗口；不会再触碰额外锚点文件，避免重复重载。只有 MainPID 不变、服务保持 active、预期监听出现且旧监听消失时才算成功。候选配置仍先通过 `shoes --dry-run`；失败会恢复旧配置与服务状态，并记录 journal 中的实际重载次数。
+满足前置条件时，新增监听、修改监听端口和删除非最后节点会尝试 shoes 原生配置热重载。ping-rust 通过同一目录内的原子替换触发父目录 watcher，等待时间高于 shoes 的去抖窗口；不会再触碰额外锚点文件，避免重复重载。只有 MainPID 不变、服务保持 active、预期监听出现且旧监听消失时才算成功。候选配置仍先通过 `shoes --dry-run`；失败会恢复旧配置与服务状态，并记录 journal 中的实际重载次数。
 
 只改显示名称或公网地址等不影响运行 YAML 的信息无需服务动作。凭据等无法从监听端口证明已生效的修改继续重启 shoes；首次部署仍启动服务，删除最后一个节点仍停止服务。备份恢复、链式代理切换和 shoes 二进制更新保持原有服务处理流程。
 
@@ -688,6 +688,10 @@ ping-rust/
 
 
 
+
+### shoes v0.3.7 升级说明
+
+v0.3.0 之后的下一版起，默认 shoes Release 和源码 pin 升级到 v0.3.7（commit `ee44a397e6850193e86a1ae66639f037f963822d`）。v0.3.7 带来 Xray 兼容的 Sudoku TCP 掩码 `sudoku_mask`（上游 #246、#252，只支持 TCP），供后续 VLESS-ENC 外观选项使用；`shoes --version` 在版本行之后追加 `target:` / `compiler:` 两行，ping-rust 只读取第一行；watcher 去抖窗口和 REALITY 目标握手记录布局要求与 v0.3.6 相同。
 
 ### shoes v0.3.6 兼容说明
 

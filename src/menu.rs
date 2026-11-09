@@ -2113,7 +2113,7 @@ mod tests {
             MenuControl::Continue
         );
         for failure in [
-            anyhow::anyhow!("请求 shoes 固定 Release v0.3.6 失败"),
+            anyhow::anyhow!("请求 shoes 固定 Release v0.3.7 失败"),
             anyhow::anyhow!("未找到 systemctl；当前系统可能未使用 systemd"),
         ] {
             assert_eq!(

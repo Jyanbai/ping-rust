@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Debian 12 systemd acceptance for the v0.2.2 -> v0.3.6 migration path.
+# Debian 12 systemd acceptance for the v0.2.2 -> pinned shoes (v0.3.7) migration path.
 # All external release assets are pinned by version and SHA-256.
 set -euo pipefail
 
@@ -9,7 +9,7 @@ OLD_TAG=v0.2.2
 OLD_ASSET=ping-rust-x86_64-unknown-linux-musl.tar.gz
 OLD_ASSET_SHA256=66a8502a199c31971ab474545ecc18661c4cfd2dc1b0afe81511b33aaf04ba0b
 OLD_SHOES_VERSION=0.2.7
-NEW_SHOES_VERSION=0.3.6
+NEW_SHOES_VERSION=0.3.7
 SERVER=127.0.0.1
 export NO_COLOR=1 TERM=dumb
 mkdir -p "$WORK/download" "$WORK/records"

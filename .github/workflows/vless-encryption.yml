@@ -27,9 +27,9 @@ jobs:
           directory="$RUNNER_TEMP/vless-enc-binaries"
           mkdir -p "$directory"
           curl -fsSL --retry 3 --proto '=https' --tlsv1.2 \
-            https://github.com/cfal/shoes/releases/download/v0.3.6/shoes-x86_64-unknown-linux-musl.tar.gz \
+            https://github.com/cfal/shoes/releases/download/v0.3.7/shoes-x86_64-unknown-linux-musl.tar.gz \
             -o "$directory/shoes.tar.gz"
-          echo "d09a9f5915ae8c3fc933bd86c025f2d8878d45e1dee8f0e2bb404c920de8c707  $directory/shoes.tar.gz" | sha256sum --check --strict
+          echo "c594d7b30b474b6b3ab4cd30cc0996ba39aac2e66ffaadd725894037866a2705  $directory/shoes.tar.gz" | sha256sum --check --strict
           tar -xzf "$directory/shoes.tar.gz" -C "$directory"
           sudo install -m 0755 "$directory/shoes" /usr/local/bin/shoes
           # Record the same honest Release provenance as the installer. The
@@ -42,8 +42,8 @@ jobs:
           os.umask(0o077)
           root = Path('/var/lib/ping-rust')
           root.mkdir(parents=True, exist_ok=True, mode=0o700)
-          record = {'source': 'github-release', 'version': '0.3.6', 'revision': None,
-                    'release_tag': 'v0.3.6', 'binary_sha256': hashlib.sha256(Path('/usr/local/bin/shoes').read_bytes()).hexdigest()}
+          record = {'source': 'github-release', 'version': '0.3.7', 'revision': None,
+                    'release_tag': 'v0.3.7', 'binary_sha256': hashlib.sha256(Path('/usr/local/bin/shoes').read_bytes()).hexdigest()}
           (root / 'shoes-install.json').write_text(json.dumps(record))
           (root / 'shoes-install.json').chmod(0o600)
           PY
