@@ -34,9 +34,6 @@ on:
       - Backward compatibility (v0.2.1 reads new files)
     types: [completed]
     branches: [main]
-  # 临时：PR 分支上 dry-run 验证，合并前删除
-  push:
-    branches: [claude/modest-jones-f38c44]
   schedule:
     - cron: '41 * * * *'
   workflow_dispatch:
@@ -69,7 +66,7 @@ jobs:
           github.event.workflow_run.head_branch == 'main' &&
           github.event.workflow_run.head_repository.full_name == github.repository
         ) ||
-        github.event_name == 'schedule' || github.event_name == 'push' ||
+        github.event_name == 'schedule' ||
         (
           github.event_name == 'workflow_dispatch' &&
           github.actor == github.repository_owner
@@ -91,8 +88,8 @@ jobs:
           REPO: ${{ github.repository }}
           # workflow_run 时为触发事件的提交；schedule 为空（只对最近的提交和打开的 issue 对账）。
           EVENT_SHA: ${{ github.event.workflow_run.head_sha }}
-          INPUT_RUN_ID: ${{ github.event_name == 'push' && '42580129094' || inputs.run_id }}
-          DRY_RUN: ${{ (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.dry_run)) && '1' || '0' }}
+          INPUT_RUN_ID: ${{ inputs.run_id }}
+          DRY_RUN: ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '1' || '0' }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           WATCHED: |-
             CI
@@ -104,22 +101,3 @@ jobs:
             VLESS-ENC interoperability
             Backward compatibility (v0.2.1 reads new files)
         run: python3 scripts/ci/main_watch.py
-      - name: 临时：其余失败运行的分类（dry-run）
-        if: github.event_name == 'push'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          DRY_RUN: '1'
-          WATCHED: |-
-            CI
-            Ubuntu 24.04 acceptance
-            Chain proxy systemd acceptance
-            shoes schema compatibility
-            Legacy instance upgrade
-            Linux performance and reliability baseline
-            VLESS-ENC interoperability
-            Backward compatibility (v0.2.1 reads new files)
-        run: |
-          for id in 42580129079 42580129029 42580128997 42580129148 42580129089 42580129126; do
-            INPUT_RUN_ID="$id" python3 scripts/ci/main_watch.py | grep -E '判定：|^  - ' || true
-          done
