@@ -24,10 +24,10 @@ use crate::{config, performance, utils};
 
 const RELEASE_TAG_API_PREFIX: &str = "https://api.github.com/repos/cfal/shoes/releases/tags/";
 /// 经过验收的 shoes GitHub Release；默认安装、bootstrap 与 `update --method release` 只安装此 tag。
-pub const SHOES_RELEASE_TAG: &str = "v0.3.6";
+pub const SHOES_RELEASE_TAG: &str = "v0.3.7";
 const SHOES_GIT_REPOSITORY: &str = "https://github.com/cfal/shoes";
-const SHOES_SCHEMA_REVISION: &str = "3737e07467387044e677ae7cf8b1c16d291f1b68";
-const SHOES_SCHEMA_VERSION: &str = "0.3.6";
+const SHOES_SCHEMA_REVISION: &str = "ee44a397e6850193e86a1ae66639f037f963822d";
+const SHOES_SCHEMA_VERSION: &str = "0.3.7";
 const MAX_ARCHIVE_SIZE: u64 = 128 * 1024 * 1024;
 const MAX_BINARY_SIZE: u64 = 128 * 1024 * 1024;
 const LOW_MEMORY_THRESHOLD_KIB: u64 = 1024 * 1024;
@@ -281,7 +281,7 @@ pub(crate) async fn install_locked_with_options(
 
 /// Install a new shoes binary without validating the old on-disk config. The
 /// caller must immediately run the managed migration transaction before any
-/// service restart; this is needed because v0.3.6 intentionally rejects the
+/// service restart; this is needed because v0.3.6+ intentionally rejects the
 /// v0.2.x wildcard rule spelling.
 pub(crate) async fn install_locked_for_migration(
     method: InstallMethod,
@@ -748,8 +748,8 @@ mod tests {
         std::fs::write(&destination, b"installed shoes").unwrap();
         assert!(destination.is_file());
         assert!(!dir.path().join("shoes-install.json").exists());
-        assert!(!downgrade_allowed(None, Some("v0.3.6"), false));
-        let message = unknown_shoes_source_message("v0.3.6");
+        assert!(!downgrade_allowed(None, Some("v0.3.7"), false));
+        let message = unknown_shoes_source_message("v0.3.7");
         assert!(
             message.contains("无法确认当前 shoes 的安装来源"),
             "{message}"
@@ -776,37 +776,48 @@ mod tests {
             parse_version_output(b"\n", b"shoes 0.3.6\n").unwrap(),
             "shoes 0.3.6"
         );
+        // shoes v0.3.7 起 --version 在首行之后追加 target / compiler 两行。
+        assert_eq!(
+            parse_version_output(
+                b"shoes 0.3.7\ntarget: x86_64-unknown-linux-musl\ncompiler: rustc 1.99.1\n",
+                b""
+            )
+            .unwrap(),
+            "shoes 0.3.7"
+        );
         assert!(parse_version_output(b"\n", b"\n").is_err());
     }
     #[test]
     fn unverified_release_notice_only_for_newer_github_release() {
-        let notice = unverified_installed_notice(&release_provenance("0.3.7")).unwrap();
+        let notice = unverified_installed_notice(&release_provenance("0.3.8")).unwrap();
         assert_eq!(
             notice,
             format!(
-                "当前 shoes v0.3.7 未经 ping-rust 验证；可执行 sudo ping-rust update --method release --allow-downgrade 回到 {SHOES_RELEASE_TAG}"
+                "当前 shoes v0.3.8 未经 ping-rust 验证；可执行 sudo ping-rust update --method release --allow-downgrade 回到 {SHOES_RELEASE_TAG}"
             )
         );
-        assert!(notice.ends_with("回到 v0.3.6"));
+        assert!(notice.ends_with("回到 v0.3.7"));
+        assert!(unverified_installed_notice(&release_provenance("0.3.7")).is_none());
+        assert!(unverified_installed_notice(&release_provenance("0.3.6")).is_none());
         assert!(unverified_installed_notice(&release_provenance("0.2.7")).is_none());
         assert!(unverified_installed_notice(&release_provenance("0.2.6")).is_none());
         let mut pin = release_provenance("0.3.2");
         pin.source = "verified-pin".to_owned();
         assert!(unverified_installed_notice(&pin).is_none());
         assert!(unverified_installed_notice(&ShoesProvenance::default()).is_none());
-        let mut tagged = release_provenance("v0.3.7");
-        tagged.version = Some("v0.3.7".to_owned());
+        let mut tagged = release_provenance("v0.3.8");
+        tagged.version = Some("v0.3.8".to_owned());
         assert!(unverified_installed_notice(&tagged)
             .unwrap()
-            .contains("shoes v0.3.7 "));
+            .contains("shoes v0.3.8 "));
     }
 
     #[test]
     fn release_install_is_pinned_to_verified_tag() {
-        assert_eq!(SHOES_RELEASE_TAG, "v0.3.6");
+        assert_eq!(SHOES_RELEASE_TAG, "v0.3.7");
         assert_eq!(
             pinned_release_api(),
-            "https://api.github.com/repos/cfal/shoes/releases/tags/v0.3.6"
+            "https://api.github.com/repos/cfal/shoes/releases/tags/v0.3.7"
         );
         assert!(!pinned_release_api().contains("latest"));
     }
@@ -826,14 +837,16 @@ mod tests {
 
     #[test]
     fn pinned_release_metadata_must_match_tag() {
-        assert!(ensure_pinned_release_tag("v0.3.6").is_ok());
+        assert!(ensure_pinned_release_tag("v0.3.7").is_ok());
+        assert!(ensure_pinned_release_tag("v0.3.6").is_err());
         assert!(ensure_pinned_release_tag("v0.3.2").is_err());
     }
 
     #[test]
     fn upstream_newer_release_notice_is_informational_only() {
-        let notice = newer_upstream_release_notice("v0.3.7").unwrap();
-        assert!(notice.contains("v0.3.7") && notice.contains("未经验证"));
+        let notice = newer_upstream_release_notice("v0.3.8").unwrap();
+        assert!(notice.contains("v0.3.8") && notice.contains("未经验证"));
+        assert!(newer_upstream_release_notice("v0.3.7").is_none());
         assert!(newer_upstream_release_notice("v0.3.6").is_none());
         assert!(newer_upstream_release_notice("v0.2.6").is_none());
         assert!(newer_upstream_release_notice("garbage").is_none());
@@ -909,7 +922,7 @@ mod tests {
         fs::write(&binary, b"verified shoes").unwrap();
         let provenance = ShoesProvenance {
             source: "verified-pin".to_owned(),
-            version: Some("0.3.6".to_owned()),
+            version: Some(SHOES_SCHEMA_VERSION.to_owned()),
             revision: Some(SHOES_SCHEMA_REVISION.to_owned()),
             release_tag: None,
             binary_sha256: None,

@@ -29,8 +29,8 @@ permissions:
 env:
   GITHUB_TOKEN: ${{ github.token }}
   PUBLIC_VERSION: 0.1.15
-  SHOES_ARCHIVE_SHA256: d09a9f5915ae8c3fc933bd86c025f2d8878d45e1dee8f0e2bb404c920de8c707
-  SHOES_URL: https://github.com/cfal/shoes/releases/download/v0.3.6/shoes-x86_64-unknown-linux-musl.tar.gz
+  SHOES_ARCHIVE_SHA256: c594d7b30b474b6b3ab4cd30cc0996ba39aac2e66ffaadd725894037866a2705
+  SHOES_URL: https://github.com/cfal/shoes/releases/download/v0.3.7/shoes-x86_64-unknown-linux-musl.tar.gz
 
 jobs:
   root-systemd:
@@ -1492,8 +1492,8 @@ jobs:
           docker exec ping-rust-debian \
             /opt/ping-rust-current/bin/ping-rust --version
 
-          archive="$RUNNER_TEMP/shoes-v0.3.6.tar.gz"
-          directory="$RUNNER_TEMP/shoes-v0.3.6"
+          archive="$RUNNER_TEMP/shoes-v0.3.7.tar.gz"
+          directory="$RUNNER_TEMP/shoes-v0.3.7"
           curl --fail --location --retry 3 --proto '=https' --tlsv1.2 \
             --output "$archive" "$SHOES_URL"
           echo "$SHOES_ARCHIVE_SHA256  $archive" | sha256sum --check --strict

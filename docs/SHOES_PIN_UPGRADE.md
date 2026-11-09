@@ -1,6 +1,6 @@
 # shoes pin 升级检查清单
 
-目标 pin：shoes v0.3.6，commit `3737e07467387044e677ae7cf8b1c16d291f1b68`。
+目标 pin：shoes v0.3.7，commit `ee44a397e6850193e86a1ae66639f037f963822d`（上一个 pin：v0.3.6，`3737e07467387044e677ae7cf8b1c16d291f1b68`）。
 
 1. 在独立分支同步 `src/installer.rs` 与所有 workflow 的 Release tag、源码 commit、下载 URL 和 SHA-256 digest。
 2. 用 `shoes --version` 记录实际运行版本；用 `shoes --dry-run` 检查 `examples/*.yaml`、生成协议、Chain、Pool、ShadowTLS 和 H2MUX。
@@ -13,6 +13,14 @@
 
 v0.3.6 对规则通配主机名不再接受旧的 `masks: '*.example.com'` 字符串；生成配置使用 `masks: {domain_pattern: ['*.example.com']}`。兼容夹具中的旧 UUID 也已统一为 version 4/标准 variant，满足 v0.3.6 的严格校验。
 
-## watcher 验收结论
+## v0.3.7 升级记录
+
+- 上游 v0.3.6..v0.3.7 共 46 个提交，配置模块大幅重写（compiler / lower / resolved），schema 兼容性以 CI 的 dry-run、兼容夹具和验收结果为准。
+- `src/process.rs` 的 `RELOAD_DEBOUNCE` 仍为 5 秒；`src/reality/reality_target_flight.rs` 与 v0.3.6 完全相同。
+- `--version` 输出变为 `shoes <版本>` + `target:` + `compiler:` 三行（上游 #282）；ping-rust 只取首行，记录的版本来自 `SHOES_SCHEMA_VERSION` 常量。从源码编译时版本为 `0.3.7+g<commit>`。
+- `rust-version` 仍为 1.99.1，源码编译的工具链要求不变。
+- 必需检查名 "Debian 12 v0.2.2 to shoes v0.3.6 migration" 是规则集里登记的名称，未改名；实际迁移目标是当前 pin。
+
+## watcher 验收结论（v0.3.6）
 
 shoes v0.3.6 监听聚合配置的父目录并对事件去抖；上游源码 `RELOAD_DEBOUNCE` 为 5 秒。ping-rust 使用同目录原子替换，等待时间为 10 秒，覆盖该窗口。旧的硬链接锚点通知已移除，避免临时文件和候选文件写入造成额外重载。最终结果以 MainPID、监听集合和 journal 计数为证据；未实际运行的外部握手、Mihomo 连接或 Update Center 路径必须标记为“未验证”。

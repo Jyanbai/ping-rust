@@ -326,13 +326,13 @@ mod tests {
             records.push((remaining[0], length));
             remaining = &remaining[5 + length..];
         }
-        assert_eq!(records.len(), 3, "shoes v0.3.6 要求三条记录：{records:?}");
+        assert_eq!(records.len(), 3, "shoes（v0.3.6 起）要求三条记录：{records:?}");
         assert_eq!(records[0].0, 22);
         assert_eq!(records[1], (20, 1));
         assert_eq!(records[2].0, 23);
         assert!(
             records[2].1 > 512,
-            "shoes v0.3.6 要求合并加密记录大于 512 字节：{records:?}"
+            "shoes（v0.3.6 起）要求合并加密记录大于 512 字节：{records:?}"
         );
     }
 
@@ -383,7 +383,7 @@ mod tests {
         };
         let _serial = SHOES_E2E.lock().await;
         let target = tls_target(&rustls::version::TLS13).await;
-        // shoes v0.3.6 的 Reality dest 必须是域名，IP 会被拒绝（REALITY requires a hostname destination）。
+        // shoes（v0.3.6 起）的 Reality dest 必须是域名，IP 会被拒绝（REALITY requires a hostname destination）。
         let target_address = format!("localhost:{}", target.address.port());
         for mode in [Mode::Reality, Mode::ShadowTls] {
             let origin = origin().await;

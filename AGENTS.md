@@ -33,7 +33,7 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 ```
 
-部分测试需要 shoes 二进制：`PING_RUST_TEST_SHOES`、`PING_RUST_SHOES_E2E_BIN` 指向 shoes v0.3.6（下载地址和 SHA-256 见 `.github/workflows/ci.yml`）。没有 shoes、不能绑定端口或不能联网时，这些测试会失败或跳过，写明"未运行"即可，CI 会完整测试。
+部分测试需要 shoes 二进制：`PING_RUST_TEST_SHOES`、`PING_RUST_SHOES_E2E_BIN` 指向固定版本的 shoes（当前 v0.3.7，下载地址和 SHA-256 见 `.github/workflows/ci.yml`）。没有 shoes、不能绑定端口或不能联网时，这些测试会失败或跳过，写明"未运行"即可，CI 会完整测试。
 
 ## 工作规则
 

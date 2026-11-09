@@ -2851,7 +2851,10 @@ async fn validate_candidate_with_shoes(yaml: &str, directory: &Path) -> Result<(
     match validate_candidate_with_binary(yaml, directory, Path::new(utils::SHOES_BIN)).await {
         Ok(()) => Ok(()),
         Err(error) if yaml.contains("domain_pattern:") => {
-            bail!("请先升级 shoes 到 v0.3.6 后再修改配置：{error:#}")
+            bail!(
+                "请先升级 shoes 到 {} 后再修改配置：{error:#}",
+                crate::installer::SHOES_RELEASE_TAG
+            )
         }
         Err(error) => Err(error),
     }

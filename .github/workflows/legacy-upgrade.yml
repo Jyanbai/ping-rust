@@ -33,7 +33,7 @@ jobs:
       fail-fast: true
       max-parallel: 1
       matrix:
-        scenario: [L1, C2]
+        scenario: [L1, C2, V3]
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
