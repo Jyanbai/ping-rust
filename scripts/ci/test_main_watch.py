@@ -727,8 +727,8 @@ class ReconcileTest(unittest.TestCase):
         self.fake.runs[5] = run_dict(5, "CI", sha=older)
         self.fake.jobs[5] = [{"id": 50, "name": "x", "conclusion": "failure", "steps": []}]
         self.fake.logs[50] = INFRA_LOG
-        code, _ = mw.main(["--repo", REPO, "--watched", "\n".join(WATCHED)], gh=self.fake,
-                          stream=io.StringIO(), environ={})
+        code = mw.main(["--repo", REPO, "--watched", "\n".join(WATCHED)], gh=self.fake,
+                       stream=io.StringIO(), environ={})
         self.assertEqual(code, 0)
         self.assertIn(older, self.only_issue()["body"])
 
