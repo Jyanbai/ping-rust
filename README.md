@@ -691,7 +691,15 @@ ping-rust/
 
 ### shoes v0.3.7 升级说明
 
-v0.3.0 之后的下一版起，默认 shoes Release 和源码 pin 升级到 v0.3.7（commit `ee44a397e6850193e86a1ae66639f037f963822d`）。v0.3.7 带来 Xray 兼容的 Sudoku TCP 掩码 `sudoku_mask`（上游 #246、#252，只支持 TCP），供后续 VLESS-ENC 外观选项使用；`shoes --version` 在版本行之后追加 `target:` / `compiler:` 两行，ping-rust 只读取第一行；watcher 去抖窗口和 REALITY 目标握手记录布局要求与 v0.3.6 相同。
+v0.3.0 之后的下一版起，默认 shoes Release 和源码 pin 升级到 v0.3.7（commit `ee44a397e6850193e86a1ae66639f037f963822d`，[上游发布说明](https://github.com/cfal/shoes/releases/tag/v0.3.7)）。
+
+对 ping-rust 的影响：
+
+- **新能力**：Xray 兼容的 Sudoku TCP 掩码 `sudoku_mask`（上游 #246、#252，可与 Xray FinalMask 互通，只支持 TCP），用于 VLESS-ENC 的可选外观。
+- **`shoes --version`**：版本行之后追加 `target:` / `compiler:` 两行（`shoes -V` 仍是一行）。ping-rust 只读取第一行，记录的版本来自固定常量。
+- **不变**：watcher 去抖窗口（5 秒）、REALITY 目标握手记录布局要求、源码编译的 Rust 最低版本（1.99.1）。
+- **上游的破坏性变更不影响 ping-rust 生成的配置**：v0.3.7 删除了 `type: fallback` 客户端组和 `health_check`，改变了 `rule_group` 的含义，DNS 的 `client_chain: [a, b]` 改为依次经过，并弃用 `client_proxy`；`global_limits` 改名为 `global_settings`（旧名仍可用但会警告）。ping-rust 不生成客户端组、`rule_group`、DNS 配置或 `client_proxy`，也一直省略 `global_limits`，链式代理使用未弃用的 `client_chains`。已有节点的配置无需迁移，升级验收（含从 v0.3.0 + shoes v0.3.6 升级）已在 CI 中通过。
+- **上游其他新增**（ping-rust 目前未使用）：原生 Hysteria2 / TUIC v5 客户端（含 Salamander、端口跳跃）、WebSocket early-data、AnyTLS 客户端会话复用、`global_settings.ntp` 应用内时间校正、`default_dns` 与静态 `hosts`、远程规则源、路由 `conditions` 与 UDP 协议识别、Linux 桌面托管 TUN，以及 Linux ARMv7 和 MIPS 发布构建。
 
 ### shoes v0.3.6 兼容说明
 
