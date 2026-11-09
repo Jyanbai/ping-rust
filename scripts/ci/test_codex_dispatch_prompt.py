@@ -132,5 +132,51 @@ class IssuePromptTest(unittest.TestCase):
         self.assertIn(f"api repos/{REPO}/issues/7/comments", log)
 
 
+class SandboxRulesTest(unittest.TestCase):
+    """prompt 要如实说明沙箱里哪些测试跑不了。
+
+    在 runner 上实测（Codex CLI 0.166.0，权限配置 ci）：关闭网络时 seccomp 禁止创建
+    TCP/UDP socket，127.0.0.1 也不行；依赖 shoes 的测试没设环境变量时直接返回、显示 ok。
+    """
+
+    def build_prompt(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        work = Path(temporary.name)
+        (work / "instruction.txt").write_text("修复 README 里的失效链接\n", encoding="utf-8")
+        output = work / "github_output"
+        output.touch()
+        env = {
+            **os.environ,
+            "RUNNER_TEMP": str(work),
+            "GITHUB_OUTPUT": str(output),
+            "REPO": REPO,
+            "OWNER": OWNER,
+            "MODE": "new",
+            "BASE": "main",
+            "RUN_ID": "42",
+        }
+        result = subprocess.run(
+            ["bash", "-e", "-o", "pipefail", "-c", step_script(STEP_NAME)],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return (work / "prompt.txt").read_text(encoding="utf-8")
+
+    def test_rules_say_socket_and_shoes_tests_cannot_pass_in_sandbox(self):
+        prompt = self.build_prompt()
+        self.assertIn("修复 README 里的失效链接", prompt)
+        # 监听 / 连接端口的测试会失败，不能为此改代码或测试。
+        self.assertIn("127.0.0.1", prompt)
+        self.assertIn("Operation not permitted", prompt)
+        # 静默跳过的 shoes 测试不能算通过，要在最终回复里写"未验证"。
+        self.assertIn("PING_RUST_SHOES_E2E_BIN", prompt)
+        self.assertIn("未验证", prompt)
+        self.assertNotIn("跳过即可", prompt)
+
+
 if __name__ == "__main__":
     unittest.main()
