@@ -9,7 +9,7 @@
 
 核心逻辑全部位于 Rust 源码中；`scripts/install.sh` 只负责执行 Rust 前的架构检测、下载、SHA-256 校验与严格解包，原子安装、快捷命令所有权判断和首次部署均由已校验的 Rust 二进制完成。
 
-> 当前版本：[`v0.3.0`](https://github.com/Jyanbai/ping-rust/releases/tag/v0.3.0)，升级要求见[正式发版说明](docs/RELEASE_NOTES_v0.3.0.md)。v0.3.0 新增 VLESS-ENC，自动迁移通配符路由规则，并将新建 Snell v3 节点默认 cipher 改为 aes-128-gcm。v0.2.0 引入 Update Center、Verified Hot Reload、Chain Proxy 2.0、规则路由和受验证范围内的 H2MUX；v0.2.1 增加 Pool 节点批量测试、热重载不可用原因提示和 NaiveProxy 测试证书有效期管理；v0.2.2 将默认安装的 shoes 固定为经过验证的 v0.2.7（已装更新的未验证版本时提示回退命令），YAML 库换成 serde-saphyr（修复 RUSTSEC-2024-0449），`--version` 额外输出构建 commit。**热重载需要固定 pin 构建；默认一键安装使用 GitHub Release 来源，监听变更使用受控重启。**支持 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks、AnyTLS、VLESS-TLS-Vision、VLESS-WS-TLS、Trojan-TLS、Trojan-REALITY、VMess-WS-TLS、SOCKS5、Snell v3、NaiveProxy 和 VLESS-ENC 十四种受管协议。用户只选择完整协议，不需要理解或手动组合传输层、安全层与内层协议。
+> 当前版本：[`v0.3.0`](https://github.com/Jyanbai/ping-rust/releases/tag/v0.3.0)，升级要求见[正式发版说明](docs/RELEASE_NOTES_v0.3.0.md)。v0.3.0 新增 VLESS-ENC，自动迁移通配符路由规则，并将新建 Snell v3 节点默认 cipher 改为 aes-128-gcm。v0.2.0 引入 Update Center、Verified Hot Reload、Chain Proxy 2.0、规则路由和受验证范围内的 H2MUX；v0.2.1 增加 Pool 节点批量测试、热重载不可用原因提示和 NaiveProxy 测试证书有效期管理；v0.2.2 将默认安装的 shoes 固定为经过验证的 v0.2.7（已装更新的未验证版本时提示回退命令），YAML 库换成 serde-saphyr（修复 RUSTSEC-2024-0449），`--version` 额外输出构建 commit。**热重载需要固定 pin 构建；默认一键安装使用 GitHub Release 来源，监听变更使用受控重启。**支持 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks、AnyTLS、VLESS-TLS-Vision、VLESS-WS-TLS、Trojan-TLS、Trojan-REALITY、VMess-WS-TLS、SOCKS5、Snell v3、NaiveProxy、VLESS-ENC 和 [VLESS-XHTTP-REALITY](docs/wiki/VLESS-XHTTP-REALITY.md) 十五种受管协议。用户只选择完整协议，不需要理解或手动组合传输层、安全层与内层协议。
 
 完整文档：[Wiki](https://github.com/Jyanbai/ping-rust/wiki) · [快速开始](https://github.com/Jyanbai/ping-rust/wiki/Quick-Start) · [链式代理](https://github.com/Jyanbai/ping-rust/wiki/Chain-Proxy) · [故障排查](https://github.com/Jyanbai/ping-rust/wiki/Troubleshooting)
 
@@ -313,7 +313,7 @@ VMess WebSocket TLS、非 Vision VLESS WebSocket TLS 和 Trojan TLS 可在“更
 
 sing-box 导出会携带 `multiplex.protocol=h2mux`；固定 shoes 上的 VMess/VLESS WebSocket TLS 和 Trojan TLS 已通过本地 TCP、并发流、half-close 与大 payload 验证，sing-box 1.14.2 已通过导出配置检查及 Trojan H2MUX 数据面测试。Mihomo H2MUX 存在已知兼容问题，开启偏好时拒绝 Mihomo 导出；NekoBox、普通分享 URI 与 QR 仍可用于普通连接，但不携带 H2MUX 设置。VLESS Vision、Shadowsocks、SS2022 + ShadowTLS、Snell v3 及其它协议不提供 H2MUX 开关。H2MUX UDP 尚未验证或启用；Pool、Chain 和路由语义不受该偏好影响。
 
-首次安装流程是：`install.sh → 自动安装 ping-rust/shoes → 自动随机端口部署 VLESS-REALITY → 复制 URL`，中间零输入。Reality 未指定 SNI 时会自动检测内置名单并选择可用目标（规则见下文）；客户端指纹固定为 `chrome`。后续日常流程是：`prs → 1 → 选择协议 → 输入端口/直接回车随机`；Shadowsocks 会额外选择加密方式和密码，SS 2022 密码不符合所选 cipher 的 Base64 密钥长度时会警告并自动替换。其余协议自动生成 UUID、密码、Reality 密钥、WebSocket 路径或证书。SOCKS5 快速添加默认生成安全随机用户名和密码并启用 UDP ASSOCIATE；Snell v3 快速添加默认使用 `aes-128-gcm`，生成随机密码并启用 UDP-over-TCP。NaiveProxy 要求明确选择受信任证书或自签名测试模式，不会静默生成生产自签名配置。添加或查看配置成功后直接退出 `prs`；主菜单输入 `0` 退出，任意子菜单输入 `0` 返回主菜单。自动端口从 `20000..=65535` 的高位范围选择；菜单协议选择固定使用连续编号 `1..=13`。信息只会在配置通过 `shoes --dry-run`、原子写入、systemd 启动且确认为 active 后输出；失败会恢复原配置和服务状态。
+首次安装流程是：`install.sh → 自动安装 ping-rust/shoes → 自动随机端口部署 VLESS-REALITY → 复制 URL`，中间零输入。Reality 未指定 SNI 时会自动检测内置名单并选择可用目标（规则见下文）；客户端指纹固定为 `chrome`。后续日常流程是：`prs → 1 → 选择协议 → 输入端口/直接回车随机`；Shadowsocks 会额外选择加密方式和密码，SS 2022 密码不符合所选 cipher 的 Base64 密钥长度时会警告并自动替换。其余协议自动生成 UUID、密码、Reality 密钥、WebSocket 路径或证书。SOCKS5 快速添加默认生成安全随机用户名和密码并启用 UDP ASSOCIATE；Snell v3 快速添加默认使用 `aes-128-gcm`，生成随机密码并启用 UDP-over-TCP。NaiveProxy 要求明确选择受信任证书或自签名测试模式，不会静默生成生产自签名配置。添加或查看配置成功后直接退出 `prs`；主菜单输入 `0` 退出，任意子菜单输入 `0` 返回主菜单。自动端口从 `20000..=65535` 的高位范围选择；菜单协议选择固定使用连续编号 `1..=15`。信息只会在配置通过 `shoes --dry-run`、原子写入、systemd 启动且确认为 active 后输出；失败会恢复原配置和服务状态。
 
 非交互方式：
 
@@ -349,9 +349,12 @@ sudo prs add trojan-reality
 sudo prs add vmess-ws-tls
 sudo prs add socks5
 sudo prs add snell
+sudo prs add vless-xhttp-reality
 ```
 
 SOCKS5 支持 TCP CONNECT 与 UDP ASSOCIATE，默认启用用户名/密码认证。SOCKS5 本身不提供传输加密，更适合作为工具型代理、内网代理或链式出口。高级添加可关闭 UDP，或在明确警告后主动选择无认证模式。Snell v3 高级添加可选择 cipher、密码和 UDP-over-TCP 开关；选择 `aes-256-gcm` 或 `chacha20-ietf-poly1305` 时会显示 Mihomo 兼容性警告。
+
+[VLESS-XHTTP-REALITY](docs/wiki/VLESS-XHTTP-REALITY.md) 使用 shoes 原生 XHTTP，放在 REALITY 目标内部，无需自己的域名或证书。只支持 v2rayN / Xray 客户端，通过分享链接或二维码导入；Mihomo、sing-box 和 NekoBox 导出明确拒绝。固定 `mode: auto`，REALITY 客户端默认走 stream-one，不支持 Vision。path 默认 `/` 加 16 位随机小写十六进制，可用 `--xhttp-path /my-path` 指定；“更改配置”支持端口、SNI 和 path，改 path 的确认默认 N。高级添加原有 1–14 项不变，末尾新增 **15) VLESS-XHTTP-REALITY**，主菜单不变。公网监听建议按 [shoes v0.3.7 文档](https://github.com/cfal/shoes/blob/v0.3.7/docs/src/content/docs/zh-cn/protocols/xhttp.md) 显式配置 `limits`，生成器不默认开启。只有添加该协议的机器才会写出旧版不认识的 state 结构，添加后不能直接降级到 v0.2.1。
 
 WebSocket 路径默认安全随机生成；需要固定路径时可使用完整命令：
 

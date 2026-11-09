@@ -85,6 +85,9 @@ pub fn stored_share_uri(profile: &ManagedProfile, override_server: Option<&str>)
 }
 
 pub fn render(profile: &ManagedProfile, format: ClientFormat, server: &str) -> Result<String> {
+    if matches!(profile.credentials, Credentials::VlessXhttpReality { .. }) {
+        bail!("该客户端不支持 XHTTP，请用分享链接导入 v2rayN 或 Xray");
+    }
     if matches!(profile.credentials, Credentials::VlessEnc { .. })
         && matches!(format, ClientFormat::SingBox | ClientFormat::Nekobox)
     {
@@ -110,6 +113,9 @@ fn clash_meta(profile: &ManagedProfile, server: &str) -> Result<String> {
         bail!("当前 Mihomo H2MUX 存在已知兼容问题；请使用 sing-box 导出，或关闭 H2MUX preference 后导出普通 Mihomo 节点");
     }
     let proxy = match &profile.credentials {
+        Credentials::VlessXhttpReality { .. } => {
+            bail!("该客户端不支持 XHTTP，请用分享链接导入 v2rayN 或 Xray")
+        }
         Credentials::VlessEnc {
             user_id,
             encryption,
@@ -417,6 +423,9 @@ fn sing_box(profile: &ManagedProfile, server: &str) -> Result<String> {
         .context("生成 sing-box ShadowTLS JSON 失败");
     }
     let mut outbound: Value = match &profile.credentials {
+        Credentials::VlessXhttpReality { .. } => {
+            bail!("该客户端不支持 XHTTP，请用分享链接导入 v2rayN 或 Xray")
+        }
         Credentials::VlessEnc { .. } => bail!("sing-box 暂不支持 VLESS Encryption"),
         Credentials::Reality {
             user_id,
@@ -679,17 +688,33 @@ pub fn share_uri(profile: &ManagedProfile, server: &str) -> Result<String> {
             short_id,
             server_name,
             ..
+        }
+        | Credentials::VlessXhttpReality {
+            user_id,
+            public_key,
+            short_id,
+            server_name,
+            ..
         } => {
             let mut query = Serializer::new(String::new());
+            query.append_pair("encryption", "none");
+            if matches!(profile.credentials, Credentials::Reality { .. }) {
+                query.append_pair("flow", "xtls-rprx-vision");
+            }
             query
-                .append_pair("encryption", "none")
-                .append_pair("flow", "xtls-rprx-vision")
                 .append_pair("security", "reality")
                 .append_pair("sni", server_name)
                 .append_pair("fp", config::REALITY_FINGERPRINT)
                 .append_pair("pbk", public_key)
-                .append_pair("sid", short_id)
-                .append_pair("type", "tcp");
+                .append_pair("sid", short_id);
+            if let Credentials::VlessXhttpReality { xhttp, .. } = &profile.credentials {
+                query
+                    .append_pair("type", "xhttp")
+                    .append_pair("path", &xhttp.path)
+                    .append_pair("mode", "auto");
+            } else {
+                query.append_pair("type", "tcp");
+            }
             Ok(format!(
                 "vless://{user_id}@{host}:{}?{}#{fragment}",
                 profile.port,

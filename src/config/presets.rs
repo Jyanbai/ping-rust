@@ -19,6 +19,7 @@ mod tuic;
 pub(super) mod vless_enc;
 mod vless_tls_vision;
 mod vless_ws_tls;
+mod vless_xhttp_reality;
 mod vmess_ws_tls;
 
 type Generator = fn(&GenerationRequest, &Path, Uuid) -> Result<GeneratedPreset>;
@@ -198,6 +199,17 @@ const PRESETS: &[PresetDescriptor] = &[
         udp_required: false,
         generator: vless_enc::generate,
     },
+    PresetDescriptor {
+        protocol: Protocol::VlessXhttpReality,
+        menu_number: 15,
+        menu_label: "VLESS-XHTTP-REALITY",
+        advanced_label: "VLESS-XHTTP-REALITY",
+        slug: "vless-xhttp-reality",
+        display_prefix: "VLESS-XHTTP-REALITY",
+        tcp_required: true,
+        udp_required: false,
+        generator: vless_xhttp_reality::generate,
+    },
 ];
 
 pub(super) fn all() -> &'static [PresetDescriptor] {
@@ -247,6 +259,7 @@ mod tests {
             Protocol::Snell,
             Protocol::NaiveProxy,
             Protocol::VlessEnc,
+            Protocol::VlessXhttpReality,
         ];
         assert_eq!(PRESETS.len(), expected.len());
         for (index, (preset, protocol)) in PRESETS.iter().zip(expected).enumerate() {

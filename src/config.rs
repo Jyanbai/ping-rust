@@ -41,6 +41,8 @@ mod naive_certificate_tests;
 #[cfg(test)]
 mod vless_encryption_tests;
 #[cfg(test)]
+mod xhttp_reality_tests;
+#[cfg(test)]
 mod yaml_fixture_tests;
 
 #[cfg(test)]
@@ -116,6 +118,8 @@ pub enum Protocol {
     NaiveProxy,
     #[value(name = "vless-enc")]
     VlessEnc,
+    #[value(name = "vless-xhttp-reality")]
+    VlessXhttpReality,
 }
 
 impl Protocol {
@@ -153,8 +157,10 @@ impl Protocol {
     }
 
     pub fn uses_reality(self, anytls_mode: AnyTlsMode) -> bool {
-        matches!(self, Self::Reality | Self::TrojanReality)
-            || (matches!(self, Self::AnyTls) && anytls_mode == AnyTlsMode::Reality)
+        matches!(
+            self,
+            Self::Reality | Self::TrojanReality | Self::VlessXhttpReality
+        ) || (matches!(self, Self::AnyTls) && anytls_mode == AnyTlsMode::Reality)
     }
 
     pub fn requires_certificate(self, anytls_mode: AnyTlsMode) -> bool {
@@ -354,6 +360,7 @@ pub(crate) fn generated_socks5_username() -> String {
 
 #[derive(Clone, Debug)]
 pub struct GenerationOptions {
+    pub xhttp_path: Option<String>,
     pub vless_enc_mode: VlessEncMode,
     pub vless_enc_auth: VlessEncAuth,
     pub vless_enc_vision: bool,
@@ -388,6 +395,7 @@ pub struct GenerationOptions {
 impl Default for GenerationOptions {
     fn default() -> Self {
         Self {
+            xhttp_path: None,
             vless_enc_mode: VlessEncMode::default(),
             vless_enc_auth: VlessEncAuth::default(),
             vless_enc_vision: false,
@@ -435,6 +443,7 @@ pub struct GenerationRequest {
 }
 
 pub enum ProfileChange {
+    XhttpPath(String),
     VlessEncMode(VlessEncMode),
     VlessEncAuth(VlessEncAuth),
     VlessEncVision(bool),
@@ -495,6 +504,14 @@ pub(crate) struct ChainProxyUpdateResult {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub enum Credentials {
+    VlessXhttpReality {
+        user_id: Uuid,
+        private_key: String,
+        public_key: String,
+        short_id: String,
+        server_name: String,
+        xhttp: XhttpSettings,
+    },
     VlessEnc {
         user_id: Uuid,
         encryption: String,
@@ -580,6 +597,18 @@ pub enum Credentials {
         alpn_protocols: Vec<String>,
         websocket_path: String,
     },
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct XhttpSettings {
+    pub path: String,
+    pub mode: XhttpMode,
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum XhttpMode {
+    Auto,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -683,6 +712,7 @@ impl ManagedProfile {
 
     pub fn protocol(&self) -> Protocol {
         match &self.credentials {
+            Credentials::VlessXhttpReality { .. } => Protocol::VlessXhttpReality,
             Credentials::VlessEnc { .. } => Protocol::VlessEnc,
             Credentials::Reality { .. } => Protocol::Reality,
             Credentials::Hysteria2 { .. } => Protocol::Hysteria2,
@@ -714,6 +744,7 @@ impl ManagedProfile {
 
     pub fn protocol_name(&self) -> &'static str {
         match &self.credentials {
+            Credentials::VlessXhttpReality { .. } => "VLESS-XHTTP-REALITY",
             Credentials::VlessEnc { .. } => "VLESS-ENC",
             Credentials::Reality { .. } => "VLESS-Reality-Vision",
             Credentials::Hysteria2 { .. } => "Hysteria2",
@@ -748,6 +779,7 @@ impl ManagedProfile {
         match &self.credentials {
             Credentials::VlessEnc { .. } => "-",
             Credentials::Reality { server_name, .. }
+            | Credentials::VlessXhttpReality { server_name, .. }
             | Credentials::Hysteria2 { server_name, .. }
             | Credentials::Tuic { server_name, .. }
             | Credentials::AnyTls { server_name, .. }
@@ -1113,6 +1145,7 @@ pub(crate) async fn update_profile_locked(
                 bail!("客户端地址必须为 1..=255 个非控制字符");
             }
         }
+        ProfileChange::XhttpPath(path) => validate_xhttp_path(path)?,
         ProfileChange::RealityServerName(server_name) => validate_server_name(server_name)?,
         ProfileChange::ShadowTlsServerName(server_name) => validate_server_name(server_name)?,
         ProfileChange::ShadowTlsHandshake(handshake) => validate_host_port(handshake)?,
@@ -1212,6 +1245,32 @@ fn apply_profile_change(
     change: ProfileChange,
 ) -> Result<()> {
     match change {
+        ProfileChange::XhttpPath(path) => {
+            validate_xhttp_path(&path)?;
+            let Credentials::VlessXhttpReality {
+                xhttp, server_name, ..
+            } = &mut profile.credentials
+            else {
+                bail!("只有 VLESS-XHTTP-REALITY 支持更改 XHTTP path");
+            };
+            let ServerProtocol::Tls {
+                reality_targets, ..
+            } = &mut server.protocol
+            else {
+                bail!("XHTTP 配置与管理状态不一致");
+            };
+            let target = reality_targets
+                .get_mut(server_name)
+                .context("XHTTP 配置中缺少 REALITY 目标")?;
+            let InnerProtocol::Xhttp {
+                path: server_path, ..
+            } = &mut target.protocol
+            else {
+                bail!("REALITY 内层协议不是 XHTTP");
+            };
+            *server_path = path.clone();
+            xhttp.path = path;
+        }
         ProfileChange::VlessEncMode(mode) => {
             update_vless_enc(server, profile, Some(mode), None, None)?
         }
@@ -1333,6 +1392,7 @@ fn apply_profile_change(
         ProfileChange::RealityServerName(new_name) => {
             let server_name = match &mut profile.credentials {
                 Credentials::Reality { server_name, .. }
+                | Credentials::VlessXhttpReality { server_name, .. }
                 | Credentials::Trojan {
                     server_name,
                     security: TlsSecurity::Reality { .. },
@@ -1794,6 +1854,14 @@ fn regenerate_profile_credentials(
             public_key,
             short_id,
             server_name,
+        }
+        | Credentials::VlessXhttpReality {
+            user_id,
+            private_key,
+            public_key,
+            short_id,
+            server_name,
+            ..
         } => {
             let ServerProtocol::Tls {
                 reality_targets, ..
@@ -1810,13 +1878,7 @@ fn regenerate_profile_credentials(
                 reality_targets.values_mut().next()
             }
             .context("Reality 配置中缺少目标")?;
-            let InnerProtocol::Vless {
-                user_id: server_user_id,
-                ..
-            } = &mut target.protocol
-            else {
-                bail!("Reality 内层协议不是 VLESS");
-            };
+            let server_user_id = vless_user_id_mut(&mut target.protocol)?;
             let keypair = generate_reality_keypair();
             let new_user_id = Uuid::new_v4();
             let new_short_id = random_hex(8);
@@ -2039,6 +2101,7 @@ fn only_reality_target_mut(server: &mut ServerConfig) -> Result<&mut RealityTarg
 
 fn vless_user_id_mut(protocol: &mut InnerProtocol) -> Result<&mut Uuid> {
     match protocol {
+        InnerProtocol::Xhttp { protocol, .. } => vless_user_id_mut(protocol),
         InnerProtocol::Vless { user_id, .. } => Ok(user_id),
         InnerProtocol::Websocket { targets } if targets.len() == 1 => {
             vless_user_id_mut(&mut targets[0].protocol)
@@ -2187,6 +2250,47 @@ fn ensure_servers_match_state(servers: &[ServerConfig], profiles: &[ManagedProfi
             );
         }
         let protocol_matches = match (&server.protocol, profile.protocol()) {
+            (
+                ServerProtocol::Tls {
+                    reality_targets,
+                    tls_targets,
+                    shadowtls_targets,
+                },
+                Protocol::VlessXhttpReality,
+            ) => {
+                if let Credentials::VlessXhttpReality {
+                    user_id,
+                    private_key,
+                    short_id,
+                    server_name,
+                    xhttp,
+                    ..
+                } = &profile.credentials
+                {
+                    let target_matches = reality_targets.get(server_name).is_some_and(|target| {
+                        let InnerProtocol::Xhttp { path, mode, protocol } = &target.protocol else {
+                            return false;
+                        };
+                        !target.vision
+                            && target.private_key == *private_key
+                            && target.short_ids == [short_id.clone()]
+                            && path == &xhttp.path
+                            && mode == &xhttp.mode
+                            && matches!(protocol.as_ref(), InnerProtocol::Vless { user_id: id, .. } if id == user_id)
+                    });
+                    tls_targets.is_empty()
+                        && shadowtls_targets.is_empty()
+                        && reality_targets.len() == 1
+                        && profile.certificate_path.is_none()
+                        && profile.certificate_key_path.is_none()
+                        && server.transport.is_none()
+                        && server.quic_settings.is_none()
+                        && validate_xhttp_path(&xhttp.path).is_ok()
+                        && target_matches
+                } else {
+                    false
+                }
+            }
             (
                 ServerProtocol::Vless {
                     user_id,
@@ -2645,7 +2749,24 @@ pub(crate) fn validate_naive_fallback(path: &str) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn validate_xhttp_path(path: &str) -> Result<()> {
+    if !path.starts_with('/')
+        || !path
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"/-._~".contains(&b))
+    {
+        bail!("XHTTP path 必须以 / 开头，且只含 URL 安全字符（字母、数字、/、-、.、_、~）");
+    }
+    Ok(())
+}
+
 fn validate_request(request: &GenerationRequest) -> Result<()> {
+    if let Some(path) = &request.options.xhttp_path {
+        if request.protocol != Protocol::VlessXhttpReality {
+            bail!("--xhttp-path 仅适用于 VLESS-XHTTP-REALITY");
+        }
+        validate_xhttp_path(path)?;
+    }
     if request.protocol != Protocol::VlessEnc
         && (request.options.vless_enc_mode != VlessEncMode::Native
             || request.options.vless_enc_auth != VlessEncAuth::X25519

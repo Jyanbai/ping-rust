@@ -72,3 +72,30 @@ grep -H -v '^exit=0$' -x "$WORK"/new/* /dev/null | grep 'exit=' || true
 
 /usr/local/bin/shoes --dry-run /etc/shoes/config.yaml
 echo "backward compatibility: PASS"
+
+# Only an explicit addition of the new protocol writes its unknown enum variant.
+# Keep the successful legacy checks above, then prove the downgrade boundary with
+# the actual v0.2.1 binary rather than silently dropping the unsupported profile.
+cp /etc/shoes/ping-rust-state.json "$WORK/legacy-state.json"
+jq -e 'all(.profiles[]; .credentials | has("VlessXhttpReality") | not)' \
+  "$WORK/legacy-state.json" >/dev/null
+"$NEW" add vless-xhttp-reality --port 24433 --name compat-xhttp \
+  --server-address "$SERVER" --server-name www.cloudflare.com --yes >"$WORK/xhttp-add.txt" 2>&1
+python3 - "$WORK/legacy-state.json" /etc/shoes/ping-rust-state.json <<'PY'
+import json
+import sys
+with open(sys.argv[1]) as source:
+    before = json.load(source)
+with open(sys.argv[2]) as source:
+    after = json.load(source)
+assert after["profiles"][:-1] == before["profiles"]
+assert "VlessXhttpReality" in after["profiles"][-1]["credentials"]
+assert after["chain_proxy"] == before["chain_proxy"]
+PY
+if "$OLD" info >"$WORK/old/xhttp-unsupported.txt" 2>&1; then
+  echo 'v0.2.1 unexpectedly accepted XHTTP state; inspect downgrade behavior' >&2
+  exit 1
+fi
+grep -F 'unknown variant' "$WORK/old/xhttp-unsupported.txt"
+grep -F 'VlessXhttpReality' "$WORK/old/xhttp-unsupported.txt"
+echo 'v0.2.1: legacy state readable; explicit XHTTP addition rejects downgrade as expected'

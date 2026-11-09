@@ -59,6 +59,11 @@ send_choice 9
 expect_or_fail {工具:} "tools menu"
 expect_or_fail {1\) 导出客户端配置\r?\n2\) 高级添加配置\r?\n3\) SNI 检测\r?\n4\) SNI 扫描} "tools order"
 expect_or_fail {请选择 \[0-8\]: } "tools prompt"
+send_choice 2
+expect_or_fail {14\) VLESS-ENC\r?\n15\) VLESS-XHTTP-REALITY\r?\n0\) 返回} "appended advanced protocol"
+expect_or_fail {请选择 \[0-15\]: } "advanced protocol prompt"
+send_choice 0
+tools_menu
 send_choice 3
 expect_or_fail {输入 SNI 域名，空格分隔[^\r\n]*（输入 0 返回）：} "SNI check prompt"
 send_choice 0

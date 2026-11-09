@@ -140,6 +140,11 @@ pub(super) struct RealityTarget {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub(super) enum InnerProtocol {
+    Xhttp {
+        path: String,
+        mode: super::XhttpMode,
+        protocol: Box<InnerProtocol>,
+    },
     Vless {
         user_id: Uuid,
         udp_enabled: bool,

@@ -113,6 +113,99 @@ JSON
   return "$result"
 }
 
+# Native XHTTP inside REALITY: each negative case starts a fresh client so
+# an established HTTP/2 connection cannot mask a wrong path or short ID.
+run_xhttp_reality() {
+  local mode="$1" case_name="$2" port="$3"
+  local case_dir
+  case_dir="$(mktemp -d "$WORK/xhttp-${mode}-${case_name}.XXXXXX")"
+  local prefix="$WORK/logs/xhttp-${mode}-${case_name}"
+  mkdir -p "$case_dir"
+  if ! "$PING_RUST" generate vless-xhttp-reality --port "$port" \
+      --server-name www.cloudflare.com --xhttp-path /0123456789abcdef \
+      --output "$case_dir/config.yaml" >"${prefix}-generate.txt" 2>&1; then
+    return 1
+  fi
+  "$SHOES" --dry-run "$case_dir/config.yaml" >"${prefix}-dry-run.txt" 2>&1 || return 1
+  python3 - "$case_dir/ping-rust-state.json" "${prefix}-xray.json" "$mode" "$case_name" "$port" <<'PYTHON' || return 1
+import json
+import os
+import sys
+state_path, output, mode, case_name, port = sys.argv[1:]
+with open(state_path) as source:
+    credentials = json.load(source)["profiles"][0]["credentials"]["VlessXhttpReality"]
+short_id = credentials["short_id"]
+path = credentials["xhttp"]["path"]
+if case_name == "wrong-short-id":
+    short_id = ("0" if short_id[0] != "0" else "1") + short_id[1:]
+elif case_name == "wrong-path":
+    path += "-wrong"
+client = {
+    "log": {"loglevel": "warning"},
+    "inbounds": [{"listen": "127.0.0.1", "port": 18082, "protocol": "socks", "settings": {"udp": False}}],
+    "outbounds": [{"protocol": "vless", "settings": {"vnext": [{
+        "address": "127.0.0.1", "port": int(port),
+        "users": [{"id": credentials["user_id"], "encryption": "none"}],
+    }]}, "streamSettings": {
+        "network": "xhttp", "security": "reality",
+        "realitySettings": {"serverName": credentials["server_name"], "fingerprint": "chrome",
+                            "password": credentials["public_key"], "publicKey": credentials["public_key"],
+                            "shortId": short_id},
+        "xhttpSettings": {"path": path, "mode": mode},
+    }}],
+}
+with open(output, "w") as destination:
+    json.dump(client, destination)
+os.chmod(output, 0o600)
+PYTHON
+  "$XRAY_26" run -test -c "${prefix}-xray.json" >"${prefix}-xray-check.txt" 2>&1 || return 1
+  "$SHOES" "$case_dir/config.yaml" >"${prefix}-shoes.log" 2>&1 &
+  local shoes_pid=$!
+  ACTIVE_PIDS="$shoes_pid"
+  if ! wait_tcp "$port"; then
+    kill "$shoes_pid" 2>/dev/null || true
+    ACTIVE_PIDS=""
+    return 1
+  fi
+  "$XRAY_26" run -c "${prefix}-xray.json" >"${prefix}-xray.log" 2>&1 &
+  local xray_pid=$!
+  ACTIVE_PIDS="$shoes_pid $xray_pid"
+  if ! wait_tcp 18082 || ! kill -0 "$xray_pid"; then
+    kill "$shoes_pid" "$xray_pid" 2>/dev/null || true
+    wait "$shoes_pid" "$xray_pid" 2>/dev/null || true
+    ACTIVE_PIDS=""
+    return 1
+  fi
+  local result=0
+  if curl --noproxy '' --fail --silent --show-error --max-time 10 \
+      --proxy socks5h://127.0.0.1:18082 http://127.0.0.1:18080/marker \
+      >"${prefix}-response.txt" 2>"${prefix}-curl.txt"; then
+    if [ "$case_name" != valid ] || ! grep -Fxq 'external client acceptance' "${prefix}-response.txt"; then
+      result=1
+    fi
+  elif [ "$case_name" = valid ]; then
+    result=1
+  fi
+  # A crashed server or client does not count as an authentication rejection.
+  if ! kill -0 "$shoes_pid" || ! kill -0 "$xray_pid"; then result=1; fi
+  kill "$shoes_pid" "$xray_pid" 2>/dev/null || true
+  wait "$shoes_pid" "$xray_pid" 2>/dev/null || true
+  ACTIVE_PIDS=""
+  return "$result"
+}
+
+xhttp_results=()
+xhttp_port=25210
+for mode in auto packet-up; do
+  for case_name in valid wrong-short-id wrong-path; do
+    xhttp_port=$((xhttp_port + 1))
+    if run_xhttp_reality "$mode" "$case_name" "$xhttp_port"; then result=PASS; else result=FAIL; fi
+    xhttp_results+=("${mode}/${case_name}=${result}")
+    echo "xhttp-reality xray ${XRAY_26_TAG} ${mode}/${case_name}: ${result}"
+  done
+done
+printf '%s\n' "${xhttp_results[@]}" >"$WORK/logs/xhttp-reality-summary.txt"
+
 echo "xray ${XRAY_26_TAG}: $($XRAY_26 version 2>&1 | head -n 1)"
 echo "xray ${XRAY_MIN_TAG}: $($XRAY_MIN version 2>&1 | head -n 1)"
 legacy_fixture="$(cd "$(dirname "$0")/../../tests/fixtures/yaml/chain-v2" && pwd)/config.yaml"
@@ -266,8 +359,10 @@ done
 
 printf '%s\n' "${reality_results[@]}" >"$WORK/logs/reality-summary.txt"
 printf '%s\n' "${snell_results[@]}" >"$WORK/logs/snell-summary.txt"
-sudo chmod -R a+rX "$WORK"
+# Keep XHTTP runtime/state private keys at their generated 0600 permissions.
+sudo find "$WORK" -path "$WORK/xhttp-*" -prune -o -exec chmod a+rX {} +
 echo 'external client acceptance complete'
-if printf '%s\n' "${reality_results[@]}" | grep -Fq '=FAIL' || [ "$minimum_result" != PASS ]; then
+if printf '%s\n' "${reality_results[@]}" | grep -Fq '=FAIL' || [ "$minimum_result" != PASS ] \
+    || printf '%s\n' "${xhttp_results[@]}" | grep -Fq '=FAIL'; then
   exit 1
 fi

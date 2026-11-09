@@ -77,6 +77,7 @@ enum ChangeAction {
     RegenerateCredentials,
     Password,
     RealityServerName,
+    XhttpPath,
     RecommendSni,
     ShadowsocksCipher,
     ShadowTlsPassword,
@@ -562,7 +563,36 @@ async fn change_config_menu() -> Result<()> {
     }
 }
 
-async fn change_profile_menu(profile: &config::ManagedProfile) -> Result<()> {
+fn read_xhttp_path_change(
+    reader: &mut impl io::BufRead,
+    writer: &mut impl io::Write,
+    current: &str,
+) -> Result<Option<ProfileChange>> {
+    let path = input::read_text(
+        reader,
+        writer,
+        "新 XHTTP path",
+        Some(current),
+        false,
+        |path| {
+            config::validate_xhttp_path(path)?;
+            Ok(path.to_owned())
+        },
+    )?;
+    if path == current
+        || !input::read_confirm(
+            reader,
+            writer,
+            "更改 path 会使旧链接失效，确认更改？",
+            false,
+        )?
+    {
+        return Ok(None);
+    }
+    Ok(Some(ProfileChange::XhttpPath(path)))
+}
+
+fn change_actions(profile: &config::ManagedProfile) -> Vec<(ChangeAction, &'static str)> {
     let mut actions = vec![
         (ChangeAction::Port, "更改端口"),
         (ChangeAction::Name, "更改配置名称"),
@@ -585,7 +615,10 @@ async fn change_profile_menu(profile: &config::ManagedProfile) -> Result<()> {
             ));
             actions.push((ChangeAction::VlessEncVision, "开启或关闭 Vision"));
         }
-        Protocol::Reality | Protocol::TrojanReality => {
+        Protocol::Reality | Protocol::TrojanReality | Protocol::VlessXhttpReality => {
+            if profile.protocol() == Protocol::VlessXhttpReality {
+                actions.push((ChangeAction::XhttpPath, "更改 XHTTP path"));
+            }
             actions.push((ChangeAction::RealityServerName, "更改 SNI"));
             actions.push((ChangeAction::RecommendSni, "检测与推荐 SNI"));
         }
@@ -654,6 +687,11 @@ async fn change_profile_menu(profile: &config::ManagedProfile) -> Result<()> {
     if profile.h2mux_eligible() {
         actions.push((ChangeAction::H2Mux, "配置 H2MUX 客户端偏好"));
     }
+    actions
+}
+
+async fn change_profile_menu(profile: &config::ManagedProfile) -> Result<()> {
+    let actions = change_actions(profile);
     let action_labels = actions.iter().map(|(_, label)| *label).collect::<Vec<_>>();
     let Some(action_index) = select_numbered("选择更改项目", &action_labels)? else {
         return Ok(());
@@ -794,6 +832,17 @@ async fn change_profile_menu(profile: &config::ManagedProfile) -> Result<()> {
             } else {
                 ProfileChange::RealityServerName(domain)
             }
+        }
+        ChangeAction::XhttpPath => {
+            let Credentials::VlessXhttpReality { xhttp, .. } = &profile.credentials else {
+                bail!("该配置不是 VLESS-XHTTP-REALITY");
+            };
+            let Some(change) =
+                read_xhttp_path_change(&mut io::stdin().lock(), &mut io::stdout(), &xhttp.path)?
+            else {
+                return Ok(());
+            };
+            change
         }
         ChangeAction::RealityServerName => {
             let server_name = input::checked_text(
@@ -1427,6 +1476,7 @@ async fn fast_add_config_menu_once() -> Result<MenuControl> {
         let result = fast_add::execute(fast_add::AddRequest {
             interactive: true,
             vless_enc: Default::default(),
+            xhttp_path: None,
             name: None,
             protocol,
             port,
@@ -1700,6 +1750,7 @@ async fn deploy_fast_config(
     let request = fast_add::AddRequest {
         interactive: true,
         vless_enc,
+        xhttp_path: None,
         name: None,
         protocol,
         port,
@@ -2079,6 +2130,49 @@ fn uninstall_menu() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn xhttp_reality_menu_exposes_sni_and_path_and_confirms_with_default_no() {
+        let state: config::ManagedState = serde_json::from_str(include_str!(
+            "../tests/fixtures/yaml/vless-xhttp-reality/state.json"
+        ))
+        .unwrap();
+        let actions = change_actions(&state.profiles[0]);
+        for label in ["更改端口", "更改 SNI", "更改 XHTTP path"] {
+            assert!(actions.iter().any(|(_, action)| *action == label));
+        }
+        assert!(!actions
+            .iter()
+            .any(|(_, label)| label.contains("Vision") || label.contains("H2MUX")));
+        for entered in ["/changed\n\n", "/changed\nn\n", "\n"] {
+            assert!(read_xhttp_path_change(
+                &mut io::Cursor::new(entered),
+                &mut Vec::new(),
+                "/current"
+            )
+            .unwrap()
+            .is_none());
+        }
+        let mut output = Vec::new();
+        let change = read_xhttp_path_change(
+            &mut io::Cursor::new("invalid\n/changed\ny\n"),
+            &mut output,
+            "/current",
+        )
+        .unwrap();
+        assert!(matches!(change, Some(ProfileChange::XhttpPath(path)) if path == "/changed"));
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("旧链接失效"));
+        assert!(output.contains("[y/N]（输入 0 返回）"));
+        assert!(output.contains("错误！XHTTP path"));
+        for entered in ["0\n", "/changed\n0\n"] {
+            assert!(input::is_back(
+                &read_xhttp_path_change(&mut io::Cursor::new(entered), &mut Vec::new(), "/current")
+                    .err()
+                    .unwrap()
+            ));
+        }
+    }
 
     #[test]
     fn bootstrap_confirmation_only_asks_on_terminals_and_back_skips() {
