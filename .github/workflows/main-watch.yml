@@ -1,0 +1,103 @@
+name: Main watch
+
+# main 上 push 触发的验收检查失败时开或更新 main-red issue，纯基础设施失败自动重跑一次。
+#
+#   1. 被监视的 workflow（与下面 env.WATCHED 一致）在 main 的 push 上结束时触发。每次都把最近
+#      几个 main 提交和所有打开的 main-red issue 对一遍账：并发组里被顶掉的排队运行不会漏掉失败。
+#   2. 每个提交一个 issue（正文隐藏标记 <!-- main-watch sha=… -->），每次失败的运行（run id +
+#      第几次尝试）一条评论：失败的 job、步骤、判定依据、报错前若干行（总长有上限）、运行链接。
+#   3. 分类在 scripts/ci/main_watch.py：失败步骤只命中基础设施模式（下载返回 5xx、GitHub 限流、
+#      rustup / crates.io / apt / dnf / 镜像仓库网络错误）且是第 1 次尝试时，rerun failed jobs 一次；
+#      命中代码失败模式（测试失败、panic、编译错误、断言）或什么都没命中的，不重跑。
+#   4. 该提交被监视的运行全部成功后，评论并关闭 issue。
+#   5. 不派发 Codex、不改代码、不碰 Release。仓库变量 MAIN_WATCH=off 时停用。
+#
+# 定时运行兜底：用 GITHUB_TOKEN 重跑的运行结束时可能不会再触发 workflow_run，每小时对一次账，
+# 重跑成功后最晚一小时内关闭 issue。
+#
+# 安全：workflow_run 和 schedule 总是用 main 上的文件运行；提交 SHA、run id 只经环境变量传给
+# 脚本并在脚本里校验，日志内容只写进代码块。
+#
+# 手动触发（仓库所有者）：填 run_id，默认 dry-run，只打印分类结果和会写的 issue 内容，不写入、不重跑。
+
+on:
+  workflow_run:
+    # 与下面 env.WATCHED 保持一致（scripts/ci/test_main_watch.py 会检查）。
+    workflows:
+      - CI
+      - Ubuntu 24.04 acceptance
+      - Chain proxy systemd acceptance
+      - shoes schema compatibility
+      - Legacy instance upgrade
+      - Linux performance and reliability baseline
+      - VLESS-ENC interoperability
+      - Backward compatibility (v0.2.1 reads new files)
+    types: [completed]
+    branches: [main]
+  schedule:
+    - cron: '41 * * * *'
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 要分类的运行 id（main 上 push 触发的被监视运行）
+        required: true
+        type: string
+      dry_run:
+        description: 只打印分类结果和会写的 issue 内容，不写入、不重跑
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  # 真实运行全部串行（每次都完整对账，被顶掉的排队运行不丢事）；dry-run 各自独立，不顶掉真实运行。
+  group: main-watch-${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && format('dry-run-{0}', github.run_id) || 'live' }}
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    if: >-
+      vars.MAIN_WATCH != 'off' && (
+        (
+          github.event_name == 'workflow_run' &&
+          github.event.workflow_run.event == 'push' &&
+          github.event.workflow_run.head_branch == 'main' &&
+          github.event.workflow_run.head_repository.full_name == github.repository
+        ) ||
+        github.event_name == 'schedule' ||
+        (
+          github.event_name == 'workflow_dispatch' &&
+          github.actor == github.repository_owner
+        )
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read   # checkout 读分类脚本
+      actions: write   # 读失败日志、rerun failed jobs
+      issues: write    # 开、更新、关闭 main-red issue
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+      - name: Reconcile main push checks
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          # workflow_run 时为触发事件的提交；schedule 为空（只对最近的提交和打开的 issue 对账）。
+          EVENT_SHA: ${{ github.event.workflow_run.head_sha }}
+          INPUT_RUN_ID: ${{ inputs.run_id }}
+          DRY_RUN: ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '1' || '0' }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          WATCHED: |-
+            CI
+            Ubuntu 24.04 acceptance
+            Chain proxy systemd acceptance
+            shoes schema compatibility
+            Legacy instance upgrade
+            Linux performance and reliability baseline
+            VLESS-ENC interoperability
+            Backward compatibility (v0.2.1 reads new files)
+        run: python3 scripts/ci/main_watch.py
