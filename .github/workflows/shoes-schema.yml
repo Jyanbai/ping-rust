@@ -92,8 +92,10 @@ jobs:
       - name: Probe repeated atomic replacements against pinned shoes
         env:
           PING_RUST_SHOES_E2E_BIN: /usr/local/bin/shoes
+          PING_RUST_REQUIRE_E2E: "1"
         run: cargo test --locked pinned_shoes_watches_repeated_atomic_config_replacements -- --nocapture
       - name: Validate complete shoes compatibility matrix
         env:
           PING_RUST_SHOES_E2E_BIN: /usr/local/bin/shoes
+          PING_RUST_REQUIRE_E2E: "1"
         run: bash scripts/ci/validate-shoes-schema.sh

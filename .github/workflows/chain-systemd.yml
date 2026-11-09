@@ -73,6 +73,7 @@ jobs:
       - name: Exercise Chain Proxy 2.0 local traffic matrix
         env:
           PING_RUST_SHOES_E2E_BIN: /usr/local/bin/shoes
+          PING_RUST_REQUIRE_E2E: "1"
         run: cargo test --locked --test chain_v2_e2e -- --nocapture
       - name: Exercise Rust production menu, state, network exits and systemd
         shell: bash

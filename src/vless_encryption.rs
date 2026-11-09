@@ -261,7 +261,11 @@ mod tests {
     #[test]
     #[ignore = "requires the checksum-verified pinned shoes binary"]
     fn vless_encryption_real_shoes_generator() {
-        let binary = std::env::var_os("PING_RUST_TEST_SHOES").expect("set binary path");
+        // 只在 --ignored 时显式运行，缺少变量直接失败，不跳过。
+        let binary = crate::shoes_e2e::required_shoes_binary(
+            "vless_encryption::tests::vless_encryption_real_shoes_generator",
+            &[crate::shoes_e2e::TEST_SHOES],
+        );
         for mode in ["native", "xorpub", "random"] {
             for auth in ["x25519", "mlkem768"] {
                 assert!(generate_with_binary(std::path::Path::new(&binary), mode, auth).is_ok());
