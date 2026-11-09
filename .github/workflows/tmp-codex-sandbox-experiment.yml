@@ -150,40 +150,26 @@ jobs:
             bash "$GITHUB_WORKSPACE/probe.sh"
           echo "codex sandbox exit: $?"
 
-      - name: chain_v2_e2e inside sandbox
+      - name: Full cargo test inside sandbox
         shell: bash
         run: |
-          set -uo pipefail
-          codex sandbox -P ci -C "$GITHUB_WORKSPACE/work" -- env CARGO_NET_OFFLINE=true \
-            PING_RUST_TEST_SHOES="$SHOES" PING_RUST_SHOES_E2E_BIN="$SHOES" \
-            cargo test --offline --test chain_v2_e2e -- --nocapture 2>&1 | tail -n 40
-          echo "exit: ${PIPESTATUS[0]}"
-
-      - name: chain_proxy_e2e inside sandbox
-        shell: bash
-        run: |
-          set -uo pipefail
-          codex sandbox -P ci -C "$GITHUB_WORKSPACE/work" -- env CARGO_NET_OFFLINE=true \
-            PING_RUST_SHOES_E2E_BIN="$SHOES" \
-            cargo test --offline --test chain_proxy_e2e -- --nocapture 2>&1 | tail -n 40
-          echo "exit: ${PIPESTATUS[0]}"
-
-      - name: Full cargo test inside sandbox (both env vars)
-        shell: bash
-        run: |
-          set -uo pipefail
-          codex sandbox -P ci -C "$GITHUB_WORKSPACE/work" -- env CARGO_NET_OFFLINE=true \
-            PING_RUST_TEST_SHOES="$SHOES" PING_RUST_SHOES_E2E_BIN="$SHOES" \
-            cargo test --offline --no-fail-fast > "$GITHUB_WORKSPACE/full.log" 2>&1
-          echo "exit: $?"
-          grep -E '^test result:|FAILED|panicked|^failures:|^    [a-z_:]+$|Running ' "$GITHUB_WORKSPACE/full.log" | tail -n 120
-
-      - name: Full cargo test inside sandbox (PING_RUST_TEST_SHOES only, like CI)
-        shell: bash
-        run: |
-          set -uo pipefail
-          codex sandbox -P ci -C "$GITHUB_WORKSPACE/work" -- env CARGO_NET_OFFLINE=true \
-            PING_RUST_TEST_SHOES="$SHOES" \
-            cargo test --offline --no-fail-fast > "$GITHUB_WORKSPACE/ci-like.log" 2>&1
-          echo "exit: $?"
-          grep -E '^test result:|FAILED|panicked|^failures:|Running ' "$GITHUB_WORKSPACE/ci-like.log" | tail -n 80
+          set +e
+          summarize() {
+            echo "--- $1: exit $2"
+            grep -E '^test result:|^test .* FAILED$|skipped|未运行|Operation not permitted' "$3" | sort | uniq -c | sort -rn | head -n 80
+          }
+          for mode in none test-shoes both; do
+            case "$mode" in
+              none) extra=() ;;
+              test-shoes) extra=(PING_RUST_TEST_SHOES="$SHOES") ;;
+              both) extra=(PING_RUST_TEST_SHOES="$SHOES" PING_RUST_SHOES_E2E_BIN="$SHOES") ;;
+            esac
+            log="$GITHUB_WORKSPACE/full-$mode.log"
+            codex sandbox -P ci -C "$GITHUB_WORKSPACE/work" -- env CARGO_NET_OFFLINE=true "${extra[@]}"               cargo test --offline --no-fail-fast -- --nocapture > "$log" 2>&1
+            summarize "sandbox, env=$mode" "$?" "$log"
+          done
+          # 对照：沙箱外、同样的环境变量（证明失败来自沙箱，不是代码本身）
+          log="$GITHUB_WORKSPACE/full-outside.log"
+          (cd work && CARGO_NET_OFFLINE=true PING_RUST_TEST_SHOES="$SHOES" PING_RUST_SHOES_E2E_BIN="$SHOES"             cargo test --offline --no-fail-fast -- --nocapture > "$log" 2>&1)
+          summarize "outside sandbox, env=both" "$?" "$log"
+          exit 0
