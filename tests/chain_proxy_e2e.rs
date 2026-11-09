@@ -1,5 +1,5 @@
 use std::{
-    env, fs,
+    fs,
     io::{self, Read, Write},
     net::{Shutdown, SocketAddr, TcpListener, TcpStream},
     path::Path,
@@ -11,6 +11,9 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+
+#[path = "support/shoes_e2e.rs"]
+mod shoes_e2e;
 
 struct ChildGuard(Child);
 
@@ -202,8 +205,10 @@ fn origin_detection_rejects_empty_or_failed_responses() {
 
 #[test]
 fn chain_proxy_uses_authenticated_upstream_without_direct_fallback() -> io::Result<()> {
-    let Some(shoes) = env::var_os("PING_RUST_SHOES_E2E_BIN") else {
-        eprintln!("skipped: set PING_RUST_SHOES_E2E_BIN to run shoes traffic acceptance");
+    let Some(shoes) = shoes_e2e::shoes_binary(
+        "chain_proxy_uses_authenticated_upstream_without_direct_fallback",
+        &[shoes_e2e::SHOES_E2E_BIN],
+    ) else {
         return Ok(());
     };
     let shoes = Path::new(&shoes);

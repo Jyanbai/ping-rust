@@ -170,6 +170,7 @@ async fn run_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shoes_e2e::{shoes_binary, SHOES_E2E_BIN, TEST_SHOES};
     use std::{net::SocketAddr, path::PathBuf, sync::Arc};
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
@@ -191,13 +192,9 @@ mod tests {
     /// cargo 并行跑测试时，另一个用例可能在释放间隙拿到同一端口，所以需要 shoes 的用例串行执行。
     static SHOES_E2E: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-    fn shoes() -> Option<PathBuf> {
-        let binary = std::env::var_os("PING_RUST_TEST_SHOES")
-            .or_else(|| std::env::var_os("PING_RUST_SHOES_E2E_BIN"));
-        if binary.is_none() {
-            eprintln!("未运行，待 CI：本机 SNI 预检需要 PING_RUST_TEST_SHOES 和绑定端口权限");
-        }
-        binary.map(PathBuf::from)
+    fn shoes(test: &str) -> Option<PathBuf> {
+        let test = format!("sni::preflight::tests::{test}");
+        shoes_binary(&test, &[TEST_SHOES, SHOES_E2E_BIN])
     }
 
     #[test]
@@ -382,7 +379,7 @@ mod tests {
 
     #[tokio::test]
     async fn local_sni_preflight_accepts_local_tls13_target() {
-        let Some(binary) = shoes() else {
+        let Some(binary) = shoes("local_sni_preflight_accepts_local_tls13_target") else {
             return;
         };
         let _serial = SHOES_E2E.lock().await;
@@ -406,7 +403,7 @@ mod tests {
 
     #[tokio::test]
     async fn local_sni_preflight_rejects_tls12_target() {
-        let Some(binary) = shoes() else {
+        let Some(binary) = shoes("local_sni_preflight_rejects_tls12_target") else {
             return;
         };
         let _serial = SHOES_E2E.lock().await;
@@ -435,7 +432,7 @@ mod tests {
 
     #[tokio::test]
     async fn local_sni_preflight_rejects_reality_ip_destination() {
-        let Some(binary) = shoes() else {
+        let Some(binary) = shoes("local_sni_preflight_rejects_reality_ip_destination") else {
             return;
         };
         let _serial = SHOES_E2E.lock().await;
@@ -459,7 +456,8 @@ mod tests {
 
     #[tokio::test]
     async fn local_sni_preflight_timeout_cleans_process_and_private_files() {
-        let Some(binary) = shoes() else {
+        let test = "local_sni_preflight_timeout_cleans_process_and_private_files";
+        let Some(binary) = shoes(test) else {
             return;
         };
         let _serial = SHOES_E2E.lock().await;
