@@ -43,10 +43,15 @@ pub struct Options {
     /// VLESS-ENC 开启 Vision（默认关闭）
     #[arg(long)]
     pub vision: bool,
+    #[command(flatten)]
+    pub sudoku: crate::sudoku::SudokuOptions,
 }
 
 impl Options {
     pub fn warn(&self) {
+        if self.sudoku.enabled {
+            eprintln!("提示：{}", crate::sudoku::COST);
+        }
         if self.mode == VlessEncMode::Random {
             eprintln!("提示：random 外观会关闭 TCP splice。");
         }

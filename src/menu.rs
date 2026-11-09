@@ -70,6 +70,8 @@ enum ChangeAction {
     VlessEncMode,
     VlessEncAuth,
     VlessEncVision,
+    Sudoku,
+    RegenerateSudokuPassword,
     H2Mux,
     Port,
     Name,
@@ -584,6 +586,11 @@ async fn change_profile_menu(profile: &config::ManagedProfile) -> Result<()> {
                 "更改 VLESS Encryption 认证（重新生成密钥）",
             ));
             actions.push((ChangeAction::VlessEncVision, "开启或关闭 Vision"));
+            actions.push((ChangeAction::Sudoku, "开启或关闭 Sudoku 外观"));
+            actions.push((
+                ChangeAction::RegenerateSudokuPassword,
+                "重新生成 Sudoku 密码",
+            ));
         }
         Protocol::Reality | Protocol::TrojanReality => {
             actions.push((ChangeAction::RealityServerName, "更改 SNI"));
@@ -660,6 +667,23 @@ async fn change_profile_menu(profile: &config::ManagedProfile) -> Result<()> {
     };
     let action = actions[action_index].0;
     let change = match action {
+        ChangeAction::Sudoku | ChangeAction::RegenerateSudokuPassword => {
+            let Credentials::VlessEnc { sudoku, .. } = &profile.credentials else {
+                bail!("配置协议不一致");
+            };
+            let regenerate = matches!(action, ChangeAction::RegenerateSudokuPassword);
+            if sudoku.is_none() && !regenerate {
+                println!("{}", crate::sudoku::COST);
+            }
+            let Some(change) =
+                sudoku_menu_change(sudoku.as_ref(), regenerate, |prompt, default| {
+                    input::confirm(prompt, default)
+                })?
+            else {
+                return Ok(());
+            };
+            change
+        }
         ChangeAction::VlessEncMode => {
             let Some(mode) = prompt_vless_enc_mode()? else {
                 return Ok(());
@@ -1636,9 +1660,49 @@ fn prompt_vless_enc_auth() -> Result<Option<config::VlessEncAuth>> {
 }
 
 fn prompt_vless_enc_options() -> Result<Option<crate::vless_encryption::Options>> {
-    prompt_vless_enc_options_with(prompt_vless_enc_mode, prompt_vless_enc_auth, || {
-        input::confirm("开启 Vision？", false)
-    })
+    let Some(mut options) =
+        prompt_vless_enc_options_with(prompt_vless_enc_mode, prompt_vless_enc_auth, || {
+            input::confirm("开启 Vision？", false)
+        })?
+    else {
+        return Ok(None);
+    };
+    options.sudoku.enabled = read_sudoku_prompt(&mut io::stdin().lock(), &mut io::stdout())?;
+    Ok(Some(options))
+}
+
+fn read_sudoku_prompt(reader: &mut impl io::BufRead, writer: &mut impl io::Write) -> Result<bool> {
+    writeln!(writer, "{}", crate::sudoku::COST)?;
+    input::read_confirm(reader, writer, "启用 Sudoku 外观？", false)
+}
+
+fn sudoku_menu_change(
+    current: Option<&crate::sudoku::SudokuConfig>,
+    regenerate: bool,
+    confirm: impl FnOnce(&str, bool) -> Result<bool>,
+) -> Result<Option<ProfileChange>> {
+    if regenerate {
+        if current.is_none() {
+            bail!("请先开启 Sudoku 外观");
+        }
+        return Ok(
+            confirm("重新生成 Sudoku 密码？（会使旧分享链接失效）", false)?
+                .then_some(ProfileChange::RegenerateSudokuPassword),
+        );
+    }
+    let prompt = if current.is_some() {
+        "关闭 Sudoku 外观？（会使旧分享链接失效）"
+    } else {
+        "启用 Sudoku 外观？"
+    };
+    if !confirm(prompt, false)? {
+        return Ok(None);
+    }
+    Ok(Some(ProfileChange::Sudoku(if current.is_some() {
+        None
+    } else {
+        Some(crate::sudoku::SudokuConfig::generated())
+    })))
 }
 
 fn prompt_vless_enc_options_with(
@@ -1657,6 +1721,7 @@ fn prompt_vless_enc_options_with(
         mode,
         auth,
         vision,
+        sudoku: Default::default(),
     }))
 }
 
@@ -1763,6 +1828,7 @@ async fn advanced_add_config_menu() -> Result<()> {
         options.vless_enc_mode = selected.mode;
         options.vless_enc_auth = selected.auth;
         options.vless_enc_vision = selected.vision;
+        options.sudoku = selected.sudoku.config()?;
     }
     let mut shadowtls_server_name = None;
     if matches!(protocol, Protocol::Shadowsocks) {
@@ -2197,6 +2263,64 @@ mod tests {
         assert_eq!(parse_shadowsocks_mode("bad"), None);
         assert_eq!(parse_shadowsocks_mode("0"), Some(None));
         assert_eq!(parse_shadowsocks_mode(""), parse_shadowsocks_mode("1"));
+    }
+
+    #[test]
+    fn sudoku_menu_defaults_back_toggle_and_password_confirmation() {
+        let mut output = Vec::new();
+        for (answer, enabled) in [("\n", false), ("n\n", false), ("y\n", true)] {
+            let mut reader = answer.as_bytes();
+            assert_eq!(
+                read_sudoku_prompt(&mut reader, &mut output).unwrap(),
+                enabled
+            );
+        }
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains(crate::sudoku::COST));
+        assert!(text.find(crate::sudoku::COST).unwrap() < text.find("启用 Sudoku 外观？").unwrap());
+        assert!(text.contains("[y/N]（输入 0 返回）"));
+        assert!(input::is_back(
+            &read_sudoku_prompt(&mut "0\n".as_bytes(), &mut Vec::new()).unwrap_err()
+        ));
+        assert!(sudoku_menu_change(None, false, |_, default| {
+            assert!(!default);
+            Ok(false)
+        })
+        .unwrap()
+        .is_none());
+        assert!(matches!(
+            sudoku_menu_change(None, false, |_, default| {
+                assert!(!default);
+                Ok(true)
+            })
+            .unwrap(),
+            Some(ProfileChange::Sudoku(Some(_)))
+        ));
+        let config = crate::sudoku::SudokuConfig::generated();
+        assert!(matches!(
+            sudoku_menu_change(Some(&config), false, |_, default| {
+                assert!(!default);
+                Ok(true)
+            })
+            .unwrap(),
+            Some(ProfileChange::Sudoku(None))
+        ));
+        assert!(sudoku_menu_change(Some(&config), true, |prompt, default| {
+            assert!(prompt.contains("旧分享链接失效"));
+            assert!(!default);
+            Ok(false)
+        })
+        .unwrap()
+        .is_none());
+        assert!(matches!(
+            sudoku_menu_change(Some(&config), true, |_, default| {
+                assert!(!default);
+                Ok(true)
+            })
+            .unwrap(),
+            Some(ProfileChange::RegenerateSudokuPassword)
+        ));
+        assert!(sudoku_menu_change(None, true, |_, _| panic!("disabled")).is_err());
     }
 
     #[test]

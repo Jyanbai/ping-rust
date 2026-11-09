@@ -205,3 +205,249 @@ async fn vless_enc_mode_auth_and_regeneration_use_shoes_and_keep_state_public() 
         assert!(validate_with_binary(&binary, &path).await.is_ok());
     }
 }
+
+#[test]
+fn sudoku_wraps_vless_and_roundtrips_finalmask_without_changing_inner_protocol() {
+    use crate::sudoku::{SudokuAscii, SudokuConfig};
+    for vision in [false, true] {
+        for ascii in [
+            SudokuAscii::PreferEntropy,
+            SudokuAscii::Entropy,
+            SudokuAscii::PreferAscii,
+            SudokuAscii::Ascii,
+        ] {
+            let (mut server, mut profile) = sample(vision);
+            let original = crate::yaml::to_value(&server).unwrap();
+            let mask = SudokuConfig {
+                password: " test +&?/密码% ".into(),
+                ascii,
+                padding_min: 0,
+                padding_max: 10,
+            };
+            apply_profile_change(
+                &mut server,
+                &mut profile,
+                ProfileChange::Sudoku(Some(mask.clone())),
+            )
+            .unwrap();
+            let yaml = crate::yaml::to_value(&server).unwrap();
+            assert_eq!(yaml["protocol"]["type"], "sudoku_mask");
+            assert_eq!(yaml["protocol"]["password"], mask.password);
+            assert_eq!(yaml["protocol"]["ascii"], ascii.as_str());
+            assert_eq!(yaml["protocol"]["padding_min"], 0);
+            assert_eq!(yaml["protocol"]["padding_max"], 10);
+            assert_eq!(yaml["protocol"]["protocol"], original["protocol"]);
+            let uri = client::share_uri(&profile, "203.0.113.10").unwrap();
+            let parsed = url::Url::parse(&uri).unwrap();
+            let fm = parsed
+                .query_pairs()
+                .find(|(key, _)| key == "fm")
+                .unwrap()
+                .1
+                .into_owned();
+            let value: serde_json::Value = serde_json::from_str(&fm).unwrap();
+            assert_eq!(
+                fm,
+                serde_json::to_string(&value).unwrap(),
+                "must be compact JSON"
+            );
+            assert_eq!(
+                value,
+                serde_json::json!({"tcp": [{"type": "sudoku", "settings": {"password": mask.password, "ascii": ascii.as_str(), "paddingMin": 0, "paddingMax": 10}}]})
+            );
+            assert!(uri.contains("fm=%7B%22"));
+            let rebuilt = url::form_urlencoded::Serializer::new(String::new())
+                .append_pair("fm", &fm)
+                .finish();
+            assert!(uri.contains(&rebuilt));
+            let decoded_server: ServerConfig =
+                crate::yaml::from_str(&crate::yaml::to_string(&server).unwrap()).unwrap();
+            let decoded_profile: ManagedProfile =
+                serde_json::from_str(&serde_json::to_string(&profile).unwrap()).unwrap();
+            assert!(ensure_servers_match_state(&[decoded_server], &[decoded_profile]).is_ok());
+            let details = crate::cli::profile_details_text(&profile, None);
+            assert!(details.contains(&format!(
+                "外观：Sudoku（{}、padding 0–10%）",
+                ascii.as_str()
+            )));
+            assert!(!details.contains(&mask.password));
+            for format in [
+                ClientFormat::ClashMeta,
+                ClientFormat::SingBox,
+                ClientFormat::Nekobox,
+            ] {
+                assert_eq!(client::render(&profile, format, "203.0.113.10").unwrap_err().to_string(), "该客户端导出不支持 Xray FinalMask Sudoku，请用分享链接导入 v2rayN 或 Xray ≥ v26.3.27");
+            }
+            apply_profile_change(
+                &mut server,
+                &mut profile,
+                ProfileChange::VlessEncVision(!vision),
+            )
+            .unwrap();
+            assert_eq!(
+                crate::yaml::to_value(&server).unwrap()["protocol"]["protocol"]["vision"]
+                    .as_bool()
+                    .unwrap_or(false),
+                !vision
+            );
+            assert!(ensure_servers_match_state(&[server.clone()], &[profile.clone()]).is_ok());
+            let mut wrong = profile.clone();
+            let Credentials::VlessEnc {
+                sudoku: Some(sudoku),
+                ..
+            } = &mut wrong.credentials
+            else {
+                panic!()
+            };
+            sudoku.password.push('x');
+            assert!(ensure_servers_match_state(&[server.clone()], &[wrong]).is_err());
+            apply_profile_change(&mut server, &mut profile, ProfileChange::Sudoku(None)).unwrap();
+            assert_eq!(
+                crate::yaml::to_value(&server).unwrap()["protocol"]["type"],
+                "vless"
+            );
+            assert!(!client::share_uri(&profile, "203.0.113.10")
+                .unwrap()
+                .contains("fm="));
+        }
+    }
+}
+
+#[test]
+fn sudoku_toggle_and_password_rotation_preserve_credentials_and_restore_original_bytes() {
+    let (mut server, mut profile) = sample(false);
+    let yaml_before = crate::yaml::to_string(&server).unwrap();
+    let state_before = serde_json::to_string(&profile).unwrap();
+    let link_before = client::share_uri(&profile, "203.0.113.10").unwrap();
+    apply_profile_change(
+        &mut server,
+        &mut profile,
+        ProfileChange::RegenerateSudokuPassword,
+    )
+    .unwrap_err();
+    apply_profile_change(
+        &mut server,
+        &mut profile,
+        ProfileChange::Sudoku(Some(crate::sudoku::SudokuConfig::generated())),
+    )
+    .unwrap();
+    let first = client::share_uri(&profile, "203.0.113.10").unwrap();
+    apply_profile_change(
+        &mut server,
+        &mut profile,
+        ProfileChange::RegenerateSudokuPassword,
+    )
+    .unwrap();
+    assert_ne!(first, client::share_uri(&profile, "203.0.113.10").unwrap());
+    assert!(ensure_servers_match_state(&[server.clone()], &[profile.clone()]).is_ok());
+    apply_profile_change(&mut server, &mut profile, ProfileChange::Sudoku(None)).unwrap();
+    assert_eq!(crate::yaml::to_string(&server).unwrap(), yaml_before);
+    assert_eq!(serde_json::to_string(&profile).unwrap(), state_before);
+    assert_eq!(
+        client::share_uri(&profile, "203.0.113.10").unwrap(),
+        link_before
+    );
+    let restored: ManagedProfile = serde_json::from_str(&state_before).unwrap();
+    assert_eq!(serde_json::to_string(&restored).unwrap(), state_before);
+}
+
+#[test]
+fn sudoku_preset_generation_and_new_fixture_match() {
+    let state =
+        load_state_from(Path::new("tests/fixtures/yaml/vless-enc-sudoku/state.json")).unwrap();
+    let servers = load_servers(Path::new(
+        "tests/fixtures/yaml/vless-enc-sudoku/config.yaml",
+    ))
+    .unwrap();
+    ensure_servers_match_state(&servers, &state.profiles).unwrap();
+    let Credentials::VlessEnc { sudoku, .. } = &state.profiles[0].credentials else {
+        panic!()
+    };
+    let request = GenerationRequest {
+        options: GenerationOptions {
+            sudoku: sudoku.clone(),
+            ..Default::default()
+        },
+        ..tests::request(Protocol::VlessEnc, "unused.yaml".into())
+    };
+    let pair = CredentialPair {
+        encryption: format!(
+            "mlkem768x25519plus.native.0rtt.{}",
+            URL_SAFE_NO_PAD.encode([7; 32])
+        ),
+        decryption: format!(
+            "mlkem768x25519plus.native.600s.{}",
+            URL_SAFE_NO_PAD.encode([9; 32])
+        ),
+    };
+    let generated = presets::vless_enc::from_pair(&request, pair);
+    let value = crate::yaml::to_value(&generated.server).unwrap();
+    let expected = crate::yaml::to_value(&servers[0]).unwrap();
+    for key in ["type", "password", "ascii", "padding_min", "padding_max"] {
+        assert_eq!(value["protocol"][key], expected["protocol"][key]);
+    }
+    assert_eq!(value["protocol"]["protocol"]["type"], "vless");
+    assert_eq!(
+        value["protocol"]["protocol"]["decryption"],
+        expected["protocol"]["protocol"]["decryption"]
+    );
+}
+
+#[test]
+fn sudoku_disabled_legacy_state_keeps_original_serialization_bytes() {
+    let state = load_state_from(Path::new("tests/fixtures/yaml/vless-enc/state.json")).unwrap();
+    let expected =
+        include_str!("../../tests/fixtures/yaml/vless-enc-sudoku/disabled-profile.json").trim_end();
+    assert_eq!(serde_json::to_string(&state.profiles[0]).unwrap(), expected);
+    let mut value: serde_json::Value = serde_json::from_str(expected).unwrap();
+    value["credentials"]["VlessEnc"]["sudoku"] = serde_json::Value::Null;
+    let explicit_null: ManagedProfile = serde_json::from_value(value).unwrap();
+    assert_eq!(serde_json::to_string(&explicit_null).unwrap(), expected);
+    assert_eq!(client::share_uri(&state.profiles[0], "203.0.113.10").unwrap(), "vless://b85798ef-e9dc-46a4-9a87-8da4499d36d0@203.0.113.10:24444?encryption=mlkem768x25519plus.native.0rtt.BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc&security=none&type=tcp#VLESS-ENC-24444");
+    assert!(!crate::cli::profile_details_text(&state.profiles[0], None).contains("外观："));
+}
+
+#[test]
+fn sudoku_rejects_invalid_requests_and_mismatched_or_nested_masks() {
+    use crate::sudoku::SudokuConfig;
+    let mut request = tests::request(Protocol::VlessEnc, "unused.yaml".into());
+    for (min, max) in [(101, 101), (0, 101), (10, 9)] {
+        request.options.sudoku = Some(SudokuConfig {
+            padding_min: min,
+            padding_max: max,
+            ..SudokuConfig::generated()
+        });
+        assert!(validate_request(&request).is_err());
+        let (mut server, mut profile) = sample(false);
+        let before = crate::yaml::to_string(&server).unwrap();
+        assert!(apply_profile_change(
+            &mut server,
+            &mut profile,
+            ProfileChange::Sudoku(request.options.sudoku.clone())
+        )
+        .is_err());
+        assert_eq!(crate::yaml::to_string(&server).unwrap(), before);
+    }
+    request.options.sudoku = Some(SudokuConfig::generated());
+    request.protocol = Protocol::Socks5;
+    assert!(validate_request(&request).is_err());
+    let (mut server, mut profile) = sample(false);
+    let unmasked = server.clone();
+    let old_profile = profile.clone();
+    apply_profile_change(
+        &mut server,
+        &mut profile,
+        ProfileChange::Sudoku(request.options.sudoku.clone()),
+    )
+    .unwrap();
+    assert!(ensure_servers_match_state(&[unmasked], &[profile.clone()]).is_err());
+    assert!(ensure_servers_match_state(&[server.clone()], &[old_profile]).is_err());
+    let nested = ServerConfig {
+        protocol: ServerProtocol::SudokuMask {
+            settings: request.options.sudoku.unwrap(),
+            protocol: Box::new(server.protocol.clone()),
+        },
+        ..server
+    };
+    assert!(ensure_servers_match_state(&[nested], &[profile]).is_err());
+}

@@ -99,8 +99,10 @@ def client_process(args, label):
         LOGS.append((label, raw))
 
 
-def test_case(client, mode, auth, vision, index):
+def test_case(client, mode, auth, vision, index, sudoku=None):
     label = f"{client}-{mode}-{auth}-vision-{str(vision).lower()}"
+    if sudoku:
+        label += "-sudoku-" + sudoku
     port = 25100 + index
     old_pid = pid()
     args = [PRS, "add", "vless-enc", "--port", str(port), "--name", label,
@@ -108,6 +110,8 @@ def test_case(client, mode, auth, vision, index):
             "--encryption-mode", mode, "--encryption-auth", auth]
     if vision:
         args.append("--vision")
+    if sudoku:
+        args += ["--sudoku", "--sudoku-ascii", sudoku.replace("_", "-")]
     uri = command(args, label + "-add").strip()
     require(pid() != old_pid, "Release add must perform controlled restart")
     require(command(["systemctl", "is-active", "shoes"], label + "-active").strip() == "active",
@@ -137,21 +141,41 @@ def test_case(client, mode, auth, vision, index):
     require(query["encryption"] == [encryption], "URI encryption differs from state")
     details = command([PRS, "info", label], label + "-info")
     require("Encryption" in details and mode in details, "details missing encryption or mode")
-    for target in ("sing-box", "nekobox"):
+    if sudoku:
+        require("sudoku_mask" in profile_text, "server must have Sudoku mask")
+        mask = profile["credentials"]["VlessEnc"]["sudoku"]
+        require(mask["ascii"] == sudoku, "state Sudoku mode differs")
+        require(len(mask["password"]) == 24 and mask["password"].isascii()
+                and mask["password"].isalnum(), "generated Sudoku password format")
+        require("外观：Sudoku" in details, "details missing Sudoku")
+        expected = {"tcp": [{"type": "sudoku", "settings": {
+            "password": mask["password"], "ascii": sudoku, "paddingMin": 0, "paddingMax": 0}}]}
+        require(json.loads(query["fm"][0]) == expected, "URI FinalMask differs from state")
+    else:
+        require("fm" not in query, "disabled Sudoku must omit fm")
+        require("sudoku" not in profile["credentials"]["VlessEnc"], "disabled Sudoku must omit state field")
+    targets = ("clash-meta", "sing-box", "nekobox") if sudoku else ("sing-box", "nekobox")
+    for target in targets:
         result = subprocess.run([PRS, "export", target, "--profile", profile["id"], "--server", "127.0.0.1"], capture_output=True, timeout=30)
         safe(result.stdout + result.stderr)
-        require(result.returncode != 0 and "不支持 VLESS Encryption" in result.stderr.decode(), "unsupported export must refuse")
+        if sudoku:
+            require(result.returncode != 0 and "该客户端导出不支持 Xray FinalMask Sudoku，请用分享链接导入 v2rayN 或 Xray ≥ v26.3.27" in result.stderr.decode(), "Sudoku unsupported export must refuse")
+        else:
+            require(result.returncode != 0 and "不支持 VLESS Encryption" in result.stderr.decode(), "unsupported export must refuse")
 
     config = WORK / (label + (".json" if client == "xray" else ".yaml"))
     if client == "xray":
         user = {"id": parsed.username, "encryption": encryption}
         if vision:
             user["flow"] = "xtls-rprx-vision"
-        content = json.dumps({
+        xray_config = {
             "log": {"loglevel": "warning"},
             "inbounds": [{"listen": "127.0.0.1", "port": 18081, "protocol": "socks", "settings": {"udp": False}}],
             "outbounds": [{"protocol": "vless", "settings": {"vnext": [{"address": "127.0.0.1", "port": port, "users": [user]}]}, "streamSettings": {"network": "tcp", "security": "none"}}],
-        })
+        }
+        if sudoku:
+            xray_config["outbounds"][0]["streamSettings"]["finalmask"] = json.loads(query["fm"][0])
+        content = json.dumps(xray_config)
         client_args = [os.environ["XRAY"], "run", "-c", str(config)]
     else:
         content = command([PRS, "export", "clash-meta", "--profile", profile["id"], "--server", "127.0.0.1"], label + "-export")
@@ -166,6 +190,21 @@ def test_case(client, mode, auth, vision, index):
         response = command(["curl", "--noproxy", "", "--fail", "--silent", "--show-error", "--max-time", "15", "--proxy", "socks5h://127.0.0.1:18081", f"http://127.0.0.1:18080{request_path}"], label + "-request")
         require(response == request_path, "proxy response marker differs")
     require(HITS.count(request_path) == before + 1, "endpoint did not receive exactly one request")
+    if sudoku:
+        # The same working client, with only the mask password changed, must
+        # fail before reaching the endpoint. This proves the mask is in use.
+        xray_config["outbounds"][0]["streamSettings"]["finalmask"]["tcp"][0]["settings"]["password"] += "Mismatch"
+        config.write_text(json.dumps(xray_config))
+        before_bad = HITS.count(request_path)
+        with client_process(client_args, label + "-wrong-password-client"):
+            result = subprocess.run(["curl", "--noproxy", "", "--fail", "--silent", "--show-error",
+                                     "--max-time", "8", "--proxy", "socks5h://127.0.0.1:18081",
+                                     f"http://127.0.0.1:18080{request_path}"], capture_output=True, timeout=15)
+            safe(result.stdout + result.stderr)
+            require(result.returncode != 0, "wrong Sudoku password must fail")
+        require(HITS.count(request_path) == before_bad, "wrong Sudoku password reached endpoint")
+        RESULTS.append({"case": label + "-wrong-password", "result": "PASS", "endpoint_requests": 0})
+        print(label + "-wrong-password: PASS", flush=True)
     RESULTS.append({"case": label, "result": "PASS", "endpoint_requests": 1, "controlled_restart": True, "service_active": True, "new_port_listening": True})
     print(label + ": PASS", flush=True)
 
@@ -184,6 +223,9 @@ def main():
         matrix += [("xray", "native", "mlkem768", False), ("mihomo", "native", "x25519", False), ("mihomo", "native", "x25519", True)]
         for index, case in enumerate(matrix):
             test_case(*case, index)
+        for offset, (ascii_mode, vision) in enumerate(
+                (ascii_mode, vision) for ascii_mode in ("prefer_entropy", "ascii") for vision in (False, True)):
+            test_case("xray", "native", "x25519", vision, len(matrix) + offset, sudoku=ascii_mode)
         # Read the real state produced above with the published v0.2.2 binary.
         # Keep only the parser error: never persist any old CLI profile output.
         old = os.environ["OLD_PING_RUST"]

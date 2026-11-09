@@ -62,6 +62,7 @@ pub(crate) async fn execute_with_sni(
 }
 
 async fn execute_inner(request: AddRequest, checked_sni: Option<String>) -> Result<AddResult> {
+    request.vless_enc.sudoku.validate_for(request.protocol)?;
     utils::require_linux_root()?;
     if !Path::new(utils::SHOES_BIN).is_file() {
         bail!("shoes 尚未安装；请先运行 ping-rust install，或为 add 添加 --yes 自动安装");
@@ -87,6 +88,7 @@ async fn execute_inner(request: AddRequest, checked_sni: Option<String>) -> Resu
         vless_enc_mode: request.vless_enc.mode,
         vless_enc_auth: request.vless_enc.auth,
         vless_enc_vision: request.vless_enc.vision,
+        sudoku: request.vless_enc.sudoku.config()?,
         ..Default::default()
     };
     if request.protocol == Protocol::VlessEnc {

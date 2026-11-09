@@ -15,6 +15,7 @@ mod self_update;
 mod service;
 mod sni;
 mod sni_probe;
+mod sudoku;
 mod utils;
 mod vless_encryption;
 mod yaml;

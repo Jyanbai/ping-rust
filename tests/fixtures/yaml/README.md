@@ -23,3 +23,6 @@ python3 scripts/dev/scrub-yaml-fixtures.py /tmp/a /tmp/b
 # copy compat/state.json, compat/config.yaml, chain-v2/state.json from /tmp/a, then
 PING_RUST_YAML_FIXTURE_OUT=$PWD/tests/fixtures/yaml cargo test derive_yaml_fixtures -- --ignored
 ```
+
+`vless-enc-sudoku/` records the new optional outer Sudoku mask and matching state
+with fixed, fake credentials; asserted in `src/config/vless_encryption_tests.rs`.
