@@ -745,6 +745,22 @@ class GhCliTest(unittest.TestCase):
         self.assertEqual(json.loads(run.call_args.kwargs["input"]), {"title": "t `x`"})
         self.assertEqual(run.call_args.kwargs["timeout"], 7)
 
+    def test_job_logs_allow_escape_sequences_with_fallback_for_old_gh(self):
+        log = subprocess.CompletedProcess([], 0, "\x1b[36;1mcurl\x1b[0m".encode(), b"")
+        with mock.patch.object(mw.subprocess, "run", return_value=log) as run:
+            self.assertEqual(mw.GhCli().get_text("repos/a/b/actions/jobs/1/logs"), "\x1b[36;1mcurl\x1b[0m")
+        self.assertIn("--allow-escape-sequences", run.call_args.args[0])
+
+        old = subprocess.CompletedProcess([], 1, b"", b"unknown flag: --allow-escape-sequences")
+        with mock.patch.object(mw.subprocess, "run", side_effect=[old, log]) as run:
+            self.assertEqual(mw.GhCli().get_text("repos/a/b/actions/jobs/1/logs"), "\x1b[36;1mcurl\x1b[0m")
+        self.assertNotIn("--allow-escape-sequences", run.call_args.args[0])
+
+        refused = subprocess.CompletedProcess([], 1, b"", b"gh: Not Found (HTTP 404)")
+        with mock.patch.object(mw.subprocess, "run", return_value=refused):
+            with self.assertRaises(mw.GitHubError):
+                mw.GhCli().get_text("repos/a/b/actions/jobs/1/logs")
+
     def test_errors_and_timeouts_become_github_errors(self):
         failed = subprocess.CompletedProcess([], 1, b"", b"gh: Validation Failed (HTTP 422)")
         with mock.patch.object(mw.subprocess, "run", return_value=failed):

@@ -420,8 +420,10 @@ class GhCli:
     def __init__(self, timeout: int = 90):
         self.timeout = timeout
 
-    def _call(self, method: str, path: str, payload: Any = None, has_body: bool = False) -> bytes:
-        command = ["gh", "api", "-X", method, path]
+    def _call(
+        self, method: str, path: str, payload: Any = None, has_body: bool = False, extra: tuple = ()
+    ) -> bytes:
+        command = ["gh", "api", "-X", method, path, *extra]
         data = None
         if has_body:
             command += ["--input", "-"]
@@ -447,7 +449,14 @@ class GhCli:
         return json.loads(out) if out.strip() else None
 
     def get_text(self, path: str) -> str:
-        return self._call("GET", path).decode("utf-8", "replace")
+        # Actions 日志里有 ANSI 颜色；新版 gh 不加 --allow-escape-sequences 会拒绝输出，旧版 gh 没有这个参数。
+        try:
+            out = self._call("GET", path, extra=("--allow-escape-sequences",))
+        except GitHubError as error:
+            if "allow-escape-sequences" not in str(error) or "unknown flag" not in str(error):
+                raise
+            out = self._call("GET", path)
+        return out.decode("utf-8", "replace")
 
     def post(self, path: str, payload: Any = None) -> Any:
         out = self._call("POST", path, payload, has_body=payload is not None)
