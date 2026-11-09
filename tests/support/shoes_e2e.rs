@@ -99,7 +99,10 @@ fn configured(test: &str, variables: &[&str], lookup: Lookup<'_>) -> Option<Path
         path.is_file(),
         "{test}：{variable}={path:?} 不是存在的文件，请指向固定版本的 shoes"
     );
-    report(&format!("RUNNING(e2e): {test}：{variable}={}", path.display()));
+    report(&format!(
+        "RUNNING(e2e): {test}：{variable}={}",
+        path.display()
+    ));
     Some(path)
 }
 
