@@ -255,6 +255,8 @@ jobs:
         run: python3 scripts/ci/test_codex_dispatch_prompt.py
       - name: Check main-watch failure classifier and issue rules
         run: python3 scripts/ci/test_main_watch.py
+      - name: Check Codex CI Fix log excerpts survive escape sequences
+        run: python3 scripts/ci/test_codex_ci_fix.py
       - run: cargo fmt --all -- --check
       - name: Install stable shoes for unit and chain traffic acceptance
         shell: bash
