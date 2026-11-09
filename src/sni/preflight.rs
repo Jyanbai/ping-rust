@@ -326,7 +326,11 @@ mod tests {
             records.push((remaining[0], length));
             remaining = &remaining[5 + length..];
         }
-        assert_eq!(records.len(), 3, "shoes（v0.3.6 起）要求三条记录：{records:?}");
+        assert_eq!(
+            records.len(),
+            3,
+            "shoes（v0.3.6 起）要求三条记录：{records:?}"
+        );
         assert_eq!(records[0].0, 22);
         assert_eq!(records[1], (20, 1));
         assert_eq!(records[2].0, 23);
