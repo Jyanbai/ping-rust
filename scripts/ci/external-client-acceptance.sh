@@ -117,25 +117,27 @@ JSON
 # an established HTTP/2 connection cannot mask a wrong path or short ID.
 run_xhttp_reality() {
   local mode="$1" case_name="$2" port="$3"
+  local xhttp_path=/0123456789abcdef
   local case_dir
   case_dir="$(mktemp -d "$WORK/xhttp-${mode}-${case_name}.XXXXXX")"
   local prefix="$WORK/logs/xhttp-${mode}-${case_name}"
   mkdir -p "$case_dir"
   if ! "$PING_RUST" generate vless-xhttp-reality --port "$port" \
-      --server-name www.cloudflare.com --xhttp-path /0123456789abcdef \
+      --server-name www.cloudflare.com --xhttp-path "$xhttp_path" \
       --output "$case_dir/config.yaml" >"${prefix}-generate.txt" 2>&1; then
     return 1
   fi
   "$SHOES" --dry-run "$case_dir/config.yaml" >"${prefix}-dry-run.txt" 2>&1 || return 1
-  python3 - "$case_dir/ping-rust-state.json" "${prefix}-xray.json" "$mode" "$case_name" "$port" <<'PYTHON' || return 1
+  # Custom --output writes only YAML; read public client fields from the
+  # generation result, as run_reality does, rather than expecting managed state.
+  python3 - "${prefix}-generate.txt" "${prefix}-xray.json" "$mode" "$case_name" "$port" "$xhttp_path" <<'PYTHON' || return 1
 import json
 import os
 import sys
-state_path, output, mode, case_name, port = sys.argv[1:]
-with open(state_path) as source:
-    credentials = json.load(source)["profiles"][0]["credentials"]["VlessXhttpReality"]
-short_id = credentials["short_id"]
-path = credentials["xhttp"]["path"]
+generated_path, output, mode, case_name, port, path = sys.argv[1:]
+with open(generated_path) as source:
+    fields = dict(line.rstrip("\n").split("：", 1) for line in source if "：" in line)
+short_id = fields["Short ID"]
 if case_name == "wrong-short-id":
     short_id = ("0" if short_id[0] != "0" else "1") + short_id[1:]
 elif case_name == "wrong-path":
@@ -145,11 +147,11 @@ client = {
     "inbounds": [{"listen": "127.0.0.1", "port": 18082, "protocol": "socks", "settings": {"udp": False}}],
     "outbounds": [{"protocol": "vless", "settings": {"vnext": [{
         "address": "127.0.0.1", "port": int(port),
-        "users": [{"id": credentials["user_id"], "encryption": "none"}],
+        "users": [{"id": fields["UUID"], "encryption": "none"}],
     }]}, "streamSettings": {
         "network": "xhttp", "security": "reality",
-        "realitySettings": {"serverName": credentials["server_name"], "fingerprint": "chrome",
-                            "password": credentials["public_key"], "publicKey": credentials["public_key"],
+        "realitySettings": {"serverName": fields["SNI"], "fingerprint": "chrome",
+                            "password": fields["Reality 公钥"], "publicKey": fields["Reality 公钥"],
                             "shortId": short_id},
         "xhttpSettings": {"path": path, "mode": mode},
     }}],
