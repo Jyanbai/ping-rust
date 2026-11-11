@@ -159,7 +159,8 @@ def main():
             elif protocol == "shadowtls-v3":
                 command += ["--shadowtls", "--server-name", "www.cloudflare.com"]
             elif protocol == "socks5":
-                command += ["--username", h2.SOCKS_USER, "--password", h2.SOCKS_PASSWORD]
+                # 随机密码可能以 "-" 开头，用 --name=value 写法，避免被 clap 当成选项。
+                command += [f"--username={h2.SOCKS_USER}", f"--password={h2.SOCKS_PASSWORD}"]
             elif protocol == "naiveproxy":
                 command += ["--server-name", "matrix.example.invalid", "--self-signed"]
             elif protocol not in ("shadowsocks", "snell"):
