@@ -42,6 +42,38 @@ class FailureDiagnosticsTest(unittest.TestCase):
         self.assertIn("SOCKS generation cause", stderr.getvalue())
         self.assertNotIn(matrix.h2.SOCKS_PASSWORD, stderr.getvalue())
 
+    def test_source_matrix_passes_hyphen_leading_socks_password_as_value(self):
+        # secrets.token_urlsafe 约 1/64 的概率以 "-" 开头；分开传参时 clap 会把它当成选项。
+        spec = importlib.util.spec_from_file_location(
+            "source_matrix", Path(__file__).with_name("shoes-source-matrix.py"))
+        matrix = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(matrix)
+        password = "-" + secrets.token_urlsafe(24)
+        commands = []
+
+        def run(command, **kwargs):
+            if "--version" in command:
+                return subprocess.CompletedProcess(command, 0, "test runtime", "")
+            commands.append(command)
+            if command[2] == "socks5":
+                raise RuntimeError("stop after socks5")
+            return subprocess.CompletedProcess(command, 0, b"", b"")
+
+        with tempfile.TemporaryDirectory() as root, \
+                patch.dict(os.environ, {"SHOES_BIN": "shoes", "PING_RUST_BIN": "ping-rust"}), \
+                patch("sys.argv", ["matrix", "--source", "verified-pin", "--output", str(Path(root) / "out.json")]), \
+                patch.object(matrix.subprocess, "run", side_effect=run), \
+                patch.object(matrix, "dry_run", return_value=0), \
+                patch.object(matrix.h2, "free_port", return_value=12345), \
+                patch.object(matrix.h2, "SOCKS_PASSWORD", password), \
+                contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(RuntimeError, "stop after socks5"):
+                matrix.main()
+        socks = commands[-1]
+        self.assertEqual(socks[2], "socks5")
+        self.assertIn(f"--password={password}", socks)
+        self.assertNotIn(password, socks)
+
     def test_harness_redacts_json_strings_and_multiline_yaml_keys(self):
         secret = secrets.token_urlsafe(32) + ",suffix"
         config = json.dumps([{"protocol": {"password": secret, "type": "socks"}}])
