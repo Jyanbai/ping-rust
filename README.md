@@ -220,9 +220,10 @@ shoes: running
 12) Snell v3
 13) NaiveProxy
 14) VLESS-ENC
+15) VLESS-XHTTP-REALITY
 0) 返回
 
-请选择 [0-14]: 4
+请选择 [0-15]: 4
 输入端口（直接回车自动选择随机端口）:
 
 部署成功，shoes 服务已启动。
