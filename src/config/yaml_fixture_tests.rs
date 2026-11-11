@@ -16,6 +16,7 @@ use crate::{
         parse_share_uri, ChainDefinition, ChainHop, ChainPool, RouteTarget, RoutingRule,
     },
     client::{self, ClientFormat},
+    shoes_e2e::{shoes_binary, SHOES_E2E_BIN},
 };
 
 const EXPORT_SERVER: &str = "203.0.113.10";
@@ -245,13 +246,12 @@ fn old_chain_v2_state_regenerates_v036_domain_pattern_rules() {
 
 #[test]
 fn old_chain_v2_config_is_rejected_by_v036_dry_run() {
-    let Some(binary) = std::env::var_os("PING_RUST_SHOES_E2E_BIN") else {
+    let Some(binary) = shoes_binary(
+        "config::yaml_fixture_tests::old_chain_v2_config_is_rejected_by_v036_dry_run",
+        &[SHOES_E2E_BIN],
+    ) else {
         return;
     };
-    let binary = PathBuf::from(binary);
-    if !binary.is_file() {
-        return;
-    }
     let output = std::process::Command::new(&binary)
         .arg("--dry-run")
         .arg(fixture_root().join("chain-v2/config.yaml"))
@@ -336,6 +336,10 @@ fn collect_strings(value: &Json, out: &mut Vec<String>) {
 #[test]
 fn yaml_special_strings_round_trip_as_exact_strings() {
     let directory = tempfile::tempdir().unwrap();
+    let shoes = shoes_binary(
+        "config::yaml_fixture_tests::yaml_special_strings_round_trip_as_exact_strings",
+        &[SHOES_E2E_BIN],
+    );
     for value in SPECIAL_STRINGS {
         let pairs = special_string_servers(directory.path(), value);
         let servers = pairs
@@ -383,12 +387,12 @@ fn yaml_special_strings_round_trip_as_exact_strings() {
             }
         }
 
-        let Some(binary) = std::env::var_os("PING_RUST_SHOES_E2E_BIN") else {
+        let Some(binary) = &shoes else {
             continue;
         };
         let path = directory.path().join("special.yaml");
         fs::write(&path, &yaml).unwrap();
-        let output = std::process::Command::new(&binary)
+        let output = std::process::Command::new(binary)
             .arg("--dry-run")
             .arg(&path)
             .output()

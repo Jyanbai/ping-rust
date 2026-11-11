@@ -35,6 +35,8 @@ cargo test --locked
 
 部分测试需要 shoes 二进制：`PING_RUST_TEST_SHOES`、`PING_RUST_SHOES_E2E_BIN` 指向固定版本的 shoes（当前 v0.3.7，下载地址和 SHA-256 见 `.github/workflows/ci.yml`）。没有 shoes、不能绑定端口或不能联网时，这些测试会失败或跳过，写明"未运行"即可，CI 会完整测试。
 
+这些测试统一通过 `tests/support/shoes_e2e.rs` 读取 shoes 路径：缺变量时在 stderr 打印 `SKIPPED(e2e): <测试名>：<原因>` 并跳过，cargo test 仍显示 ok。报告测试结果时，`SKIPPED(e2e)` 的条目要算作"未运行"，不能算作"通过"。设置 `PING_RUST_REQUIRE_E2E=1` 时缺变量直接失败；CI 中提供了 shoes 的测试步骤都设置了它。
+
 ## 工作规则
 
 1. **范围**：一个任务对应一个 issue、一个 PR，只做任务要求的事。任务外的发现写进 PR 描述的"建议"一节，不要顺手改。

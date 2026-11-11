@@ -16,7 +16,23 @@
 - 收到命令后，workflow 会给评论加 👀，再回一条带 Codex 任务链接的评论，完成后更新为结果（推送的 commit 或新 PR 的链接）。
 - 同一个 PR / issue 的任务会排队，一次只跑一个。注意 GitHub 只保留一个排队中的任务：排队时再发一条，前一条排队中的会被取消。
 - 每个任务消耗 ChatGPT 套餐里 Codex 的本地消息额度（和在电脑上用 Codex 是同一个池子）。GitHub Actions 分钟数对公开仓库免费。
-- Codex 在沙箱里不能联网。Rust 依赖会预先下载，所以它能跑 `cargo build/test --offline`；需要外网或 Xray / Mihomo 的测试跑不了，推送后由 CI 完整测试。
+- Codex 在沙箱里不能联网，也不能创建 TCP/UDP socket（连 127.0.0.1 也不行，见下文"沙箱里能跑哪些测试"）。Rust 依赖会预先下载，所以它能跑 `cargo build/test --offline`；监听或连接端口的测试、依赖 shoes / Xray / Mihomo 的测试跑不了，推送后由 CI 完整测试。prompt 要求 Codex 在最终回复里把这些测试单独列出、标"未验证"，不算作通过。
+
+## 沙箱里能跑哪些测试
+
+2026-11-09 在 `ubuntu-latest` runner 上用 Codex CLI 0.166.0、权限配置 `ci` 实测（`codex sandbox -P ci`，不调用模型）：
+
+| 项目 | 结果 |
+|---|---|
+| 执行固定版本 shoes（放在 `/opt/hostedtoolcache` 下） | 可以，`shoes --version` 输出 `shoes 0.3.7` |
+| 在 127.0.0.1 / ::1 / 0.0.0.0 上创建 TCP socket | 不行，`socket()` 直接返回 `EPERM`（Operation not permitted） |
+| 访问外网（域名、直连 IP） | 不行 |
+| 读凭据文件、列出 `$RUNNER_TEMP` | 不行 |
+| `cargo test --offline`（不设 shoes 环境变量，即 Codex 现在的情况） | 单元测试 270 通过、14 失败（`sni_probe` 6 个、`github_api` 4 个、`port_check`、`socks5_random_port`，以及需要调用 shoes 的 2 个），日志里有 10 处 `Operation not permitted`；`chain_v2_e2e`、`chain_proxy_e2e` 直接返回显示 ok |
+| 同上，设置 `PING_RUST_TEST_SHOES` 和 `PING_RUST_SHOES_E2E_BIN` | 需要调用 shoes 的 2 个通过；SNI 预检 4 个、shoes watcher、`chain_v2_e2e`、`chain_proxy_e2e` 因不能绑定端口失败 |
+| 沙箱外、同一台 runner、同样的环境变量 | 全部通过 |
+
+原因在 Codex 本身：关闭网络（`network.enabled = false`）时，Linux 沙箱用 seccomp 无条件拒绝 `bind`、`listen`、`connect`、`accept`，`socket()` 只放行 `AF_UNIX`（Codex 源码 `codex-rs/linux-sandbox/src/seccomp.rs` 的 `NetworkSeccompMode::Restricted`）。能放行 IP socket 的只有托管网络代理模式，那要求 `network.enabled = true`，等于打开网络，所以没有采用。依赖 shoes 端到端流量的测试仍然只能靠推送后的 CI 和 `codex-ci-fix.yml`。
 
 ## CI 失败后自动派回 Codex
 
@@ -112,7 +128,7 @@ Codex 在 `auth.json` 的 `last_refresh` 超过约 8 天时会自动刷新 token
 
 OpenAI 的指南（Maintain Codex account auth in CI/CD）不建议在公开仓库里用 ChatGPT 登录凭据。本仓库是公开的，所以 workflow 分成两个 job，并做了这些限制：
 
-- **codex job**（持有 Codex 凭据）：Codex 的命令在沙箱里运行（权限配置 `ci`，写在 CI 生成的 `$CODEX_HOME/config.toml` 里），只能写工作区和 `~/.cargo`，不能联网，并且读不到 `$RUNNER_TEMP`：Codex 凭据、用于遮蔽的 token 列表和 `.git` 副本都放在这里。每次运行 Codex 前，workflow 先用同一配置在沙箱里实测一次（不调用模型），凭据可读或工作区不可写就直接停止；推送用的 `CODEX_BOT_TOKEN` 只在写回凭据的步骤里出现，Codex 运行的步骤拿不到。Codex 的完整输出只写文件、不打日志；生成的 diff 和总结里只要出现任何 token 就中止。diff 用 Codex 运行前保存的 `.git` 副本生成，不受工作区里被改动的 git 配置影响。
+- **codex job**（持有 Codex 凭据）：Codex 的命令在沙箱里运行（权限配置 `ci`，写在 CI 生成的 `$CODEX_HOME/config.toml` 里），只能写工作区和 `~/.cargo`，不能联网，并且读不到 `$RUNNER_TEMP`：Codex 凭据、用于遮蔽的 token 列表和 `.git` 副本都放在这里。每次运行 Codex 前，workflow 先用同一配置在沙箱里实测一次（不调用模型），凭据可读、能访问外网（按域名或直连 IP）或工作区不可写就直接停止；推送用的 `CODEX_BOT_TOKEN` 只在写回凭据的步骤里出现，Codex 运行的步骤拿不到。Codex 的完整输出只写文件、不打日志；生成的 diff 和总结里只要出现任何 token 就中止。diff 用 Codex 运行前保存的 `.git` 副本生成，不受工作区里被改动的 git 配置影响。
 - **push job**（不接触 Codex 凭据）：只下载 diff、检查路径、`git apply`、提交和推送。
 
 其他限制：

@@ -253,6 +253,10 @@ jobs:
         run: python3 scripts/ci/test_release_metadata.py
       - name: Check Codex Dispatch keeps outside issue content away from Codex
         run: python3 scripts/ci/test_codex_dispatch_prompt.py
+      - name: Check main-watch failure classifier and issue rules
+        run: python3 scripts/ci/test_main_watch.py
+      - name: Check Codex CI Fix log excerpts survive escape sequences
+        run: python3 scripts/ci/test_codex_ci_fix.py
       - run: cargo fmt --all -- --check
       - name: Install stable shoes for unit and chain traffic acceptance
         shell: bash
@@ -272,11 +276,15 @@ jobs:
       - name: Unit and integration tests
         env:
           PING_RUST_TEST_SHOES: ${{ runner.temp }}/shoes-v0.3.7/shoes
+          PING_RUST_SHOES_E2E_BIN: ${{ runner.temp }}/shoes-v0.3.7/shoes
+          # 已提供 shoes：需要 shoes 的测试缺变量时直接失败，不允许跳过。
+          PING_RUST_REQUIRE_E2E: "1"
         run: cargo test --locked
       - name: Prove stable shoes chain traffic has no direct fallback
         if: matrix.os == 'ubuntu-24.04'
         env:
           PING_RUST_SHOES_E2E_BIN: ${{ runner.temp }}/shoes-v0.3.7/shoes
+          PING_RUST_REQUIRE_E2E: "1"
         run: cargo test --locked --test chain_proxy_e2e -- --nocapture
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo build --locked --release
@@ -443,11 +451,15 @@ jobs:
       - name: Unit and integration tests
         env:
           PING_RUST_TEST_SHOES: ${{ runner.temp }}/shoes-v0.3.7/shoes
+          PING_RUST_SHOES_E2E_BIN: ${{ runner.temp }}/shoes-v0.3.7/shoes
+          # 已提供 shoes：需要 shoes 的测试缺变量时直接失败，不允许跳过。
+          PING_RUST_REQUIRE_E2E: "1"
         run: cargo test --locked
       - name: Prove stable shoes chain traffic has no direct fallback
         if: matrix.name == 'Debian 12'
         env:
           PING_RUST_SHOES_E2E_BIN: ${{ runner.temp }}/shoes-v0.3.7/shoes
+          PING_RUST_REQUIRE_E2E: "1"
         run: cargo test --locked --test chain_proxy_e2e -- --nocapture
       - run: cargo build --locked --release
 

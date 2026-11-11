@@ -1,5 +1,5 @@
 use std::{
-    env, fs,
+    fs,
     io::{self, Read, Write},
     net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs},
     path::Path,
@@ -11,6 +11,9 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+
+#[path = "support/shoes_e2e.rs"]
+mod shoes_e2e;
 
 struct ChildGuard(Child);
 
@@ -229,8 +232,10 @@ fn rule(mask: &str, action: &str, chains: Option<&str>) -> String {
 
 #[test]
 fn chain_v2_local_routing_traffic() -> io::Result<()> {
-    let Some(binary) = env::var_os("PING_RUST_SHOES_E2E_BIN") else {
-        eprintln!("skipped: set PING_RUST_SHOES_E2E_BIN for pinned shoes traffic test");
+    let Some(binary) = shoes_e2e::shoes_binary(
+        "chain_v2_local_routing_traffic",
+        &[shoes_e2e::SHOES_E2E_BIN],
+    ) else {
         return Ok(());
     };
     let shoes = Path::new(&binary);

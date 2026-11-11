@@ -20,6 +20,13 @@ mod utils;
 mod vless_encryption;
 mod yaml;
 
+// 需要 shoes 的测试共用的路径读取；集成测试通过 #[path] 引用同一份源码。
+#[cfg(test)]
+#[path = "../tests/support/shoes_e2e.rs"]
+mod shoes_e2e;
+#[cfg(test)]
+mod shoes_e2e_tests;
+
 use anyhow::Result;
 use clap::Parser;
 use std::future::Future;

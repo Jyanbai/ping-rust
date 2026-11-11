@@ -239,8 +239,15 @@ jobs:
           运行环境与约束：
           - 你在 GitHub Actions 的沙箱里运行：只能修改当前仓库目录，不能联网。
           - Rust 依赖已经预先下载好，可以用 `cargo build --offline`、`cargo test --offline`、
-            `cargo clippy --offline` 验证；需要外网或 Xray / Mihomo 等外部程序的测试跑不了，
-            跳过即可，推送后 CI 会完整测试。
+            `cargo clippy --offline` 验证。
+          - 沙箱禁止创建 TCP/UDP socket，连 127.0.0.1 也不行：监听或连接端口的测试会失败，报错是
+            `Operation not permitted`（PermissionDenied）。这是沙箱的限制，不要为此修改代码或测试。
+          - 沙箱里没有 shoes（`PING_RUST_TEST_SHOES`、`PING_RUST_SHOES_E2E_BIN` 都没有设置）：依赖
+            shoes 的测试有的直接返回并显示 ok（输出里有 skipped 或"未运行"），这不代表通过；有的
+            因为找不到 shoes 而失败。需要 root、systemd、外网或 Xray / Mihomo 的测试同样跑不了。
+            这些都由推送后的 CI 完整测试。
+          - 最终回复里分开写：实际通过的检查；因沙箱限制失败或被跳过的测试（写出测试名，标"未验证"），
+            不要把它们算作"通过"。
           - 不要执行 git commit / git push / 新建分支，只修改文件；提交由 workflow 负责。
           - 不要修改 .github/workflows/ 和 .github/actions/ 下的任何文件（这类改动会被自动拒绝）。
           - 改动保持最小，只做任务要求的事。
@@ -418,7 +425,14 @@ jobs:
             sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
           # 用和 Codex 相同的权限配置跑一条命令（不调用模型、不耗额度）：凭据和 $RUNNER_TEMP
-          # 必须读不到，工作区和 ~/.cargo 必须能写。任何一项不符合就不运行 Codex。
+          # 必须读不到，外网必须访问不了，工作区和 ~/.cargo 必须能写。任何一项不符合就不运行 Codex。
+          # 断网检查要有对照：沙箱外必须能访问 github.com；沙箱里按域名和直连 IP 都要访问不了。
+          # IP 只作为参数传进沙箱，不打印。
+          ip="$(getent ahostsv4 github.com | awk 'NR == 1 { print $1 }')"
+          if [ -z "$ip" ] || ! curl -sS --retry 2 --max-time 15 -o /dev/null https://github.com; then
+            echo "::error::沙箱外访问不了 github.com，无法检查沙箱是否断网，已停止，不运行 Codex。"
+            exit 1
+          fi
           probe="$GITHUB_WORKSPACE/.codex-sandbox-probe"
           rc=0
           # shellcheck disable=SC2016 # 单引号里的 $1… 由沙箱内的 bash 展开
@@ -426,16 +440,22 @@ jobs:
             fail=0
             if cat "$1" >/dev/null 2>&1; then echo "凭据文件可读"; fail=1; fi
             if ls "$2" >/dev/null 2>&1; then echo "RUNNER_TEMP 可列出"; fail=1; fi
+            if curl -s --max-time 10 -o /dev/null https://github.com; then
+              echo "沙箱里能访问外网（域名）"; fail=1
+            fi
+            if curl -s --max-time 10 -o /dev/null --resolve "github.com:443:$5" https://github.com; then
+              echo "沙箱里能访问外网（直连 IP）"; fail=1
+            fi
             if ! touch "$3"; then echo "工作区不可写"; fail=1; fi
             if ! touch "$4/.codex-sandbox-probe"; then echo "~/.cargo 不可写"; fail=1; fi
             rm -f "$3" "$4/.codex-sandbox-probe"
             exit "$fail"
-          ' probe "$CODEX_HOME/auth.json" "$RUNNER_TEMP" "$probe" "$HOME/.cargo" || rc=$?
+          ' probe "$CODEX_HOME/auth.json" "$RUNNER_TEMP" "$probe" "$HOME/.cargo" "$ip" || rc=$?
           if [ "$rc" -ne 0 ]; then
             echo "::error::Codex 沙箱没有按权限配置 ci 生效（exit $rc），已停止，不运行 Codex。"
             exit 1
           fi
-          echo "✅ 沙箱内读不到 Codex 凭据和 RUNNER_TEMP；工作区和 ~/.cargo 可写。"
+          echo "✅ 沙箱内读不到 Codex 凭据和 RUNNER_TEMP，访问不了外网；工作区和 ~/.cargo 可写。"
           echo "ok=true" >> "$GITHUB_OUTPUT"
 
       - name: Run Codex

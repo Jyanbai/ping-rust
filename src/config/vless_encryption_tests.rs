@@ -182,9 +182,12 @@ async fn vless_enc_dry_run_failure_does_not_echo_secret() {
 #[tokio::test]
 async fn vless_enc_mode_auth_and_regeneration_use_shoes_and_keep_state_public() {
     let (mut server, mut profile) = sample(false);
-    let binary = std::env::var_os("PING_RUST_TEST_SHOES")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(crate::utils::SHOES_BIN));
+    // 未设置变量时沿用原来的回退（已安装的 shoes），不跳过；CI 设置 REQUIRE 后不允许回退。
+    let binary = crate::shoes_e2e::shoes_binary_or(
+        "config::vless_encryption_tests::vless_enc_mode_auth_and_regeneration_use_shoes_and_keep_state_public",
+        &[crate::shoes_e2e::TEST_SHOES],
+        crate::utils::SHOES_BIN,
+    );
     for change in [
         ProfileChange::VlessEncMode(VlessEncMode::Random),
         ProfileChange::VlessEncAuth(VlessEncAuth::Mlkem768),

@@ -235,7 +235,11 @@ mod tests {
 
     #[test]
     fn pinned_shoes_watches_repeated_atomic_config_replacements() {
-        let Some(binary) = std::env::var_os("PING_RUST_SHOES_E2E_BIN") else {
+        use crate::shoes_e2e::{shoes_binary, SHOES_E2E_BIN};
+        let Some(binary) = shoes_binary(
+            "utils::tests::pinned_shoes_watches_repeated_atomic_config_replacements",
+            &[SHOES_E2E_BIN],
+        ) else {
             return;
         };
         let work = tempfile::tempdir().unwrap();

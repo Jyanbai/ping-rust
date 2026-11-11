@@ -157,7 +157,8 @@ pub(super) fn render_legacy_rules(state: &ChainProxyState) -> Vec<ServerRule> {
 mod tests {
     use super::*;
     use crate::chain_proxy::{parse_share_uri, ChainDefinition, ChainHop, ChainPool, RoutingRule};
-    use std::{env, fs, path::Path, process::Command};
+    use crate::shoes_e2e::{shoes_binary, SHOES_E2E_BIN};
+    use std::{fs, path::Path, process::Command};
 
     fn fixture() -> ChainProxyState {
         let mut state = ChainProxyState::default();
@@ -233,7 +234,10 @@ mod tests {
         );
         assert!(rule_yaml.find("blocked.test").unwrap() < rule_yaml.find("*.example.com").unwrap());
 
-        let Some(binary) = env::var_os("PING_RUST_SHOES_E2E_BIN") else {
+        let Some(binary) = shoes_binary(
+            "config::routing::tests::pinned_schema_accepts_full_v2_rule_shape",
+            &[SHOES_E2E_BIN],
+        ) else {
             return;
         };
         assert!(
