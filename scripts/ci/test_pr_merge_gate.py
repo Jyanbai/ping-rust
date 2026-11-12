@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import unittest
 
-from pr_merge_gate import evaluate, review_verdict, inspect_pr
+from pr_merge_gate import evaluate, review_verdict, inspect_pr, REVIEW_STEPS
 
 
 class GateTests(unittest.TestCase):
@@ -69,13 +69,18 @@ class GateTests(unittest.TestCase):
         marker = f"<!-- codex-review-verdict sha={self.sha} base={base} findings=0 run=99 attempt=1 -->"
         comment = {"user": {"login": "github-actions[bot]", "type": "Bot"}, "body": marker}
         run = dict(self.run, id=99, path=".github/workflows/codex-code-review.yml", event="workflow_run")
+        run['attestation'] = {'head': self.sha, 'base': base, 'findings': 0, 'run': 99, 'attempt': 1}
         job = dict(self.job, name="review", steps=[
             {"name": n, "status": "completed", "conclusion": "success"} for n in
-            ["Verify read-only sandbox", "Run Codex review", "Render review", "Publish review"]])
+            REVIEW_STEPS])
         self.assertEqual(review_verdict(self.sha, base, [comment], {99: run}, {99: [job]}), [])
         for bad in [marker.replace("findings=0", "findings=1"), marker.replace(base, "c" * 40), marker.replace(self.sha, "c" * 40), marker.replace("attempt=1", "attempt=2")]:
             self.assertTrue(review_verdict(self.sha, base, [dict(comment, body=bad)], {99: run}, {99: [job]}))
         self.assertTrue(review_verdict(self.sha, base, [dict(comment, user={"login": "outsider", "type": "User"})], {99: run}, {99: [job]}))
+        # 其他 bot 评论伪造 marker，引用旧成功 Review 也不能复用旧 head 的证明。
+        run['attestation']['head'] = 'c' * 40
+        self.assertTrue(review_verdict(self.sha, base, [comment], {99: run}, {99: [job]}))
+        run['attestation']['head'] = self.sha
         job["steps"][-1]["conclusion"] = "skipped"
         self.assertTrue(review_verdict(self.sha, base, [comment], {99: run}, {99: [job]}))
 
@@ -133,6 +138,54 @@ class GateTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             inspect_pr(api, 7, self.policy)
         self.assertEqual(api.statuses[-1], (self.sha, 'failure'))
+
+    def test_collector_ignores_optional_and_superseded_review_runs(self):
+        outer = self
+        base = 'b' * 40
+        comment = {'user': {'login': 'github-actions[bot]', 'type': 'Bot'},
+                   'body': f'<!-- codex-review-verdict sha={self.sha} base={base} findings=0 run=99 attempt=1 -->'}
+        run = dict(self.run, pull_requests=[{'number': 7, 'head': {'sha': self.sha}, 'base': {'sha': base}}])
+        optional = dict(run, id=2, path='.github/workflows/reality-sni-candidates.yml', conclusion='failure')
+        review = dict(self.run, id=99, path='.github/workflows/codex-code-review.yml', event='workflow_run')
+        review_job = dict(self.job, name='review', steps=[dict(self.job['steps'][0], name=n) for n in REVIEW_STEPS])
+
+        class FakeAPI:
+            def __init__(self):
+                self.statuses = []
+                self.calls = []
+
+            def request(self, path):
+                self.calls.append(path)
+                if path.startswith('pulls/'):
+                    return {'state': 'open', 'head': {'sha': outer.sha}, 'base': {'sha': base, 'ref': 'main'}}
+                return copy.deepcopy({'actions/runs/1': run, 'actions/runs/99': review}[path])
+
+            def pages(self, path, key=None):
+                self.calls.append(path)
+                if path.startswith('actions/runs?'):
+                    return [run, optional]
+                if path.endswith('/comments'):
+                    old = dict(comment, body=comment['body'].replace('run=99', 'run=98'))
+                    return [old, comment]
+                return {'actions/runs/1/attempts/1/jobs': [outer.job],
+                        'actions/runs/99/attempts/1/jobs': [review_job]}[path]
+
+            def attestation(self, selected):
+                return {'head': outer.sha, 'base': base, 'findings': 0, 'run': 99, 'attempt': 1}
+
+            def status(self, sha, state, description):
+                self.statuses.append(state)
+
+        api = FakeAPI()
+        self.assertEqual(inspect_pr(api, 7, self.policy), [])
+        self.assertEqual(api.statuses, ['pending', 'success'])
+        self.assertNotIn('actions/runs/2', api.calls)
+        self.assertNotIn('actions/runs/98', api.calls)
+        for field in ['number', 'head', 'base']:
+            original = copy.deepcopy(run['pull_requests'][0])
+            run['pull_requests'][0][field] = 8 if field == 'number' else {'sha': 'c' * 40}
+            self.assertTrue(inspect_pr(FakeAPI(), 7, self.policy))
+            run['pull_requests'][0] = original
 
 
 if __name__ == "__main__":

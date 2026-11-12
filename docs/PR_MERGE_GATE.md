@@ -15,16 +15,20 @@ head SHA。实现入口、独立只读审查、限次回修及用户决定 squas
 - 门禁自身回归与独立 Codex Review。
 
 每个必需 suite 只接受本仓库 Actions API 中 **当前 head 的 pull_request 运行**，
-以最新 run ID 和最新 attempt 为准，不使用同名 status、push、手动运行或旧 SHA 的绿灯。
+同时绑定 PR 编号及 base SHA，以最新 run ID 和最新 attempt 为准，不使用同名 status、
+其他 PR、push、手动运行或旧 SHA 的绿灯。
 workflow、每个 job、清单中的每个步骤必须 completed/success；缺失、失败、取消、超时、
 neutral、skipped 均阻止。写回前再次读取运行 attempt 和 PR head/base，API 错误也阻止。
 清单以外新出现的 job 也必须成功。
 
 独立审查的 bot 评论须有唯一的 `codex-review-verdict` 标记，绑定 head、base、
-发现数、真实 run ID/attempt。只接受发现数为 0、可信 Review workflow 实际成功且
+发现数、真实 run ID/attempt，并从该 run 下载可信 publication 步骤生成的机器证明产物
+交叉核对，其他 bot 评论即使重放旧 Review run 的标记也不能冒充当前审查。
+只接受发现数为 0、可信 Review workflow 实际成功且
 只读隔离、模型执行、读取/完成验证和发布步骤均成功的证明。关闭 Review、草稿尚未
 实际审查、非所有者 PR 不符合现有审查准入等情况均保持阻止，不伪造审查成功。
 旧版仅有 status=complete 的评论不足以通过，部署后需要重新运行审查。
+证明产物保留 90 天，过期或删除时需要重新审查，不降级为仅信任评论。
 
 专用套件的 PR 路径过滤移除，性能套件增加 PR 事件，保证文档或 workflow 改动也有
 当前 head 的完整证据。push 和定时测试范围、命令、断言与既有权限不变。

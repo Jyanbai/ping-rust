@@ -1,13 +1,16 @@
 """Evaluate trusted Actions evidence for the current PR head. No PR code is run."""
 import json
+import io
 import os
 from pathlib import Path
 import re
 import sys
 import urllib.request
+import urllib.error
+import zipfile
 
 CONTEXT = "PR Merge Gate"
-REVIEW_STEPS = ["Verify read-only sandbox", "Run Codex review", "Render review", "Publish review"]
+REVIEW_STEPS = ["Verify read-only sandbox", "Run Codex review", "Render review", "Publish review", "Upload review attestation"]
 VERDICT = re.compile(r"^<!-- codex-review-verdict sha=([0-9a-f]{40}) base=([0-9a-f]{40}) findings=([0-9]+) run=([0-9]+) attempt=([0-9]+) -->$", re.M)
 
 
@@ -49,7 +52,7 @@ def evaluate(sha, policy, runs, jobs):
     return errors
 
 
-def review_verdict(sha, base, comments, runs, jobs):
+def review_evidence(sha, base, comments):
     evidence = []
     for c in comments:
         if c.get("user", {}).get("login") != "github-actions[bot]" or c.get("user", {}).get("type") != "Bot":
@@ -60,14 +63,22 @@ def review_verdict(sha, base, comments, runs, jobs):
         for head, reviewed_base, count, run_id, attempt in markers:
             if head == sha and reviewed_base == base:
                 evidence.append((int(run_id), int(attempt), int(count)))
+    return max(evidence) if evidence else None
+
+
+def review_verdict(sha, base, comments, runs, jobs):
+    evidence = review_evidence(sha, base, comments)
     if not evidence:
         return ["缺失匹配当前 head/base 的独立 Codex 审查证明"]
-    run_id, attempt, count = max(evidence)
+    run_id, attempt, count = evidence
     run = runs.get(run_id, {})
     if (count != 0 or run.get("path") != ".github/workflows/codex-code-review.yml"
             or run.get("event") not in ("workflow_run", "workflow_dispatch")
             or run.get("run_attempt") != attempt or not succeeded(run)):
         return ["独立 Codex 审查有发现、运行未成功或证明不匹配"]
+    expected = {"head": sha, "base": base, "findings": 0, "run": run_id, "attempt": attempt}
+    if run.get("attestation") != expected:
+        return ["缺失可信 Review 运行的证明产物，或产物与当前 head/base 不匹配"]
     return check_jobs({"review": REVIEW_STEPS}, jobs.get(run_id, []))
 
 
@@ -102,6 +113,42 @@ class GitHub:
                      "description": description[:140],
                      "target_url": os.environ["GATE_RUN_URL"]})
 
+    def attestation(self, run):
+        artifacts = self.pages(f"actions/runs/{run['id']}/artifacts", "artifacts")
+        matches = [a for a in artifacts if a["name"] == f"codex-review-verdict-{run['run_attempt']}" and not a["expired"]]
+        if len(matches) != 1:
+            return None
+        artifact = matches[0]
+        if artifact.get("workflow_run", {}).get("id") != run["id"]:
+            return None
+
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                return None
+
+        # GitHub 的归档接口重定向到签名下载 URL；不向下载主机转发 API token。
+        req = urllib.request.Request(f"{self.root}/repos/{self.repo}/actions/artifacts/{artifact['id']}/zip",
+                                     headers={"Authorization": "Bearer " + self.token})
+        try:
+            urllib.request.build_opener(NoRedirect).open(req, timeout=60)
+        except urllib.error.HTTPError as error:
+            if error.code != 302:
+                raise
+            location = error.headers["Location"]
+        else:
+            raise RuntimeError("证明产物下载未返回预期重定向")
+        if not location.startswith("https://"):
+            raise RuntimeError("拒绝非 HTTPS 证明产物")
+        with urllib.request.urlopen(location, timeout=60) as response:
+            payload = response.read(65537)
+        if len(payload) > 65536:
+            raise RuntimeError("证明产物超过大小上限")
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            files = archive.infolist()
+            if len(files) != 1 or files[0].filename != "review-attestation.json" or files[0].file_size > 4096:
+                raise RuntimeError("证明产物格式不符合要求")
+            return json.loads(archive.read(files[0]))
+
 
 def inspect_pr(api, number, policy, publish=True):
     pr = api.request(f"pulls/{number}")
@@ -112,6 +159,9 @@ def inspect_pr(api, number, policy, publish=True):
         api.status(sha, "pending", "正在核对当前 head 的必需运行及独立审查")
     try:
         runs = api.pages(f"actions/runs?head_sha={sha}&event=pull_request", "workflow_runs")
+        runs = [r for r in runs if r.get("path", "").removeprefix(".github/workflows/") in policy
+                and any(p.get("number") == number and p.get("head", {}).get("sha") == sha
+                        and p.get("base", {}).get("sha") == base for p in r.get("pull_requests", []))]
         jobs = {}
         latest = {}
         for run in runs:
@@ -124,16 +174,14 @@ def inspect_pr(api, number, policy, publish=True):
         errors = evaluate(sha, policy, runs, jobs)
         comments = api.pages(f"issues/{number}/comments")
         review_runs = {}
-        for comment in comments:
-            if comment.get("user", {}).get("login") != "github-actions[bot]":
-                continue
-            for head, reviewed_base, _, run_id, _ in VERDICT.findall(comment.get("body", "")):
-                if head != sha or reviewed_base != base:
-                    continue
-                rid = int(run_id)
-                review_runs[rid] = api.request(f"actions/runs/{rid}")
-                run = review_runs[rid]
+        evidence = review_evidence(sha, base, comments)
+        if evidence:
+            rid, _, _ = evidence
+            run = api.request(f"actions/runs/{rid}")
+            review_runs[rid] = run
+            if run.get("path") == ".github/workflows/codex-code-review.yml" and succeeded(run):
                 jobs[rid] = api.pages(f"actions/runs/{rid}/attempts/{run['run_attempt']}/jobs", "jobs")
+                run["attestation"] = api.attestation(run)
         errors += review_verdict(sha, base, comments, review_runs, jobs)
         # 运行可能在取完 jobs 后被重新运行；只允许本次快照仍是最新 attempt。
         if not errors:

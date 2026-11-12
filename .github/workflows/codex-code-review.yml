@@ -334,11 +334,25 @@ jobs:
           } > "$RUNNER_TEMP/review-comment.md"
           jq -n --rawfile body "$RUNNER_TEMP/review-comment.md" '{body: $body}' > "$RUNNER_TEMP/review-comment.json"
           gh api "repos/$REPO/issues/$NUMBER/comments" --input "$RUNNER_TEMP/review-comment.json" >/dev/null
+          jq -n --arg head "$HEAD_SHA" --arg base "$BASE_SHA" \
+            --argjson findings "$(jq '.findings | length' "$RUNNER_TEMP/review.json")" \
+            --argjson run "$REVIEW_RUN_ID" --argjson attempt "$REVIEW_RUN_ATTEMPT" \
+            '{head: $head, base: $base, findings: $findings, run: $run, attempt: $attempt}' \
+            > "$RUNNER_TEMP/review-attestation.json"
           cat "$RUNNER_TEMP/review-comment.md" >> "$GITHUB_STEP_SUMMARY"
           {
             echo 'posted=true'
             echo "findings=$(jq '.findings | length' "$RUNNER_TEMP/review.json")"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Upload review attestation
+        if: steps.publish.outputs.posted == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: codex-review-verdict-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/review-attestation.json
+          if-no-files-found: error
+          retention-days: 90
 
       - name: Persist refreshed auth
         if: always() && steps.auth.outputs.ok == 'true'
