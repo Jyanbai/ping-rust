@@ -22,6 +22,24 @@ proc wait_for {pattern stage} {
         timeout { puts stderr "timeout at $stage"; exit 1 }
     }
 }
+# expect 会按分支顺序选择匹配，URI 与成功提示可能在同一次读取中到达。
+# 在消费任一结果模式前记录整个已消费缓冲区，避免丢掉更早的成功提示。
+proc record_result {output} {
+    global activated uri unsupported mode
+    if {[regexp {配置验证通过，服务已启动|部署成功，shoes 服务已启动} $output]} {
+        set activated 1
+    }
+    if {[regexp {anytls://} $output]} {
+        if {$mode == "2"} {
+            puts stderr "AnyTLS REALITY emitted a lossy TLS URI"
+            exit 1
+        }
+        set uri 1
+    }
+    if {[regexp {未生成标准分享链接|AnyTLS\+Reality 没有标准分享 URI} $output]} {
+        set unsupported 1
+    }
+}
 set selected 0
 set sni 0
 set activated 0
@@ -52,22 +70,19 @@ expect {
     -re {Reality fallback} { send "\r"; exp_continue }
     -re {请输入 VPS 公网域名或 IP} { send "203.0.113.10\r"; exp_continue }
     -re {未生成标准分享链接|AnyTLS\+Reality 没有标准分享 URI} {
-        set unsupported 1
+        record_result $expect_out(buffer)
         exp_continue
     }
     -re {anytls://} {
-        if {$mode == "2"} {
-            puts stderr "AnyTLS REALITY emitted a lossy TLS URI"
-            exit 1
-        }
-        set uri 1
+        record_result $expect_out(buffer)
         exp_continue
     }
     -re {配置验证通过，服务已启动|部署成功，shoes 服务已启动} {
-        set activated 1
+        record_result $expect_out(buffer)
         exp_continue
     }
     -re {请选择 \[0-10\]} {
+        record_result $expect_out(buffer)
         if {!$activated} {
             puts stderr "AnyTLS menu returned without successful activation"
             exit 1
