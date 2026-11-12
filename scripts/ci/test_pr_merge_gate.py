@@ -216,6 +216,11 @@ class GateTests(unittest.TestCase):
         self.assertIsNone(latest_review(7, self.sha, [dict(auto, head_branch='pr-branch')]))
         retry = dict(auto, run_attempt=2, conclusion='failure')
         self.assertEqual(latest_review(7, self.sha, [auto, retry]), retry)
+        push_review = dict(auto, id=102, conclusion='skipped', display_title='Codex Review pr=0 sha=none')
+        self.assertEqual(latest_review(7, self.sha, [auto, push_review]), auto)
+        self.assertEqual(event_targets(None, {'workflow_run': push_review}), ([], None))
+        workflow = Path(__file__).resolve().parents[2] / '.github/workflows/codex-code-review.yml'
+        self.assertIn("sha=${{ github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.head_sha || 'none' }}", workflow.read_text())
 
     def test_workflow_events_only_select_current_associated_pr(self):
         outer = self
