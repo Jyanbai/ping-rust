@@ -79,7 +79,7 @@ pub enum Command {
     Generate(Box<GenerateArgs>),
     /// 像 233boy 一样快速添加配置并直接输出分享链接
     #[command(alias = "a")]
-    Add(AddArgs),
+    Add(Box<AddArgs>),
     /// 管理 shoes systemd 服务
     Service {
         #[arg(value_enum)]
@@ -561,7 +561,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             }
             Ok(())
         }
-        Command::Add(args) => run_add(args).await,
+        Command::Add(args) => run_add(*args).await,
         Command::Service { action } => execute_service(action),
         Command::Status => execute_service(ServiceAction::Status),
         Command::RegenerateTestCertificate { profile } => {
