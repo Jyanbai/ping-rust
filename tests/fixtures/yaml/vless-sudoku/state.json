@@ -1,0 +1,39 @@
+{
+  "schema_version": 2,
+  "profiles": [],
+  "chain_proxy": {
+    "version": 2,
+    "enabled": false,
+    "nodes": [],
+    "pools": [],
+    "chains": [],
+    "rules": [],
+    "default_route": "Direct"
+  },
+  "sudoku_profiles": [
+    {
+      "position": 0,
+      "profile": {
+        "id": "00000000-0000-4000-8000-000000000096",
+        "name": "sudoku-test",
+        "port": 24444,
+        "server_address": "203.0.113.10",
+        "credentials": {
+          "VlessSudoku": {
+            "user_id": "00000000-0000-4000-8000-000000000096",
+            "sudoku": {
+              "password": "testSudokuPassword1234567",
+              "ascii": "prefer_entropy",
+              "padding_min": 0,
+              "padding_max": 10
+            },
+            "udp_enabled": true
+          }
+        },
+        "certificate_path": null,
+        "certificate_key_path": null,
+        "self_signed_certificate": false
+      }
+    }
+  ]
+}

@@ -90,7 +90,7 @@ async fn execute_inner(request: AddRequest, checked_sni: Option<String>) -> Resu
         vless_enc_mode: request.vless_enc.mode,
         vless_enc_auth: request.vless_enc.auth,
         vless_enc_vision: request.vless_enc.vision,
-        sudoku: request.vless_enc.sudoku.config()?,
+        sudoku: request.vless_enc.sudoku.config_for(request.protocol)?,
         ..Default::default()
     };
     if request.protocol == Protocol::VlessEnc {

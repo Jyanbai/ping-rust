@@ -82,6 +82,7 @@ pub(super) enum ServerProtocol {
     Vless {
         user_id: Uuid,
         udp_enabled: bool,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
         decryption: String,
         #[serde(default, skip_serializing_if = "is_false")]
         vision: bool,

@@ -60,9 +60,19 @@ expect_or_fail {工具:} "tools menu"
 expect_or_fail {1\) 导出客户端配置\r?\n2\) 高级添加配置\r?\n3\) SNI 检测\r?\n4\) SNI 扫描} "tools order"
 expect_or_fail {请选择 \[0-8\]: } "tools prompt"
 send_choice 2
-expect_or_fail {14\) VLESS-ENC\r?\n15\) VLESS-XHTTP-REALITY\r?\n0\) 返回} "appended advanced protocol"
-expect_or_fail {请选择 \[0-15\]: } "advanced protocol prompt"
+expect_or_fail {14\) VLESS-ENC\r?\n15\) VLESS-XHTTP-REALITY\r?\n16\) VLESS-Sudoku（无加密）\r?\n0\) 返回} "appended advanced protocol"
+expect_or_fail {请选择 \[0-16\]: } "advanced protocol prompt"
 send_choice 0
+main_menu
+send_choice 9
+tools_menu
+send_choice 2
+expect_or_fail {请选择 \[0-16\]: } "plain VLESS advanced protocol prompt"
+send_choice 16
+expect_or_fail {VLESS-Sudoku 没有任何加密和认证} "plain VLESS security warning"
+expect_or_fail {UUID、目标地址、非 HTTPS 内容都能在链路上被还原} "plain VLESS recoverable data warning"
+expect_or_fail {仍要添加无加密的 VLESS-Sudoku 节点？ \[y/N\]（输入 0 返回）：} "plain VLESS default no"
+send_choice ""
 main_menu
 send_choice 9
 tools_menu

@@ -42,6 +42,8 @@ mod naive_certificate_tests;
 #[cfg(test)]
 mod vless_encryption_tests;
 #[cfg(test)]
+mod vless_sudoku_tests;
+#[cfg(test)]
 mod xhttp_reality_tests;
 #[cfg(test)]
 mod yaml_fixture_tests;
@@ -121,6 +123,8 @@ pub enum Protocol {
     VlessEnc,
     #[value(name = "vless-xhttp-reality")]
     VlessXhttpReality,
+    #[value(name = "vless-sudoku", help = crate::sudoku::PLAIN_WARNING)]
+    VlessSudoku,
 }
 
 impl Protocol {
@@ -509,6 +513,11 @@ pub(crate) struct ChainProxyUpdateResult {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub enum Credentials {
+    VlessSudoku {
+        user_id: Uuid,
+        sudoku: crate::sudoku::SudokuConfig,
+        udp_enabled: bool,
+    },
     VlessXhttpReality {
         user_id: Uuid,
         private_key: String,
@@ -722,6 +731,7 @@ impl ManagedProfile {
         match &self.credentials {
             Credentials::VlessXhttpReality { .. } => Protocol::VlessXhttpReality,
             Credentials::VlessEnc { .. } => Protocol::VlessEnc,
+            Credentials::VlessSudoku { .. } => Protocol::VlessSudoku,
             Credentials::Reality { .. } => Protocol::Reality,
             Credentials::Hysteria2 { .. } => Protocol::Hysteria2,
             Credentials::Tuic { .. } => Protocol::Tuic,
@@ -754,6 +764,7 @@ impl ManagedProfile {
         match &self.credentials {
             Credentials::VlessXhttpReality { .. } => "VLESS-XHTTP-REALITY",
             Credentials::VlessEnc { .. } => "VLESS-ENC",
+            Credentials::VlessSudoku { .. } => "VLESS-Sudoku（无加密）",
             Credentials::Reality { .. } => "VLESS-Reality-Vision",
             Credentials::Hysteria2 { .. } => "Hysteria2",
             Credentials::Tuic { .. } => "TUIC v5",
@@ -785,7 +796,7 @@ impl ManagedProfile {
 
     pub fn server_name(&self) -> &str {
         match &self.credentials {
-            Credentials::VlessEnc { .. } => "-",
+            Credentials::VlessEnc { .. } | Credentials::VlessSudoku { .. } => "-",
             Credentials::Reality { server_name, .. }
             | Credentials::VlessXhttpReality { server_name, .. }
             | Credentials::Hysteria2 { server_name, .. }
@@ -1281,12 +1292,13 @@ fn apply_profile_change(
         }
         ProfileChange::Sudoku(sudoku) => update_sudoku(server, profile, sudoku)?,
         ProfileChange::RegenerateSudokuPassword => {
-            let Credentials::VlessEnc {
-                sudoku: Some(sudoku),
-                ..
-            } = &profile.credentials
-            else {
-                bail!("请先开启 Sudoku 外观");
+            let sudoku = match &profile.credentials {
+                Credentials::VlessEnc {
+                    sudoku: Some(sudoku),
+                    ..
+                }
+                | Credentials::VlessSudoku { sudoku, .. } => sudoku,
+                _ => bail!("请先开启 Sudoku 外观"),
             };
             let mut sudoku = sudoku.clone();
             sudoku.password = crate::sudoku::generate_password();
@@ -1834,9 +1846,15 @@ fn update_sudoku(
     profile: &mut ManagedProfile,
     selected: Option<crate::sudoku::SudokuConfig>,
 ) -> Result<()> {
-    let Credentials::VlessEnc { sudoku, .. } = &mut profile.credentials else {
-        bail!("只有 VLESS-ENC 配置支持 Sudoku 外观");
-    };
+    if matches!(profile.credentials, Credentials::VlessSudoku { .. }) && selected.is_none() {
+        bail!("VLESS-Sudoku 不能关闭 Sudoku 掩码");
+    }
+    if !matches!(
+        profile.credentials,
+        Credentials::VlessEnc { .. } | Credentials::VlessSudoku { .. }
+    ) {
+        bail!("只有 VLESS-ENC 或 VLESS-Sudoku 配置支持 Sudoku 外观");
+    }
     if let Some(settings) = &selected {
         settings.validate()?;
     }
@@ -1852,7 +1870,13 @@ fn update_sudoku(
         },
         None => inner,
     };
-    *sudoku = selected;
+    match &mut profile.credentials {
+        Credentials::VlessEnc { sudoku, .. } => *sudoku = selected,
+        Credentials::VlessSudoku { sudoku, .. } => {
+            *sudoku = selected.context("缺少 Sudoku 掩码")?
+        }
+        _ => unreachable!(),
+    }
     Ok(())
 }
 
@@ -1903,6 +1927,24 @@ fn regenerate_profile_credentials(
     profile: &mut ManagedProfile,
 ) -> Result<()> {
     match &mut profile.credentials {
+        Credentials::VlessSudoku {
+            user_id, sudoku, ..
+        } => {
+            let ServerProtocol::SudokuMask { settings, protocol } = &mut server.protocol else {
+                bail!("VLESS-Sudoku 配置与管理状态不一致");
+            };
+            let ServerProtocol::Vless {
+                user_id: server_user,
+                ..
+            } = protocol.as_mut()
+            else {
+                bail!("VLESS-Sudoku 内层必须为 VLESS");
+            };
+            *user_id = Uuid::new_v4();
+            *server_user = *user_id;
+            sudoku.password = crate::sudoku::generate_password();
+            *settings = sudoku.clone();
+        }
         Credentials::VlessEnc { .. } => {
             update_vless_enc(server, profile, None, None, None)?;
         }
@@ -2315,12 +2357,31 @@ fn ensure_servers_match_state(servers: &[ServerConfig], profiles: &[ManagedProfi
         };
         let expected_mask = match &profile.credentials {
             Credentials::VlessEnc { sudoku, .. } => sudoku.as_ref(),
+            Credentials::VlessSudoku { sudoku, .. } => Some(sudoku),
             _ => None,
         };
         if mask != expected_mask || mask.is_some_and(|sudoku| sudoku.validate().is_err()) {
             bail!("第 {} 项 Sudoku 外观与管理状态不一致", index + 1);
         }
         let protocol_matches = match (protocol, profile.protocol()) {
+            (
+                ServerProtocol::Vless {
+                    user_id,
+                    decryption,
+                    vision,
+                    udp_enabled,
+                },
+                Protocol::VlessSudoku,
+            ) => {
+                matches!(&profile.credentials, Credentials::VlessSudoku { user_id: state_user, udp_enabled: state_udp, .. }
+                    if user_id == state_user && udp_enabled == state_udp)
+                    && decryption.is_empty()
+                    && !vision
+                    && server.transport.is_none()
+                    && server.quic_settings.is_none()
+                    && profile.certificate_path.is_none()
+                    && profile.certificate_key_path.is_none()
+            }
             (
                 ServerProtocol::Tls {
                     reality_targets,
@@ -2842,12 +2903,14 @@ fn validate_request(request: &GenerationRequest) -> Result<()> {
     if request.protocol != Protocol::VlessEnc
         && (request.options.vless_enc_mode != VlessEncMode::Native
             || request.options.vless_enc_auth != VlessEncAuth::X25519
-            || request.options.vless_enc_vision
-            || request.options.sudoku.is_some())
+            || request.options.vless_enc_vision)
     {
         bail!("VLESS Encryption 参数仅适用于 VLESS-ENC");
     }
     if let Some(sudoku) = &request.options.sudoku {
+        if !matches!(request.protocol, Protocol::VlessEnc | Protocol::VlessSudoku) {
+            bail!("Sudoku 参数仅适用于 VLESS-ENC 或 VLESS-Sudoku");
+        }
         sudoku.validate()?;
     }
     if request.port == 0 {
@@ -2860,7 +2923,11 @@ fn validate_request(request: &GenerationRequest) -> Result<()> {
     }
     if !matches!(
         request.protocol,
-        Protocol::Shadowsocks | Protocol::Snell | Protocol::Socks5 | Protocol::VlessEnc
+        Protocol::Shadowsocks
+            | Protocol::Snell
+            | Protocol::Socks5
+            | Protocol::VlessEnc
+            | Protocol::VlessSudoku
     ) || (matches!(request.protocol, Protocol::Shadowsocks)
         && request.options.shadowsocks_mode == ShadowsocksMode::ShadowTlsV3)
     {

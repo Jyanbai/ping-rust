@@ -17,6 +17,7 @@ mod trojan_reality;
 mod trojan_tls;
 mod tuic;
 pub(super) mod vless_enc;
+mod vless_sudoku;
 mod vless_tls_vision;
 mod vless_ws_tls;
 mod vless_xhttp_reality;
@@ -210,6 +211,17 @@ const PRESETS: &[PresetDescriptor] = &[
         udp_required: false,
         generator: vless_xhttp_reality::generate,
     },
+    PresetDescriptor {
+        protocol: Protocol::VlessSudoku,
+        menu_number: 16,
+        menu_label: "VLESS-Sudoku（无加密）",
+        advanced_label: "VLESS-Sudoku（无加密）",
+        slug: "vless-sudoku",
+        display_prefix: "VLESS-SUDOKU",
+        tcp_required: true,
+        udp_required: false,
+        generator: vless_sudoku::generate,
+    },
 ];
 
 pub(super) fn all() -> &'static [PresetDescriptor] {
@@ -260,6 +272,7 @@ mod tests {
             Protocol::NaiveProxy,
             Protocol::VlessEnc,
             Protocol::VlessXhttpReality,
+            Protocol::VlessSudoku,
         ];
         assert_eq!(PRESETS.len(), expected.len());
         for (index, (preset, protocol)) in PRESETS.iter().zip(expected).enumerate() {

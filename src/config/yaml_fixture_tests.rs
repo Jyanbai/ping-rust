@@ -159,6 +159,8 @@ fn golden_preset_outputs_are_semantically_unchanged() {
     let xhttp_state =
         load_state_from(&fixture_root().join("vless-xhttp-reality/state.json")).unwrap();
     protocols.extend(xhttp_state.profiles.iter().map(ManagedProfile::protocol));
+    let sudoku_state = load_state_from(&fixture_root().join("vless-sudoku/state.json")).unwrap();
+    protocols.extend(sudoku_state.profiles.iter().map(ManagedProfile::protocol));
     protocols.sort_by_key(|protocol| protocol.slug());
     protocols.dedup();
     let mut all = Protocol::all().collect::<Vec<_>>();

@@ -102,3 +102,32 @@ python3 "$(dirname "$0")/compare-compat-outputs.py" "$WORK/new" "$WORK/old"
 find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$WORK/hash-xhttp-after"
 diff -u "$WORK/hash-xhttp-before" "$WORK/hash-xhttp-after"
 echo 'v0.2.1: legacy info/exports unchanged with XHTTP extension present: PASS'
+
+# VLESS-Sudoku must coexist with XHTTP without exposing an unknown credential
+# variant to v0.2.1 or changing any existing profile or chain configuration.
+cp /etc/shoes/ping-rust-state.json "$WORK/before-sudoku-state.json"
+"$NEW" add vless-sudoku --port 24434 --name compat-sudoku \
+  --server-address "$SERVER" --yes >"$WORK/sudoku-add.txt" 2>&1
+python3 - "$WORK/before-sudoku-state.json" /etc/shoes/ping-rust-state.json <<'PY'
+import json
+import sys
+with open(sys.argv[1]) as source:
+    before = json.load(source)
+with open(sys.argv[2]) as source:
+    after = json.load(source)
+assert after["profiles"] == before["profiles"]
+assert after["xhttp_profiles"] == before["xhttp_profiles"]
+assert after["chain_proxy"] == before["chain_proxy"]
+assert len(after["sudoku_profiles"]) == 1
+entry = after["sudoku_profiles"][0]
+assert entry["position"] == len(before["profiles"]) + len(before["xhttp_profiles"])
+assert "VlessSudoku" in entry["profile"]["credentials"]
+PY
+"$NEW" url compat-sudoku >"$WORK/sudoku-url.txt"
+find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$WORK/hash-sudoku-before"
+capture "$OLD" "$WORK/old"
+grep -x 'exit=0' "$WORK/old/info"
+python3 "$(dirname "$0")/compare-compat-outputs.py" "$WORK/new" "$WORK/old"
+find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$WORK/hash-sudoku-after"
+diff -u "$WORK/hash-sudoku-before" "$WORK/hash-sudoku-after"
+echo 'v0.2.1: legacy info/exports unchanged with Sudoku and XHTTP extensions: PASS'

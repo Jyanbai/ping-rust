@@ -442,8 +442,11 @@ pub async fn run(cli: Cli) -> Result<()> {
             {
                 bail!("NaiveProxy --padding 不需要参数，且不能与 --no-padding 并用");
             }
+            vless_enc.sudoku.validate_for(protocol)?;
             if protocol == Protocol::VlessEnc {
                 vless_enc.warn();
+            } else if protocol == Protocol::VlessSudoku {
+                crate::sudoku::warn_plain();
             }
             let shadowsocks_cipher = cipher.unwrap_or_default();
             let snell_cipher = if matches!(protocol, Protocol::Snell) {
@@ -480,7 +483,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                     vless_enc_mode: vless_enc.mode,
                     vless_enc_auth: vless_enc.auth,
                     vless_enc_vision: vless_enc.vision,
-                    sudoku: vless_enc.sudoku.config()?,
+                    sudoku: vless_enc.sudoku.config_for(protocol)?,
                     reality_short_id: short_id,
                     reality_max_time_diff,
                     udp_enabled: udp || !disable_udp,
@@ -779,6 +782,9 @@ async fn run_add_inner(mut args: AddArgs) -> Result<()> {
         bail!("--xhttp-path 仅适用于 VLESS-XHTTP-REALITY");
     }
     args.vless_enc.sudoku.validate_for(args.protocol)?;
+    if args.protocol == Protocol::VlessSudoku {
+        crate::sudoku::warn_plain();
+    }
     if args.shadowtls && !matches!(args.protocol, Protocol::Shadowsocks) {
         bail!("--shadowtls 仅适用于 Shadowsocks");
     }
@@ -1049,6 +1055,16 @@ fn profile_details_lines(profile: &config::ManagedProfile, share_uri: Option<&st
     )];
     let address = profile.server_address.as_deref().unwrap_or("未保存");
     match &profile.credentials {
+        config::Credentials::VlessSudoku {
+            user_id, sudoku, ..
+        } => {
+            lines.push(crate::sudoku::PLAIN_WARNING.into());
+            lines.push(format!("地址：{address}"));
+            lines.push(format!("端口：{}", profile.port));
+            lines.push(format!("UUID：{user_id}"));
+            lines.push("加密：无".into());
+            lines.push(sudoku.description());
+        }
         config::Credentials::VlessEnc {
             user_id,
             encryption,
@@ -1703,7 +1719,10 @@ pub async fn show_info(selector: Option<&str>) -> Result<()> {
             };
             println!("配置数量：{}", profiles.len());
             for profile in profiles {
-                if matches!(profile.credentials, config::Credentials::VlessEnc { .. }) {
+                if matches!(
+                    profile.credentials,
+                    config::Credentials::VlessEnc { .. } | config::Credentials::VlessSudoku { .. }
+                ) {
                     let uri = profile
                         .server_address
                         .as_deref()
@@ -1771,6 +1790,9 @@ pub async fn show_info(selector: Option<&str>) -> Result<()> {
 fn print_saved_url(selector: Option<&str>, server_address: Option<&str>) -> Result<()> {
     let state = config::load_state()?;
     let profile = client::select_profile(&state.profiles, selector)?;
+    if profile.protocol() == Protocol::VlessSudoku {
+        crate::sudoku::warn_plain();
+    }
     println!("{}", client::stored_share_uri(profile, server_address)?);
     if profile.h2mux.enabled {
         eprintln!("提示：标准 URI 不包含 H2MUX 客户端偏好；此链接仍可用于普通连接。");
@@ -1781,6 +1803,9 @@ fn print_saved_url(selector: Option<&str>, server_address: Option<&str>) -> Resu
 fn print_saved_qr(selector: Option<&str>, server_address: Option<&str>) -> Result<()> {
     let state = config::load_state()?;
     let profile = client::select_profile(&state.profiles, selector)?;
+    if profile.protocol() == Protocol::VlessSudoku {
+        crate::sudoku::warn_plain();
+    }
     let uri = client::stored_share_uri(profile, server_address)?;
     let (output, error) = terminal_qr_or_url_text(&uri);
     println!("{output}");
@@ -1816,6 +1841,15 @@ pub fn print_credentials(result: &config::GenerationResult) {
     );
     println!("配置 ID：{}", result.profile_id);
     match &result.credentials {
+        config::Credentials::VlessSudoku {
+            user_id, sudoku, ..
+        } => {
+            println!("{}", crate::sudoku::PLAIN_WARNING);
+            println!("协议：VLESS-Sudoku（无加密）");
+            println!("UUID：{user_id}");
+            println!("加密：无");
+            println!("{}", sudoku.description());
+        }
         config::Credentials::VlessEnc {
             user_id,
             encryption,

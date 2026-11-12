@@ -65,12 +65,14 @@ const SHOES_UPDATE_ITEMS: [&str; 2] = [
     "安装 shoes 最新 GitHub Release（高级）",
 ];
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum ChangeAction {
     VlessEncMode,
     VlessEncAuth,
     VlessEncVision,
     Sudoku,
+    SudokuAscii,
+    SudokuPadding,
     RegenerateSudokuPassword,
     H2Mux,
     Port,
@@ -602,6 +604,14 @@ fn change_actions(profile: &config::ManagedProfile) -> Vec<(ChangeAction, &'stat
         (ChangeAction::RegenerateCredentials, "重新生成全部协议凭据"),
     ];
     match profile.protocol() {
+        Protocol::VlessSudoku => {
+            actions.push((ChangeAction::SudokuAscii, "更改 Sudoku ascii 模式"));
+            actions.push((ChangeAction::SudokuPadding, "更改 Sudoku padding"));
+            actions.push((
+                ChangeAction::RegenerateSudokuPassword,
+                "重新生成 Sudoku 密码",
+            ));
+        }
         Protocol::VlessEnc => {
             actions[3] = (
                 ChangeAction::RegenerateCredentials,
@@ -698,6 +708,9 @@ fn change_actions(profile: &config::ManagedProfile) -> Vec<(ChangeAction, &'stat
 }
 
 async fn change_profile_menu(profile: &config::ManagedProfile) -> Result<()> {
+    if profile.protocol() == Protocol::VlessSudoku {
+        println!("{}", crate::sudoku::PLAIN_WARNING);
+    }
     let actions = change_actions(profile);
     let action_labels = actions.iter().map(|(_, label)| *label).collect::<Vec<_>>();
     let Some(action_index) = select_numbered("选择更改项目", &action_labels)? else {
@@ -705,18 +718,49 @@ async fn change_profile_menu(profile: &config::ManagedProfile) -> Result<()> {
     };
     let action = actions[action_index].0;
     let change = match action {
-        ChangeAction::Sudoku | ChangeAction::RegenerateSudokuPassword => {
-            let Credentials::VlessEnc { sudoku, .. } = &profile.credentials else {
+        ChangeAction::SudokuAscii | ChangeAction::SudokuPadding => {
+            let Credentials::VlessSudoku { sudoku, .. } = &profile.credentials else {
                 bail!("配置协议不一致");
+            };
+            let mut settings = sudoku.clone();
+            if matches!(action, ChangeAction::SudokuAscii) {
+                let Some(index) = select_numbered(
+                    "Sudoku ascii 模式",
+                    &["prefer_entropy", "entropy", "prefer_ascii", "ascii"],
+                )?
+                else {
+                    return Ok(());
+                };
+                use crate::sudoku::SudokuAscii;
+                settings.ascii = [
+                    SudokuAscii::PreferEntropy,
+                    SudokuAscii::Entropy,
+                    SudokuAscii::PreferAscii,
+                    SudokuAscii::Ascii,
+                ][index];
+            } else {
+                let Some(updated) =
+                    read_sudoku_padding(&mut io::stdin().lock(), &mut io::stdout(), &settings)?
+                else {
+                    return Ok(());
+                };
+                settings = updated;
+            }
+            ProfileChange::Sudoku(Some(settings))
+        }
+        ChangeAction::Sudoku | ChangeAction::RegenerateSudokuPassword => {
+            let sudoku = match &profile.credentials {
+                Credentials::VlessEnc { sudoku, .. } => sudoku.as_ref(),
+                Credentials::VlessSudoku { sudoku, .. } => Some(sudoku),
+                _ => bail!("配置协议不一致"),
             };
             let regenerate = matches!(action, ChangeAction::RegenerateSudokuPassword);
             if sudoku.is_none() && !regenerate {
                 println!("{}", crate::sudoku::COST);
             }
-            let Some(change) =
-                sudoku_menu_change(sudoku.as_ref(), regenerate, |prompt, default| {
-                    input::confirm(prompt, default)
-                })?
+            let Some(change) = sudoku_menu_change(sudoku, regenerate, |prompt, default| {
+                input::confirm(prompt, default)
+            })?
             else {
                 return Ok(());
             };
@@ -1081,7 +1125,12 @@ async fn change_profile_menu(profile: &config::ManagedProfile) -> Result<()> {
     );
     if let Some(server) = result.profile.server_address.as_deref() {
         match client::share_uri(&result.profile, server) {
-            Ok(uri) if result.profile.protocol() == Protocol::VlessEnc => {
+            Ok(uri)
+                if matches!(
+                    result.profile.protocol(),
+                    Protocol::VlessEnc | Protocol::VlessSudoku
+                ) =>
+            {
                 cli::print_share_uri_with_qr(&uri)
             }
             Ok(uri) => println!("\n{uri}\n"),
@@ -1726,6 +1775,46 @@ fn read_sudoku_prompt(reader: &mut impl io::BufRead, writer: &mut impl io::Write
     input::read_confirm(reader, writer, "启用 Sudoku 外观？", false)
 }
 
+fn read_vless_sudoku_prompt(
+    reader: &mut impl io::BufRead,
+    writer: &mut impl io::Write,
+) -> Result<bool> {
+    writeln!(
+        writer,
+        "{}\n{}",
+        crate::sudoku::PLAIN_WARNING,
+        crate::sudoku::PLAIN_COST
+    )?;
+    input::read_confirm(
+        reader,
+        writer,
+        "仍要添加无加密的 VLESS-Sudoku 节点？",
+        false,
+    )
+}
+
+fn read_sudoku_padding(
+    reader: &mut impl io::BufRead,
+    writer: &mut impl io::Write,
+    current: &crate::sudoku::SudokuConfig,
+) -> Result<Option<crate::sudoku::SudokuConfig>> {
+    // A separate return choice keeps zero available as a valid padding value.
+    if !input::read_confirm(reader, writer, "更改 Sudoku padding？", false)? {
+        return Ok(None);
+    }
+    let mut selected = current.clone();
+    loop {
+        selected.padding_min =
+            input::read_number(reader, writer, "最小 padding（0–100）", current.padding_min)?;
+        selected.padding_max =
+            input::read_number(reader, writer, "最大 padding（0–100）", current.padding_max)?;
+        match selected.validate() {
+            Ok(()) => return Ok(Some(selected)),
+            Err(error) => writeln!(writer, "错误！{error}")?,
+        }
+    }
+}
+
 fn sudoku_menu_change(
     current: Option<&crate::sudoku::SudokuConfig>,
     regenerate: bool,
@@ -1796,6 +1885,11 @@ async fn deploy_fast_config(
     shadowsocks_password: Option<String>,
     shadowsocks_mode: config::ShadowsocksMode,
 ) -> Result<MenuControl> {
+    if protocol == Protocol::VlessSudoku
+        && !read_vless_sudoku_prompt(&mut io::stdin().lock(), &mut io::stdout())?
+    {
+        return Ok(MenuControl::Continue);
+    }
     let vless_enc = if protocol == Protocol::VlessEnc {
         let Some(options) = prompt_vless_enc_options()? else {
             return Ok(MenuControl::Continue);
@@ -1867,6 +1961,11 @@ async fn advanced_add_config_menu() -> Result<()> {
     };
     let protocol =
         Protocol::from_menu_number(selected + 1).context("协议菜单与中央注册表不一致")?;
+    if protocol == Protocol::VlessSudoku
+        && !read_vless_sudoku_prompt(&mut io::stdin().lock(), &mut io::stdout())?
+    {
+        return Ok(());
+    }
     let name = input::checked_text("配置名称", Some(protocol.slug()), false, |name| {
         config::validate_profile_name(name, &config::load_state()?.profiles, None)
     })?;
@@ -2033,7 +2132,11 @@ async fn advanced_add_config_menu() -> Result<()> {
         shadowtls_server_name.context("缺少已检测的 ShadowTLS SNI")?
     } else if matches!(
         protocol,
-        Protocol::Shadowsocks | Protocol::Snell | Protocol::Socks5 | Protocol::VlessEnc
+        Protocol::Shadowsocks
+            | Protocol::Snell
+            | Protocol::Socks5
+            | Protocol::VlessEnc
+            | Protocol::VlessSudoku
     ) {
         config::DEFAULT_SNI.to_owned()
     } else if reality_outer {
@@ -2357,6 +2460,78 @@ mod tests {
         assert_eq!(parse_shadowsocks_mode("bad"), None);
         assert_eq!(parse_shadowsocks_mode("0"), Some(None));
         assert_eq!(parse_shadowsocks_mode(""), parse_shadowsocks_mode("1"));
+    }
+
+    #[test]
+    fn vless_sudoku_menu_warning_confirmation_defaults_back_and_retry() {
+        for (answer, expected) in [
+            ("\n", false),
+            ("n\n", false),
+            ("y\n", true),
+            ("bad\ny\n", true),
+        ] {
+            let mut output = Vec::new();
+            assert_eq!(
+                read_vless_sudoku_prompt(&mut answer.as_bytes(), &mut output).unwrap(),
+                expected
+            );
+            let text = String::from_utf8(output).unwrap();
+            assert!(text.contains(crate::sudoku::PLAIN_WARNING));
+            assert!(text.contains(crate::sudoku::PLAIN_COST));
+            assert!(text.contains("仍要添加无加密的 VLESS-Sudoku 节点？ [y/N]（输入 0 返回）"));
+            assert!(
+                text.find(crate::sudoku::PLAIN_WARNING).unwrap() < text.find("仍要添加").unwrap()
+            );
+            assert!(!text.contains("传输安全仍由 VLESS Encryption 提供"));
+        }
+        let error = read_vless_sudoku_prompt(&mut "0\n".as_bytes(), &mut Vec::new()).unwrap_err();
+        assert!(input::is_back(&error));
+        assert_eq!(control_after_error(&error), MenuControl::Continue);
+        let state: config::ManagedState = serde_json::from_str(include_str!(
+            "../tests/fixtures/yaml/vless-sudoku/state.json"
+        ))
+        .unwrap();
+        let actions = change_actions(&state.profiles[0]);
+        for expected in [
+            ChangeAction::Port,
+            ChangeAction::SudokuAscii,
+            ChangeAction::SudokuPadding,
+            ChangeAction::RegenerateSudokuPassword,
+        ] {
+            assert!(actions.iter().any(|(action, _)| *action == expected));
+        }
+        assert!(!actions
+            .iter()
+            .any(|(action, _)| *action == ChangeAction::Sudoku));
+        let current = crate::sudoku::SudokuConfig::generated();
+        assert!(sudoku_menu_change(Some(&current), true, |prompt, default| {
+            assert!(!default);
+            assert!(prompt.contains("旧分享链接失效"));
+            Ok(default)
+        })
+        .unwrap()
+        .is_none());
+        assert!(
+            read_sudoku_padding(&mut "\n".as_bytes(), &mut Vec::new(), &current)
+                .unwrap()
+                .is_none()
+        );
+        let error =
+            read_sudoku_padding(&mut "0\n".as_bytes(), &mut Vec::new(), &current).unwrap_err();
+        assert!(input::is_back(&error));
+        let mut output = Vec::new();
+        let updated = read_sudoku_padding(
+            &mut "y\n101\n0\n20\n10\n0\n10\n".as_bytes(),
+            &mut output,
+            &current,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!((updated.padding_min, updated.padding_max), (0, 10));
+        assert_eq!(updated.password, current.password);
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains("0–100"));
+        assert!(text.contains("不能小于"));
     }
 
     #[test]
