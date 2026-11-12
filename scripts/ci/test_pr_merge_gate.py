@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import unittest
 
-from pr_merge_gate import evaluate, review_verdict, inspect_pr, latest_review, REVIEW_STEPS
+from pr_merge_gate import evaluate, review_verdict, inspect_pr, latest_review, event_targets, REVIEW_STEPS
 
 
 class GateTests(unittest.TestCase):
@@ -216,6 +216,28 @@ class GateTests(unittest.TestCase):
         self.assertIsNone(latest_review(7, self.sha, [dict(auto, head_branch='pr-branch')]))
         retry = dict(auto, run_attempt=2, conclusion='failure')
         self.assertEqual(latest_review(7, self.sha, [auto, retry]), retry)
+
+    def test_workflow_events_only_select_current_associated_pr(self):
+        outer = self
+
+        class FakeAPI:
+            def pages(self, path):
+                self.path = path
+                return [dict(number=number, state='open', head={'sha': sha}, base={'ref': base})
+                        for number, sha, base in [(7, outer.sha, 'main'), (8, 'c' * 40, 'main'), (9, outer.sha, 'other')]]
+
+        api = FakeAPI()
+        self.assertEqual(event_targets(api, {'workflow_run': dict(self.run, event='push')}), ([], None))
+        self.assertFalse(hasattr(api, 'path'))
+        self.assertEqual(event_targets(api, {'workflow_run': self.run}), ([7], self.sha))
+        self.assertEqual(api.path, f'commits/{self.sha}/pulls')
+        auto = dict(self.run, path='.github/workflows/codex-code-review.yml', event='workflow_run',
+                    head_branch='main', display_title=f'Codex Review pr=0 sha={self.sha}')
+        self.assertEqual(event_targets(api, {'workflow_run': auto}), ([7], self.sha))
+        manual = dict(auto, event='workflow_dispatch', display_title='Codex Review pr=7 sha=none')
+        self.assertEqual(event_targets(api, {'workflow_run': manual}), ([7], None))
+        self.assertEqual(event_targets(api, {'workflow_run': dict(manual, head_branch='untrusted')}), ([], None))
+        self.assertEqual(event_targets(api, {}), (None, None))
 
 
 if __name__ == "__main__":

@@ -19,7 +19,7 @@ on:
       - Codex Code Review
     types: [requested, in_progress, completed]
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '*/15 * * * *'
   workflow_dispatch:
     inputs:
       pr:

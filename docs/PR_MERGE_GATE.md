@@ -42,8 +42,9 @@ direct fallback）和失败诊断不列为必需；相应验收在 Ubuntu 24 / D
 
 ## 触发及安全边界
 
-PR 事件、必需 workflow 的 requested/in_progress/completed、每 5 分钟兜底检查以及
-main 上手动触发会重新计算。重新运行开始后撤销旧绿灯；新提交因 SHA 不同天然没有
+PR 事件、必需 workflow 的 completed、每 15 分钟兜底检查以及 main 上手动触发会重新计算。
+workflow_run 事件只处理关联的当前 PR，忽略 push 和旧 head，避免每个事件全仓扫描。
+requested/in_progress 只对关联 PR 轻量发布 pending，重新运行开始后撤销旧绿灯；新提交因 SHA 不同天然没有
 旧状态可用。GitHub 事件和定时调度可能延迟，运行重试期间应等待新一轮门禁完成。
 发布过程串行，不取消中途运行；门禁读取失败后应排查日志并手动重跑，不无限重试测试。
 

@@ -231,6 +231,31 @@ def inspect_pr(api, number, policy, publish=True):
         raise
 
 
+def event_targets(api, event):
+    """只核对事件关联的当前 PR；push 和旧 head 事件不扫描整个仓库。"""
+    run = event.get("workflow_run")
+    if run is None:
+        return None, None
+    if run.get("path") == ".github/workflows/codex-code-review.yml" or run.get("name") == "Codex Code Review":
+        title = re.fullmatch(r"Codex Review pr=([0-9]+) sha=(none|[0-9a-f]{40})", run.get("display_title", ""))
+        if not title or run.get("head_branch") != "main":
+            return [], None
+        number, sha = title.groups()
+        if run.get("event") == "workflow_dispatch" and number != "0" and sha == "none":
+            return [int(number)], None
+        if run.get("event") != "workflow_run" or number != "0" or sha == "none":
+            return [], None
+    elif run.get("event") == "pull_request":
+        sha = run.get("head_sha", "")
+    else:
+        return [], None
+    if not re.fullmatch(r"[0-9a-f]{40}", sha):
+        return [], None
+    prs = api.pages(f"commits/{sha}/pulls")
+    return [p["number"] for p in prs if p["state"] == "open"
+            and p["head"]["sha"] == sha and p["base"]["ref"] == "main"], sha
+
+
 def main():
     api = GitHub()
     policy = json.loads(Path(__file__).with_name("pr_merge_gate_policy.json").read_text(encoding="utf-8"))
@@ -238,13 +263,22 @@ def main():
     number = os.environ.get("PR_NUMBER", "")
     if not number and "pull_request" in event:
         number = str(event["pull_request"]["number"])
-    if number:
+    targets, expected_sha = event_targets(api, event)
+    if targets is not None:
+        numbers = targets
+    elif number:
         if not re.fullmatch(r"[1-9][0-9]*", number):
             raise ValueError("PR 编号必须是正整数")
         numbers = [int(number)]
     else:
         numbers = [p["number"] for p in api.pages("pulls?state=open&base=main")]
     for number in numbers:
+        if event.get("workflow_run") and event.get("action") in ("requested", "in_progress"):
+            pr = api.request(f"pulls/{number}")
+            if (pr["state"] == "open" and pr["base"]["ref"] == "main"
+                    and (expected_sha is None or pr["head"]["sha"] == expected_sha)):
+                api.status(pr["head"]["sha"], "pending", "当前 head 的必需运行或独立审查已开始，等待最终证据")
+            continue
         inspect_pr(api, number, policy, publish=os.environ.get("DRY_RUN") != "true")
 
 
