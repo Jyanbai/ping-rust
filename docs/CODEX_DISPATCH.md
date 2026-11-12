@@ -18,6 +18,40 @@
 - 每个任务消耗 ChatGPT 套餐里 Codex 的本地消息额度（和在电脑上用 Codex 是同一个池子）。GitHub Actions 分钟数对公开仓库免费。
 - Codex 在沙箱里不能联网，也不能创建 TCP/UDP socket（连 127.0.0.1 也不行，见下文"沙箱里能跑哪些测试"）。Rust 依赖会预先下载，所以它能跑 `cargo build/test --offline`；监听或连接端口的测试、依赖 shoes / Xray / Mihomo 的测试跑不了，推送后由 CI 完整测试。prompt 要求 Codex 在最终回复里把这些测试单独列出、标"未验证"，不算作通过。
 
+## Codex 接管实现、审查与回修
+
+自 2026-11-12 起，Claude 停用，删除自动审查与 `@claude` 两个 workflow。
+Codex 负责实现、独立只读审查及回修，Grok bot 只读播报进度，用户最终检查并决定合并。
+共同审查清单与角色分工统一放在 `AGENTS.md`；`CLAUDE.md` 只保留历史兼容入口。
+
+编译和测试统一由 GitHub Actions 执行，包括普通 Linux debug / release 构建。旧 SSH 构建环境
+已停用，本机只编辑、操作 Git、派发任务和读取日志；部署与实机验收另行授权。
+
+`.github/workflows/codex-code-review.yml` 复用 environment
+`codex` 的 `CODEX_AUTH_JSON`、`CODEX_BOT_TOKEN` 和模型变量，不需要新增登录或 API key。
+现有 `/codex <任务>` 仍负责写代码，循环如下：
+
+**issue / 验收标准 → Codex 实现同一个 PR → CI → Codex 独立审查 → 自动回修 → 再次 CI / 审查 → 用户最终检查**。
+
+- PR 的 **CI** 结束后自动审查（CI 失败也会审查）；只接受所有者在本仓库创建、以 `main`
+  为目标的非草稿 PR。来自 fork 或其他作者的 PR 不自动消耗登录额度。
+- 审查在独立、临时的 Codex 会话中使用默认分支的 `AGENTS.md`，只读查看 PR 的精确提交和差异，
+  不运行其中的代码、编译或测试。模型步骤没有 GitHub token；命令沙箱不能写文件、联网或读登录凭据。
+  结果以 **Codex Code Review** 为标题，由 `github-actions[bot]` 留在 PR 下。
+- 同一个 head / base 提交组合成功审查后不重复消费额度；审查期间提交变化则不发布过期结果。
+- 结构化结果通过格式校验、凭据检查后才发布。有问题时，单独步骤用现有所有者 PAT 留下 `/codex`
+  回修评论，包含具体意见，触发现有 Codex Dispatch 更新同一个 PR；实现会话不需要联网获取评论。
+  没有发现时不再派任务，也不自动合并。
+- 每个 PR 默认最多自动回修 2 次，同一提交只派一次；超过上限明确交人工。`no-auto-fix` 标签
+  同时禁止 CI 修复和审查回修。登录、额度或沙箱失败会报告失败，不发布“无问题”的结论。
+- 对已打开的 PR（例如 #97），或需要重审时，到 Actions → **Codex Code Review** →
+  **Run workflow**，分支选 `main`，填写 PR 编号。手动重审会绕过去重检查。
+- 仓库变量 `CODEX_REVIEW=off` 暂停自动及手动审查；`CODEX_REVIEW_FIX=off` 只暂停审查回修；
+  `CODEX_REVIEW_FIX_MAX` 调整每个 PR 的自动回修上限（1 至 10，默认 2），CI 修复另有独立预算。
+- 这是使用现有登录的 Actions 审查工作流，与需要在 Codex 网页单独启用的官方 `@codex`
+  GitHub 审查入口相互独立。只有合并到 `main` 后才会生效，真实模型调用、沙箱和评论派发需届时验证。
+  审查回修不增加 `actions: write` 权限，不绕过 Codex Dispatch 的工作流文件限制。
+
 ## 沙箱里能跑哪些测试
 
 2026-11-09 在 `ubuntu-latest` runner 上用 Codex CLI 0.166.0、权限配置 `ci` 实测（`codex sandbox -P ci`，不调用模型）：
@@ -40,7 +74,7 @@
 
 - 每个 PR 最多自动派 2 次。用完后贴一条评论并打 `needs-human` 标签，之后仍可以手动 `/codex`。
 - 同一个提交只派一次；派发前会在 PR 下留一条带隐藏标记的评论，次数就是按这些评论数的。
-- 只处理本仓库的 `codex/*` 分支。人或 Claude 开的其他分支、fork 来的 PR 都不会被自动修改。
+- 只处理本仓库的 `codex/*` 分支。其他分支、fork 来的 PR 都不会被自动修改。
 - 不想自动修：给 PR 打 `no-auto-fix` 标签。整个关掉：仓库变量 `CODEX_CI_FIX` 设为 `off`。改次数：仓库变量 `CODEX_CI_FIX_MAX`。
 - Codex 判断失败和本 PR 无关（比如偶发网络问题）或必须改 `.github/` 才能修时，不改代码，只在 PR 下说明理由，循环到此结束。
 - 手动检查：Actions → Codex CI Fix → Run workflow，填分支和完整 SHA，勾着 `dry_run` 只在日志里打印会派发的任务，不评论、不派发。
