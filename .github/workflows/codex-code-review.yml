@@ -90,7 +90,17 @@ jobs:
           [[ "$sha" =~ ^[0-9a-f]{40}$ && "$base" =~ ^[0-9a-f]{40}$ ]] || exit 1
           if [ "$EVENT_NAME" = workflow_run ]; then
             [ "$sha" = "$EVENT_SHA" ] || { echo 'CI 对应的提交已过期，跳过。'; exit 0; }
-            # 每个新 run/attempt 必须实际审查；不能因相同 head 的历史评论跳过。
+            # 兼容旧版只有成功标记的 Review；原有准入/去重断言保持不变。
+            # 新版可信证明包含 verdict 标记：遇到它时不得复用旧 run，
+            # 新一次 CI Review 必须实际审查并发布本次 run/attempt 的证明。
+            comments="$(gh api "repos/$REPO/issues/$number/comments" --paginate --jq \
+              '.[] | select(.user.login == "github-actions[bot]") | .body')"
+            legacy="<!-- codex-review sha=$sha base=$base status=complete -->"
+            modern="<!-- codex-review-verdict sha=$sha base=$base "
+            if grep -qF "$legacy" <<< "$comments" && ! grep -qF "$modern" <<< "$comments"; then
+              echo '只有旧版审查成功标记，保持兼容去重；统一门禁仍要求新版证明。'
+              exit 0
+            fi
           fi
           {
             echo "number=$number"
@@ -329,12 +339,12 @@ jobs:
               "$HEAD_SHA" "$BASE_SHA" "$(jq '.findings | length' "$RUNNER_TEMP/review.json")" "$REVIEW_RUN_ID" "$REVIEW_RUN_ATTEMPT"
           } > "$RUNNER_TEMP/review-comment.md"
           jq -n --rawfile body "$RUNNER_TEMP/review-comment.md" '{body: $body}' > "$RUNNER_TEMP/review-comment.json"
-          # 只对同一 run/attempt 已发布的完全相同评论执行幂等处理。
-          # 不根据 head/base 的历史评论跳过实际审查或可信证明上传。
-          existing="$(gh api "repos/$REPO/issues/$NUMBER/comments" --paginate --slurp)"
-          if jq -e --rawfile expected "$RUNNER_TEMP/review-comment.md" \
-            'any(.[][]; .user.login == "github-actions[bot]" and .body == $expected)' \
-            <<< "$existing" >/dev/null; then
+          # 用 run/attempt 的精确 verdict 标记去重，仅避免重复发评论；
+          # 不跳过模型审查、产物生成或证明上传。
+          marker="<!-- codex-review-verdict sha=$HEAD_SHA base=$BASE_SHA findings=$(jq '.findings | length' "$RUNNER_TEMP/review.json") run=$REVIEW_RUN_ID attempt=$REVIEW_RUN_ATTEMPT -->"
+          existing="$(gh api "repos/$REPO/issues/$NUMBER/comments" --paginate --jq \
+            '.[] | select(.user.login == "github-actions[bot]") | .body')"
+          if grep -Fxq -- "$marker" <<< "$existing"; then
             echo '当前 run/attempt 的相同 Review 评论已发布，继续生成可信证明。'
           else
             gh api "repos/$REPO/issues/$NUMBER/comments" --input "$RUNNER_TEMP/review-comment.json" >/dev/null

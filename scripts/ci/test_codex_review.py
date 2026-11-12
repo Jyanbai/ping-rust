@@ -230,6 +230,31 @@ class ReviewScriptsTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("review=true", self.output())
 
+    def test_modern_review_proof_requires_new_automatic_review(self):
+        self.api[f"repos/{REPO}/issues/7/comments"] = [{
+            "user": {"login": "github-actions[bot]"},
+            "body": MARKER + f"\n<!-- codex-review-verdict sha={HEAD} base={BASE} findings=0 run=98 attempt=1 -->",
+        }]
+        result = self.run_step("Select PR")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("review=true", self.output())
+
+    def test_same_run_attempt_publication_is_idempotent_but_still_attested(self):
+        self.prepare_review()
+        marker = f"<!-- codex-review-verdict sha={HEAD} base={BASE} findings=0 run=99 attempt=1 -->"
+        self.api[f"repos/{REPO}/issues/7/comments"] = [{
+            "user": {"login": "github-actions[bot]"},
+            "body": MARKER + "\n" + marker,
+        }]
+        result = self.run_step("Publish review")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((self.work / "posted.json").exists())
+        attestation = json.loads((self.work / "review-attestation.json").read_text())
+        self.assertEqual(attestation, {
+            "head": HEAD, "base": BASE, "findings": 0, "run": 99, "attempt": 1,
+        })
+        self.assertIn("posted=true", self.output())
+
     def test_manual_review_can_recheck_existing_pr(self):
         self.env.update(EVENT_NAME="workflow_dispatch", PR_INPUT="7")
         self.api[f"repos/{REPO}/issues/7/comments"] = [
