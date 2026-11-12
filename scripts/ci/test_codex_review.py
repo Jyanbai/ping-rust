@@ -4,11 +4,13 @@
 """
 
 import copy
+import io
 import json
 import os
 import re
 import subprocess
 import tempfile
+import tarfile
 import textwrap
 import unittest
 from pathlib import Path
@@ -18,7 +20,8 @@ WORKFLOW = ROOT / ".github/workflows/codex-code-review.yml"
 REPO = "owner/example"
 HEAD = "a" * 40
 BASE = "b" * 40
-MARKER = f"<!-- codex-review sha={HEAD} base={BASE} -->"
+READ_CHECK = "e" * 64
+MARKER = f"<!-- codex-review sha={HEAD} base={BASE} status=complete -->"
 PR = {
     "number": 7,
     "state": "open",
@@ -119,6 +122,7 @@ class ReviewScriptsTest(unittest.TestCase):
             **os.environ,
             "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
             "RUNNER_TEMP": str(self.work),
+            "GITHUB_WORKSPACE": str(self.work / "workspace"),
             "GITHUB_OUTPUT": str(self.work / "output"),
             "GITHUB_STEP_SUMMARY": str(self.work / "summary"),
             "GITHUB_EVENT_PATH": str(self.work / "event.json"),
@@ -138,6 +142,8 @@ class ReviewScriptsTest(unittest.TestCase):
             "MAX_ATTEMPTS": "2",
         }
         (self.work / "codex-home").mkdir()
+        (self.work / "workspace").mkdir()
+        (self.work / "workspace/review-read-check.txt").write_text(READ_CHECK)
         self.write_event()
 
     def write_event(self, **overrides):
@@ -164,10 +170,19 @@ class ReviewScriptsTest(unittest.TestCase):
     def prepare_review(self, text="未发现有充分证据的代码问题。", tokens=(), findings=()):
         (self.work / "review.md").write_text(text, encoding="utf-8")
         (self.work / "review.json").write_text(
-            json.dumps({"summary": text, "findings": list(findings)}), encoding="utf-8"
+            json.dumps({"summary": text, "findings": list(findings),
+                        "review_complete": True, "read_check": READ_CHECK}), encoding="utf-8"
         )
         (self.work / "seed-tokens.txt").write_text("\n".join(tokens))
         (self.work / "codex-home/auth.json").write_text(json.dumps({"tokens": {}}))
+
+    def test_legacy_unfinished_review_does_not_suppress_retry(self):
+        self.api[f"repos/{REPO}/issues/7/comments"] = [{
+            "user": {"login": "github-actions[bot]"},
+            "body": MARKER.replace(" status=complete", ""),
+        }]
+        self.assertEqual(self.run_step("Select PR").returncode, 0)
+        self.assertIn("review=true", self.output())
 
     def test_owner_pr_is_selected_with_exact_head_and_base(self):
         result = self.run_step("Select PR")
@@ -293,6 +308,77 @@ exec "$@"
         result = self.run_step("Publish review")
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse((self.work / "posted.json").exists())
+
+    def test_installer_preserves_runtime_helpers_and_resources(self):
+        # 裸二进制能启动 CLI，却无法读取代码；移动它时必须保留同包的相邻依赖。
+        executable = b'''#!/usr/bin/env bash
+set -euo pipefail
+directory="$(dirname "$(readlink -f "$0")")"
+test -x "$directory/codex-code-mode-host"
+test -f "$directory/../codex-package.json"
+test -x "$directory/../codex-path/rg"
+echo 'codex-cli 0.166.0'
+'''
+        archive = self.work / "runtime.tar.gz"
+        with tarfile.open(archive, "w:gz") as package:
+            for name, content, mode in (
+                ("bin/codex", executable, 0o755),
+                ("codex-x86_64-unknown-linux-musl", executable, 0o755),
+                ("bin/codex-code-mode-host", b"helper", 0o755),
+                ("codex-package.json", b"{}", 0o644),
+                ("codex-path/rg", b"search", 0o755),
+            ):
+                entry = tarfile.TarInfo(name)
+                entry.size, entry.mode = len(content), mode
+                package.addfile(entry, io.BytesIO(content))
+        self.env.update({
+            "HOME": str(self.work / "home"),
+            "GITHUB_PATH": str(self.work / "github-path"),
+            "FAKE_CODEX_ARCHIVE": str(archive),
+        })
+        self.mock_command("curl", '''
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = --output ]; then output="$2"; shift 2; else shift; fi
+done
+cp "$FAKE_CODEX_ARCHIVE" "$output"
+''')
+        # 真实发布包的校验和由 Actions 中的 runtime smoke 验证；这里验证安装布局。
+        self.mock_command("sha256sum", "cat >/dev/null\n")
+        result = self.run_step("Install pinned Codex CLI")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        runtime_bin = Path((self.work / "github-path").read_text().strip())
+        result = subprocess.run([str(runtime_bin / "codex"), "--version"],
+                                text=True, capture_output=True, check=False)
+        self.assertEqual(result.returncode, 0, "CLI 丢失同包 helper 或资源目录")
+
+    def test_result_without_completion_evidence_is_rejected(self):
+        self.prepare_review("读取工具缺少 codex-code-mode-host，审查未完成。")
+        (self.work / "review.json").write_text(json.dumps({
+            "summary": "读取工具缺少 codex-code-mode-host，审查未完成。", "findings": [],
+        }))
+        self.assertNotEqual(self.run_step("Render review").returncode, 0)
+
+    def test_model_reported_incomplete_review_is_rejected(self):
+        self.prepare_review()
+        result = json.loads((self.work / "review.json").read_text())
+        result.update(review_complete=False, read_check=READ_CHECK)
+        (self.work / "review.json").write_text(json.dumps(result))
+        self.assertNotEqual(self.run_step("Render review").returncode, 0)
+
+    def test_completion_claim_without_successful_file_read_is_rejected(self):
+        self.prepare_review()
+        result = json.loads((self.work / "review.json").read_text())
+        result.update(review_complete=True, read_check="not-read")
+        (self.work / "review.json").write_text(json.dumps(result))
+        self.assertNotEqual(self.run_step("Render review").returncode, 0)
+
+    def test_completed_review_with_file_read_evidence_is_rendered(self):
+        self.prepare_review()
+        result = json.loads((self.work / "review.json").read_text())
+        result.update(review_complete=True, read_check=READ_CHECK)
+        (self.work / "review.json").write_text(json.dumps(result))
+        rendered = self.run_step("Render review")
+        self.assertEqual(rendered.returncode, 0, rendered.stderr)
 
     def prepare_findings(self):
         self.prepare_review("发现一个可复现问题", findings=[{
