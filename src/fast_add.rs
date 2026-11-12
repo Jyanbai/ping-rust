@@ -7,7 +7,8 @@ use reqwest::Client;
 use crate::{
     client,
     config::{
-        self, GenerationOptions, GenerationRequest, Protocol, ShadowsocksCipher, ShadowsocksMode,
+        self, AnyTlsMode, GenerationOptions, GenerationRequest, Protocol, ShadowsocksCipher,
+        ShadowsocksMode,
     },
     deployment, operations, utils,
 };
@@ -27,6 +28,7 @@ pub struct AddRequest {
     pub vless_enc: crate::vless_encryption::Options,
     pub name: Option<String>,
     pub protocol: Protocol,
+    pub anytls_mode: AnyTlsMode,
     pub port: Option<u16>,
     pub server_address: Option<String>,
     pub server_name: Option<String>,
@@ -42,6 +44,14 @@ pub struct AddRequest {
     pub naive_password: Option<String>,
     pub naive_padding: bool,
     pub naive_fallback: Option<String>,
+}
+
+impl AddRequest {
+    fn probes_sni(&self) -> bool {
+        self.protocol.uses_reality(self.anytls_mode)
+            || (self.protocol == Protocol::Shadowsocks
+                && self.shadowsocks_mode == ShadowsocksMode::ShadowTlsV3)
+    }
 }
 
 pub struct AddResult {
@@ -71,21 +81,44 @@ async fn execute_inner(request: AddRequest, checked_sni: Option<String>) -> Resu
 
     let server_address = resolve_server_address(request.server_address.as_deref()).await?;
     let port = select_port(request.protocol, request.port)?;
-    let probes_sni = request.protocol.uses_reality(config::AnyTlsMode::Tls)
-        || (request.protocol == Protocol::Shadowsocks
-            && request.shadowsocks_mode == ShadowsocksMode::ShadowTlsV3);
+    let probes_sni = request.probes_sni();
     let server_name = if let Some(server_name) = checked_sni {
         server_name
     } else if probes_sni {
-        crate::sni_probe::resolve(request.server_name, request.interactive).await?
+        crate::sni_probe::resolve(request.server_name.clone(), request.interactive).await?
     } else {
         config::resolve_server_name(
-            request.server_name,
+            request.server_name.clone(),
             request.protocol,
-            config::AnyTlsMode::Tls,
+            request.anytls_mode,
         )
     };
+    let generation = add_activation_context(
+        deployment::generate_and_activate(prepare_generation_request(
+            request,
+            server_address.clone(),
+            port,
+            server_name,
+        )?)
+        .await,
+        port,
+    )?;
+    let share_uri = share_uri_after_activation(&generation.profile, &server_address)?;
+    Ok(AddResult {
+        generation,
+        share_uri,
+    })
+}
+
+// Keep the selected outer mode in the same request as all generation options.
+fn prepare_generation_request(
+    request: AddRequest,
+    server_address: String,
+    port: u16,
+    server_name: String,
+) -> Result<GenerationRequest> {
     let mut options = GenerationOptions {
+        anytls_mode: request.anytls_mode,
         xhttp_path: request.xhttp_path,
         vless_enc_mode: request.vless_enc.mode,
         vless_enc_auth: request.vless_enc.auth,
@@ -124,36 +157,44 @@ async fn execute_inner(request: AddRequest, checked_sni: Option<String>) -> Resu
         options.naive_fallback = request.naive_fallback;
     }
 
-    let generation = add_activation_context(
-        deployment::generate_and_activate(GenerationRequest {
-            name: request.name,
-            protocol: request.protocol,
-            port,
-            output: utils::CONFIG_FILE.into(),
-            server_address: Some(server_address.clone()),
-            server_name: server_name.clone(),
-            reality_dest: request
-                .protocol
-                .uses_reality(config::AnyTlsMode::Tls)
-                .then(|| format!("{server_name}:443")),
-            certificate: request.certificate,
-            certificate_key: request.certificate_key,
-            options,
-        })
-        .await,
+    Ok(GenerationRequest {
+        name: request.name,
+        protocol: request.protocol,
         port,
-    )?;
-    let share_uri = if matches!(request.protocol, Protocol::Snell | Protocol::NaiveProxy)
-        || request.shadowsocks_mode == ShadowsocksMode::ShadowTlsV3
-    {
-        None
-    } else {
-        Some(client::share_uri(&generation.profile, &server_address)?)
-    };
-    Ok(AddResult {
-        generation,
-        share_uri,
+        output: utils::CONFIG_FILE.into(),
+        server_address: Some(server_address),
+        server_name: server_name.clone(),
+        reality_dest: request
+            .protocol
+            .uses_reality(request.anytls_mode)
+            .then(|| format!("{server_name}:443")),
+        certificate: request.certificate,
+        certificate_key: request.certificate_key,
+        options,
     })
+}
+
+fn share_uri_after_activation(
+    profile: &config::ManagedProfile,
+    server_address: &str,
+) -> Result<Option<String>> {
+    if matches!(
+        profile.credentials,
+        config::Credentials::Snell { .. }
+            | config::Credentials::NaiveProxy { .. }
+            | config::Credentials::Shadowsocks {
+                shadowtls: Some(_),
+                ..
+            }
+            | config::Credentials::AnyTls {
+                security: config::AnyTlsSecurity::Reality { .. },
+                ..
+            }
+    ) {
+        Ok(None)
+    } else {
+        client::share_uri(profile, server_address).map(Some)
+    }
 }
 
 fn add_activation_context<T>(result: Result<T>, port: u16) -> Result<T> {
@@ -300,6 +341,120 @@ mod tests {
     use super::*;
     use anyhow::anyhow;
 
+    fn anytls_request(mode: AnyTlsMode) -> AddRequest {
+        AddRequest {
+            interactive: false,
+            protocol: Protocol::AnyTls,
+            anytls_mode: mode,
+            name: None,
+            port: Some(443),
+            server_address: Some("203.0.113.10".into()),
+            server_name: Some("target.example.com".into()),
+            vless_enc: Default::default(),
+            xhttp_path: None,
+            shadowsocks_cipher: None,
+            shadowsocks_password: None,
+            shadowsocks_mode: ShadowsocksMode::Plain,
+            shadowtls_password: None,
+            shadowtls_handshake: None,
+            certificate: None,
+            certificate_key: None,
+            naive_self_signed: false,
+            naive_username: None,
+            naive_password: None,
+            naive_padding: true,
+            naive_fallback: None,
+        }
+    }
+
+    #[test]
+    fn anytls_fast_modes_keep_sni_destination_certificate_and_generation_consistent() {
+        assert_eq!(AnyTlsMode::default(), AnyTlsMode::Tls);
+        for mode in [AnyTlsMode::default(), AnyTlsMode::Reality] {
+            let request = anytls_request(mode);
+            let reality = mode == AnyTlsMode::Reality;
+            assert_eq!(request.probes_sni(), reality);
+            let request = prepare_generation_request(
+                request,
+                "203.0.113.10".into(),
+                443,
+                "target.example.com".into(),
+            )
+            .unwrap();
+            assert_eq!(request.options.anytls_mode, mode);
+            assert_eq!(request.server_name, "target.example.com");
+            assert_eq!(
+                request.reality_dest.as_deref(),
+                reality.then_some("target.example.com:443")
+            );
+            assert_eq!(
+                request
+                    .protocol
+                    .requires_certificate(request.options.anytls_mode),
+                !reality
+            );
+            assert_eq!(request.options.anytls_users.len(), 1);
+            assert_eq!(request.options.anytls_users[0].name, "default");
+            assert!(!request.options.anytls_users[0].password.is_empty());
+            assert_eq!(
+                request.options.anytls_padding_scheme.unwrap(),
+                ["stop=8", "0=30-30", "1=50-100"]
+            );
+            assert!(request.options.udp_enabled);
+        }
+    }
+
+    #[test]
+    fn anytls_fast_result_keeps_reality_success_without_a_tls_uri() {
+        let mut profile = config::ManagedProfile {
+            id: uuid::Uuid::nil(),
+            name: "anytls-test".into(),
+            port: 443,
+            server_address: Some("203.0.113.10".into()),
+            h2mux: Default::default(),
+            credentials: config::Credentials::AnyTls {
+                users: vec![config::AnyTlsUser {
+                    name: "default".into(),
+                    password: "test-password".into(),
+                }],
+                server_name: "target.example.com".into(),
+                alpn_protocols: vec!["h2".into(), "http/1.1".into()],
+                udp_enabled: true,
+                security: config::AnyTlsSecurity::Tls,
+            },
+            certificate_path: None,
+            certificate_key_path: None,
+            self_signed_certificate: false,
+            naive_certificate_validity: None,
+        };
+        let tls = share_uri_after_activation(&profile, "203.0.113.10")
+            .unwrap()
+            .unwrap();
+        assert!(tls.starts_with("anytls://"));
+        let config::Credentials::AnyTls { security, .. } = &mut profile.credentials else {
+            unreachable!()
+        };
+        *security = config::AnyTlsSecurity::Reality {
+            private_key: "never-export-private".into(),
+            public_key: "public-key".into(),
+            short_id: "0123456789abcdef".into(),
+        };
+        assert!(share_uri_after_activation(&profile, "203.0.113.10")
+            .unwrap()
+            .is_none());
+        let error = client::share_uri(&profile, "203.0.113.10").unwrap_err();
+        assert!(error.to_string().contains("请改用 sing-box 导出"));
+        assert!(client::render(&profile, client::ClientFormat::ClashMeta, "203.0.113.10").is_err());
+        assert!(client::render(&profile, client::ClientFormat::Nekobox, "203.0.113.10").is_err());
+        let exported =
+            client::render(&profile, client::ClientFormat::SingBox, "203.0.113.10").unwrap();
+        assert!(exported.contains("public-key"));
+        assert!(!exported.contains("never-export-private"));
+        let details = crate::cli::profile_details_text(&profile, None);
+        assert!(details.contains("public-key"));
+        assert!(!details.contains("never-export-private"));
+    }
+
     #[test]
     fn uses_sequential_protocol_numbers() {
         for protocol in Protocol::all() {
@@ -309,9 +464,9 @@ mod tests {
             );
         }
         assert_eq!(Protocol::from_menu_number(0), None);
-        assert_eq!(Protocol::from_menu_number(11), Some(Protocol::Socks5));
-        assert_eq!(Protocol::from_menu_number(12), Some(Protocol::Snell));
-        assert_eq!(Protocol::from_menu_number(13), Some(Protocol::NaiveProxy));
+        assert_eq!(Protocol::from_menu_number(15), Some(Protocol::Socks5));
+        assert_eq!(Protocol::from_menu_number(13), Some(Protocol::Snell));
+        assert_eq!(Protocol::from_menu_number(6), Some(Protocol::NaiveProxy));
     }
 
     #[test]

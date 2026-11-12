@@ -70,7 +70,7 @@ fn vless_enc_yaml_is_native_tcp_with_default_limits_and_secret_only_in_runtime()
         assert!(!state.contains(&URL_SAFE_NO_PAD.encode([9; 32])));
         assert!(ensure_servers_match_state(&[server], &[profile]).is_ok());
     }
-    assert_eq!(Protocol::from_menu_number(14), Some(Protocol::VlessEnc));
+    assert_eq!(Protocol::from_menu_number(5), Some(Protocol::VlessEnc));
     assert!(commit::is_managed_profile_file_name("VLESS-ENC-24444.yaml"));
 }
 

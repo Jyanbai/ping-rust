@@ -23,6 +23,39 @@ proc tools_menu {} {
     expect_or_fail {工具:} "tools menu"
     expect_or_fail {请选择 \[0-8\]: } "tools prompt"
 }
+# 固定完整列表，同时匹配精确名称、连续编号与末尾返回；两条入口共用同一断言。
+proc protocol_menu {} {
+    expect_or_fail {1\) VLESS-REALITY\r?\n2\) Hysteria2\r?\n3\) Shadowsocks\r?\n4\) VLESS-XHTTP-REALITY\r?\n5\) VLESS-ENC\r?\n6\) NaiveProxy\r?\n7\) AnyTLS\r?\n8\) TUIC\r?\n9\) VLESS-TLS-Vision\r?\n10\) Trojan-TLS\r?\n11\) VLESS-WS-TLS\r?\n12\) Trojan-REALITY\r?\n13\) Snell v3\r?\n14\) VMess-WS-TLS\r?\n15\) SOCKS5\r?\n16\) VLESS-Sudoku\r?\n0\) 返回\r?\n} "complete protocol order and exact names"
+    expect_or_fail {请选择 \[0-16\]: } "protocol prompt"
+}
+proc enter_protocol_menu {advanced} {
+    if {$advanced} {
+        send_choice 9
+        tools_menu
+        send_choice 2
+    } else {
+        send_choice 1
+    }
+    protocol_menu
+}
+proc advanced_name_port {slug} {
+    expect_or_fail "配置名称（默认：$slug，输入 0 返回）：" "advanced protocol mapping: $slug"
+    send_choice "menu-cancel-$slug"
+    expect_or_fail {监听端口（默认：443，输入 0 返回）：} "advanced port"
+    send_choice 25464
+}
+proc anytls_modes {} {
+    expect_or_fail {AnyTLS 外层安全模式:\r?\n\r?\n1\) TLS\r?\n2\) REALITY\r?\n0\) 返回} "AnyTLS embedded modes without rank labels"
+    expect_or_fail {请选择 \[0-2\]: } "AnyTLS modes prompt"
+}
+proc shadowsocks_modes {advanced} {
+    if {$advanced} {
+        expect_or_fail {1\) 普通 SS2022\r?\n2\) SS2022 \+ ShadowTLS v3\r?\n0\) 返回} "advanced Shadowsocks modes"
+    } else {
+        expect_or_fail {1\) Shadowsocks 2022\r?\n2\) Shadowsocks 2022 \+ ShadowTLS v3\r?\n0\) 返回} "fast Shadowsocks modes"
+    }
+    expect_or_fail {请选择 \[0-2\]: } "Shadowsocks modes prompt"
+}
 proc choose_profile {} {
     global profile_count
     if {$profile_count > 1} {
@@ -60,18 +93,155 @@ expect_or_fail {工具:} "tools menu"
 expect_or_fail {1\) 导出客户端配置\r?\n2\) 高级添加配置\r?\n3\) SNI 检测\r?\n4\) SNI 扫描} "tools order"
 expect_or_fail {请选择 \[0-8\]: } "tools prompt"
 send_choice 2
-expect_or_fail {14\) VLESS-ENC\r?\n15\) VLESS-XHTTP-REALITY\r?\n16\) VLESS-Sudoku（无加密）\r?\n0\) 返回} "appended advanced protocol"
-expect_or_fail {请选择 \[0-16\]: } "advanced protocol prompt"
+protocol_menu
 send_choice 0
 main_menu
+# 两份完整菜单都实际渲染，非法输入重试，0 返回；不写任何节点。
+foreach advanced {0 1} {
+    enter_protocol_menu $advanced
+    send_choice 17
+    expect_or_fail {无效序号} "invalid protocol number"
+    expect_or_fail {请选择 \[0-16\]: } "retry invalid protocol"
+    send_choice 0
+    main_menu
+}
+# 高级菜单逐项验证数字对应的默认 slug；Sudoku 先确认警告的路径在下方覆盖。
+set slugs {reality hysteria2 shadowsocks vless-xhttp-reality vless-enc naiveproxy anytls tuic vless-tls-vision trojan-tls vless-ws-tls trojan-reality snell vmess-ws-tls socks5}
+set number 0
+foreach slug $slugs {
+    incr number
+    enter_protocol_menu 1
+    send_choice $number
+    expect_or_fail "配置名称（默认：$slug，输入 0 返回）：" "advanced numeric mapping $number"
+    send_choice 0
+    tools_menu
+    send_choice 0
+    main_menu
+}
+# AnyTLS 两个入口都可取消；快速的 TLS/REALITY 都进入端口输入。
+foreach advanced {0 1} {
+    enter_protocol_menu $advanced
+    send_choice 7
+    if {$advanced} { advanced_name_port anytls }
+    anytls_modes
+    send_choice 3
+    expect_or_fail {无效序号} "invalid AnyTLS mode"
+    expect_or_fail {请选择 \[0-2\]: } "retry AnyTLS mode"
+    send_choice 0
+    main_menu
+}
+foreach advanced {0 1} {
+    foreach mode {1 2} {
+        enter_protocol_menu $advanced
+        send_choice 7
+        if {$advanced} { advanced_name_port anytls }
+        anytls_modes
+        send_choice $mode
+        if {$advanced} {
+            expect_or_fail {AnyTLS 用户名（默认：default，输入 0 返回）：} "advanced AnyTLS selected mode"
+        } else {
+            expect_or_fail {请输入端口（直接回车随机）（输入 0 返回）：} "fast AnyTLS selected mode"
+        }
+        send_choice 0
+        if {$advanced} {
+            tools_menu
+        } else {
+            # 文本输入 0 取消当前快速添加，回到协议选择。
+            protocol_menu
+        }
+        send_choice 0
+        main_menu
+    }
+}
+# SS 两种嵌套模式均能进入完整 cipher 列表，0 取消；旧 cipher 不得丢失。
+foreach advanced {0 1} {
+    enter_protocol_menu $advanced
+    send_choice 3
+    if {$advanced} { advanced_name_port shadowsocks }
+    shadowsocks_modes $advanced
+    send_choice 0
+    main_menu
+    foreach mode {1 2} {
+        enter_protocol_menu $advanced
+        send_choice 3
+        if {$advanced} { advanced_name_port shadowsocks }
+        shadowsocks_modes $advanced
+        send_choice $mode
+        if {!$advanced} {
+            expect_or_fail {请输入端口（直接回车随机）（输入 0 返回）：} "fast SS port"
+            send_choice 25464
+            if {$mode == 1} {
+                expect_or_fail {1\) aes-128-gcm\r?\n2\) aes-256-gcm\r?\n3\) chacha20-ietf-poly1305\r?\n4\) 2022-blake3-aes-128-gcm\r?\n5\) 2022-blake3-aes-256-gcm\r?\n6\) 2022-blake3-chacha20-ietf-poly1305\r?\n0\) 返回} "all existing fast SS ciphers"
+            } else {
+                expect_or_fail {1\) 2022-blake3-aes-128-gcm\r?\n2\) 2022-blake3-aes-256-gcm\r?\n3\) 2022-blake3-chacha20-ietf-poly1305\r?\n0\) 返回} "fast ShadowTLS SS2022 ciphers"
+            }
+            expect_or_fail {默认 2022-blake3-aes-256-gcm} "secure fast SS default"
+        } else {
+            expect_or_fail {1\) 2022-blake3-aes-256-gcm\r?\n2\) 2022-blake3-aes-128-gcm\r?\n3\) 2022-blake3-chacha20-ietf-poly1305} "advanced SS2022 ciphers without rank labels"
+            if {$mode == 1} {
+                expect_or_fail {4\) aes-256-gcm\r?\n5\) aes-128-gcm\r?\n6\) chacha20-ietf-poly1305\r?\n0\) 返回} "all existing advanced SS ciphers"
+            }
+        }
+        expect_or_fail {请选择 \[0-[36]\]: } "SS cipher prompt"
+        send_choice 0
+        main_menu
+    }
+}
+# VLESS-ENC 子菜单逐层取消；Sudoku 仍是内部选项并保留默认 N 及代价提示。
+foreach advanced {0 1} {
+    foreach stage {mode auth sudoku} {
+        enter_protocol_menu $advanced
+        send_choice 5
+        if {$advanced} {
+            advanced_name_port vless-enc
+        } else {
+            expect_or_fail {请输入端口（直接回车随机）（输入 0 返回）：} "fast ENC port"
+            send_choice 25464
+        }
+        expect_or_fail {1\) native（默认）\r?\n2\) xorpub（混淆公钥）\r?\n3\) random（关闭 TCP splice）\r?\n0\) 返回} "ENC mode choices"
+        expect_or_fail {请选择 \[0-3\]: } "ENC mode prompt"
+        if {$stage == "mode"} {
+            send_choice 0
+        } else {
+            send_choice 1
+            expect_or_fail {1\) x25519（默认）\r?\n2\) mlkem768（链接约 1.6 KB，二维码可能无法扫描）\r?\n0\) 返回} "ENC auth choices"
+            expect_or_fail {请选择 \[0-2\]: } "ENC auth prompt"
+            if {$stage == "auth"} {
+                send_choice 0
+            } else {
+                send_choice 1
+                expect_or_fail {开启 Vision？ \[y/N\]（输入 0 返回）：} "ENC Vision default N"
+                send_choice ""
+                expect_or_fail {Sudoku} "Sudoku cost warning"
+                expect_or_fail {启用 Sudoku 外观？ \[y/N\]（输入 0 返回）：} "Sudoku embedded default N"
+                send_choice 0
+            }
+        }
+        if {$stage == "sudoku"} {
+            # 输入框内的 0 返回所属菜单；随后返回主菜单。
+            if {$advanced} { tools_menu } else { protocol_menu }
+            send_choice 0
+        }
+        main_menu
+    }
+}
 send_choice 9
 tools_menu
 send_choice 2
-expect_or_fail {请选择 \[0-16\]: } "plain VLESS advanced protocol prompt"
+protocol_menu
 send_choice 16
 expect_or_fail {VLESS-Sudoku 没有任何加密和认证} "plain VLESS security warning"
 expect_or_fail {UUID、目标地址、非 HTTPS 内容都能在链路上被还原} "plain VLESS recoverable data warning"
 expect_or_fail {仍要添加无加密的 VLESS-Sudoku 节点？ \[y/N\]（输入 0 返回）：} "plain VLESS default no"
+send_choice ""
+main_menu
+enter_protocol_menu 0
+send_choice 16
+expect_or_fail {请输入端口（直接回车随机）（输入 0 返回）：} "fast plain VLESS port"
+send_choice 25464
+expect_or_fail {VLESS-Sudoku 没有任何加密和认证} "fast plain VLESS security warning"
+expect_or_fail {UUID、目标地址、非 HTTPS 内容都能在链路上被还原} "fast plain VLESS data warning"
+expect_or_fail {仍要添加无加密的 VLESS-Sudoku 节点？ \[y/N\]（输入 0 返回）：} "fast plain VLESS default no"
 send_choice ""
 main_menu
 send_choice 9
@@ -126,6 +296,22 @@ send_choice 0
 main_menu
 send -- "\004"
 successful_exit
+
+# 协议及子菜单 EOF 均正常退出，不能落入部署路径。
+foreach advanced {0 1} {
+    foreach submenu {0 1} {
+        spawn $binary
+        main_menu
+        enter_protocol_menu $advanced
+        if {$submenu} {
+            send_choice 7
+            if {$advanced} { advanced_name_port anytls }
+            anytls_modes
+        }
+        send -- "\004"
+        successful_exit
+    }
+}
 
 # EOF 在文本框内也正常退出。
 spawn $binary

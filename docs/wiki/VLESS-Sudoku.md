@@ -4,7 +4,7 @@
 
 shoes v0.3.7 的 `sudoku_mask` 是 Xray FinalMask Sudoku TCP 外层混淆，不是独立隧道，也不是 Mihomo 的 `sudoku` 协议。最外层是掩码，最内层是普通 VLESS；没有 encryption/decryption、Vision、TLS 或 REALITY。
 
-高级协议列表的 **16) VLESS-Sudoku（无加密）** 在已有 1–15 之后，主菜单不变。添加前显示安全说明和代价，然后询问：
+快速和高级协议列表均为 **16) VLESS-Sudoku**，末尾为 `0) 返回`，主菜单不变。添加前显示安全说明和代价，然后询问：
 
 ```text
 仍要添加无加密的 VLESS-Sudoku 节点？ [y/N]（输入 0 返回）：

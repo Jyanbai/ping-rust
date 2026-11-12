@@ -828,8 +828,8 @@ async fn run_add_inner(mut args: AddArgs) -> Result<()> {
                 let choice = crate::menu::select_keyed(
                     "TLS 证书模式",
                     &[
-                        (1, "使用已有受信任证书（推荐）"),
-                        (2, "自签名证书（仅测试，不推荐）"),
+                        (1, "使用已有受信任证书"),
+                        (2, "自签名证书（仅供测试）"),
                         (0, "返回"),
                     ],
                 )?;
@@ -861,6 +861,7 @@ async fn run_add_inner(mut args: AddArgs) -> Result<()> {
     }
     ensure_shoes_for_add(args.yes).await?;
     let result = fast_add::execute(fast_add::AddRequest {
+        anytls_mode: AnyTlsMode::default(),
         interactive: true,
         vless_enc: args.vless_enc,
         xhttp_path: args.xhttp_path,
@@ -979,6 +980,7 @@ async fn bootstrap_default_reality_with_menu(menu: bool) -> Result<bool> {
         ensure_shoes_for_add(true).await?;
     }
     let result = fast_add::execute(fast_add::AddRequest {
+        anytls_mode: AnyTlsMode::default(),
         interactive: menu,
         name: Some("reality-default".to_owned()),
         vless_enc: Default::default(),
@@ -1027,6 +1029,14 @@ pub(crate) fn print_add_result(result: &fast_add::AddResult) {
             println!(
                 "\nShadowTLS v3 没有通用标准分享 URI；普通二维码也不支持；请使用 sing-box 或 Mihomo 导出。"
             );
+        } else if matches!(
+            profile.credentials,
+            config::Credentials::AnyTls {
+                security: config::AnyTlsSecurity::Reality { .. },
+                ..
+            }
+        ) {
+            println!("\nAnyTLS+Reality 没有标准分享 URI 或普通二维码；请改用 sing-box 导出。Mihomo 和 NekoBox 不支持该组合。");
         } else if matches!(profile.credentials, config::Credentials::NaiveProxy { .. }) {
             println!("\nNaiveProxy 没有通用标准分享 URI 或普通二维码；请使用包含 Naive 支持的 sing-box JSON 导出。");
         } else {
