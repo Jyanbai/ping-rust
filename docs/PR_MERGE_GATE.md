@@ -15,7 +15,8 @@ head SHA。实现入口、独立只读审查、限次回修及用户决定 squas
 - 门禁自身回归与独立 Codex Review。
 
 每个必需 suite 只接受本仓库 Actions API 中 **当前 head 的 pull_request 运行**，
-同时绑定 PR 编号及 base SHA，以最新 run ID 和最新 attempt 为准，不使用同名 status、
+同时绑定 PR 编号及 base SHA，以最新 run ID 为准，并合并截至最新 attempt 的各 job 最新执行，
+保留仅重跑失败 job 时此前成功的证据；不使用同名 status、
 其他 PR、push、手动运行或旧 SHA 的绿灯。
 workflow、每个 job、清单中的每个步骤必须 completed/success；缺失、失败、取消、超时、
 neutral、skipped 均阻止。写回前再次读取运行 attempt 和 PR head/base，API 错误也阻止。
@@ -32,7 +33,9 @@ neutral、skipped 均阻止。写回前再次读取运行 attempt 和 PR head/ba
 Review 使用确定性 run-name，在排队阶段即将 PR CI 触发的自动运行绑定 head、手动运行绑定 PR。
 push CI 触发的非审查运行使用空目标，不参与必需 Review 判定，保留原有跳过规则。
 门禁从 Actions 元数据中选最新运行，尚未发布任何评论的失败、取消或跳过也会阻止，
-不会回退到旧成功证明；写回前再次检查是否已有更新的 Review。
+仅当后续自动运行整体成功、策略检出和 Select PR 成功且所有必需审查步骤均跳过时，
+允许复用同 head/base 的完整可信证明；其间的失败或手动审查仍会阻止。
+写回前再次检查证明运行、去重运行的 attempt 及是否已有更新的 Review。
 
 专用套件的 PR 路径过滤移除，性能套件增加 PR 事件，保证文档或 workflow 改动也有
 当前 head 的完整证据。push 和定时测试范围、命令、断言与既有权限不变。

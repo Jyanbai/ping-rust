@@ -66,7 +66,7 @@ def review_evidence(sha, base, comments):
     return max(evidence) if evidence else None
 
 
-def latest_review(number, sha, runs):
+def review_candidates(number, sha, runs):
     """可信 run-name 在 job 开始前即绑定目标，失败/取消无需先发布评论。"""
     candidates = []
     for run in runs:
@@ -76,7 +76,36 @@ def latest_review(number, sha, runs):
         if ((run.get("event") == "workflow_run" and title == f"Codex Review pr=0 sha={sha}")
                 or (run.get("event") == "workflow_dispatch" and title == f"Codex Review pr={number} sha=none")):
             candidates.append(run)
+    return candidates
+
+
+def latest_review(number, sha, runs):
+    candidates = review_candidates(number, sha, runs)
     return max(candidates, key=lambda r: (r["id"], r.get("run_attempt", 1))) if candidates else None
+
+
+def deduplicated_review(run, jobs):
+    """自动运行成功选择目标但未执行审查；必须另行验证已有的完整证明。"""
+    if (run.get("event") != "workflow_run" or not succeeded(run) or len(jobs) != 1
+            or check_jobs({"review": ["Checkout review policy", "Select PR"]}, jobs)):
+        return False
+    for name in REVIEW_STEPS:
+        steps = [s for s in jobs[0].get("steps", []) if s.get("name") == name]
+        if len(steps) != 1 or steps[0].get("status") != "completed" or steps[0].get("conclusion") != "skipped":
+            return False
+    return True
+
+
+def run_jobs(api, run):
+    """失败 job 重跑不包含此前成功的 job，按名称保留各 job 的最新执行。"""
+    latest = {}
+    for attempt in range(1, run["run_attempt"] + 1):
+        current = {}
+        for job in api.pages(f"actions/runs/{run['id']}/attempts/{attempt}/jobs", "jobs"):
+            current.setdefault(job.get("name"), []).append(job)
+        # 保留同一 attempt 的重复项，让 check_jobs 继续拒绝歧义证据。
+        latest.update(current)
+    return [job for matches in latest.values() for job in matches]
 
 
 def review_verdict(sha, base, comments, runs, jobs):
@@ -184,23 +213,35 @@ def inspect_pr(api, number, policy, publish=True):
                 latest[key] = run
         for run in latest.values():
             if succeeded(run):
-                jobs[run["id"]] = api.pages(f"actions/runs/{run['id']}/attempts/{run['run_attempt']}/jobs", "jobs")
+                jobs[run["id"]] = run_jobs(api, run)
         errors = evaluate(sha, policy, runs, jobs)
         comments = api.pages(f"issues/{number}/comments")
         review_runs = {}
         review_path = "actions/workflows/codex-code-review.yml/runs?branch=main"
-        selected = latest_review(number, sha, api.pages(review_path, "workflow_runs"))
+        candidates = review_candidates(number, sha, api.pages(review_path, "workflow_runs"))
+        selected = latest_review(number, sha, candidates)
         evidence = review_evidence(sha, base, comments)
         if not selected or not succeeded(selected):
             errors.append("当前 PR/head 最新独立审查缺失或尚未实际成功（包括无证明的失败/取消/跳过）")
-        if evidence and selected and evidence[:2] == (selected["id"], selected["run_attempt"]):
+        if evidence and any(evidence[:2] == (r["id"], r["run_attempt"]) for r in candidates):
             rid, _, _ = evidence
             run = api.request(f"actions/runs/{rid}")
             review_runs[rid] = run
             if (run.get("path") == ".github/workflows/codex-code-review.yml"
-                    and run.get("head_branch") == "main" and succeeded(run)):
+                    and run.get("head_branch") == "main" and succeeded(run)
+                    and run.get("run_attempt") == evidence[1]):
                 jobs[rid] = api.pages(f"actions/runs/{rid}/attempts/{run['run_attempt']}/jobs", "jobs")
                 run["attestation"] = api.attestation(run)
+            # CI 重跑触发的新自动审查可能由 Select PR 去重。只允许这类成功空运行
+            # 沿用证明；其间任何实际审查、手动审查或失败均不得被后续去重遮住。
+            for newer in candidates:
+                if (newer["id"], newer["run_attempt"]) <= evidence[:2]:
+                    continue
+                review_runs[newer["id"]] = newer
+                skipped_jobs = (api.pages(f"actions/runs/{newer['id']}/attempts/{newer['run_attempt']}/jobs", "jobs")
+                                if succeeded(newer) and newer.get("event") == "workflow_run" else [])
+                if not deduplicated_review(newer, skipped_jobs):
+                    errors.append(f"较新的独立审查不是成功的自动去重运行：{newer['id']}")
         errors += review_verdict(sha, base, comments, review_runs, jobs)
         # 运行可能在取完 jobs 后被重新运行；只允许本次快照仍是最新 attempt。
         if not errors:

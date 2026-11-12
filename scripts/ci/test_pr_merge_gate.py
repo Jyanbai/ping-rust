@@ -7,6 +7,63 @@ import unittest
 from pr_merge_gate import evaluate, review_verdict, inspect_pr, latest_review, event_targets, REVIEW_STEPS
 
 
+class CollectorAPI:
+    """离线模拟多 attempt 和自动审查去重，未知请求直接失败。"""
+    def __init__(self, case):
+        self.sha = case.sha
+        self.base = 'b' * 40
+        self.run = dict(case.run, pull_requests=[
+            {'number': 7, 'head': {'sha': self.sha}, 'base': {'sha': self.base}}])
+        self.review = dict(case.run, id=99, path='.github/workflows/codex-code-review.yml',
+                           event='workflow_run', head_branch='main',
+                           display_title=f'Codex Review pr=0 sha={self.sha}')
+        self.reviews = [self.review]
+        self.jobs = {(1, 1): [copy.deepcopy(case.job)], (99, 1): [dict(case.job, name='review', steps=[
+            dict(case.job['steps'][0], name=n) for n in REVIEW_STEPS])]}
+        self.proof = {'head': self.sha, 'base': self.base, 'findings': 0, 'run': 99, 'attempt': 1}
+        self.comments = [{'user': {'login': 'github-actions[bot]', 'type': 'Bot'},
+                          'body': f'<!-- codex-review-verdict sha={self.sha} base={self.base} findings=0 run=99 attempt=1 -->'}]
+        self.fresh = {}
+        self.statuses = []
+        self.calls = []
+
+    def request(self, path):
+        self.calls.append(path)
+        if path == 'pulls/7':
+            return {'state': 'open', 'head': {'sha': self.sha}, 'base': {'sha': self.base, 'ref': 'main'}}
+        runs = {r['id']: r for r in [self.run] + self.reviews}
+        rid = int(path.removeprefix('actions/runs/'))
+        return copy.deepcopy(self.fresh.get(rid, runs[rid]))
+
+    def pages(self, path, key=None):
+        self.calls.append(path)
+        if path.startswith('actions/workflows/'):
+            return copy.deepcopy(self.reviews)
+        if path.startswith('actions/runs?'):
+            return [copy.deepcopy(self.run)]
+        if path == 'issues/7/comments':
+            return copy.deepcopy(self.comments)
+        parts = path.split('/')
+        assert parts[0:2] == ['actions', 'runs'] and parts[3] == 'attempts' and parts[5] == 'jobs', path
+        return copy.deepcopy(self.jobs[(int(parts[2]), int(parts[4]))])
+
+    def attestation(self, run):
+        assert run['id'] == 99
+        return copy.deepcopy(self.proof)
+
+    def status(self, sha, state, description):
+        self.statuses.append(state)
+
+    def deduplicate(self):
+        duplicate = dict(self.review, id=100)
+        self.reviews.append(duplicate)
+        steps = [dict(name=n, status='completed', conclusion='success')
+                 for n in ['Checkout review policy', 'Select PR']]
+        steps += [dict(name=n, status='completed', conclusion='skipped') for n in REVIEW_STEPS]
+        self.jobs[(100, 1)] = [dict(name='review', status='completed', conclusion='success', steps=steps)]
+        return duplicate
+
+
 class GateTests(unittest.TestCase):
     def setUp(self):
         self.sha = "a" * 40
@@ -202,6 +259,86 @@ class GateTests(unittest.TestCase):
             self.assertTrue(inspect_pr(api, 7, self.policy))
             self.assertEqual(api.statuses[-1], 'failure')
         review.update(id=original_id, conclusion='success')
+
+    def test_ci_rerun_reuses_attested_review_after_automatic_deduplication(self):
+        api = CollectorAPI(self)
+        api.deduplicate()
+        self.assertEqual(inspect_pr(api, 7, self.policy), [])
+        self.assertEqual(api.statuses, ['pending', 'success'])
+        self.assertIn('actions/runs/100', api.calls)
+
+    def test_deduplication_never_bypasses_failed_manual_or_incomplete_review(self):
+        for scenario in ['failed', 'cancelled', 'job-skipped', 'manual', 'select-skipped',
+                         'review-executed', 'missing-step', 'missing-proof', 'wrong-base', 'findings']:
+            with self.subTest(scenario=scenario):
+                api = CollectorAPI(self)
+                duplicate = api.deduplicate()
+                job = api.jobs[(100, 1)][0]
+                if scenario in ('failed', 'cancelled'):
+                    duplicate['conclusion'] = 'failure' if scenario == 'failed' else 'cancelled'
+                elif scenario == 'job-skipped':
+                    job['conclusion'] = 'skipped'
+                elif scenario == 'manual':
+                    duplicate.update(event='workflow_dispatch', display_title='Codex Review pr=7 sha=none')
+                elif scenario == 'select-skipped':
+                    job['steps'][1]['conclusion'] = 'skipped'
+                elif scenario == 'review-executed':
+                    job['steps'][3]['conclusion'] = 'success'
+                elif scenario == 'missing-step':
+                    job['steps'].pop()
+                elif scenario == 'missing-proof':
+                    api.proof = None
+                elif scenario == 'wrong-base':
+                    api.base = 'c' * 40
+                elif scenario == 'findings':
+                    api.comments[0]['body'] = api.comments[0]['body'].replace('findings=0', 'findings=1')
+                self.assertTrue(inspect_pr(api, 7, self.policy))
+                self.assertEqual(api.statuses[-1], 'failure')
+
+    def test_deduplicated_run_cannot_hide_intervening_review_failure(self):
+        api = CollectorAPI(self)
+        api.deduplicate()
+        api.reviews.append(dict(api.review, id=101, conclusion='failure'))
+        api.reviews.append(dict(api.reviews[1], id=102))
+        api.jobs[(102, 1)] = copy.deepcopy(api.jobs[(100, 1)])
+        self.assertTrue(inspect_pr(api, 7, self.policy))
+
+    def test_failed_jobs_rerun_preserves_successful_jobs_from_earlier_attempts(self):
+        api = CollectorAPI(self)
+        api.run['run_attempt'] = 3
+        api.jobs[(1, 1)].append(dict(self.job, name='other', conclusion='failure'))
+        api.jobs[(1, 2)] = [dict(self.job, name='other', conclusion='failure')]
+        api.jobs[(1, 3)] = [dict(self.job, name='other')]
+        policy = {'ci.yml': {'unit': ['Test'], 'other': ['Test']}}
+        self.assertEqual(inspect_pr(api, 7, policy), [])
+        self.assertEqual(api.statuses[-1], 'success')
+        for attempt in [1, 2, 3]:
+            self.assertIn(f'actions/runs/1/attempts/{attempt}/jobs', api.calls)
+
+    def test_latest_job_execution_still_must_succeed_and_be_unique(self):
+        for scenario in ['failed', 'skipped', 'duplicate', 'step-skipped']:
+            with self.subTest(scenario=scenario):
+                api = CollectorAPI(self)
+                api.run['run_attempt'] = 2
+                api.jobs[(1, 2)] = [copy.deepcopy(self.job)]
+                job = api.jobs[(1, 2)][0]
+                if scenario == 'duplicate':
+                    api.jobs[(1, 2)].append(copy.deepcopy(job))
+                elif scenario == 'step-skipped':
+                    job['steps'][0]['conclusion'] = 'skipped'
+                else:
+                    job['conclusion'] = 'failure' if scenario == 'failed' else 'skipped'
+                self.assertTrue(inspect_pr(api, 7, self.policy))
+
+    def test_rerun_during_evidence_collection_still_blocks(self):
+        for rid in [1, 99, 100]:
+            with self.subTest(rid=rid):
+                api = CollectorAPI(self)
+                duplicate = api.deduplicate()
+                run = {1: api.run, 99: api.review, 100: duplicate}[rid]
+                api.fresh[rid] = dict(run, run_attempt=2)
+                self.assertTrue(inspect_pr(api, 7, self.policy))
+                self.assertEqual(api.statuses[-1], 'failure')
 
     def test_review_metadata_binds_queued_runs_and_latest_attempt(self):
         auto = dict(self.run, id=99, path='.github/workflows/codex-code-review.yml', event='workflow_run',
