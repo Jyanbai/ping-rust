@@ -3,12 +3,6 @@ name: Ubuntu 24.04 acceptance
 on:
   workflow_dispatch:
   pull_request:
-    paths:
-      - .github/workflows/ubuntu-acceptance.yml
-      - Cargo.toml
-      - Cargo.lock
-      - src/**
-      - scripts/install.sh
   push:
     branches: [main]
     paths:

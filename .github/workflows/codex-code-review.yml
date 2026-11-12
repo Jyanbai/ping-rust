@@ -303,6 +303,8 @@ jobs:
           NUMBER: ${{ steps.target.outputs.number }}
           HEAD_SHA: ${{ steps.target.outputs.head_sha }}
           BASE_SHA: ${{ steps.target.outputs.base_sha }}
+          REVIEW_RUN_ID: ${{ github.run_id }}
+          REVIEW_RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           set -euo pipefail
           gh() { timeout 60s gh "$@"; }
@@ -327,6 +329,8 @@ jobs:
             printf '## Codex Code Review\n\n提交：`%s`\n\n' "$HEAD_SHA"
             cat "$RUNNER_TEMP/review.md"
             printf '\n\n[运行日志](%s)\n<!-- codex-review sha=%s base=%s status=complete -->\n' "$RUN_URL" "$HEAD_SHA" "$BASE_SHA"
+            printf '<!-- codex-review-verdict sha=%s base=%s findings=%s run=%s attempt=%s -->\n' \
+              "$HEAD_SHA" "$BASE_SHA" "$(jq '.findings | length' "$RUNNER_TEMP/review.json")" "$REVIEW_RUN_ID" "$REVIEW_RUN_ATTEMPT"
           } > "$RUNNER_TEMP/review-comment.md"
           jq -n --rawfile body "$RUNNER_TEMP/review-comment.md" '{body: $body}' > "$RUNNER_TEMP/review-comment.json"
           gh api "repos/$REPO/issues/$NUMBER/comments" --input "$RUNNER_TEMP/review-comment.json" >/dev/null

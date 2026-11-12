@@ -3,14 +3,6 @@ name: Chain proxy systemd acceptance
 on:
   workflow_dispatch:
   pull_request:
-    paths:
-      - .github/workflows/chain-systemd.yml
-      - tests/chain_menu.exp
-      - tests/chain_systemd_e2e.rs
-      - tests/chain_v2_e2e.rs
-      - src/**
-      - Cargo.toml
-      - Cargo.lock
   push:
     branches: [main, codex/feat-chain-proxy-v2]
     paths:

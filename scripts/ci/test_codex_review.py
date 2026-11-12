@@ -135,6 +135,8 @@ class ReviewScriptsTest(unittest.TestCase):
             "HEAD_SHA": HEAD,
             "BASE_SHA": BASE,
             "RUN_URL": "https://example.com/run/1",
+            "REVIEW_RUN_ID": "99",
+            "REVIEW_RUN_ATTEMPT": "1",
             "FAKE_API": str(self.work / "api.json"),
             "FAKE_GH_LOG": str(self.work / "gh.log"),
             "FAKE_POST": str(self.work / "posted.json"),
@@ -251,6 +253,7 @@ class ReviewScriptsTest(unittest.TestCase):
         self.assertIn("Codex Code Review", posted)
         self.assertIn("未发现有充分证据", posted)
         self.assertIn(MARKER, posted)
+        self.assertIn(f"<!-- codex-review-verdict sha={HEAD} base={BASE} findings=0 run=99 attempt=1 -->", posted)
 
     def test_updated_head_base_and_closed_pr_are_not_posted(self):
         for change in (

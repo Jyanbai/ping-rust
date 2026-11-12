@@ -1,8 +1,10 @@
 """合并门禁回归；仅由 GitHub Actions 执行。"""
 import copy
+import json
+from pathlib import Path
 import unittest
 
-from pr_merge_gate import evaluate, review_verdict
+from pr_merge_gate import evaluate, review_verdict, inspect_pr
 
 
 class GateTests(unittest.TestCase):
@@ -76,6 +78,61 @@ class GateTests(unittest.TestCase):
         self.assertTrue(review_verdict(self.sha, base, [dict(comment, user={"login": "outsider", "type": "User"})], {99: run}, {99: [job]}))
         job["steps"][-1]["conclusion"] = "skipped"
         self.assertTrue(review_verdict(self.sha, base, [comment], {99: run}, {99: [job]}))
+
+    def test_real_policy_all_requirements_have_positive_and_negative_coverage(self):
+        policy = json.loads(Path(__file__).with_name('pr_merge_gate_policy.json').read_text())
+        self.assertEqual(set(policy), {'ci.yml', 'shoes-schema.yml', 'backward-compat.yml',
+            'vless-encryption.yml', 'chain-systemd.yml', 'legacy-upgrade.yml',
+            'ubuntu-acceptance.yml', 'performance-baseline.yml', 'security-audit.yml',
+            'pr-merge-gate-tests.yml'})
+        runs, jobs = [], {}
+        for rid, (workflow, expected) in enumerate(policy.items(), 1):
+            runs.append(dict(self.run, id=rid, path=f'.github/workflows/{workflow}'))
+            jobs[rid] = [dict(self.job, name=name, steps=[dict(self.job['steps'][0], name=s) for s in steps])
+                         for name, steps in expected.items()]
+        self.assertEqual(evaluate(self.sha, policy, runs, jobs), [])
+        for run in runs:
+            self.assertTrue(evaluate(self.sha, policy, [r for r in runs if r is not run], jobs))
+        for suite in jobs.values():
+            for job in suite:
+                for step in job['steps']:
+                    step['conclusion'] = 'skipped'
+                    self.assertTrue(evaluate(self.sha, policy, runs, jobs), step['name'])
+                    step['conclusion'] = 'success'
+
+    def test_collector_fails_closed_on_api_error_or_head_change(self):
+        outer = self
+
+        class FakeAPI:
+            def __init__(self, fail=False):
+                self.statuses = []
+                self.reads = 0
+                self.fail = fail
+
+            def request(self, path):
+                if self.fail:
+                    # 首次读取 PR 成功，读取证据时失败。
+                    if self.reads:
+                        raise RuntimeError('API unavailable')
+                self.reads += 1
+                return {'state': 'open', 'base': {'sha': 'b' * 40, 'ref': 'main'},
+                        'head': {'sha': outer.sha if self.reads == 1 else 'c' * 40}}
+
+            def pages(self, path, key=None):
+                if self.fail:
+                    raise RuntimeError('API unavailable')
+                return []
+
+            def status(self, sha, state, description):
+                self.statuses.append((sha, state))
+
+        api = FakeAPI()
+        self.assertTrue(inspect_pr(api, 7, self.policy))
+        self.assertEqual(api.statuses, [(self.sha, 'pending'), (self.sha, 'failure')])
+        api = FakeAPI(fail=True)
+        with self.assertRaises(RuntimeError):
+            inspect_pr(api, 7, self.policy)
+        self.assertEqual(api.statuses[-1], (self.sha, 'failure'))
 
 
 if __name__ == "__main__":

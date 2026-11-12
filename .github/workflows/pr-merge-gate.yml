@@ -1,0 +1,56 @@
+name: PR Merge Gate
+
+# 此工作流只执行 main 的策略；绝不 checkout 或执行 PR 代码/产物。
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review, edited]
+  workflow_run:
+    workflows:
+      - CI
+      - shoes schema compatibility
+      - Backward compatibility (v0.2.1 reads new files)
+      - VLESS-ENC interoperability
+      - Chain proxy systemd acceptance
+      - Legacy instance upgrade
+      - Ubuntu 24.04 acceptance
+      - Linux performance and reliability baseline
+      - Rust dependency security audit
+      - PR merge gate regression
+      - Codex Code Review
+    types: [requested, in_progress, completed]
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: PR 编号（留空检查所有打开的 main PR）
+        type: string
+        required: false
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+  statuses: write
+
+# 所有入口串行，避免较旧的证据快照覆盖较新的结论。
+concurrency:
+  group: pr-merge-gate-publisher
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Evaluate exact PR head and publish status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr }}
+          GATE_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python3 scripts/ci/pr_merge_gate.py
