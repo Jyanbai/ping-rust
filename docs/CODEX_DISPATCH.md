@@ -24,6 +24,9 @@
 Codex 负责实现、独立只读审查及回修，Grok bot 只读播报进度，用户最终检查并决定合并。
 共同审查清单与角色分工统一放在 `AGENTS.md`；`CLAUDE.md` 只保留历史兼容入口。
 
+编译和测试统一由 GitHub Actions 执行，包括普通 Linux debug / release 构建。旧 SSH 构建环境
+已停用，本机只编辑、操作 Git、派发任务和读取日志；部署与实机验收另行授权。
+
 `.github/workflows/codex-code-review.yml` 复用 environment
 `codex` 的 `CODEX_AUTH_JSON`、`CODEX_BOT_TOKEN` 和模型变量，不需要新增登录或 API key。
 现有 `/codex <任务>` 仍负责写代码，循环如下：

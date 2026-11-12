@@ -1,6 +1,6 @@
 # ping-rust 开发规则
 
-所有在本仓库工作的 agent（Codex、Claude、其他）都遵守本文件。任务提示里另有规定时（例如 GitHub Actions 派发的运行环境约束），以任务提示为准。
+所有在本仓库工作的 agent 都遵守本文件。任务提示里另有规定时（例如 GitHub Actions 派发的运行环境约束），以任务提示为准。
 
 ## Agent 分工与开发循环（2026-11-12 更新）
 
@@ -59,7 +59,14 @@ ping-rust 是纯 Rust 编写的 [shoes](https://github.com/cfal/shoes) 代理内
 | `scripts/ci/` | CI 验收脚本 |
 | `tests/fixtures/yaml/` | YAML 兼容与 golden 夹具，说明见该目录的 README |
 
-## 常用命令
+## 构建与测试位置（2026-11-12 更新）
+
+- 编译和测试统一在 **GitHub Actions**，包括 Linux debug / release 和多平台检查。Codex 的实现、独立审查与回修使用现有 Actions 入口，本机只编辑、操作 Git、派发任务和读取日志。
+- 旧 SSH 构建环境已停用，不再向它同步源码、运行后台构建或清理编译缓存；本机也不运行编译和测试命令。
+- 使用仓库现有 workflow 验证，对照对应提交的 Actions 最终结论和 job / step 日志汇报。未运行、被跳过或受沙箱限制的检查写“未验证”；任务提交成功不代表验证通过。
+- 部署与实机验收单独按用户授权执行，不把它们混入自动构建与审查循环。
+
+## 常用命令（在 GitHub Actions 中执行）
 
 ```sh
 cargo fmt --all -- --check
