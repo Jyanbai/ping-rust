@@ -143,6 +143,8 @@ pub(super) enum InnerProtocol {
     Xhttp {
         path: String,
         mode: super::XhttpMode,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limits: Option<Value>,
         protocol: Box<InnerProtocol>,
     },
     Vless {

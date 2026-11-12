@@ -193,9 +193,150 @@ fn xhttp_reality_changes_keep_runtime_and_state_in_sync() {
 }
 
 #[test]
+fn xhttp_reality_state_keeps_legacy_profiles_readable_and_preserves_order() {
+    // Model the old reader's externally tagged enum: unknown variants must fail.
+    #[derive(Deserialize)]
+    enum LegacyCredentials {
+        Reality(serde_json::Value),
+    }
+    #[derive(Deserialize)]
+    struct LegacyProfile {
+        id: Uuid,
+        credentials: LegacyCredentials,
+    }
+    #[derive(Deserialize)]
+    struct LegacyState {
+        schema_version: u8,
+        profiles: Vec<LegacyProfile>,
+        chain_proxy: ChainProxyState,
+    }
+
+    let (_, legacy) = tests::reality_server_and_profile(24443);
+    let (_, mut first) = sample(Some("/first"));
+    let (_, mut last) = sample(Some("/last"));
+    first.id = Uuid::from_u128(95);
+    last.id = Uuid::from_u128(96);
+    for profiles in [
+        vec![legacy.clone(), first.clone()],
+        vec![first.clone(), legacy.clone(), last.clone()],
+        vec![first.clone(), last.clone()],
+    ] {
+        let state = ManagedState {
+            profiles,
+            ..ManagedState::default()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        save_state_to(&path, &state).unwrap();
+        let bytes = fs::read(&path).unwrap();
+        let old: LegacyState = serde_json::from_slice(&bytes).unwrap();
+        let expected_legacy: Vec<_> = state
+            .profiles
+            .iter()
+            .filter(|p| p.protocol() == Protocol::Reality)
+            .collect();
+        assert_eq!(old.schema_version, 2);
+        assert_eq!(old.profiles.len(), expected_legacy.len());
+        for (read, expected) in old.profiles.iter().zip(&expected_legacy) {
+            assert_eq!(read.id, expected.id);
+            let LegacyCredentials::Reality(credentials) = &read.credentials;
+            assert_eq!(
+                credentials,
+                &serde_json::to_value(&expected.credentials).unwrap()["Reality"]
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(&old.chain_proxy).unwrap(),
+            serde_json::to_value(&state.chain_proxy).unwrap()
+        );
+        let written: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            written["profiles"],
+            serde_json::to_value(expected_legacy).unwrap()
+        );
+        let loaded = load_state_from(&path).unwrap();
+        assert_eq!(
+            serde_json::to_value(&loaded.profiles).unwrap(),
+            serde_json::to_value(&state.profiles).unwrap()
+        );
+        assert_eq!(serde_json::to_vec_pretty(&loaded).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn xhttp_reality_limits_survive_managed_changes_and_commits() {
+    let (server, mut profile) = sample(Some("/original"));
+    // Preserve the complete user-supplied object, including nested/future fields.
+    let limits = serde_json::json!({
+        "max_connections": 128,
+        "max_header_bytes": 16384,
+        "future_limit": {"enabled": true, "budgets": [32, 64]}
+    });
+    let mut yaml = crate::yaml::to_value(&server).unwrap();
+    yaml["protocol"]["reality_targets"]["example.com"]["protocol"]["limits"] = limits.clone();
+    let mut server: ServerConfig =
+        crate::yaml::from_str(&crate::yaml::to_string(&yaml).unwrap()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.yaml");
+    let state_path = dir.path().join("state.json");
+    let profiles_path = dir.path().join("profiles");
+    for change in [
+        ProfileChange::Port(24443),
+        ProfileChange::XhttpPath("/changed".into()),
+        ProfileChange::RealityServerName("new.example.com".into()),
+        ProfileChange::RegenerateCredentials,
+    ] {
+        apply_profile_change(&mut server, &mut profile, change).unwrap();
+        let (other_server, other_profile) = tests::reality_server_and_profile(24444);
+        let state = ManagedState {
+            profiles: vec![profile.clone(), other_profile],
+            ..ManagedState::default()
+        };
+        commit_managed_with_state_writer(
+            &config_path,
+            &state_path,
+            &profiles_path,
+            &[server, other_server],
+            &state,
+            save_state_to,
+        )
+        .unwrap();
+        let mut servers = load_servers(&config_path).unwrap();
+        let loaded = load_state_from(&state_path).unwrap();
+        ensure_servers_match_state(&servers, &loaded.profiles).unwrap();
+        server = servers.remove(0);
+        for saved in [
+            crate::yaml::to_value(&server).unwrap(),
+            crate::yaml::from_slice::<serde_json::Value>(
+                &fs::read(profiles_path.join(profile.config_file_name())).unwrap(),
+            )
+            .unwrap(),
+        ] {
+            assert_eq!(
+                saved["protocol"]["reality_targets"][profile.server_name()]["protocol"]["limits"],
+                limits
+            );
+        }
+    }
+}
+
+#[test]
 fn xhttp_reality_state_roundtrips_and_old_state_bytes_stay_unchanged() {
-    let fixture = include_str!("../../tests/fixtures/yaml/vless-xhttp-reality/state.json");
+    let fixture =
+        include_str!("../../tests/fixtures/yaml/vless-xhttp-reality/compatible-state.json");
     let state: ManagedState = serde_json::from_str(fixture).unwrap();
+    let original: ManagedState = serde_json::from_str(include_str!(
+        "../../tests/fixtures/yaml/vless-xhttp-reality/state.json"
+    ))
+    .unwrap();
+    assert_eq!(
+        serde_json::to_vec(&original.profiles).unwrap(),
+        serde_json::to_vec(&state.profiles).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_string_pretty(&original).unwrap() + "\n",
+        fixture
+    );
     assert_eq!(
         serde_json::to_string_pretty(&state).unwrap() + "\n",
         fixture
@@ -228,6 +369,27 @@ fn xhttp_reality_state_roundtrips_and_old_state_bytes_stay_unchanged() {
         assert!(!written.contains("VlessXhttpReality"));
         assert!(!written.contains("xhttp"));
     }
+}
+
+#[test]
+fn xhttp_reality_state_rejects_invalid_extension_positions_and_credentials() {
+    let canonical: serde_json::Value = serde_json::from_str(include_str!(
+        "../../tests/fixtures/yaml/vless-xhttp-reality/compatible-state.json"
+    ))
+    .unwrap();
+    let mut out_of_range = canonical.clone();
+    out_of_range["xhttp_profiles"][0]["position"] = 1.into();
+    assert!(serde_json::from_value::<ManagedState>(out_of_range).is_err());
+    let mut duplicate = canonical.clone();
+    duplicate["xhttp_profiles"]
+        .as_array_mut()
+        .unwrap()
+        .push(canonical["xhttp_profiles"][0].clone());
+    assert!(serde_json::from_value::<ManagedState>(duplicate).is_err());
+    let mut wrong_protocol = canonical;
+    let (_, legacy) = tests::reality_server_and_profile(24443);
+    wrong_protocol["xhttp_profiles"][0]["profile"] = serde_json::to_value(legacy).unwrap();
+    assert!(serde_json::from_value::<ManagedState>(wrong_protocol).is_err());
 }
 
 #[tokio::test]

@@ -1,0 +1,40 @@
+{
+  "schema_version": 2,
+  "profiles": [],
+  "chain_proxy": {
+    "version": 2,
+    "enabled": false,
+    "nodes": [],
+    "pools": [],
+    "chains": [],
+    "rules": [],
+    "default_route": "Direct"
+  },
+  "xhttp_profiles": [
+    {
+      "position": 0,
+      "profile": {
+        "id": "00000000-0000-4000-8000-000000000095",
+        "name": "xhttp-test",
+        "port": 443,
+        "server_address": "203.0.113.10",
+        "credentials": {
+          "VlessXhttpReality": {
+            "user_id": "00000000-0000-4000-8000-000000000095",
+            "private_key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+            "public_key": "CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk",
+            "short_id": "0123456789abcdef",
+            "server_name": "example.com",
+            "xhttp": {
+              "path": "/0123456789abcdef",
+              "mode": "auto"
+            }
+          }
+        },
+        "certificate_path": null,
+        "certificate_key_path": null,
+        "self_signed_certificate": false
+      }
+    }
+  ]
+}

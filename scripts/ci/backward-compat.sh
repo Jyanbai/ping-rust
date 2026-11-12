@@ -73,9 +73,8 @@ grep -H -v '^exit=0$' -x "$WORK"/new/* /dev/null | grep 'exit=' || true
 /usr/local/bin/shoes --dry-run /etc/shoes/config.yaml
 echo "backward compatibility: PASS"
 
-# Only an explicit addition of the new protocol writes its unknown enum variant.
-# Keep the successful legacy checks above, then prove the downgrade boundary with
-# the actual v0.2.1 binary rather than silently dropping the unsupported profile.
+# The XHTTP extension must leave legacy profiles readable by the actual v0.2.1
+# binary, with identical legacy info/exports and no changes made by reading.
 cp /etc/shoes/ping-rust-state.json "$WORK/legacy-state.json"
 jq -e 'all(.profiles[]; .credentials | has("VlessXhttpReality") | not)' \
   "$WORK/legacy-state.json" >/dev/null
@@ -88,14 +87,18 @@ with open(sys.argv[1]) as source:
     before = json.load(source)
 with open(sys.argv[2]) as source:
     after = json.load(source)
-assert after["profiles"][:-1] == before["profiles"]
-assert "VlessXhttpReality" in after["profiles"][-1]["credentials"]
+assert after["profiles"] == before["profiles"]
+assert len(after["xhttp_profiles"]) == 1
+entry = after["xhttp_profiles"][0]
+assert entry["position"] == len(before["profiles"])
+assert "VlessXhttpReality" in entry["profile"]["credentials"]
 assert after["chain_proxy"] == before["chain_proxy"]
 PY
-if "$OLD" info >"$WORK/old/xhttp-unsupported.txt" 2>&1; then
-  echo 'v0.2.1 unexpectedly accepted XHTTP state; inspect downgrade behavior' >&2
-  exit 1
-fi
-grep -F 'unknown variant' "$WORK/old/xhttp-unsupported.txt"
-grep -F 'VlessXhttpReality' "$WORK/old/xhttp-unsupported.txt"
-echo 'v0.2.1: legacy state readable; explicit XHTTP addition rejects downgrade as expected'
+"$NEW" url compat-xhttp >"$WORK/xhttp-url.txt"
+find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$WORK/hash-xhttp-before"
+capture "$OLD" "$WORK/old"
+grep -x 'exit=0' "$WORK/old/info"
+python3 "$(dirname "$0")/compare-compat-outputs.py" "$WORK/new" "$WORK/old"
+find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$WORK/hash-xhttp-after"
+diff -u "$WORK/hash-xhttp-before" "$WORK/hash-xhttp-after"
+echo 'v0.2.1: legacy info/exports unchanged with XHTTP extension present: PASS'

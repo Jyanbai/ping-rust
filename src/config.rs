@@ -33,6 +33,7 @@ pub use naive_certificate::NaiveCertificateValidity;
 mod presets;
 mod routing;
 mod schema;
+mod state;
 mod transaction;
 mod validation;
 
@@ -632,6 +633,7 @@ pub enum TlsSecurity {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(try_from = "state::StateFile", into = "state::StateFile")]
 pub struct ManagedState {
     pub schema_version: u8,
     pub profiles: Vec<ManagedProfile>,
@@ -2268,7 +2270,7 @@ fn ensure_servers_match_state(servers: &[ServerConfig], profiles: &[ManagedProfi
                 } = &profile.credentials
                 {
                     let target_matches = reality_targets.get(server_name).is_some_and(|target| {
-                        let InnerProtocol::Xhttp { path, mode, protocol } = &target.protocol else {
+                        let InnerProtocol::Xhttp { path, mode, protocol, .. } = &target.protocol else {
                             return false;
                         };
                         !target.vision
@@ -3361,7 +3363,7 @@ mod tests {
         );
     }
 
-    fn reality_server_and_profile(port: u16) -> (ServerConfig, ManagedProfile) {
+    pub(super) fn reality_server_and_profile(port: u16) -> (ServerConfig, ManagedProfile) {
         let mut request = request(Protocol::Reality, PathBuf::from("unused.yaml"));
         request.port = port;
         let (server, credentials, _, _) = generate_reality(&request);

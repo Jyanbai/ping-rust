@@ -19,6 +19,6 @@ sudo prs add vless-xhttp-reality --port 443 --xhttp-path /my-path
 该客户端不支持 XHTTP，请用分享链接导入 v2rayN 或 Xray
 ```
 
-公网监听建议显式配置 XHTTP 的 `limits`，按资源预算采用上游的公网部署建议；生成器不默认开启，也不默默替换客户端不支持的选项。具体限制字段、单位和配置示例请参照 [shoes v0.3.7 XHTTP 文档](https://github.com/cfal/shoes/blob/v0.3.7/docs/src/content/docs/zh-cn/protocols/xhttp.md)、[XHTTP 示例](https://github.com/cfal/shoes/blob/v0.3.7/examples/xhttp.yaml) 和 [配置类型](https://github.com/cfal/shoes/blob/v0.3.7/src/config/types/xhttp.rs)。这些链接固定到 v0.3.7；手动修改运行配置前请备份，并先执行 `shoes --dry-run` 校验。
+公网监听建议显式配置 XHTTP 的 `limits`，按资源预算采用上游的公网部署建议；生成器不默认开启，也不默默替换客户端不支持的选项。具体限制字段、单位和配置示例请参照 [shoes v0.3.7 XHTTP 文档](https://github.com/cfal/shoes/blob/v0.3.7/docs/src/content/docs/zh-cn/protocols/xhttp.md)、[XHTTP 示例](https://github.com/cfal/shoes/blob/v0.3.7/examples/xhttp.yaml) 和 [配置类型](https://github.com/cfal/shoes/blob/v0.3.7/src/config/types/xhttp.rs)。这些链接固定到 v0.3.7；手动修改运行配置前请备份，并先执行 `shoes --dry-run` 校验。受管操作会保留已有的 `limits`。
 
-新协议使用独立的 `VlessXhttpReality` state 结构；旧协议的序列化不变。v0.2.1 不认识该枚举，添加此协议后不能直接降级读取 state；只有显式添加此协议才会写出该结构，升级不会替换已有节点。降级前请用新版删除 XHTTP 节点并保留备份。
+XHTTP 节点写入 state 的独立顶层字段 `xhttp_profiles`，并记录原列表位置；新版读取后恢复节点顺序，旧协议的序列化不变。v0.2.1 忽略该扩展，可读取原有节点的 info 和导出；不会把 XHTTP 节点误认为普通 REALITY。旧版不支持管理 XHTTP 或包含它的运行配置，降级操作前请用新版删除 XHTTP 节点并保留备份。新版也能读取本 PR 先前将 XHTTP 写入 `profiles` 的 state，下次保存时转换为兼容布局，已有节点的端口、凭据和客户端配置不变。

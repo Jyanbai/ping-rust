@@ -53,6 +53,7 @@ pub(super) fn generate(
                         protocol: InnerProtocol::Xhttp {
                             path: xhttp.path.clone(),
                             mode: xhttp.mode,
+                            limits: None,
                             protocol: Box::new(InnerProtocol::Vless {
                                 user_id,
                                 udp_enabled: request.options.udp_enabled,
