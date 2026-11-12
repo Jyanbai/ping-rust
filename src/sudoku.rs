@@ -3,7 +3,21 @@ use clap::ValueEnum;
 use rand::distr::{Alphanumeric, SampleString};
 use serde::{Deserialize, Serialize};
 
-pub const COST: &str = "Sudoku 是混淆，不是加密或认证，传输安全仍由 VLESS Encryption 提供。上行约 4 倍（无 padding），10% padding 约 4.5 倍，单次写入最多约 9 倍；下行约 1.33 倍。关闭原始 TCP splice，每条连接多占约 64 KiB 缓冲。只支持 TCP，没有 UDP/QUIC 掩码；在 TCP 内转发的 UDP 仍可用。客户端需要 Xray ≥ v26.3.27 或 v2rayN 等基于它的客户端。";
+macro_rules! transport_cost {
+    () => { "上行约 4 倍（无 padding），10% padding 约 4.5 倍，单次写入最多约 9 倍；下行约 1.33 倍。关闭原始 TCP splice，每条连接多占约 64 KiB 缓冲。只支持 TCP，没有 UDP/QUIC 掩码；在 TCP 内转发的 UDP 仍可用。客户端需要 Xray ≥ v26.3.27 或 v2rayN 等基于它的客户端。" };
+}
+
+pub const COST: &str = concat!(
+    "Sudoku 是混淆，不是加密或认证，传输安全仍由 VLESS Encryption 提供。",
+    transport_cost!()
+);
+pub const PLAIN_WARNING: &str = "警告：VLESS-Sudoku 没有任何加密和认证。Sudoku 只是混淆，不是加密或身份验证；下行打包编码没有密钥，上行的置换种子空间有限。普通 VLESS 不加密，UUID、目标地址、非 HTTPS 内容都能在链路上被还原。需要加密时请使用 VLESS-ENC + Sudoku 或 VLESS-REALITY。";
+pub const PLAIN_COST: &str = transport_cost!();
+
+pub fn warn_plain() {
+    eprintln!("{PLAIN_WARNING}\n{PLAIN_COST}");
+}
+
 pub const UNSUPPORTED: &str =
     "该客户端导出不支持 Xray FinalMask Sudoku，请用分享链接导入 v2rayN 或 Xray ≥ v26.3.27";
 
@@ -86,36 +100,42 @@ pub struct SudokuOptions {
     #[arg(id = "sudoku_enabled", long = "sudoku", long_help = COST)]
     pub enabled: bool,
     /// Sudoku 共享密码，按原样使用；省略时安全随机生成 24 位字母数字
-    #[arg(
-        id = "sudoku_password",
-        long = "sudoku-password",
-        requires = "sudoku_enabled"
-    )]
+    #[arg(id = "sudoku_password", long = "sudoku-password")]
     pub password: Option<String>,
     /// Sudoku ASCII 模式（使用默认熵布局）
-    #[arg(
-        id = "sudoku_ascii",
-        long = "sudoku-ascii",
-        value_enum,
-        default_value = "prefer-entropy",
-        requires = "sudoku_enabled"
-    )]
-    pub ascii: SudokuAscii,
+    #[arg(id = "sudoku_ascii", long = "sudoku-ascii", value_enum)]
+    pub ascii: Option<SudokuAscii>,
     /// Sudoku 最小 padding 百分比
-    #[arg(id = "sudoku_padding_min", long = "sudoku-padding-min", default_value_t = 0, value_parser = clap::value_parser!(u8).range(0..=100), requires = "sudoku_enabled")]
-    pub padding_min: u8,
+    #[arg(id = "sudoku_padding_min", long = "sudoku-padding-min", value_parser = clap::value_parser!(u8).range(0..=100))]
+    pub padding_min: Option<u8>,
     /// Sudoku 最大 padding 百分比，不能小于 min
-    #[arg(id = "sudoku_padding_max", long = "sudoku-padding-max", default_value_t = 0, value_parser = clap::value_parser!(u8).range(0..=100), requires = "sudoku_enabled")]
-    pub padding_max: u8,
+    #[arg(id = "sudoku_padding_max", long = "sudoku-padding-max", value_parser = clap::value_parser!(u8).range(0..=100))]
+    pub padding_max: Option<u8>,
 }
 
 impl SudokuOptions {
     pub fn validate_for(&self, protocol: crate::config::Protocol) -> Result<()> {
-        if self.enabled && protocol != crate::config::Protocol::VlessEnc {
-            bail!("Sudoku 参数仅适用于 VLESS-ENC");
+        use crate::config::Protocol;
+        let parameters = self.password.is_some()
+            || self.ascii.is_some()
+            || self.padding_min.is_some()
+            || self.padding_max.is_some();
+        if protocol != Protocol::VlessSudoku {
+            if self.enabled && protocol != Protocol::VlessEnc {
+                bail!("Sudoku 参数仅适用于 VLESS-ENC 或 VLESS-Sudoku");
+            }
+            if parameters && !self.enabled {
+                bail!("VLESS-ENC 的 Sudoku 参数需要 --sudoku，其他协议不支持 Sudoku 参数");
+            }
         }
-        self.config()?;
+        self.config_for(protocol)?;
         Ok(())
+    }
+
+    pub fn config_for(&self, protocol: crate::config::Protocol) -> Result<Option<SudokuConfig>> {
+        let mut options = self.clone();
+        options.enabled |= protocol == crate::config::Protocol::VlessSudoku;
+        options.config()
     }
     pub fn config(&self) -> Result<Option<SudokuConfig>> {
         if !self.enabled {
@@ -123,9 +143,9 @@ impl SudokuOptions {
         }
         let config = SudokuConfig {
             password: self.password.clone().unwrap_or_else(generate_password),
-            ascii: self.ascii,
-            padding_min: self.padding_min,
-            padding_max: self.padding_max,
+            ascii: self.ascii.unwrap_or_default(),
+            padding_min: self.padding_min.unwrap_or_default(),
+            padding_max: self.padding_max.unwrap_or_default(),
         };
         config.validate()?;
         Ok(Some(config))
@@ -223,11 +243,23 @@ mod tests {
             vec!["--sudoku", "--sudoku-padding-max", "101"],
             vec!["--sudoku", "--sudoku-padding-min", "-1"],
             vec!["--sudoku", "--sudoku-ascii", "bad"],
+        ] {
+            assert!(options(&args).is_err(), "{args:?}");
+        }
+        // VLESS-Sudoku can omit --sudoku, so the shared semantic validator
+        // now enforces this requirement for VLESS-ENC after clap parsing.
+        for args in [
             vec!["--sudoku-password", "pass"],
             vec!["--sudoku-ascii", "ascii"],
             vec!["--sudoku-padding-min", "0"],
         ] {
-            assert!(options(&args).is_err(), "{args:?}");
+            assert!(
+                options(&args)
+                    .unwrap()
+                    .validate_for(crate::config::Protocol::VlessEnc)
+                    .is_err(),
+                "{args:?}"
+            );
         }
         assert!(options(&[
             "--sudoku",

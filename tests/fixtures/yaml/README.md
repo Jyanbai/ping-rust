@@ -26,3 +26,7 @@ PING_RUST_YAML_FIXTURE_OUT=$PWD/tests/fixtures/yaml cargo test derive_yaml_fixtu
 
 `vless-enc-sudoku/` records the new optional outer Sudoku mask and matching state
 with fixed, fake credentials; asserted in `src/config/vless_encryption_tests.rs`.
+
+`vless-sudoku/` records plain VLESS inside the mandatory outer Sudoku mask and
+its backward-compatible state extension with fixed, fake credentials; asserted
+in `src/config/vless_sudoku_tests.rs`.

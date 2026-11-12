@@ -93,7 +93,7 @@ pub fn render(profile: &ManagedProfile, format: ClientFormat, server: &str) -> R
         Credentials::VlessEnc {
             sudoku: Some(_),
             ..
-        }
+        } | Credentials::VlessSudoku { .. }
     ) {
         bail!(crate::sudoku::UNSUPPORTED);
     }
@@ -122,6 +122,7 @@ fn clash_meta(profile: &ManagedProfile, server: &str) -> Result<String> {
         bail!("当前 Mihomo H2MUX 存在已知兼容问题；请使用 sing-box 导出，或关闭 H2MUX preference 后导出普通 Mihomo 节点");
     }
     let proxy = match &profile.credentials {
+        Credentials::VlessSudoku { .. } => bail!(crate::sudoku::UNSUPPORTED),
         Credentials::VlessXhttpReality { .. } => {
             bail!("该客户端不支持 XHTTP，请用分享链接导入 v2rayN 或 Xray")
         }
@@ -435,6 +436,7 @@ fn sing_box(profile: &ManagedProfile, server: &str) -> Result<String> {
         Credentials::VlessXhttpReality { .. } => {
             bail!("该客户端不支持 XHTTP，请用分享链接导入 v2rayN 或 Xray")
         }
+        Credentials::VlessSudoku { .. } => bail!(crate::sudoku::UNSUPPORTED),
         Credentials::VlessEnc { .. } => bail!("sing-box 暂不支持 VLESS Encryption"),
         Credentials::Reality {
             user_id,
@@ -666,6 +668,33 @@ fn sing_box(profile: &ManagedProfile, server: &str) -> Result<String> {
         .context("生成 sing-box JSON 失败")
 }
 
+fn vless_tcp_uri(
+    user_id: Uuid,
+    host: &str,
+    port: u16,
+    fragment: &str,
+    encryption: &str,
+    vision: bool,
+    sudoku: Option<&crate::sudoku::SudokuConfig>,
+) -> Result<String> {
+    let mut query = Serializer::new(String::new());
+    query
+        .append_pair("encryption", encryption)
+        .append_pair("security", "none")
+        .append_pair("type", "tcp");
+    if vision {
+        query.append_pair("flow", "xtls-rprx-vision");
+    }
+    if let Some(sudoku) = sudoku {
+        sudoku.validate()?;
+        query.append_pair("fm", &serde_json::to_string(&sudoku.finalmask())?);
+    }
+    Ok(format!(
+        "vless://{user_id}@{host}:{port}?{}#{fragment}",
+        query.finish()
+    ))
+}
+
 pub fn share_uri(profile: &ManagedProfile, server: &str) -> Result<String> {
     let server = normalize_server_address(server)?;
     let host = authority_host(&server);
@@ -677,25 +706,26 @@ pub fn share_uri(profile: &ManagedProfile, server: &str) -> Result<String> {
             vision,
             sudoku,
             ..
-        } => {
-            let mut query = Serializer::new(String::new());
-            query
-                .append_pair("encryption", encryption)
-                .append_pair("security", "none")
-                .append_pair("type", "tcp");
-            if *vision {
-                query.append_pair("flow", "xtls-rprx-vision");
-            }
-            if let Some(sudoku) = sudoku {
-                sudoku.validate()?;
-                query.append_pair("fm", &serde_json::to_string(&sudoku.finalmask())?);
-            }
-            Ok(format!(
-                "vless://{user_id}@{host}:{}?{}#{fragment}",
-                profile.port,
-                query.finish()
-            ))
-        }
+        } => vless_tcp_uri(
+            *user_id,
+            &host,
+            profile.port,
+            &fragment,
+            encryption,
+            *vision,
+            sudoku.as_ref(),
+        ),
+        Credentials::VlessSudoku {
+            user_id, sudoku, ..
+        } => vless_tcp_uri(
+            *user_id,
+            &host,
+            profile.port,
+            &fragment,
+            "none",
+            false,
+            Some(sudoku),
+        ),
         Credentials::Reality {
             user_id,
             public_key,

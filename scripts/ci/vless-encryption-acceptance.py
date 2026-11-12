@@ -20,6 +20,7 @@ RECORDS = Path(os.environ["RECORDS"])
 SECRETS = []
 LOGS = []
 RESULTS = []
+VLESS_SUDOKU_RESULTS = []
 DOWNGRADE = {}
 FORBIDDEN = re.compile(rb"mlkem768x25519plus\.(?:native|xorpub|random)\.600s\.[A-Za-z0-9_-]+")
 
@@ -99,51 +100,69 @@ def client_process(args, label):
         LOGS.append((label, raw))
 
 
-def test_case(client, mode, auth, vision, index, sudoku=None):
-    label = f"{client}-{mode}-{auth}-vision-{str(vision).lower()}"
+def test_case(client, mode, auth, vision, index, sudoku=None, plain=False):
+    label = "xray-vless-plain" if plain else f"{client}-{mode}-{auth}-vision-{str(vision).lower()}"
     if sudoku:
         label += "-sudoku-" + sudoku
+    # Preserve the existing workflow's exact ENC matrix assertions. The new
+    # protocol has a separate report and mandatory checks in this script.
+    case_results = VLESS_SUDOKU_RESULTS if plain else RESULTS
     port = 25100 + index
     old_pid = pid()
-    args = [PRS, "add", "vless-enc", "--port", str(port), "--name", label,
-            "--server-address", "127.0.0.1", "--yes", "--plain",
-            "--encryption-mode", mode, "--encryption-auth", auth]
+    args = [PRS, "add", "vless-sudoku" if plain else "vless-enc", "--port", str(port), "--name", label,
+            "--server-address", "127.0.0.1", "--yes", "--plain"]
+    if not plain:
+        args += ["--encryption-mode", mode, "--encryption-auth", auth]
     if vision:
         args.append("--vision")
     if sudoku:
-        args += ["--sudoku", "--sudoku-ascii", sudoku.replace("_", "-")]
+        if not plain:
+            args.append("--sudoku")
+        args += ["--sudoku-ascii", sudoku.replace("_", "-")]
     uri = command(args, label + "-add").strip()
     require(pid() != old_pid, "Release add must perform controlled restart")
     require(command(["systemctl", "is-active", "shoes"], label + "-active").strip() == "active",
             "service must be active after controlled restart")
     listeners = command(["ss", "-H", "-ltn", "sport", "=", str(port)], label + "-listener")
     require(bool(listeners.strip()), "new server port must listen after controlled restart")
-    profile_path = Path(f"/etc/shoes/profiles/VLESS-ENC-{port}.yaml")
+    prefix = "VLESS-SUDOKU" if plain else "VLESS-ENC"
+    profile_path = Path(f"/etc/shoes/profiles/{prefix}-{port}.yaml")
     aggregate = Path("/etc/shoes/config.yaml")
     for path in (profile_path, aggregate):
         require(stat.S_IMODE(path.stat().st_mode) == 0o600, "runtime permissions must be 0600")
     profile_text = profile_path.read_text()
     match = re.search(r"^\s*decryption: ([A-Za-z0-9_.-]+)\s*$", profile_text, re.M)
-    require(match is not None, "server decryption missing")
-    SECRETS.append(match[1].encode())
+    if plain:
+        require(match is None, "plain VLESS must omit decryption")
+        require(not re.search(r"^\s*(?:encryption|vision):", profile_text, re.M), "plain VLESS must omit encryption and Vision")
+        require("type: vless" in profile_text, "plain VLESS inner protocol missing")
+    else:
+        require(match is not None, "server decryption missing")
+        SECRETS.append(match[1].encode())
     require("encryption_limits:" not in profile_text, "must use shoes default limits")
     require("tls_targets:" not in profile_text and "reality_targets:" not in profile_text, "must be native TCP")
     state_bytes = Path("/etc/shoes/ping-rust-state.json").read_bytes()
     safe(state_bytes)
     state = json.loads(state_bytes)
-    profile = next(p for p in state["profiles"] if p["port"] == port)
+    profiles = [entry["profile"] for entry in state["sudoku_profiles"]] if plain else state["profiles"]
+    profile = next(p for p in profiles if p["port"] == port)
+    credentials = profile["credentials"]["VlessSudoku" if plain else "VlessEnc"]
     parsed = urllib.parse.urlsplit(uri)
     query = urllib.parse.parse_qs(parsed.query)
     require(parsed.scheme == "vless" and parsed.hostname == "127.0.0.1", "invalid URI authority")
     require(query["security"] == ["none"] and query["type"] == ["tcp"], "invalid URI security or transport")
     require(query.get("flow") == (["xtls-rprx-vision"] if vision else None), "invalid URI Vision")
-    encryption = profile["credentials"]["VlessEnc"]["encryption"]
+    encryption = "none" if plain else credentials["encryption"]
     require(query["encryption"] == [encryption], "URI encryption differs from state")
     details = command([PRS, "info", label], label + "-info")
-    require("Encryption" in details and mode in details, "details missing encryption or mode")
+    if plain:
+        for text in ("加密：无", "没有任何加密和认证", "UUID", "目标地址", "非 HTTPS", "VLESS-ENC + Sudoku", "VLESS-REALITY"):
+            require(text in details, "plain VLESS details missing security warning")
+    else:
+        require("Encryption" in details and mode in details, "details missing encryption or mode")
     if sudoku:
         require("sudoku_mask" in profile_text, "server must have Sudoku mask")
-        mask = profile["credentials"]["VlessEnc"]["sudoku"]
+        mask = credentials["sudoku"]
         require(mask["ascii"] == sudoku, "state Sudoku mode differs")
         require(len(mask["password"]) == 24 and mask["password"].isascii()
                 and mask["password"].isalnum(), "generated Sudoku password format")
@@ -171,7 +190,7 @@ def test_case(client, mode, auth, vision, index, sudoku=None):
         xray_config = {
             "log": {"loglevel": "warning"},
             "inbounds": [{"listen": "127.0.0.1", "port": 18081, "protocol": "socks", "settings": {"udp": False}}],
-            "outbounds": [{"protocol": "vless", "settings": {"vnext": [{"address": "127.0.0.1", "port": port, "users": [user]}]}, "streamSettings": {"network": "tcp", "security": "none"}}],
+            "outbounds": [{"protocol": "vless", "settings": {"vnext": [{"address": "127.0.0.1", "port": port, "users": [user]}]}, "streamSettings": {"network": "raw" if plain else "tcp", "security": "none"}}],
         }
         if sudoku:
             xray_config["outbounds"][0]["streamSettings"]["finalmask"] = json.loads(query["fm"][0])
@@ -203,10 +222,41 @@ def test_case(client, mode, auth, vision, index, sudoku=None):
             safe(result.stdout + result.stderr)
             require(result.returncode != 0, "wrong Sudoku password must fail")
         require(HITS.count(request_path) == before_bad, "wrong Sudoku password reached endpoint")
-        RESULTS.append({"case": label + "-wrong-password", "result": "PASS", "endpoint_requests": 0})
+        case_results.append({"case": label + "-wrong-password", "result": "PASS", "endpoint_requests": 0})
         print(label + "-wrong-password: PASS", flush=True)
-    RESULTS.append({"case": label, "result": "PASS", "endpoint_requests": 1, "controlled_restart": True, "service_active": True, "new_port_listening": True})
+        if plain:
+            # Strip FinalMask entirely: an ordinary unmasked VLESS client must
+            # not reach the endpoint, even with the correct UUID.
+            del xray_config["outbounds"][0]["streamSettings"]["finalmask"]
+            config.write_text(json.dumps(xray_config))
+            before_unmasked = HITS.count(request_path)
+            with client_process(client_args, label + "-unmasked-client"):
+                result = subprocess.run(["curl", "--noproxy", "", "--fail", "--silent", "--show-error",
+                                         "--max-time", "8", "--proxy", "socks5h://127.0.0.1:18081",
+                                         f"http://127.0.0.1:18080{request_path}"], capture_output=True, timeout=15)
+                safe(result.stdout + result.stderr)
+                require(result.returncode != 0, "unmasked plain VLESS must fail")
+            require(HITS.count(request_path) == before_unmasked, "unmasked plain VLESS reached endpoint")
+            case_results.append({"case": label + "-unmasked", "result": "PASS", "endpoint_requests": 0})
+            print(label + "-unmasked: PASS", flush=True)
+    case_results.append({"case": label, "result": "PASS", "endpoint_requests": 1, "controlled_restart": True, "service_active": True, "new_port_listening": True})
     print(label + ": PASS", flush=True)
+
+
+def validate_vless_sudoku_results():
+    expected = {"xray-vless-plain-sudoku-" + mode for mode in ("prefer_entropy", "ascii")}
+    positive = [case for case in VLESS_SUDOKU_RESULTS if case["case"] in expected]
+    negative = [case for case in VLESS_SUDOKU_RESULTS if case["case"] not in expected]
+    require(len(positive) == 2 and {case["case"] for case in positive} == expected,
+            "plain VLESS Sudoku positive matrix incomplete")
+    require(all(case["result"] == "PASS" and case["endpoint_requests"] == 1
+                and case["controlled_restart"] and case["service_active"] and case["new_port_listening"]
+                for case in positive), "plain VLESS Sudoku positive failed")
+    expected_negative = {name + suffix for name in expected for suffix in ("-wrong-password", "-unmasked")}
+    require(len(negative) == 4 and {case["case"] for case in negative} == expected_negative,
+            "plain VLESS Sudoku negative matrix incomplete")
+    require(all(case["result"] == "PASS" and case["endpoint_requests"] == 0 for case in negative),
+            "plain VLESS Sudoku negative reached endpoint")
 
 
 def main():
@@ -226,6 +276,10 @@ def main():
         for offset, (ascii_mode, vision) in enumerate(
                 (ascii_mode, vision) for ascii_mode in ("prefer_entropy", "ascii") for vision in (False, True)):
             test_case("xray", "native", "x25519", vision, len(matrix) + offset, sudoku=ascii_mode)
+        for offset, ascii_mode in enumerate(("prefer_entropy", "ascii")):
+            test_case("xray", "native", "x25519", False, len(matrix) + 4 + offset,
+                      sudoku=ascii_mode, plain=True)
+        validate_vless_sudoku_results()
         # Read the real state produced above with the published v0.2.2 binary.
         # Keep only the parser error: never persist any old CLI profile output.
         old = os.environ["OLD_PING_RUST"]
@@ -246,7 +300,7 @@ def main():
         # Do not print exception chains, argv, captured output or config data.
         stage = str(error) if isinstance(error, AcceptanceFailure) else "unexpected error; details withheld"
         print("VLESS-ENC acceptance failed at " + stage, flush=True)
-        RESULTS.append({"result": "FAIL", "stage": stage, "completed_cases": len(RESULTS)})
+        RESULTS.append({"result": "FAIL", "stage": stage, "completed_cases": len(RESULTS) + len(VLESS_SUDOKU_RESULTS)})
         status = 1
     finally:
         journal = subprocess.run(["journalctl", "-u", "shoes", "--no-pager", "-o", "cat"], capture_output=True, timeout=30)
@@ -263,7 +317,7 @@ def main():
         except Exception:
             print("Secret audit failed; raw output has been withheld.", flush=True)
             status = 1
-        report = {"xray": "v26.6.27", "mihomo": "v1.19.33", "shoes": "v0.3.7", "cases": RESULTS, "downgrade": DOWNGRADE, "artifact_secret_audit": status == 0}
+        report = {"xray": "v26.6.27", "mihomo": "v1.19.33", "shoes": "v0.3.7", "cases": RESULTS, "vless_sudoku_cases": VLESS_SUDOKU_RESULTS, "downgrade": DOWNGRADE, "artifact_secret_audit": status == 0}
         (RECORDS / "results.json").write_text(json.dumps(report, indent=2) + "\n")
         endpoint.shutdown()
         subprocess.run(["systemctl", "stop", "shoes"], capture_output=True, timeout=30)

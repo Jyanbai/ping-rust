@@ -1,5 +1,7 @@
 # ping-rust
 
+> **VLESS-Sudoku 没有任何加密和认证。** Sudoku 只是混淆，下行打包编码没有密钥，上行置换种子空间有限；普通 VLESS 的 UUID、目标地址、非 HTTPS 内容都能在链路上被还原。需要加密时请使用 VLESS-ENC + Sudoku 或 VLESS-REALITY。
+
 [![crates.io](https://img.shields.io/crates/v/ping-rust.svg)](https://crates.io/crates/ping-rust)
 [![GitHub Release](https://img.shields.io/github/v/release/Jyanbai/ping-rust)](https://github.com/Jyanbai/ping-rust/releases/latest)
 [![CI](https://github.com/Jyanbai/ping-rust/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Jyanbai/ping-rust/actions/workflows/ci.yml)
@@ -9,7 +11,7 @@
 
 核心逻辑全部位于 Rust 源码中；`scripts/install.sh` 只负责执行 Rust 前的架构检测、下载、SHA-256 校验与严格解包，原子安装、快捷命令所有权判断和首次部署均由已校验的 Rust 二进制完成。
 
-> 当前版本：[`v0.3.0`](https://github.com/Jyanbai/ping-rust/releases/tag/v0.3.0)，升级要求见[正式发版说明](docs/RELEASE_NOTES_v0.3.0.md)。v0.3.0 新增 VLESS-ENC，自动迁移通配符路由规则，并将新建 Snell v3 节点默认 cipher 改为 aes-128-gcm。v0.2.0 引入 Update Center、Verified Hot Reload、Chain Proxy 2.0、规则路由和受验证范围内的 H2MUX；v0.2.1 增加 Pool 节点批量测试、热重载不可用原因提示和 NaiveProxy 测试证书有效期管理；v0.2.2 将默认安装的 shoes 固定为经过验证的 v0.2.7（已装更新的未验证版本时提示回退命令），YAML 库换成 serde-saphyr（修复 RUSTSEC-2024-0449），`--version` 额外输出构建 commit。**热重载需要固定 pin 构建；默认一键安装使用 GitHub Release 来源，监听变更使用受控重启。**支持 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks、AnyTLS、VLESS-TLS-Vision、VLESS-WS-TLS、Trojan-TLS、Trojan-REALITY、VMess-WS-TLS、SOCKS5、Snell v3、NaiveProxy、VLESS-ENC 和 [VLESS-XHTTP-REALITY](docs/wiki/VLESS-XHTTP-REALITY.md) 十五种受管协议。用户只选择完整协议，不需要理解或手动组合传输层、安全层与内层协议。
+> 当前版本：[`v0.3.0`](https://github.com/Jyanbai/ping-rust/releases/tag/v0.3.0)，升级要求见[正式发版说明](docs/RELEASE_NOTES_v0.3.0.md)。v0.3.0 新增 VLESS-ENC，自动迁移通配符路由规则，并将新建 Snell v3 节点默认 cipher 改为 aes-128-gcm。v0.2.0 引入 Update Center、Verified Hot Reload、Chain Proxy 2.0、规则路由和受验证范围内的 H2MUX；v0.2.1 增加 Pool 节点批量测试、热重载不可用原因提示和 NaiveProxy 测试证书有效期管理；v0.2.2 将默认安装的 shoes 固定为经过验证的 v0.2.7（已装更新的未验证版本时提示回退命令），YAML 库换成 serde-saphyr（修复 RUSTSEC-2024-0449），`--version` 额外输出构建 commit。**热重载需要固定 pin 构建；默认一键安装使用 GitHub Release 来源，监听变更使用受控重启。**支持 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks、AnyTLS、VLESS-TLS-Vision、VLESS-WS-TLS、Trojan-TLS、Trojan-REALITY、VMess-WS-TLS、SOCKS5、Snell v3、NaiveProxy、VLESS-ENC、[VLESS-XHTTP-REALITY](docs/wiki/VLESS-XHTTP-REALITY.md) 和 [VLESS-Sudoku（无加密）](docs/wiki/VLESS-Sudoku.md) 十六种受管协议。用户只选择完整协议，不需要理解或手动组合传输层、安全层与内层协议。
 
 完整文档：[Wiki](https://github.com/Jyanbai/ping-rust/wiki) · [快速开始](https://github.com/Jyanbai/ping-rust/wiki/Quick-Start) · [链式代理](https://github.com/Jyanbai/ping-rust/wiki/Chain-Proxy) · [故障排查](https://github.com/Jyanbai/ping-rust/wiki/Troubleshooting)
 
@@ -114,7 +116,24 @@ Sudoku 是混淆，不是加密或认证，传输安全仍由 VLESS Encryption �
 
 格式参考：[shoes v0.3.7 文档](https://github.com/cfal/shoes/blob/v0.3.7/docs/src/content/docs/zh-cn/protocols/sudoku.md)、[shoes 与 Xray 互通测试](https://github.com/cfal/shoes/blob/v0.3.7/tests/cases/optional_peer/vless_encryption/sudoku_mask.rs)、[v2rayN 分享链接处理](https://github.com/2dust/v2rayN/blob/master/v2rayN/ServiceLib/Handler/Fmt/BaseFmt.cs)。
 
-### 协议分级
+### VLESS-Sudoku（无加密）
+
+**VLESS-Sudoku 没有任何加密和认证。** Sudoku 只是混淆，下行打包编码没有密钥，上行置换种子空间有限；普通 VLESS 的 UUID、目标地址、非 HTTPS 内容都能在链路上被还原。需要加密时请使用 VLESS-ENC + Sudoku 或 VLESS-REALITY。
+
+普通 VLESS 外面始终包一层 shoes `sudoku_mask`，不使用 VLESS Encryption、TLS、REALITY 或 Vision。这是 Xray FinalMask Sudoku，不是 Mihomo 的 `sudoku` 隧道协议。高级协议列表保留 1–15，在末尾追加 **16) VLESS-Sudoku（无加密）**，主菜单不变。菜单先显示安全与代价说明，再询问“仍要添加无加密的 VLESS-Sudoku 节点？[y/N]（输入 0 返回）”，默认 N。
+
+```sh
+sudo prs add vless-sudoku --server-address 203.0.113.10
+sudo prs add vless-sudoku --sudoku-ascii ascii --sudoku-padding-min 0 --sudoku-padding-max 10
+```
+
+无需 `--sudoku`；密码、ascii、padding 参数与 VLESS-ENC Sudoku 相同。上行约 4 倍（无 padding），10% padding 约 4.5 倍，单次写入最多约 9 倍；下行约 1.33 倍。关闭原始 TCP splice，每条连接多占约 64 KiB 缓冲。只支持 TCP，没有 UDP/QUIC 掩码；TCP 内转发的 UDP 仍可用。客户端需要 **Xray ≥ v26.3.27** 或基于它的 v2rayN。
+
+链接使用 `encryption=none&security=none&type=tcp&fm=`（URL 编码的紧凑 FinalMask JSON），二维码内容相同。`prs info` 显示“加密：无”和 ascii、padding 范围。Clash Meta / Mihomo、sing-box、NekoBox 导出均明确拒绝。菜单“2 更改配置”支持端口、ascii、padding 和重新生成 Sudoku 密码；重置密码会使旧链接失效，确认默认 N。配置修改沿用 dry-run、原子提交和失败回滚。
+
+state 将新节点放在顶层 `sudoku_profiles` 扩展，v0.2.1 可忽略并读取原有节点；已有协议的 state 输出不变。旧版不支持管理该节点，降级操作前请先用新版删除并备份配置。详见 [VLESS-Sudoku wiki](docs/wiki/VLESS-Sudoku.md)。
+
+## 协议分级
 
 | 标签 | 协议或功能 | 说明 |
 |---|---|---|
@@ -240,9 +259,10 @@ shoes: running
 13) NaiveProxy
 14) VLESS-ENC
 15) VLESS-XHTTP-REALITY
+16) VLESS-Sudoku（无加密）
 0) 返回
 
-请选择 [0-15]: 4
+请选择 [0-16]: 4
 输入端口（直接回车自动选择随机端口）:
 
 部署成功，shoes 服务已启动。
@@ -333,7 +353,7 @@ VMess WebSocket TLS、非 Vision VLESS WebSocket TLS 和 Trojan TLS 可在“更
 
 sing-box 导出会携带 `multiplex.protocol=h2mux`；固定 shoes 上的 VMess/VLESS WebSocket TLS 和 Trojan TLS 已通过本地 TCP、并发流、half-close 与大 payload 验证，sing-box 1.14.2 已通过导出配置检查及 Trojan H2MUX 数据面测试。Mihomo H2MUX 存在已知兼容问题，开启偏好时拒绝 Mihomo 导出；NekoBox、普通分享 URI 与 QR 仍可用于普通连接，但不携带 H2MUX 设置。VLESS Vision、Shadowsocks、SS2022 + ShadowTLS、Snell v3 及其它协议不提供 H2MUX 开关。H2MUX UDP 尚未验证或启用；Pool、Chain 和路由语义不受该偏好影响。
 
-首次安装流程是：`install.sh → 自动安装 ping-rust/shoes → 自动随机端口部署 VLESS-REALITY → 复制 URL`，中间零输入。Reality 未指定 SNI 时会自动检测内置名单并选择可用目标（规则见下文）；客户端指纹固定为 `chrome`。后续日常流程是：`prs → 1 → 选择协议 → 输入端口/直接回车随机`；Shadowsocks 会额外选择加密方式和密码，SS 2022 密码不符合所选 cipher 的 Base64 密钥长度时会警告并自动替换。其余协议自动生成 UUID、密码、Reality 密钥、WebSocket 路径或证书。SOCKS5 快速添加默认生成安全随机用户名和密码并启用 UDP ASSOCIATE；Snell v3 快速添加默认使用 `aes-128-gcm`，生成随机密码并启用 UDP-over-TCP。NaiveProxy 要求明确选择受信任证书或自签名测试模式，不会静默生成生产自签名配置。添加或查看配置成功后直接退出 `prs`；主菜单输入 `0` 退出，任意子菜单输入 `0` 返回主菜单。自动端口从 `20000..=65535` 的高位范围选择；菜单协议选择固定使用连续编号 `1..=15`。信息只会在配置通过 `shoes --dry-run`、原子写入、systemd 启动且确认为 active 后输出；失败会恢复原配置和服务状态。
+首次安装流程是：`install.sh → 自动安装 ping-rust/shoes → 自动随机端口部署 VLESS-REALITY → 复制 URL`，中间零输入。Reality 未指定 SNI 时会自动检测内置名单并选择可用目标（规则见下文）；客户端指纹固定为 `chrome`。后续日常流程是：`prs → 1 → 选择协议 → 输入端口/直接回车随机`；Shadowsocks 会额外选择加密方式和密码，SS 2022 密码不符合所选 cipher 的 Base64 密钥长度时会警告并自动替换。其余协议自动生成 UUID、密码、Reality 密钥、WebSocket 路径或证书。SOCKS5 快速添加默认生成安全随机用户名和密码并启用 UDP ASSOCIATE；Snell v3 快速添加默认使用 `aes-128-gcm`，生成随机密码并启用 UDP-over-TCP。NaiveProxy 要求明确选择受信任证书或自签名测试模式，不会静默生成生产自签名配置。添加或查看配置成功后直接退出 `prs`；主菜单输入 `0` 退出，任意子菜单输入 `0` 返回主菜单。自动端口从 `20000..=65535` 的高位范围选择；菜单协议选择固定使用连续编号 `1..=16`。信息只会在配置通过 `shoes --dry-run`、原子写入、systemd 启动且确认为 active 后输出；失败会恢复原配置和服务状态。
 
 非交互方式：
 
