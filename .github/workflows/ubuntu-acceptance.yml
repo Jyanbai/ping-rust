@@ -375,7 +375,7 @@ jobs:
           expect -re {工具:}
           send "2\r"
           expect -re {选择协议}
-          send "5\r"
+          send "7\r"
           expect -re {配置名称}
           send "anytls-reality-view\r"
           expect -re {监听端口}
@@ -388,7 +388,7 @@ jobs:
           send "\r"
           expect -re {继续添加 AnyTLS 用户}
           send "n\r"
-          expect -re {使用推荐 padding_scheme}
+          expect -re {使用默认 padding_scheme}
           send "y\r"
           expect -re {配置认证失败 fallback}
           send "n\r"
@@ -718,13 +718,13 @@ jobs:
           }
           wait_for {输入端口} port-prompt
           send "$env(MENU_PORT)\r"
-          if {$env(PROTOCOL_NUMBER) in {4 9}} {
-            # #72 起菜单添加 Reality（4 VLESS-REALITY、9 Trojan-Reality）会先选择 SNI 方式；
+          if {$env(PROTOCOL_NUMBER) in {1 12}} {
+            # 菜单添加 Reality（1 VLESS-REALITY、12 Trojan-REALITY）会先选择 SNI 方式；
             # 回车 = 1 自动选择。
             wait_for {选择 SNI 方式} reality-sni-choice
             send "\r"
           }
-          if {$env(PROTOCOL_NUMBER) == "14"} {
+          if {$env(PROTOCOL_NUMBER) == "5"} {
             wait_for {VLESS Encryption 外观} encryption-mode
             send "1\r"
             wait_for {VLESS Encryption 认证} encryption-auth
@@ -741,14 +741,14 @@ jobs:
             wait_for {请设置密码} shadowsocks-password-prompt
             send "\r"
           }
-          if {$env(PROTOCOL_NUMBER) == "12"} {
+          if {$env(PROTOCOL_NUMBER) == "13"} {
             wait_for {协议 \(protocol\)[^\r\n]*= snell} snell-details
             wait_for {没有通用标准分享 URI} snell-uri-guidance
           } else {
             wait_for "$env(SHARE_SCHEME)://" share-uri
             wait_for {二维码 \(QR\)} add-qr-heading
             wait_for {▀|▄|█} add-qr-blocks
-            if {$env(PROTOCOL_NUMBER) == "14"} {
+            if {$env(PROTOCOL_NUMBER) == "5"} {
               wait_for {重新生成密钥} encryption-regeneration
               send "n\r"
             }
@@ -757,9 +757,9 @@ jobs:
           EXPECT
           }
 
-          run_menu_add 4 25448 vless
+          run_menu_add 1 25448 vless
           enc_pid_before="$(sudo systemctl show shoes.service -p MainPID --value)"
-          run_menu_add 14 25466 vless
+          run_menu_add 5 25466 vless
           test "$(sudo systemctl show shoes.service -p MainPID --value)" = "$enc_pid_before"
           sudo python3 - <<'PY'
           import json
@@ -826,13 +826,13 @@ jobs:
           PY
           )"
           sudo "$PRS" delete "$shadowtls_fast_profile_id" --yes >/dev/null
-          run_menu_add 6 25451 vless
-          run_menu_add 7 25452 vless
-          run_menu_add 8 25453 trojan
-          run_menu_add 9 25454 trojan
-          run_menu_add 10 25455 vmess
-          run_menu_add 11 25456 socks5
-          run_menu_add 12 25457 snell
+          run_menu_add 9 25451 vless
+          run_menu_add 11 25452 vless
+          run_menu_add 10 25453 trojan
+          run_menu_add 12 25454 trojan
+          run_menu_add 14 25455 vmess
+          run_menu_add 15 25456 socks5
+          run_menu_add 13 25457 snell
           sudo env PRS_COMMAND="$PRS" expect <<'EXPECT'
           log_user 0
           set timeout 180
@@ -840,7 +840,7 @@ jobs:
           expect -re {请选择 \[0-10\]}
           send "1\r"
           expect -re {请选择 \[0-16\]}
-          send "13\r"
+          send "6\r"
           expect {输入端口}
           send "25464\r"
           expect {请输入域名/SNI}
@@ -1130,6 +1130,89 @@ jobs:
             sleep 0.5
           done
           ! sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)25449$'
+
+      - name: Verify AnyTLS TLS and REALITY through quick and advanced menus
+        shell: bash
+        run: |
+          set -euo pipefail
+          port=25467
+          for flow in quick advanced; do
+            for mode in 1 2; do
+              sudo expect scripts/ci/menu-anytls.exp "$PRS" "$flow" "$mode" "$port"
+              sudo systemctl is-active --quiet shoes.service
+              sudo ss -H -lnt | awk '{print $4}' | grep -Eq "(^|:)${port}$"
+              sudo python3 - "$PRS" "$port" "$mode" "$RUNNER_TEMP" <<'PY'
+          import json
+          from pathlib import Path
+          import stat
+          import subprocess
+          import sys
+          import tempfile
+
+          binary, port, mode, directory = sys.argv[1:]
+          port = int(port)
+          state_path = Path('/etc/shoes/ping-rust-state.json')
+          profiles = json.loads(state_path.read_text())['profiles']
+          matches = [profile for profile in profiles if profile['port'] == port]
+          assert len(matches) == 1
+          profile = matches[0]
+          credentials = profile['credentials']['AnyTls']
+          runtime_path = Path(f'/etc/shoes/profiles/ANYTLS-{port}.yaml')
+          runtime = runtime_path.read_text()
+          for path in (runtime_path, state_path, Path('/etc/shoes/config.yaml')):
+              assert stat.S_IMODE(path.stat().st_mode) == 0o600
+          assert 'type: anytls' in runtime
+          assert len(credentials['users']) == 1
+          if mode == '1':
+              assert credentials['security'] == 'Tls'
+              assert 'tls_targets:' in runtime and 'reality_targets:' not in runtime
+              assert profile['self_signed_certificate'] is True
+              for field in ('certificate_path', 'certificate_key_path'):
+                  assert Path(profile[field]).is_file()
+          else:
+              assert 'Reality' in credentials['security']
+              assert 'reality_targets:' in runtime and 'tls_targets:' not in runtime
+              assert profile['self_signed_certificate'] is False
+              assert not profile.get('certificate_path')
+              assert not profile.get('certificate_key_path')
+          with tempfile.TemporaryDirectory(dir=directory) as temporary:
+              output = Path(temporary) / 'sing-box.json'
+              subprocess.run(
+                  [binary, 'export', 'sing-box', '--profile', profile['id'],
+                   '--server', '203.0.113.10', '--output', str(output)],
+                  check=True, capture_output=True, timeout=30)
+              outbounds = json.loads(output.read_text())['outbounds']
+              outbound = next(item for item in outbounds if item['type'] == 'anytls')
+              assert outbound['server_port'] == port
+              assert outbound['password'] == credentials['users'][0]['password']
+              tls = outbound['tls']
+              assert tls['enabled'] is True
+              assert tls['server_name'] == credentials['server_name']
+              if mode == '1':
+                  assert tls['insecure'] is True
+                  assert 'reality' not in tls
+              else:
+                  reality = credentials['security']['Reality']
+                  assert tls['reality']['enabled'] is True
+                  assert tls['reality']['public_key'] == reality['public_key']
+                  assert tls['reality']['short_id'] == reality['short_id']
+                  rejected = subprocess.run(
+                      [binary, 'export', 'nekobox', '--profile', profile['id'],
+                       '--server', '203.0.113.10',
+                       '--output', str(Path(temporary) / 'nekobox.txt')],
+                      capture_output=True, text=True, timeout=30)
+                  assert rejected.returncode != 0
+                  assert 'Reality' in rejected.stderr + rejected.stdout
+          subprocess.run([binary, 'delete', profile['id'], '--yes'],
+                         check=True, capture_output=True, timeout=60)
+          assert not runtime_path.exists()
+          print(f'AnyTLS menu mode {mode} state, YAML, export and cleanup: PASS')
+          PY
+              sudo systemctl is-active --quiet shoes.service
+              ! sudo ss -H -lnt | awk '{print $4}' | grep -Eq "(^|:)${port}$"
+              port=$((port + 1))
+            done
+          done
 
       - name: Edit H2MUX client preference without shoes service action
         shell: bash
