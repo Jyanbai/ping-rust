@@ -66,6 +66,19 @@ def review_evidence(sha, base, comments):
     return max(evidence) if evidence else None
 
 
+def latest_review(number, sha, runs):
+    """可信 run-name 在 job 开始前即绑定目标，失败/取消无需先发布评论。"""
+    candidates = []
+    for run in runs:
+        if run.get("head_branch") != "main" or run.get("path") != ".github/workflows/codex-code-review.yml":
+            continue
+        title = run.get("display_title")
+        if ((run.get("event") == "workflow_run" and title == f"Codex Review pr=0 sha={sha}")
+                or (run.get("event") == "workflow_dispatch" and title == f"Codex Review pr={number} sha=none")):
+            candidates.append(run)
+    return max(candidates, key=lambda r: (r["id"], r.get("run_attempt", 1))) if candidates else None
+
+
 def review_verdict(sha, base, comments, runs, jobs):
     evidence = review_evidence(sha, base, comments)
     if not evidence:
@@ -175,8 +188,12 @@ def inspect_pr(api, number, policy, publish=True):
         errors = evaluate(sha, policy, runs, jobs)
         comments = api.pages(f"issues/{number}/comments")
         review_runs = {}
+        review_path = "actions/workflows/codex-code-review.yml/runs?branch=main"
+        selected = latest_review(number, sha, api.pages(review_path, "workflow_runs"))
         evidence = review_evidence(sha, base, comments)
-        if evidence:
+        if not selected or not succeeded(selected):
+            errors.append("当前 PR/head 最新独立审查缺失或尚未实际成功（包括无证明的失败/取消/跳过）")
+        if evidence and selected and evidence[:2] == (selected["id"], selected["run_attempt"]):
             rid, _, _ = evidence
             run = api.request(f"actions/runs/{rid}")
             review_runs[rid] = run
@@ -191,6 +208,10 @@ def inspect_pr(api, number, policy, publish=True):
                 fresh = api.request(f"actions/runs/{run['id']}")
                 if fresh.get("run_attempt") != run.get("run_attempt") or not succeeded(fresh):
                     errors.append(f"证据读取期间运行已变化：{run['id']}")
+            latest = latest_review(number, sha, api.pages(review_path, "workflow_runs"))
+            if (not latest or not succeeded(latest)
+                    or (latest["id"], latest["run_attempt"]) != (selected["id"], selected["run_attempt"])):
+                errors.append("证据读取期间有新的独立审查，请等待最新运行完成")
         # 写回前重读 PR，避免新提交沿用旧 head/base 的快照。
         current = api.request(f"pulls/{number}")
         if current["head"]["sha"] != sha or current["base"]["sha"] != base or current["state"] != "open":

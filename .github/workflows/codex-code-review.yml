@@ -1,4 +1,5 @@
 name: Codex Code Review
+run-name: Codex Review pr=${{ inputs.pr || '0' }} sha=${{ github.event.workflow_run.head_sha || 'none' }}
 
 # workflow_run 使用默认分支上的定义，符合 environment codex 只允许 main 的限制。
 # 只审查所有者在本仓库开的 PR；不执行 PR 中的脚本，不接收它生成的 artifact。

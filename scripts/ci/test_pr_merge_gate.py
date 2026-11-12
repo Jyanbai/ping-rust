@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import unittest
 
-from pr_merge_gate import evaluate, review_verdict, inspect_pr, REVIEW_STEPS
+from pr_merge_gate import evaluate, review_verdict, inspect_pr, latest_review, REVIEW_STEPS
 
 
 class GateTests(unittest.TestCase):
@@ -149,7 +149,8 @@ class GateTests(unittest.TestCase):
                    'body': f'<!-- codex-review-verdict sha={self.sha} base={base} findings=0 run=99 attempt=1 -->'}
         run = dict(self.run, pull_requests=[{'number': 7, 'head': {'sha': self.sha}, 'base': {'sha': base}}])
         optional = dict(run, id=2, path='.github/workflows/reality-sni-candidates.yml', conclusion='failure')
-        review = dict(self.run, id=99, path='.github/workflows/codex-code-review.yml', event='workflow_run', head_branch='main')
+        review = dict(self.run, id=99, path='.github/workflows/codex-code-review.yml', event='workflow_run', head_branch='main',
+                      display_title=f'Codex Review pr=0 sha={self.sha}')
         review_job = dict(self.job, name='review', steps=[dict(self.job['steps'][0], name=n) for n in REVIEW_STEPS])
 
         class FakeAPI:
@@ -165,6 +166,8 @@ class GateTests(unittest.TestCase):
 
             def pages(self, path, key=None):
                 self.calls.append(path)
+                if path.startswith('actions/workflows/'):
+                    return [review]
                 if path.startswith('actions/runs?'):
                     return [run, optional]
                 if path.endswith('/comments'):
@@ -189,6 +192,30 @@ class GateTests(unittest.TestCase):
             run['pull_requests'][0][field] = 8 if field == 'number' else {'sha': 'c' * 40}
             self.assertTrue(inspect_pr(FakeAPI(), 7, self.policy))
             run['pull_requests'][0] = original
+
+        # 新审查在发布任何证明之前失败、取消、跳过或排队，不能复用旧绿灯。
+        original_id = review['id']
+        for conclusion in ['failure', 'cancelled', 'timed_out', 'skipped', None]:
+            review['id'] = 100
+            review['conclusion'] = conclusion
+            api = FakeAPI()
+            self.assertTrue(inspect_pr(api, 7, self.policy))
+            self.assertEqual(api.statuses[-1], 'failure')
+        review.update(id=original_id, conclusion='success')
+
+    def test_review_metadata_binds_queued_runs_and_latest_attempt(self):
+        auto = dict(self.run, id=99, path='.github/workflows/codex-code-review.yml', event='workflow_run',
+                    head_branch='main', display_title=f'Codex Review pr=0 sha={self.sha}')
+        for status, conclusion in [('queued', None), ('completed', 'cancelled'), ('completed', 'failure'), ('completed', 'skipped')]:
+            newer = dict(auto, id=100, status=status, conclusion=conclusion)
+            self.assertEqual(latest_review(7, self.sha, [auto, newer]), newer)
+        manual = dict(auto, id=101, event='workflow_dispatch', display_title='Codex Review pr=7 sha=none')
+        self.assertEqual(latest_review(7, self.sha, [auto, manual]), manual)
+        self.assertEqual(latest_review(8, self.sha, [auto, manual]), auto)
+        self.assertIsNone(latest_review(7, 'c' * 40, [auto]))
+        self.assertIsNone(latest_review(7, self.sha, [dict(auto, head_branch='pr-branch')]))
+        retry = dict(auto, run_attempt=2, conclusion='failure')
+        self.assertEqual(latest_review(7, self.sha, [auto, retry]), retry)
 
 
 if __name__ == "__main__":
