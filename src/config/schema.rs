@@ -73,6 +73,12 @@ pub(super) struct QuicSettings {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub(super) enum ServerProtocol {
+    #[serde(rename = "sudoku_mask")]
+    SudokuMask {
+        #[serde(flatten)]
+        settings: crate::sudoku::SudokuConfig,
+        protocol: Box<ServerProtocol>,
+    },
     Vless {
         user_id: Uuid,
         udp_enabled: bool,

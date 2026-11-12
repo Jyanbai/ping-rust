@@ -79,7 +79,7 @@ pub enum Command {
     Generate(Box<GenerateArgs>),
     /// 像 233boy 一样快速添加配置并直接输出分享链接
     #[command(alias = "a")]
-    Add(AddArgs),
+    Add(Box<AddArgs>),
     /// 管理 shoes systemd 服务
     Service {
         #[arg(value_enum)]
@@ -480,6 +480,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                     vless_enc_mode: vless_enc.mode,
                     vless_enc_auth: vless_enc.auth,
                     vless_enc_vision: vless_enc.vision,
+                    sudoku: vless_enc.sudoku.config()?,
                     reality_short_id: short_id,
                     reality_max_time_diff,
                     udp_enabled: udp || !disable_udp,
@@ -560,7 +561,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             }
             Ok(())
         }
-        Command::Add(args) => run_add(args).await,
+        Command::Add(args) => run_add(*args).await,
         Command::Service { action } => execute_service(action),
         Command::Status => execute_service(ServiceAction::Status),
         Command::RegenerateTestCertificate { profile } => {
@@ -777,6 +778,7 @@ async fn run_add_inner(mut args: AddArgs) -> Result<()> {
     if args.xhttp_path.is_some() && args.protocol != Protocol::VlessXhttpReality {
         bail!("--xhttp-path 仅适用于 VLESS-XHTTP-REALITY");
     }
+    args.vless_enc.sudoku.validate_for(args.protocol)?;
     if args.shadowtls && !matches!(args.protocol, Protocol::Shadowsocks) {
         bail!("--shadowtls 仅适用于 Shadowsocks");
     }
@@ -1053,6 +1055,7 @@ fn profile_details_lines(profile: &config::ManagedProfile, share_uri: Option<&st
             mode,
             auth,
             vision,
+            sudoku,
             ..
         } => {
             lines.push(format!("地址：{address}"));
@@ -1064,6 +1067,9 @@ fn profile_details_lines(profile: &config::ManagedProfile, share_uri: Option<&st
                 auth.as_str()
             ));
             lines.push(format!("Encryption：{encryption}"));
+            if let Some(sudoku) = sudoku {
+                lines.push(sudoku.description());
+            }
         }
         config::Credentials::VlessXhttpReality {
             user_id,
