@@ -156,6 +156,9 @@ fn golden_preset_outputs_are_semantically_unchanged() {
         .collect::<Vec<_>>();
     let enc_state = load_state_from(&fixture_root().join("vless-enc/state.json")).unwrap();
     protocols.extend(enc_state.profiles.iter().map(ManagedProfile::protocol));
+    let xhttp_state =
+        load_state_from(&fixture_root().join("vless-xhttp-reality/state.json")).unwrap();
+    protocols.extend(xhttp_state.profiles.iter().map(ManagedProfile::protocol));
     protocols.sort_by_key(|protocol| protocol.slug());
     protocols.dedup();
     let mut all = Protocol::all().collect::<Vec<_>>();

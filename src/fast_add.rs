@@ -23,6 +23,7 @@ const ADDRESS_ENDPOINTS: &[&str] = &[
 
 pub struct AddRequest {
     pub interactive: bool,
+    pub xhttp_path: Option<String>,
     pub vless_enc: crate::vless_encryption::Options,
     pub name: Option<String>,
     pub protocol: Protocol,
@@ -84,6 +85,7 @@ async fn execute_inner(request: AddRequest, checked_sni: Option<String>) -> Resu
         )
     };
     let mut options = GenerationOptions {
+        xhttp_path: request.xhttp_path,
         vless_enc_mode: request.vless_enc.mode,
         vless_enc_auth: request.vless_enc.auth,
         vless_enc_vision: request.vless_enc.vision,

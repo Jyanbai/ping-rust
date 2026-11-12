@@ -1,0 +1,19 @@
+address: 0.0.0.0:443
+protocol:
+  type: tls
+  reality_targets:
+    example.com:
+      private_key: PRIVATE_KEY
+      short_ids:
+      - SHORT_ID
+      dest: example.com:443
+      max_time_diff: 60000
+      vision: false
+      protocol:
+        type: xhttp
+        path: /test-path_~.012345
+        mode: auto
+        protocol:
+          type: vless
+          user_id: USER_ID
+          udp_enabled: true

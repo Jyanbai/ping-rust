@@ -181,6 +181,9 @@ pub struct AddArgs {
     pub vless_enc: crate::vless_encryption::Options,
     #[arg(value_enum)]
     pub protocol: Protocol,
+    /// XHTTP 路径；省略时随机生成 / 加 16 位小写十六进制
+    #[arg(long, value_parser = parse_xhttp_path)]
+    pub xhttp_path: Option<String>,
     /// 快速添加位置参数端口，例如 `prs add reality 443`
     #[arg(value_name = "PORT", conflicts_with_all = ["port", "random_port"])]
     pub legacy_port: Option<u16>,
@@ -310,6 +313,9 @@ pub struct GenerateArgs {
     /// VLESS-WS-TLS/VMess-WS-TLS 的 WebSocket 路径；不指定时安全随机生成
     #[arg(long)]
     websocket_path: Option<String>,
+    /// VLESS-XHTTP-REALITY 路径；只接受 / 和 URL 非保留字符
+    #[arg(long, value_parser = parse_xhttp_path)]
+    xhttp_path: Option<String>,
     /// 使用 TLS 的协议预设所需 PEM 证书；不指定时生成自签名证书
     #[arg(long, requires = "key")]
     cert: Option<PathBuf>,
@@ -396,6 +402,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 anytls_padding,
                 fallback,
                 websocket_path,
+                xhttp_path,
                 cert,
                 key,
                 self_signed,
@@ -469,6 +476,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 certificate: cert,
                 certificate_key: key,
                 options: GenerationOptions {
+                    xhttp_path,
                     vless_enc_mode: vless_enc.mode,
                     vless_enc_auth: vless_enc.auth,
                     vless_enc_vision: vless_enc.vision,
@@ -753,6 +761,11 @@ fn generated_server_name(
     }
 }
 
+fn parse_xhttp_path(value: &str) -> std::result::Result<String, String> {
+    config::validate_xhttp_path(value).map_err(|error| error.to_string())?;
+    Ok(value.to_owned())
+}
+
 async fn run_add(args: AddArgs) -> Result<()> {
     match run_add_inner(args).await {
         Err(error) if input::is_back(&error) => Ok(()),
@@ -761,6 +774,9 @@ async fn run_add(args: AddArgs) -> Result<()> {
 }
 
 async fn run_add_inner(mut args: AddArgs) -> Result<()> {
+    if args.xhttp_path.is_some() && args.protocol != Protocol::VlessXhttpReality {
+        bail!("--xhttp-path 仅适用于 VLESS-XHTTP-REALITY");
+    }
     if args.shadowtls && !matches!(args.protocol, Protocol::Shadowsocks) {
         bail!("--shadowtls 仅适用于 Shadowsocks");
     }
@@ -839,6 +855,7 @@ async fn run_add_inner(mut args: AddArgs) -> Result<()> {
     let result = fast_add::execute(fast_add::AddRequest {
         interactive: true,
         vless_enc: args.vless_enc,
+        xhttp_path: args.xhttp_path,
         name: args.name,
         protocol: args.protocol,
         port: args.port.or(args.legacy_port),
@@ -957,6 +974,7 @@ async fn bootstrap_default_reality_with_menu(menu: bool) -> Result<bool> {
         interactive: menu,
         name: Some("reality-default".to_owned()),
         vless_enc: Default::default(),
+        xhttp_path: None,
         protocol: Protocol::Reality,
         port: None,
         server_address: Some(server_address),
@@ -1046,6 +1064,23 @@ fn profile_details_lines(profile: &config::ManagedProfile, share_uri: Option<&st
                 auth.as_str()
             ));
             lines.push(format!("Encryption：{encryption}"));
+        }
+        config::Credentials::VlessXhttpReality {
+            user_id,
+            public_key,
+            short_id,
+            server_name,
+            xhttp,
+            ..
+        } => {
+            lines.push(format!("地址：{address}"));
+            lines.push(format!("端口：{}", profile.port));
+            lines.push(format!("UUID：{user_id}"));
+            lines.push(format!("SNI：{server_name}"));
+            lines.push(format!("Reality 公钥：{public_key}"));
+            lines.push(format!("Short ID：{short_id}"));
+            lines.push(format!("指纹：{}", config::REALITY_FINGERPRINT));
+            lines.push(format!("传输：XHTTP（path {}，mode auto）", xhttp.path));
         }
         config::Credentials::Reality {
             user_id,
@@ -1792,6 +1827,21 @@ pub fn print_credentials(result: &config::GenerationResult) {
             );
             println!("Encryption：{encryption}");
         }
+        config::Credentials::VlessXhttpReality {
+            user_id,
+            public_key,
+            short_id,
+            server_name,
+            xhttp,
+            ..
+        } => {
+            println!("协议：VLESS-XHTTP-REALITY");
+            println!("UUID：{user_id}");
+            println!("SNI：{server_name}");
+            println!("Short ID：{short_id}");
+            println!("Reality 公钥：{public_key}");
+            println!("传输：XHTTP（path {}，mode auto）", xhttp.path);
+        }
         config::Credentials::Reality {
             user_id,
             private_key,
@@ -2033,6 +2083,43 @@ fn print_certificate_notice(result: &config::GenerationResult) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn xhttp_reality_cli_accepts_paths_and_rejects_invalid_paths() {
+        for command in ["add", "generate"] {
+            for path in ["/", "/a/b_~.-"] {
+                let cli = Cli::try_parse_from([
+                    "prs",
+                    command,
+                    "vless-xhttp-reality",
+                    "--xhttp-path",
+                    path,
+                ])
+                .unwrap();
+                match cli.command.unwrap() {
+                    Command::Add(args) => {
+                        assert_eq!(args.protocol, Protocol::VlessXhttpReality);
+                        assert_eq!(args.xhttp_path.as_deref(), Some(path));
+                    }
+                    Command::Generate(args) => {
+                        assert_eq!(args.protocol, Protocol::VlessXhttpReality);
+                        assert_eq!(args.xhttp_path.as_deref(), Some(path));
+                    }
+                    _ => panic!("unexpected command"),
+                }
+            }
+            for path in ["bad", "/a b", "/a?b", "/a#b", "/a%b"] {
+                assert!(Cli::try_parse_from([
+                    "prs",
+                    command,
+                    "vless-xhttp-reality",
+                    "--xhttp-path",
+                    path
+                ])
+                .is_err());
+            }
+        }
+    }
+
     #[test]
     fn generate_sni_selection_is_offline_for_every_target_protocol() {
         let candidates = config::reality_server_names();

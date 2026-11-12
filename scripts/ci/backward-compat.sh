@@ -72,3 +72,33 @@ grep -H -v '^exit=0$' -x "$WORK"/new/* /dev/null | grep 'exit=' || true
 
 /usr/local/bin/shoes --dry-run /etc/shoes/config.yaml
 echo "backward compatibility: PASS"
+
+# The XHTTP extension must leave legacy profiles readable by the actual v0.2.1
+# binary, with identical legacy info/exports and no changes made by reading.
+cp /etc/shoes/ping-rust-state.json "$WORK/legacy-state.json"
+jq -e 'all(.profiles[]; .credentials | has("VlessXhttpReality") | not)' \
+  "$WORK/legacy-state.json" >/dev/null
+"$NEW" add vless-xhttp-reality --port 24433 --name compat-xhttp \
+  --server-address "$SERVER" --server-name www.cloudflare.com --yes >"$WORK/xhttp-add.txt" 2>&1
+python3 - "$WORK/legacy-state.json" /etc/shoes/ping-rust-state.json <<'PY'
+import json
+import sys
+with open(sys.argv[1]) as source:
+    before = json.load(source)
+with open(sys.argv[2]) as source:
+    after = json.load(source)
+assert after["profiles"] == before["profiles"]
+assert len(after["xhttp_profiles"]) == 1
+entry = after["xhttp_profiles"][0]
+assert entry["position"] == len(before["profiles"])
+assert "VlessXhttpReality" in entry["profile"]["credentials"]
+assert after["chain_proxy"] == before["chain_proxy"]
+PY
+"$NEW" url compat-xhttp >"$WORK/xhttp-url.txt"
+find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$WORK/hash-xhttp-before"
+capture "$OLD" "$WORK/old"
+grep -x 'exit=0' "$WORK/old/info"
+python3 "$(dirname "$0")/compare-compat-outputs.py" "$WORK/new" "$WORK/old"
+find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$WORK/hash-xhttp-after"
+diff -u "$WORK/hash-xhttp-before" "$WORK/hash-xhttp-after"
+echo 'v0.2.1: legacy info/exports unchanged with XHTTP extension present: PASS'
