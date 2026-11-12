@@ -48,7 +48,7 @@ class CollectorAPI:
         return copy.deepcopy(self.jobs[(int(parts[2]), int(parts[4]))])
 
     def attestation(self, run):
-        assert run['id'] == 99
+        assert run['id'] == self.proof['run']
         return copy.deepcopy(self.proof)
 
     def status(self, sha, state, description):
@@ -260,12 +260,36 @@ class GateTests(unittest.TestCase):
             self.assertEqual(api.statuses[-1], 'failure')
         review.update(id=original_id, conclusion='success')
 
-    def test_ci_rerun_reuses_attested_review_after_automatic_deduplication(self):
+    def test_ci_rerun_requires_fresh_review_not_skipped_prior_evidence(self):
         api = CollectorAPI(self)
         api.deduplicate()
+        self.assertTrue(inspect_pr(api, 7, self.policy))
+        self.assertEqual(api.statuses[-1], 'failure')
+
+        api = CollectorAPI(self)
+        api.deduplicate()
+        for step in api.jobs[(100, 1)][0]['steps']:
+            if step['name'] in REVIEW_STEPS:
+                step['conclusion'] = 'success'
+        api.proof = {'head': api.sha, 'base': api.base, 'findings': 0, 'run': 100, 'attempt': 1}
+        api.comments.append({'user': {'login': 'github-actions[bot]', 'type': 'Bot'},
+                             'body': f'<!-- codex-review-verdict sha={api.sha} base={api.base} findings=0 run=100 attempt=1 -->'})
         self.assertEqual(inspect_pr(api, 7, self.policy), [])
         self.assertEqual(api.statuses, ['pending', 'success'])
         self.assertIn('actions/runs/100', api.calls)
+
+    def test_review_rerun_attempt_requires_fresh_proof(self):
+        api = CollectorAPI(self)
+        api.review['run_attempt'] = 2
+        api.jobs[(99, 2)] = copy.deepcopy(api.jobs[(99, 1)])
+        self.assertTrue(inspect_pr(api, 7, self.policy))
+        self.assertEqual(api.statuses[-1], 'failure')
+        api.proof['attempt'] = 2
+        api.comments.append({'user': {'login': 'github-actions[bot]', 'type': 'Bot'},
+                             'body': f'<!-- codex-review-verdict sha={api.sha} base={api.base} findings=0 run=99 attempt=2 -->'})
+        api.statuses.clear()
+        self.assertEqual(inspect_pr(api, 7, self.policy), [])
+        self.assertEqual(api.statuses, ['pending', 'success'])
 
     def test_deduplication_never_bypasses_failed_manual_or_incomplete_review(self):
         for scenario in ['failed', 'cancelled', 'job-skipped', 'manual', 'select-skipped',
@@ -358,6 +382,7 @@ class GateTests(unittest.TestCase):
         self.assertEqual(event_targets(None, {'workflow_run': push_review}), ([], None))
         workflow = Path(__file__).resolve().parents[2] / '.github/workflows/codex-code-review.yml'
         self.assertIn("sha=${{ github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.head_sha || 'none' }}", workflow.read_text())
+        self.assertNotIn("该提交已有成功的 Codex 审查，跳过。", workflow.read_text())
 
     def test_workflow_events_only_select_current_associated_pr(self):
         outer = self

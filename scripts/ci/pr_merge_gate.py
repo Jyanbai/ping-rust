@@ -84,18 +84,6 @@ def latest_review(number, sha, runs):
     return max(candidates, key=lambda r: (r["id"], r.get("run_attempt", 1))) if candidates else None
 
 
-def deduplicated_review(run, jobs):
-    """自动运行成功选择目标但未执行审查；必须另行验证已有的完整证明。"""
-    if (run.get("event") != "workflow_run" or not succeeded(run) or len(jobs) != 1
-            or check_jobs({"review": ["Checkout review policy", "Select PR"]}, jobs)):
-        return False
-    for name in REVIEW_STEPS:
-        steps = [s for s in jobs[0].get("steps", []) if s.get("name") == name]
-        if len(steps) != 1 or steps[0].get("status") != "completed" or steps[0].get("conclusion") != "skipped":
-            return False
-    return True
-
-
 def run_jobs(api, run):
     """失败 job 重跑不包含此前成功的 job，按名称保留各 job 的最新执行。"""
     latest = {}
@@ -223,7 +211,9 @@ def inspect_pr(api, number, policy, publish=True):
         evidence = review_evidence(sha, base, comments)
         if not selected or not succeeded(selected):
             errors.append("当前 PR/head 最新独立审查缺失或尚未实际成功（包括无证明的失败/取消/跳过）")
-        if evidence and any(evidence[:2] == (r["id"], r["run_attempt"]) for r in candidates):
+        # 只接受最新 Review run/attempt 本身发布的证明。每次 CI 重跑产生的
+        # 新 Review 都必须实际执行；旧证明不能为新的 skipped steps 背书。
+        if evidence and selected and evidence[:2] == (selected["id"], selected["run_attempt"]):
             rid, _, _ = evidence
             run = api.request(f"actions/runs/{rid}")
             review_runs[rid] = run
@@ -232,16 +222,8 @@ def inspect_pr(api, number, policy, publish=True):
                     and run.get("run_attempt") == evidence[1]):
                 jobs[rid] = api.pages(f"actions/runs/{rid}/attempts/{run['run_attempt']}/jobs", "jobs")
                 run["attestation"] = api.attestation(run)
-            # CI 重跑触发的新自动审查可能由 Select PR 去重。只允许这类成功空运行
-            # 沿用证明；其间任何实际审查、手动审查或失败均不得被后续去重遮住。
-            for newer in candidates:
-                if (newer["id"], newer["run_attempt"]) <= evidence[:2]:
-                    continue
-                review_runs[newer["id"]] = newer
-                skipped_jobs = (api.pages(f"actions/runs/{newer['id']}/attempts/{newer['run_attempt']}/jobs", "jobs")
-                                if succeeded(newer) and newer.get("event") == "workflow_run" else [])
-                if not deduplicated_review(newer, skipped_jobs):
-                    errors.append(f"较新的独立审查不是成功的自动去重运行：{newer['id']}")
+        elif evidence:
+            errors.append("最新独立审查未提供同 run/attempt 的证明，旧证明不可复用")
         errors += review_verdict(sha, base, comments, review_runs, jobs)
         # 运行可能在取完 jobs 后被重新运行；只允许本次快照仍是最新 attempt。
         if not errors:
