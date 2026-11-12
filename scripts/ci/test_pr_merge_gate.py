@@ -68,12 +68,15 @@ class GateTests(unittest.TestCase):
         base = "b" * 40
         marker = f"<!-- codex-review-verdict sha={self.sha} base={base} findings=0 run=99 attempt=1 -->"
         comment = {"user": {"login": "github-actions[bot]", "type": "Bot"}, "body": marker}
-        run = dict(self.run, id=99, path=".github/workflows/codex-code-review.yml", event="workflow_run")
+        run = dict(self.run, id=99, path=".github/workflows/codex-code-review.yml", event="workflow_run", head_branch="main")
         run['attestation'] = {'head': self.sha, 'base': base, 'findings': 0, 'run': 99, 'attempt': 1}
         job = dict(self.job, name="review", steps=[
             {"name": n, "status": "completed", "conclusion": "success"} for n in
             REVIEW_STEPS])
         self.assertEqual(review_verdict(self.sha, base, [comment], {99: run}, {99: [job]}), [])
+        run['head_branch'] = 'untrusted-pr'
+        self.assertTrue(review_verdict(self.sha, base, [comment], {99: run}, {99: [job]}))
+        run['head_branch'] = 'main'
         for bad in [marker.replace("findings=0", "findings=1"), marker.replace(base, "c" * 40), marker.replace(self.sha, "c" * 40), marker.replace("attempt=1", "attempt=2")]:
             self.assertTrue(review_verdict(self.sha, base, [dict(comment, body=bad)], {99: run}, {99: [job]}))
         self.assertTrue(review_verdict(self.sha, base, [dict(comment, user={"login": "outsider", "type": "User"})], {99: run}, {99: [job]}))
@@ -146,7 +149,7 @@ class GateTests(unittest.TestCase):
                    'body': f'<!-- codex-review-verdict sha={self.sha} base={base} findings=0 run=99 attempt=1 -->'}
         run = dict(self.run, pull_requests=[{'number': 7, 'head': {'sha': self.sha}, 'base': {'sha': base}}])
         optional = dict(run, id=2, path='.github/workflows/reality-sni-candidates.yml', conclusion='failure')
-        review = dict(self.run, id=99, path='.github/workflows/codex-code-review.yml', event='workflow_run')
+        review = dict(self.run, id=99, path='.github/workflows/codex-code-review.yml', event='workflow_run', head_branch='main')
         review_job = dict(self.job, name='review', steps=[dict(self.job['steps'][0], name=n) for n in REVIEW_STEPS])
 
         class FakeAPI:

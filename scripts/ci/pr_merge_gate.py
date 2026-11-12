@@ -73,6 +73,7 @@ def review_verdict(sha, base, comments, runs, jobs):
     run_id, attempt, count = evidence
     run = runs.get(run_id, {})
     if (count != 0 or run.get("path") != ".github/workflows/codex-code-review.yml"
+            or run.get("head_branch") != "main"
             or run.get("event") not in ("workflow_run", "workflow_dispatch")
             or run.get("run_attempt") != attempt or not succeeded(run)):
         return ["独立 Codex 审查有发现、运行未成功或证明不匹配"]
@@ -179,7 +180,8 @@ def inspect_pr(api, number, policy, publish=True):
             rid, _, _ = evidence
             run = api.request(f"actions/runs/{rid}")
             review_runs[rid] = run
-            if run.get("path") == ".github/workflows/codex-code-review.yml" and succeeded(run):
+            if (run.get("path") == ".github/workflows/codex-code-review.yml"
+                    and run.get("head_branch") == "main" and succeeded(run)):
                 jobs[rid] = api.pages(f"actions/runs/{rid}/attempts/{run['run_attempt']}/jobs", "jobs")
                 run["attestation"] = api.attestation(run)
         errors += review_verdict(sha, base, comments, review_runs, jobs)
