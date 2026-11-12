@@ -710,7 +710,7 @@ jobs:
           spawn $env(PRS_COMMAND)
           wait_for {请选择 \[0-10\]} main-menu
           send "1\r"
-          wait_for {请选择 \[0-15\]} protocol-menu
+          wait_for {请选择 \[0-16\]} protocol-menu
           send "$env(PROTOCOL_NUMBER)\r"
           if {$env(PROTOCOL_NUMBER) == "3"} {
             wait_for {Shadowsocks 模式} shadowsocks-mode-menu
@@ -783,7 +783,7 @@ jobs:
           spawn $env(PRS_COMMAND)
           expect -re {请选择 \[0-10\]}
           send "1\r"
-          expect -re {请选择 \[0-15\]}
+          expect -re {请选择 \[0-16\]}
           send "3\r"
           expect {Shadowsocks 模式}
           send "2\r"
@@ -839,7 +839,7 @@ jobs:
           spawn $env(PRS_COMMAND)
           expect -re {请选择 \[0-10\]}
           send "1\r"
-          expect -re {请选择 \[0-15\]}
+          expect -re {请选择 \[0-16\]}
           send "13\r"
           expect {输入端口}
           send "25464\r"
