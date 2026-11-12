@@ -88,6 +88,15 @@ pub fn render(profile: &ManagedProfile, format: ClientFormat, server: &str) -> R
     if matches!(profile.credentials, Credentials::VlessXhttpReality { .. }) {
         bail!("该客户端不支持 XHTTP，请用分享链接导入 v2rayN 或 Xray");
     }
+    if matches!(
+        profile.credentials,
+        Credentials::VlessEnc {
+            sudoku: Some(_),
+            ..
+        }
+    ) {
+        bail!(crate::sudoku::UNSUPPORTED);
+    }
     if matches!(profile.credentials, Credentials::VlessEnc { .. })
         && matches!(format, ClientFormat::SingBox | ClientFormat::Nekobox)
     {
@@ -666,6 +675,7 @@ pub fn share_uri(profile: &ManagedProfile, server: &str) -> Result<String> {
             user_id,
             encryption,
             vision,
+            sudoku,
             ..
         } => {
             let mut query = Serializer::new(String::new());
@@ -675,6 +685,10 @@ pub fn share_uri(profile: &ManagedProfile, server: &str) -> Result<String> {
                 .append_pair("type", "tcp");
             if *vision {
                 query.append_pair("flow", "xtls-rprx-vision");
+            }
+            if let Some(sudoku) = sudoku {
+                sudoku.validate()?;
+                query.append_pair("fm", &serde_json::to_string(&sudoku.finalmask())?);
             }
             Ok(format!(
                 "vless://{user_id}@{host}:{}?{}#{fragment}",

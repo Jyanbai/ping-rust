@@ -731,6 +731,9 @@ jobs:
             send "1\r"
             wait_for {开启 Vision} encryption-vision
             send "n\r"
+            # #87 起添加 VLESS-ENC 会询问是否启用 Sudoku 外观（默认 N），这里保持关闭。
+            wait_for {启用 Sudoku 外观} encryption-sudoku
+            send "n\r"
           }
           if {$env(PROTOCOL_NUMBER) == "3"} {
             wait_for {请选择加密方式} shadowsocks-cipher-menu

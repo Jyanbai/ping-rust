@@ -1,0 +1,15 @@
+- address: 0.0.0.0:24444
+  protocol:
+    type: sudoku_mask
+    password: testSudokuPassword1234567
+    ascii: prefer_entropy
+    padding_min: 0
+    padding_max: 10
+    protocol:
+      type: vless
+      user_id: b85798ef-e9dc-46a4-9a87-8da4499d36d0
+      udp_enabled: true
+      decryption: mlkem768x25519plus.native.600s.CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk
+  rules:
+    - masks: 0.0.0.0/0
+      action: allow

@@ -26,20 +26,29 @@ pub(in crate::config) fn from_pair(
     pair: CredentialPair,
 ) -> GeneratedPreset {
     let user_id = Uuid::new_v4();
+    let protocol = ServerProtocol::Vless {
+        user_id,
+        udp_enabled: request.options.udp_enabled,
+        decryption: pair.decryption,
+        vision: request.options.vless_enc_vision,
+    };
+    let protocol = match &request.options.sudoku {
+        Some(settings) => ServerProtocol::SudokuMask {
+            settings: settings.clone(),
+            protocol: Box::new(protocol),
+        },
+        None => protocol,
+    };
     GeneratedPreset {
         server: ServerConfig {
             address: format!("0.0.0.0:{}", request.port),
             transport: None,
             quic_settings: None,
             rules: direct_rules(),
-            protocol: ServerProtocol::Vless {
-                user_id,
-                udp_enabled: request.options.udp_enabled,
-                decryption: pair.decryption,
-                vision: request.options.vless_enc_vision,
-            },
+            protocol,
         },
         credentials: Credentials::VlessEnc {
+            sudoku: request.options.sudoku.clone(),
             user_id,
             encryption: pair.encryption,
             mode: request.options.vless_enc_mode,
