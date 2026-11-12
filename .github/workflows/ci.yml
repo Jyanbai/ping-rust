@@ -259,6 +259,8 @@ jobs:
         run: python3 scripts/ci/test_codex_ci_fix.py
       - name: Check Codex review admission and publication
         run: python3 scripts/ci/test_codex_review.py
+      - name: Check complete Codex runtime installation
+        run: python3 scripts/ci/check_codex_runtime.py
       - run: cargo fmt --all -- --check
       - name: Install stable shoes for unit and chain traffic acceptance
         shell: bash

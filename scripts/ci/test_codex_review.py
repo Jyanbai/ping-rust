@@ -21,7 +21,7 @@ REPO = "owner/example"
 HEAD = "a" * 40
 BASE = "b" * 40
 READ_CHECK = "e" * 64
-MARKER = f"<!-- codex-review sha={HEAD} base={BASE} -->"
+MARKER = f"<!-- codex-review sha={HEAD} base={BASE} status=complete -->"
 PR = {
     "number": 7,
     "state": "open",
@@ -170,10 +170,19 @@ class ReviewScriptsTest(unittest.TestCase):
     def prepare_review(self, text="未发现有充分证据的代码问题。", tokens=(), findings=()):
         (self.work / "review.md").write_text(text, encoding="utf-8")
         (self.work / "review.json").write_text(
-            json.dumps({"summary": text, "findings": list(findings)}), encoding="utf-8"
+            json.dumps({"summary": text, "findings": list(findings),
+                        "review_complete": True, "read_check": READ_CHECK}), encoding="utf-8"
         )
         (self.work / "seed-tokens.txt").write_text("\n".join(tokens))
         (self.work / "codex-home/auth.json").write_text(json.dumps({"tokens": {}}))
+
+    def test_legacy_unfinished_review_does_not_suppress_retry(self):
+        self.api[f"repos/{REPO}/issues/7/comments"] = [{
+            "user": {"login": "github-actions[bot]"},
+            "body": MARKER.replace(" status=complete", ""),
+        }]
+        self.assertEqual(self.run_step("Select PR").returncode, 0)
+        self.assertIn("review=true", self.output())
 
     def test_owner_pr_is_selected_with_exact_head_and_base(self):
         result = self.run_step("Select PR")
