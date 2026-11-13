@@ -199,7 +199,10 @@ fn reserved_ingress_ports_cannot_be_reused_by_relays() -> io::Result<()> {
         .iter()
         .map(|address| {
             TcpListener::bind(address).map_err(|error| {
-                io::Error::new(error.kind(), format!("regression rebind {address}: {error}"))
+                io::Error::new(
+                    error.kind(),
+                    format!("regression rebind {address}: {error}"),
+                )
             })
         })
         .collect::<io::Result<Vec<_>>>()?;
