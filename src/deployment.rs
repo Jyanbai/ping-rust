@@ -78,6 +78,13 @@ impl Error for ActivationFailure {
 
 pub async fn generate_and_activate(request: GenerationRequest) -> Result<GenerationResult> {
     utils::require_linux_root()?;
+    let needs_sudoku = crate::shoes_compat::managed_state_needs_sudoku()?;
+    crate::shoes_compat::ensure_sudoku(
+        needs_sudoku
+            || request.protocol == config::Protocol::VlessSudoku
+            || (request.protocol == config::Protocol::VlessEnc && request.options.sudoku.is_some()),
+    )
+    .await?;
     let lock = utils::exclusive_lock(Path::new(utils::LOCK_FILE))?;
     let service_snapshot = service::capture_snapshot()?;
     let hot_reload_snapshot = capture_reload_readiness(&service_snapshot).filter(|snapshot| {
@@ -132,6 +139,11 @@ pub async fn generate_and_activate(request: GenerationRequest) -> Result<Generat
 
 pub async fn update_and_activate(id: Uuid, change: ProfileChange) -> Result<GenerationResult> {
     utils::require_linux_root()?;
+    let needs_sudoku = crate::shoes_compat::managed_state_needs_sudoku()?;
+    crate::shoes_compat::ensure_sudoku(
+        needs_sudoku || matches!(&change, ProfileChange::Sudoku(Some(_))),
+    )
+    .await?;
     let lock = utils::exclusive_lock(Path::new(utils::LOCK_FILE))?;
     let service_snapshot = service::capture_snapshot()?;
     let observable_port_change = matches!(&change, ProfileChange::Port(_));
@@ -208,6 +220,8 @@ pub async fn update_and_activate(id: Uuid, change: ProfileChange) -> Result<Gene
 
 pub async fn delete_and_activate(id: Uuid) -> Result<config::ManagedProfile> {
     utils::require_linux_root()?;
+    let needs_sudoku = crate::shoes_compat::managed_state_needs_sudoku()?;
+    crate::shoes_compat::ensure_sudoku(needs_sudoku).await?;
     let lock = utils::exclusive_lock(Path::new(utils::LOCK_FILE))?;
     let service_snapshot = service::capture_snapshot()?;
     let was_active = Path::new(utils::SERVICE_FILE).exists() && service::is_active()?;

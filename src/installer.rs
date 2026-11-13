@@ -451,6 +451,9 @@ async fn install_release_asset(
     let extracted = extract_shoes(&archive_path, work.path())?;
     set_executable(&extracted)?;
     binary_health(&extracted).await?;
+    if !crate::shoes_compat::supports_sudoku(&extracted).await? {
+        bail!("固定 Release 缺少 sudoku_mask 支持，已拒绝安装；原二进制和配置未修改");
+    }
     utils::atomic_copy(&extracted, destination, 0o755)
 }
 
