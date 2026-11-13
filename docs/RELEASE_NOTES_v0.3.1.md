@@ -5,7 +5,7 @@
 ## 本版变更
 
 - 默认 shoes Release 与源码 pin 升级为 v0.3.7（`ee44a397e6850193e86a1ae66639f037f963822d`）；沿用 v0.3.6 的路由迁移与热重载资格要求。
-- 新增 VLESS-XHTTP-REALITY、VLESS-Sudoku 受管协议，以及 VLESS-ENC 可选 Sudoku 外观。具体限制见各协议文档；VLESS-Sudoku 本身不提供加密。
+- 新增 VLESS-XHTTP-REALITY、VLESS-Sudoku 受管协议，以及 VLESS-ENC 可选 Sudoku 外观。具体限制见 [XHTTP](wiki/VLESS-XHTTP-REALITY.md)、[Sudoku](wiki/VLESS-Sudoku.md) 和 [VLESS-ENC](wiki/VLESS-ENC.md) 文档；VLESS-Sudoku 本身不提供加密。
 - 统一协议选择菜单，支持快速 AnyTLS REALITY；修复菜单取消、返回、首次部署失败及配置状态不一致时的恢复。
 - 补充 SNI 检测与推荐、终端菜单回归、旧版本升级和外部客户端验收。
 - 增加严格 PR 合并门禁与 Release 门禁，按精确 SHA 核验 CI、E2E、兼容性、安全审计及构建产物；保留全部现有协议、测试和安全策略。
@@ -34,10 +34,13 @@ sudo ping-rust update --method release
 
 - 在统一协议菜单中选择 VLESS-ENC，或执行 `sudo prs add vless-enc`。默认使用 x25519、native、0rtt、600s，Vision 默认关闭。
 - 原生 TCP，**不套 TLS 或 Reality**，安全性完全依赖 VLESS Encryption。支持 native/xorpub/random 外观、x25519/mlkem768 认证和可选 Vision；random 外观会关闭 TCP splice。
-- 支持 Mihomo 导出；**不支持 sing-box 或 NekoBox**，不支持链式出口或 H2MUX。
+- 未开启 Sudoku 时支持 Mihomo 导出；**不支持 sing-box 或 NekoBox**，不支持链式出口或 H2MUX。
 - 客户端版本以 **CI 实测**为准：Xray **v26.6.27**、Mihomo **v1.19.33**。Xray 已验证 x25519 的三种外观与 Vision 开关六种组合，以及 native/mlkem768/Vision 关闭；Mihomo 已验证 native/x25519 的 Vision 关闭和开启。其他版本或组合未验证。
+- 开启 Sudoku 后需要支持 Xray FinalMask Sudoku 的客户端；Mihomo、sing-box、NekoBox 导出均拒绝。XHTTP 同样仅支持 Xray / v2rayN，不支持 Vision 或 H2MUX。
 - 更改外观、认证或重新生成密钥后，需要重新导入客户端配置。mlkem768 链接较长，可能无法通过二维码导入。
 
 ## 降级限制
 
 添加 VLESS-ENC 节点后**不能降级到 v0.2.x**，旧版无法读取包含该节点的管理状态。若必须降级，请先在 v0.3.1 中删除全部 VLESS-ENC 节点并备份配置，再执行降级。删除 VLESS-ENC 节点后再降级的其他行为未验证。
+
+XHTTP、VLESS-Sudoku 节点保存在独立 state 扩展中，v0.2.1 可忽略扩展读取原有节点，但不支持管理这些新协议或包含它们的运行配置。降级前应先用新版删除新协议节点并备份配置，不能将“旧版能读取原有节点”理解为完整降级兼容。
