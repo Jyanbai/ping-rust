@@ -1,4 +1,5 @@
 name: Codex Code Review
+run-name: Codex Review pr=${{ inputs.pr || '0' }} sha=${{ github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.head_sha || 'none' }}
 
 # workflow_run 使用默认分支上的定义，符合 environment codex 只允许 main 的限制。
 # 只审查所有者在本仓库开的 PR；不执行 PR 中的脚本，不接收它生成的 artifact。
@@ -89,10 +90,15 @@ jobs:
           [[ "$sha" =~ ^[0-9a-f]{40}$ && "$base" =~ ^[0-9a-f]{40}$ ]] || exit 1
           if [ "$EVENT_NAME" = workflow_run ]; then
             [ "$sha" = "$EVENT_SHA" ] || { echo 'CI 对应的提交已过期，跳过。'; exit 0; }
+            # 兼容旧版只有成功标记的 Review；原有准入/去重断言保持不变。
+            # 新版可信证明包含 verdict 标记：遇到它时不得复用旧 run，
+            # 新一次 CI Review 必须实际审查并发布本次 run/attempt 的证明。
             comments="$(gh api "repos/$REPO/issues/$number/comments" --paginate --jq \
               '.[] | select(.user.login == "github-actions[bot]") | .body')"
-            if grep -qF "<!-- codex-review sha=$sha base=$base status=complete -->" <<< "$comments"; then
-              echo '该提交已有成功的 Codex 审查，跳过。'
+            legacy="<!-- codex-review sha=$sha base=$base status=complete -->"
+            modern="<!-- codex-review-verdict sha=$sha base=$base "
+            if grep -qF "$legacy" <<< "$comments" && ! grep -qF "$modern" <<< "$comments"; then
+              echo '只有旧版审查成功标记，保持兼容去重；统一门禁仍要求新版证明。'
               exit 0
             fi
           fi
@@ -303,6 +309,8 @@ jobs:
           NUMBER: ${{ steps.target.outputs.number }}
           HEAD_SHA: ${{ steps.target.outputs.head_sha }}
           BASE_SHA: ${{ steps.target.outputs.base_sha }}
+          REVIEW_RUN_ID: ${{ github.run_id }}
+          REVIEW_RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           set -euo pipefail
           gh() { timeout 60s gh "$@"; }
@@ -327,14 +335,39 @@ jobs:
             printf '## Codex Code Review\n\n提交：`%s`\n\n' "$HEAD_SHA"
             cat "$RUNNER_TEMP/review.md"
             printf '\n\n[运行日志](%s)\n<!-- codex-review sha=%s base=%s status=complete -->\n' "$RUN_URL" "$HEAD_SHA" "$BASE_SHA"
+            printf '<!-- codex-review-verdict sha=%s base=%s findings=%s run=%s attempt=%s -->\n' \
+              "$HEAD_SHA" "$BASE_SHA" "$(jq '.findings | length' "$RUNNER_TEMP/review.json")" "$REVIEW_RUN_ID" "$REVIEW_RUN_ATTEMPT"
           } > "$RUNNER_TEMP/review-comment.md"
           jq -n --rawfile body "$RUNNER_TEMP/review-comment.md" '{body: $body}' > "$RUNNER_TEMP/review-comment.json"
-          gh api "repos/$REPO/issues/$NUMBER/comments" --input "$RUNNER_TEMP/review-comment.json" >/dev/null
+          # 用 run/attempt 的精确 verdict 标记去重，仅避免重复发评论；
+          # 不跳过模型审查、产物生成或证明上传。
+          marker="<!-- codex-review-verdict sha=$HEAD_SHA base=$BASE_SHA findings=$(jq '.findings | length' "$RUNNER_TEMP/review.json") run=$REVIEW_RUN_ID attempt=$REVIEW_RUN_ATTEMPT -->"
+          existing="$(gh api "repos/$REPO/issues/$NUMBER/comments" --paginate --jq \
+            '.[] | select(.user.login == "github-actions[bot]") | .body')"
+          if grep -Fxq -- "$marker" <<< "$existing"; then
+            echo '当前 run/attempt 的相同 Review 评论已发布，继续生成可信证明。'
+          else
+            gh api "repos/$REPO/issues/$NUMBER/comments" --input "$RUNNER_TEMP/review-comment.json" >/dev/null
+          fi
+          jq -n --arg head "$HEAD_SHA" --arg base "$BASE_SHA" \
+            --argjson findings "$(jq '.findings | length' "$RUNNER_TEMP/review.json")" \
+            --argjson run "$REVIEW_RUN_ID" --argjson attempt "$REVIEW_RUN_ATTEMPT" \
+            '{head: $head, base: $base, findings: $findings, run: $run, attempt: $attempt}' \
+            > "$RUNNER_TEMP/review-attestation.json"
           cat "$RUNNER_TEMP/review-comment.md" >> "$GITHUB_STEP_SUMMARY"
           {
             echo 'posted=true'
             echo "findings=$(jq '.findings | length' "$RUNNER_TEMP/review.json")"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Upload review attestation
+        if: steps.publish.outputs.posted == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: codex-review-verdict-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/review-attestation.json
+          if-no-files-found: error
+          retention-days: 90
 
       - name: Persist refreshed auth
         if: always() && steps.auth.outputs.ok == 'true'
