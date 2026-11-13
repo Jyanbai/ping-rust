@@ -134,14 +134,48 @@ fn serve_socks(mut incoming: TcpStream) -> io::Result<()> {
     Ok(())
 }
 
-fn ports(count: usize) -> io::Result<Vec<u16>> {
-    let listeners = (0..count)
+fn reserve_ports(count: usize) -> io::Result<Vec<TcpListener>> {
+    (0..count)
         .map(|_| TcpListener::bind("127.0.0.1:0"))
-        .collect::<io::Result<Vec<_>>>()?;
-    listeners
-        .iter()
-        .map(|listener| listener.local_addr().map(|address| address.port()))
         .collect()
+}
+
+#[test]
+fn reserved_ingress_ports_cannot_be_reused_by_relays() -> io::Result<()> {
+    let reservations = reserve_ports(9)?;
+    let addresses = reservations
+        .iter()
+        .map(TcpListener::local_addr)
+        .collect::<io::Result<Vec<_>>>()?;
+    for address in &addresses {
+        let error = TcpListener::bind(address).expect_err("reserved address was reused");
+        assert_eq!(error.kind(), io::ErrorKind::AddrInUse);
+    }
+    let relay = SocksHop::start()?;
+    assert!(!addresses.contains(&relay.address));
+    drop(reservations);
+    let listeners = addresses
+        .iter()
+        .map(TcpListener::bind)
+        .collect::<io::Result<Vec<_>>>()?;
+    assert_eq!(listeners.len(), 9);
+    Ok(())
+}
+
+#[test]
+fn startup_diagnostics_report_exit_without_leaking_stderr() -> io::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let log = directory.path().join("runtime.log");
+    fs::write(&log, "Address already in use password=diagnostic-secret")?;
+    let mut child = Command::new("sh").args(["-c", "exit 7"]).spawn()?;
+    child.wait()?;
+    let report = startup_diagnostics(&mut child, &[], &log);
+    assert!(report.contains("exited:"));
+    assert!(report.contains("7"));
+    assert!(report.contains("Address already in use"));
+    assert!(!report.contains("diagnostic-secret"));
+    assert!(!report.contains("password"));
+    Ok(())
 }
 
 fn wait_port(port: u16) -> io::Result<()> {
@@ -314,7 +348,13 @@ fn chain_v2_local_routing_traffic() -> io::Result<()> {
     }
     let _origin_guard = StopOrigin(origin_stop, Some(origin_worker));
 
-    let p = ports(9)?;
+    // Keep the ingress ports bound while relays and dry-run start, so those
+    // local allocations cannot steal a port selected for shoes.
+    let reservations = reserve_ports(9)?;
+    let p = reservations
+        .iter()
+        .map(|listener| listener.local_addr().map(|address| address.port()))
+        .collect::<io::Result<Vec<_>>>()?;
     let relay_a = SocksHop::start()?;
     let relay_b = SocksHop::start()?;
     let a = relay_a.address;
@@ -386,6 +426,7 @@ fn chain_v2_local_routing_traffic() -> io::Result<()> {
         String::from_utf8_lossy(&dry_run.stderr)
     );
     let runtime_log = directory.path().join("runtime.log");
+    drop(reservations);
     let child = Command::new(shoes)
         .arg(&config)
         .env("RUST_LOG", "debug")
