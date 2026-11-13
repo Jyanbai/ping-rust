@@ -26,6 +26,9 @@ class CollectorAPI:
         self.fresh = {}
         self.statuses = []
         self.calls = []
+        self.peers = []
+        self.run_reads = 0
+        self.new_run = None
 
     def request(self, path):
         self.calls.append(path)
@@ -37,9 +40,14 @@ class CollectorAPI:
 
     def pages(self, path, key=None):
         self.calls.append(path)
+        if path.startswith('commits/'):
+            return self.peers
         if path.startswith('actions/workflows/'):
             return copy.deepcopy(self.reviews)
         if path.startswith('actions/runs?'):
+            self.run_reads += 1
+            if self.new_run and self.run_reads > 1:
+                return [copy.deepcopy(self.run), copy.deepcopy(self.new_run)]
             return [copy.deepcopy(self.run)]
         if path == 'issues/7/comments':
             return copy.deepcopy(self.comments)
@@ -65,6 +73,27 @@ class CollectorAPI:
 
 
 class GateTests(unittest.TestCase):
+    def test_new_required_run_created_during_collection_blocks(self):
+        api = CollectorAPI(self)
+        api.new_run = dict(api.run, id=2, status='queued', conclusion=None)
+        self.assertTrue(inspect_pr(api, 7, self.policy))
+        self.assertEqual(api.statuses[-1], 'failure')
+
+    def test_shared_sha_cannot_override_another_pr_failure(self):
+        class PeerAPI(CollectorAPI):
+            def request(self, path):
+                return super().request('pulls/7' if path == 'pulls/8' else path)
+
+            def pages(self, path, key=None):
+                if path == 'issues/8/comments':
+                    return []
+                return super().pages(path, key)
+
+        api = PeerAPI(self)
+        api.peers = [{'number': 8, 'state': 'open', 'head': {'sha': self.sha}, 'base': {'ref': 'main'}}]
+        self.assertTrue(inspect_pr(api, 7, self.policy))
+        self.assertEqual(api.statuses[-1], 'failure')
+
     def test_cargo_executable_uses_current_artifact_not_directory_layout(self):
         from cargo_test_executable import executable
         artifact = {'reason': 'compiler-artifact', 'target': {'name': 'performance_baseline'},
@@ -267,6 +296,8 @@ class GateTests(unittest.TestCase):
 
             def pages(self, path, key=None):
                 self.calls.append(path)
+                if path.startswith('commits/'):
+                    return []
                 if path.startswith('actions/workflows/'):
                     return [review]
                 if path.startswith('actions/runs?'):

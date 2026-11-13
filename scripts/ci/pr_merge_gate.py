@@ -236,6 +236,15 @@ def inspect_pr(api, number, policy, publish=True):
         errors += review_verdict(sha, base, comments, review_runs, jobs)
         # 运行可能在取完 jobs 后被重新运行；只允许本次快照仍是最新 attempt。
         if not errors:
+            fresh_runs = api.pages(f"actions/runs?head_sha={sha}&event=pull_request", "workflow_runs")
+            for path, chosen in latest.items():
+                candidates = [r for r in fresh_runs if r.get('path') == path
+                              and r.get('head_sha') == sha and r.get('event') == 'pull_request'
+                              and any(p.get('number') == number and p.get('head', {}).get('sha') == sha
+                                      and p.get('base', {}).get('sha') == base for p in r.get('pull_requests', []))]
+                newest = max(candidates, key=lambda r: (r['id'], r['run_attempt'])) if candidates else None
+                if not newest or (newest['id'], newest['run_attempt']) != (chosen['id'], chosen['run_attempt']) or not succeeded(newest):
+                    errors.append(f"证据读取期间必需套件有新运行：{path}")
             for run in list(latest.values()) + list(review_runs.values()):
                 fresh = api.request(f"actions/runs/{run['id']}")
                 if fresh.get("run_attempt") != run.get("run_attempt") or not succeeded(fresh):
@@ -248,6 +257,14 @@ def inspect_pr(api, number, policy, publish=True):
         current = api.request(f"pulls/{number}")
         if current["head"]["sha"] != sha or current["base"]["sha"] != base or current["state"] != "open":
             errors.append("核对期间 PR 已变化，请等待下一次门禁")
+        # commit status 由同 SHA 的所有 PR 共享；成功必须涵盖每个相关 PR。
+        if publish and not errors:
+            for peer in api.pages(f"commits/{sha}/pulls"):
+                if (peer['number'] != number and peer['state'] == 'open'
+                        and peer['head']['sha'] == sha and peer['base']['ref'] == 'main'):
+                    peer_errors = inspect_pr(api, peer['number'], policy, publish=False)
+                    if peer_errors:
+                        errors.append(f"共享当前 SHA 的 PR #{peer['number']} 尚未满足门禁")
         state = "failure" if errors else "success"
         print(json.dumps({"pr": number, "sha": sha, "base": base, "state": state, "errors": errors}, ensure_ascii=False))
         if os.environ.get("GITHUB_STEP_SUMMARY"):
