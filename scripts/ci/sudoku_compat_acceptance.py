@@ -11,6 +11,14 @@ from pathlib import Path
 
 def verify_sudoku_compatibility(binary, run, state, pid, free_port, menu_edit):
     shoes = Path('/usr/local/bin/shoes')
+
+    def replace_binary(content):
+        with tempfile.NamedTempFile(dir=shoes.parent, delete=False) as candidate:
+            candidate.write(content)
+            candidate_path = Path(candidate.name)
+        candidate_path.chmod(0o755)
+        os.replace(candidate_path, shoes)
+
     provenance_path = Path('/var/lib/ping-rust/shoes-install.json')
     backup = shoes.with_name('shoes-sudoku-fixture-backup')
     assert not backup.exists()
@@ -58,12 +66,12 @@ def verify_sudoku_compatibility(binary, run, state, pid, free_port, menu_edit):
         # Deleting the last mask must work even with an incompatible, untracked
         # binary: no download or implicit downgrade may be required to recover.
         installed_binary = shoes.read_bytes()
-        shoes.write_bytes(original_binary)
+        replace_binary(original_binary)
         try:
             _, errors = run('delete', plain['id'], '--yes')
             assert '正在自动升级' not in errors
         finally:
-            shoes.write_bytes(installed_binary)
+            replace_binary(installed_binary)
         run('add', 'vless-enc', '--sudoku', '--name', 'compat-enc-sudoku', '--port', str(free_port()),
             '--server-address', '127.0.0.1', '--yes', '--plain')
         encrypted = next(p for p in state()['profiles'] if p['name'] == 'compat-enc-sudoku')
