@@ -11,7 +11,7 @@
 
 核心逻辑全部位于 Rust 源码中；`scripts/install.sh` 只负责执行 Rust 前的架构检测、下载、SHA-256 校验与严格解包，原子安装、快捷命令所有权判断和首次部署均由已校验的 Rust 二进制完成。
 
-> 当前版本：[`v0.3.0`](https://github.com/Jyanbai/ping-rust/releases/tag/v0.3.0)，升级要求见[正式发版说明](docs/RELEASE_NOTES_v0.3.0.md)。v0.3.0 新增 VLESS-ENC，自动迁移通配符路由规则，并将新建 Snell v3 节点默认 cipher 改为 aes-128-gcm。v0.2.0 引入 Update Center、Verified Hot Reload、Chain Proxy 2.0、规则路由和受验证范围内的 H2MUX；v0.2.1 增加 Pool 节点批量测试、热重载不可用原因提示和 NaiveProxy 测试证书有效期管理；v0.2.2 将默认安装的 shoes 固定为经过验证的 v0.2.7（已装更新的未验证版本时提示回退命令），YAML 库换成 serde-saphyr（修复 RUSTSEC-2024-0449），`--version` 额外输出构建 commit。**热重载需要固定 pin 构建；默认一键安装使用 GitHub Release 来源，监听变更使用受控重启。**支持 VLESS-REALITY、Hysteria2、Shadowsocks、[VLESS-XHTTP-REALITY](docs/wiki/VLESS-XHTTP-REALITY.md)、VLESS-ENC、NaiveProxy、AnyTLS、TUIC、VLESS-TLS-Vision、Trojan-TLS、VLESS-WS-TLS、Trojan-REALITY、Snell v3、VMess-WS-TLS、SOCKS5 和 [VLESS-Sudoku](docs/wiki/VLESS-Sudoku.md) 十六种受管协议。用户只选择完整协议，不需要理解或手动组合传输层、安全层与内层协议。
+> 本分支准备版本：[`v0.3.1`](https://github.com/Jyanbai/ping-rust/releases/tag/v0.3.1)（尚未发布；正式发布前稳定版仍为 v0.3.0），升级要求见[发版准备说明](docs/RELEASE_NOTES_v0.3.1.md)。v0.3.1 汇总 shoes v0.3.7、VLESS-XHTTP-REALITY、VLESS-Sudoku、VLESS-ENC Sudoku 外观、统一协议菜单和严格 Release 门禁。v0.3.0 新增 VLESS-ENC，自动迁移通配符路由规则，并将新建 Snell v3 节点默认 cipher 改为 aes-128-gcm。v0.2.0 引入 Update Center、Verified Hot Reload、Chain Proxy 2.0、规则路由和受验证范围内的 H2MUX；v0.2.1 增加 Pool 节点批量测试、热重载不可用原因提示和 NaiveProxy 测试证书有效期管理；v0.2.2 将默认安装的 shoes 固定为经过验证的 v0.2.7（已装更新的未验证版本时提示回退命令），YAML 库换成 serde-saphyr（修复 RUSTSEC-2024-0449），`--version` 额外输出构建 commit。**热重载需要固定 pin 构建；默认一键安装使用 GitHub Release 来源，监听变更使用受控重启。**支持 VLESS-REALITY、Hysteria2、Shadowsocks、[VLESS-XHTTP-REALITY](docs/wiki/VLESS-XHTTP-REALITY.md)、VLESS-ENC、NaiveProxy、AnyTLS、TUIC、VLESS-TLS-Vision、Trojan-TLS、VLESS-WS-TLS、Trojan-REALITY、Snell v3、VMess-WS-TLS、SOCKS5 和 [VLESS-Sudoku](docs/wiki/VLESS-Sudoku.md) 十六种受管协议。用户只选择完整协议，不需要理解或手动组合传输层、安全层与内层协议。
 
 完整文档：[Wiki](https://github.com/Jyanbai/ping-rust/wiki) · [快速开始](https://github.com/Jyanbai/ping-rust/wiki/Quick-Start) · [链式代理](https://github.com/Jyanbai/ping-rust/wiki/Chain-Proxy) · [故障排查](https://github.com/Jyanbai/ping-rust/wiki/Troubleshooting)
 
@@ -26,12 +26,12 @@ bash <(curl --proto '=https' --tlsv1.2 -fsSL \
 
 这一个命令会继续自动下载 shoes、选择随机可用端口、生成全部安全凭据、启动 systemd，并直接输出可导入 v2rayN 的 `vless://` 链接，不询问协议或端口。部署完成后使用 `sudo prs` 进入日常管理菜单。
 
-安装指定版本或目录：
+安装指定版本或目录（v0.3.1 示例需等待正式发布）：
 
 ```bash
 bash <(curl --proto '=https' --tlsv1.2 -fsSL \
   https://raw.githubusercontent.com/Jyanbai/ping-rust/main/scripts/install.sh) \
-  --version v0.3.0
+  --version v0.3.1
 
 bash <(curl --proto '=https' --tlsv1.2 -fsSL \
   https://raw.githubusercontent.com/Jyanbai/ping-rust/main/scripts/install.sh) \
@@ -215,7 +215,7 @@ vless://...security=reality...pbk=...&sid=...#VLESS-REALITY-30060
 ```text
 $ sudo prs
 
-------------- ping-rust v0.3.0 -------------
+------------- ping-rust v0.3.1 -------------
 shoes: running
 项目: https://github.com/Jyanbai/ping-rust
 节点（3）：
@@ -731,7 +731,7 @@ ping-rust/
 
 ### shoes v0.3.7 升级说明
 
-v0.3.0 之后的下一版起，默认 shoes Release 和源码 pin 升级到 v0.3.7（commit `ee44a397e6850193e86a1ae66639f037f963822d`）。v0.3.7 带来 Xray 兼容的 Sudoku TCP 掩码 `sudoku_mask`（上游 #246、#252，只支持 TCP），可通过 VLESS-ENC 的 `--sudoku` 选项启用；`shoes --version` 在版本行之后追加 `target:` / `compiler:` 两行，ping-rust 只读取第一行；watcher 去抖窗口和 REALITY 目标握手记录布局要求与 v0.3.6 相同。
+v0.3.1 起，默认 shoes Release 和源码 pin 升级到 v0.3.7（commit `ee44a397e6850193e86a1ae66639f037f963822d`）。v0.3.7 带来 Xray 兼容的 Sudoku TCP 掩码 `sudoku_mask`（上游 #246、#252，只支持 TCP），可通过 VLESS-ENC 的 `--sudoku` 选项启用；`shoes --version` 在版本行之后追加 `target:` / `compiler:` 两行，ping-rust 只读取第一行；watcher 去抖窗口和 REALITY 目标握手记录布局要求与 v0.3.6 相同。
 
 ### shoes v0.3.6 兼容说明
 

@@ -1,0 +1,43 @@
+# ping-rust v0.3.1
+
+> 发版准备，尚未发布。本次 PR 不创建 tag 或 Release；实际发版须另行授权，合入 main 后仍须核验最终提交的全部 push 检查。
+
+## 本版变更
+
+- 默认 shoes Release 与源码 pin 升级为 v0.3.7（`ee44a397e6850193e86a1ae66639f037f963822d`）；沿用 v0.3.6 的路由迁移与热重载资格要求。
+- 新增 VLESS-XHTTP-REALITY、VLESS-Sudoku 受管协议，以及 VLESS-ENC 可选 Sudoku 外观。具体限制见各协议文档；VLESS-Sudoku 本身不提供加密。
+- 统一协议选择菜单，支持快速 AnyTLS REALITY；修复菜单取消、返回、首次部署失败及配置状态不一致时的恢复。
+- 补充 SNI 检测与推荐、终端菜单回归、旧版本升级和外部客户端验收。
+- 增加严格 PR 合并门禁与 Release 门禁，按精确 SHA 核验 CI、E2E、兼容性、安全审计及构建产物；保留全部现有协议、测试和安全策略。
+
+以下客户端兼容范围沿用既有文档记录，不代表本次 0.3.1 提交已经通过 CI；实际结果以本次 Actions 为准。
+
+## 客户端兼容要求
+
+- Reality 客户端：CI 实测 Xray **v25.5.16** 和 **v26.6.27** 可以连接，建议使用 Xray 25.5.16 及以上。更早的版本未验证，可能连不上（例如旧版 v2rayN 内置的 Xray），请先升级客户端及其 Xray 内核。
+- Snell v3：Mihomo 只支持 `aes-128-gcm`。新节点默认改为 `aes-128-gcm`，已有节点不自动修改；已有的 chacha20 或 aes-256 节点若使用 Mihomo，需要手动修改 cipher 并重新导出配置。
+
+## 升级与配置迁移
+
+- 默认 shoes 版本为 **v0.3.7**。通配符路由规则在升级时自动迁移为 shoes v0.3.6 支持的格式；候选配置先验证，应用失败会回滚。
+- 新版 ping-rust 搭配旧 shoes 时，修改配置会提示先升级 shoes。
+- 升级顺序：先执行 `self-update` 更新 ping-rust，再执行 `update` 把 shoes 升级到 v0.3.7：
+
+```bash
+sudo ping-rust self-update --version v0.3.1
+sudo ping-rust update --method release
+```
+
+自更新成功后旧进程会退出，请重新运行 ping-rust，再执行第二条命令。安装了更新但未经验证的 shoes 版本时，请按工具提示决定是否显式允许降级。
+
+## VLESS-ENC 兼容要求
+
+- 在统一协议菜单中选择 VLESS-ENC，或执行 `sudo prs add vless-enc`。默认使用 x25519、native、0rtt、600s，Vision 默认关闭。
+- 原生 TCP，**不套 TLS 或 Reality**，安全性完全依赖 VLESS Encryption。支持 native/xorpub/random 外观、x25519/mlkem768 认证和可选 Vision；random 外观会关闭 TCP splice。
+- 支持 Mihomo 导出；**不支持 sing-box 或 NekoBox**，不支持链式出口或 H2MUX。
+- 客户端版本以 **CI 实测**为准：Xray **v26.6.27**、Mihomo **v1.19.33**。Xray 已验证 x25519 的三种外观与 Vision 开关六种组合，以及 native/mlkem768/Vision 关闭；Mihomo 已验证 native/x25519 的 Vision 关闭和开启。其他版本或组合未验证。
+- 更改外观、认证或重新生成密钥后，需要重新导入客户端配置。mlkem768 链接较长，可能无法通过二维码导入。
+
+## 降级限制
+
+添加 VLESS-ENC 节点后**不能降级到 v0.2.x**，旧版无法读取包含该节点的管理状态。若必须降级，请先在 v0.3.1 中删除全部 VLESS-ENC 节点并备份配置，再执行降级。删除 VLESS-ENC 节点后再降级的其他行为未验证。
