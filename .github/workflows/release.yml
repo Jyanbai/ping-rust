@@ -33,6 +33,31 @@ jobs:
             exit 1
           fi
           echo "tag ${GITHUB_REF_NAME} -> ${tag_commit} is on main"
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          from scripts.ci.release_gate import verify_version
+          verify_version(os.environ["GITHUB_REF_NAME"],
+                         Path("Cargo.toml").read_text(),
+                         Path("Cargo.lock").read_text())
+          PY
+
+  verify-required-checks:
+    name: Verify all required checks for tag SHA
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 85
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+      - name: Verify exact tag SHA CI E2E compatibility and security
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci/release_gate.py checks --wait-seconds 4500
 
   build:
     name: Build ${{ matrix.target }}
@@ -109,11 +134,12 @@ jobs:
   release:
     name: Publish GitHub Release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [verify-tag, build]
+    needs: [verify-tag, verify-required-checks, build]
     runs-on: ubuntu-24.04
     environment: release
     permissions:
       contents: write
+      actions: read
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
@@ -133,30 +159,78 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: Generate checksums
+      - name: Verify release assets and generate SHA256SUMS
         shell: bash
         run: |
           set -euo pipefail
-          cd dist
-          sha256sum ping-rust-*.tar.gz | sort -k 2 > SHA256SUMS
-          sha256sum --check SHA256SUMS
-          cat SHA256SUMS
+          python3 scripts/ci/release_gate.py artifacts --dist dist
+          (cd dist && sha256sum --check --strict SHA256SUMS)
 
-      - name: Create GitHub Release
+      - name: Recheck exact SHA immediately before publishing
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/release_gate.py checks --wait-seconds 0
+
+      - name: Stage complete GitHub Release as private draft
+        id: stage
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
           if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
-            gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
-          else
-            gh release create "${GITHUB_REF_NAME}" dist/* \
-              --verify-tag \
-              --title "ping-rust ${GITHUB_REF_NAME}" \
-              --generate-notes
+            echo "::error::Release ${GITHUB_REF_NAME} 已存在（包括 draft），禁止覆盖"
+            exit 1
           fi
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --draft --verify-tag \
+            --title "ping-rust ${GITHUB_REF_NAME}" \
+            --generate-notes
+          echo 'staged=true' >> "$GITHUB_OUTPUT"
 
+      - name: Verify draft contains exactly the complete assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release view "${GITHUB_REF_NAME}" --json isDraft,assets \
+            | jq -e '.isDraft == true and
+              ([.assets[].name] | sort) ==
+              (["SHA256SUMS",
+                "ping-rust-aarch64-unknown-linux-musl.tar.gz",
+                "ping-rust-x86_64-unknown-linux-musl.tar.gz"] | sort)' >/dev/null
+
+      - name: Publish validated draft
+        id: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'attempted=true' >> "$GITHUB_OUTPUT"
+          gh release edit "${GITHUB_REF_NAME}" --draft=false
+          echo 'published=true' >> "$GITHUB_OUTPUT"
+
+      - name: Verify public download integrity
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/release-public"
+          public="$RUNNER_TEMP/release-public"
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
+          for asset in SHA256SUMS \
+            ping-rust-x86_64-unknown-linux-musl.tar.gz \
+            ping-rust-aarch64-unknown-linux-musl.tar.gz; do
+            curl --fail --location --silent --show-error --retry 5 \
+              --connect-timeout 15 --max-time 180 --proto '=https' --tlsv1.2 \
+              "$base/$asset" -o "$public/$asset"
+            cmp "dist/$asset" "$public/$asset"
+          done
+          (cd "$public" && sha256sum --check --strict SHA256SUMS)
       - name: Verify published one-click installer
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -232,3 +306,16 @@ jobs:
             | grep -q '检测到已有 shoes 配置，跳过默认 VLESS-REALITY 部署。'
           rm -f "${bootstrap_output}"
           sudo "${bootstrap_dir}/ping-rust" uninstall --purge
+
+      - name: Mark public acceptance complete
+        id: accepted
+        run: echo 'verified=true' >> "$GITHUB_OUTPUT"
+
+      - name: Rollback public Release to draft on failure
+        if: ${{ always() && steps.publish.outputs.attempted == 'true' && steps.accepted.outputs.verified != 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/ci/release_rollback.sh
