@@ -1007,33 +1007,6 @@ pub(crate) fn print_add_result(result: &fast_add::AddResult) {
     let profile = &result.generation.profile;
     println!("{}", "部署成功，shoes 服务已启动。".green().bold());
     print_profile_details_with_qr(profile, result.share_uri.as_deref());
-    if result.share_uri.is_some() {
-        println!("\n复制上方链接即可导入客户端。");
-    } else {
-        if matches!(
-            profile.credentials,
-            config::Credentials::Shadowsocks {
-                shadowtls: Some(_),
-                ..
-            }
-        ) {
-            println!(
-                "\nShadowTLS v3 没有通用标准分享 URI；普通二维码也不支持；请使用 sing-box 或 Mihomo 导出。"
-            );
-        } else if matches!(
-            profile.credentials,
-            config::Credentials::AnyTls {
-                security: config::AnyTlsSecurity::Reality { .. },
-                ..
-            }
-        ) {
-            println!("\nAnyTLS+Reality 没有标准分享 URI 或普通二维码；请改用 sing-box 导出。Mihomo 和 NekoBox 不支持该组合。");
-        } else if matches!(profile.credentials, config::Credentials::NaiveProxy { .. }) {
-            println!("\nNaiveProxy 没有通用标准分享 URI 或普通二维码；请使用包含 Naive 支持的 sing-box JSON 导出。");
-        } else {
-            println!("\nSnell v3 没有通用标准分享 URI；配置已成功部署，请按客户端支持情况手动填写或导出 Clash Meta（仅 AES-128-GCM）。");
-        }
-    }
 }
 
 pub(crate) fn print_profile_details_with_qr(
@@ -1409,16 +1382,12 @@ fn profile_details_lines(profile: &config::ManagedProfile, share_uri: Option<&st
             profile.h2mux.max_streams,
             profile.h2mux.padding
         ));
-        lines.push("shoes 服务端自动识别 H2MUX；普通 URI/QR 不包含此偏好。".to_owned());
     } else if profile.h2mux_eligible() {
         lines.push("H2MUX 客户端偏好       = off".to_owned());
     }
     if let Some(uri) = share_uri {
         lines.push("------------- 链接 (URL) -------------".to_owned());
         lines.push(uri.to_owned());
-    }
-    if profile.self_signed_certificate && profile.protocol() != Protocol::NaiveProxy {
-        lines.push("警告! 客户端需启用跳过证书验证 (allowInsecure)，或换用受信任证书。".to_owned());
     }
     lines
 }
@@ -1460,6 +1429,7 @@ fn terminal_qr_or_url_text(value: &str) -> (String, Option<String>) {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn share_uri_with_qr_text(uri: &str) -> Result<String> {
     Ok([
         "------------- 链接 (URL) -------------".to_owned(),
@@ -1469,18 +1439,6 @@ pub(crate) fn share_uri_with_qr_text(uri: &str) -> Result<String> {
         "------------- END -------------".to_owned(),
     ]
     .join("\n"))
-}
-
-pub(crate) fn print_share_uri_with_qr(uri: &str) {
-    match share_uri_with_qr_text(uri) {
-        Ok(text) => println!("\n{text}"),
-        Err(error) => {
-            println!(
-                "\n------------- 链接 (URL) -------------\n{uri}\n------------- END -------------"
-            );
-            eprintln!("二维码生成失败：{error:#}；URL 已保留，可直接复制。");
-        }
-    }
 }
 
 pub(crate) async fn ensure_shoes_for_add(yes: bool) -> Result<()> {
@@ -1498,7 +1456,7 @@ pub(crate) async fn ensure_shoes_for_add(yes: bool) -> Result<()> {
     }
     let report = installer::install(InstallMethod::Release, false).await?;
     service::install_unit(false)?;
-    eprintln!("shoes 安装成功：{}（{}）", report.version, report.source);
+    let _ = report;
     Ok(())
 }
 
@@ -1605,45 +1563,10 @@ pub async fn print_update_status() -> Result<()> {
     }
     println!("shoes:");
     println!("  二进制：{}", if installed { "已安装" } else { "未安装" });
-    println!(
-        "  已知安装来源：{}",
-        if known.source.is_empty() {
-            "unknown"
-        } else {
-            &known.source
-        }
-    );
-    println!(
-        "  已知安装版本：{}",
-        known.version.as_deref().unwrap_or("未知")
-    );
-    if let Some(notice) = installer::unverified_installed_notice(&known) {
-        println!("  {}", notice.yellow());
-    }
-    println!(
-        "  已知 revision/tag：{}",
-        known
-            .revision
-            .as_deref()
-            .or(known.release_tag.as_deref())
-            .unwrap_or("未知")
-    );
-    println!("ping-rust 验证 pin:");
-    println!("  commit: {}", installer::verified_pin());
-    println!("  version: {}", installer::verified_version());
-    println!(
-        "shoes 默认安装 Release（已验证固定）: {}",
-        installer::SHOES_RELEASE_TAG
-    );
-    println!("shoes GitHub Latest Release:");
+    println!("  当前版本：{}", known.version.as_deref().unwrap_or("未知"));
     match shoes_latest {
-        Ok(tag) => {
-            println!("  tag: {tag}");
-            if let Some(notice) = installer::newer_upstream_release_notice(&tag) {
-                println!("  {notice}");
-            }
-        }
-        Err(error) => println!("  tag: 查询失败（{error}）"),
+        Ok(tag) => println!("  最新版本：{tag}"),
+        Err(error) => println!("  最新版本：查询失败（{error}）"),
     }
     println!("shoes upstream master:");
     match upstream {
@@ -1652,7 +1575,7 @@ pub async fn print_update_status() -> Result<()> {
             println!(
                 "Upstream drift: {}",
                 if upstream_drift(installer::verified_pin(), &sha) {
-                    "detected；生产 pin 保持不变，请查看 shoes upstream drift CI"
+                    "detected"
                 } else {
                     "none"
                 }
@@ -1876,10 +1799,6 @@ pub fn print_credentials(result: &config::GenerationResult) {
             println!("Short ID：{short_id}");
             println!("Reality 私钥：{private_key}");
             println!("Reality 公钥：{public_key}");
-            println!(
-                "{}",
-                "安全提示：私钥仅保存在服务器配置中，请勿分享。".yellow()
-            );
         }
         config::Credentials::Hysteria2 {
             password,

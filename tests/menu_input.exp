@@ -91,7 +91,7 @@ proc empty_stays {max} {
     send_choice ""
     expect {
         -re {无效序号|配置名称|请输入端口} { puts stderr "empty input changed menu"; exit 1 }
-        -re "请选择 \\[0-$max\\]: " {}
+        -re [format {请选择 \[0-%s\]: } $max] {}
         eof { exit 1 }
         timeout { exit 1 }
     }
@@ -131,6 +131,8 @@ foreach slug $slugs {
     send_choice $number
     expect_or_fail "配置名称（默认：$slug，输入 0 返回）：" "advanced mapping $number"
     send_choice 0
+    protocol_menu
+    send_choice 0
     tools_menu
     send_choice 0
     main_menu
@@ -145,9 +147,9 @@ foreach advanced {0 1} {
     send_choice 3
     expect_or_fail {无效序号！\r?\n请选择 \[0-2\]: } "AnyTLS invalid mode"
     send_choice 0
-    if {$advanced} { tools_menu } else { protocol_menu }
+    protocol_menu
     send_choice 0
-    main_menu
+    back_to_main $advanced
     foreach mode {1 2} {
         enter_protocol_menu $advanced
         send_choice 7
@@ -160,9 +162,9 @@ foreach advanced {0 1} {
             expect_or_fail {请输入端口（默认：随机，输入 0 返回）：} "AnyTLS selected port"
         }
         send_choice 0
-        if {$advanced} { tools_menu } else { protocol_menu }
+        protocol_menu
         send_choice 0
-        main_menu
+        back_to_main $advanced
     }
 }
 foreach advanced {0 1} {
@@ -190,12 +192,12 @@ foreach advanced {0 1} {
                 set count 6
             } else { set count 3 }
         }
-        expect_or_fail "请选择 \\[0-$count\\]: " "cipher prompt"
+        expect_or_fail [format {请选择 \[0-%s\]: } $count] "cipher prompt"
         empty_stays $count
         send_choice 0
-        if {$advanced} { tools_menu } else { protocol_menu }
+        protocol_menu
         send_choice 0
-        main_menu
+        back_to_main $advanced
     }
 }
 # Fast Sudoku now proceeds directly to its normal parameters, without substitute confirmation.

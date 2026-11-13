@@ -156,8 +156,9 @@ def test_case(client, mode, auth, vision, index, sudoku=None, plain=False):
     require(query["encryption"] == [encryption], "URI encryption differs from state")
     details = command([PRS, "info", label], label + "-info")
     if plain:
-        for text in ("加密：无", "没有任何加密和认证", "UUID", "目标地址", "非 HTTPS", "VLESS-ENC + Sudoku", "VLESS-REALITY"):
-            require(text in details, "plain VLESS details missing security warning")
+        for text in ("加密：无", "没有任何加密和认证", "目标地址", "非 HTTPS", "VLESS-ENC + Sudoku", "VLESS-REALITY"):
+            require(text not in details, "plain VLESS details contain redundant warning")
+        require("UUID" in details, "plain VLESS details missing UUID")
     else:
         require("Encryption" in details and mode in details, "details missing encryption or mode")
     if sudoku:

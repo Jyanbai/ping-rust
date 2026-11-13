@@ -168,10 +168,7 @@ where
     T::Err: Display,
 {
     loop {
-        write!(
-            writer,
-            "{prompt}（当前：{current}，直接回车保持当前值，0 为合法值）："
-        )?;
+        write!(writer, "{prompt}（默认：{current}，0 为合法值）：")?;
         writer.flush()?;
         let value = line(reader)?;
         if value.trim().is_empty() {
@@ -196,13 +193,11 @@ pub(crate) fn read_menu_choice(
         if value.trim().is_empty() {
             continue;
         }
-        if value
-            .trim()
-            .parse::<usize>()
-            .is_ok_and(|value| value <= max)
-        {
-            RETURNED.with(|returned| returned.set(value.trim() == "0"));
-            return Ok(value);
+        if let Ok(selected) = value.trim().parse::<usize>() {
+            if selected <= max {
+                RETURNED.with(|returned| returned.set(selected == 0));
+                return Ok(value);
+            }
         }
         writeln!(writer, "无效序号！")?;
     }
@@ -547,7 +542,7 @@ mod tests {
                 expected
             );
             let output = String::from_utf8(output).unwrap();
-            assert!(output.contains("Max connections（当前：4，直接回车保持当前值，0 为合法值）："));
+            assert!(output.contains("Max connections（默认：4，0 为合法值）："));
             assert!(!output.contains("输入 0 返回"));
         }
     }

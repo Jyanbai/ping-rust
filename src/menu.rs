@@ -820,7 +820,7 @@ async fn change_profile_menu(profile: &config::ManagedProfile) -> Result<()> {
         }
         ChangeAction::ServerAddress => {
             let value = input::checked_text(
-                "VPS 公网域名或 IP（留空自动检测）",
+                "VPS 公网域名或 IP（默认：自动检测）",
                 None,
                 true,
                 |value| client::normalize_server_address(value).map(|_| ()),
@@ -834,7 +834,7 @@ async fn change_profile_menu(profile: &config::ManagedProfile) -> Result<()> {
         }
         ChangeAction::RegenerateCredentials => ProfileChange::RegenerateCredentials,
         ChangeAction::Password => {
-            let password = input::password("新密码（留空安全随机生成）", true)?;
+            let password = input::password("新密码（默认：随机生成）", true)?;
             if matches!(profile.protocol(), Protocol::NaiveProxy) {
                 ProfileChange::NaivePassword(if password.is_empty() {
                     config::generated_password()
@@ -935,7 +935,7 @@ async fn change_profile_menu(profile: &config::ManagedProfile) -> Result<()> {
             ProfileChange::ShadowsocksCipher(ciphers[selected])
         }
         ChangeAction::ShadowTlsPassword => {
-            let password = input::password("ShadowTLS 密码（留空安全随机生成）", true)?;
+            let password = input::password("ShadowTLS 密码（默认：随机生成）", true)?;
             ProfileChange::ShadowTlsPassword(if password.is_empty() {
                 config::generated_password()
             } else {
@@ -1034,7 +1034,7 @@ async fn change_profile_menu(profile: &config::ManagedProfile) -> Result<()> {
             let Some(index) = select_numbered("选择 AnyTLS 用户", &user_labels)? else {
                 return Ok(());
             };
-            let password = input::password("新密码（留空安全随机生成）", true)?;
+            let password = input::password("新密码（默认：随机生成）", true)?;
             let password = if password.is_empty() {
                 config::generated_password()
             } else {
@@ -1156,62 +1156,59 @@ async fn operations_menu() -> Result<MenuControl> {
 }
 
 async fn operations_menu_once() -> Result<MenuControl> {
-    loop {
-        let Some(selected) = select_numbered("工具", &OPERATIONS_MENU_ITEMS)? else {
-            return Ok(MenuControl::Back);
-        };
-        match selected {
-            0 => export_menu(),
-            1 => advanced_add_config_menu().await,
-            2 => {
-                let command = input::validated_text(
-                    "输入 SNI 域名，空格分隔（直接回车检测默认名单和现有节点）",
-                    None,
-                    true,
-                    sni_check_command,
-                )?;
-                crate::sni::run(command).await
+    let Some(selected) = select_numbered("工具", &OPERATIONS_MENU_ITEMS)? else {
+        return Ok(MenuControl::Back);
+    };
+    match selected {
+        0 => export_menu(),
+        1 => advanced_add_config_menu().await,
+        2 => {
+            let command = input::validated_text(
+                "输入 SNI 域名，空格分隔（默认：默认名单和现有节点）",
+                None,
+                true,
+                sni_check_command,
+            )?;
+            crate::sni::run(command).await
+        }
+        3 => {
+            crate::sni::run(crate::sni::Command::Scan {
+                yes: false,
+                protocol: crate::sni::Mode::Reality,
+            })
+            .await
+        }
+        4 => {
+            let port = input::port("检查端口", Some(443))?;
+            cli::print_port_status(port, operations::check_port(port, true, true));
+            Ok(())
+        }
+        5 => {
+            if input::confirm("写入 sysctl 配置并启用 BBR？", false)? {
+                operations::enable_bbr()?;
+                println!("{}", "BBR 已启用。".green());
             }
-            3 => {
-                crate::sni::run(crate::sni::Command::Scan {
-                    yes: false,
-                    protocol: crate::sni::Mode::Reality,
-                })
-                .await
-            }
-            4 => {
-                let port = input::port("检查端口", Some(443))?;
-                cli::print_port_status(port, operations::check_port(port, true, true));
-                Ok(())
-            }
-            5 => {
-                if input::confirm("写入 sysctl 配置并启用 BBR？", false)? {
-                    operations::enable_bbr()?;
-                    println!("{}", "BBR 已启用。".green());
+            Ok(())
+        }
+        6 => {
+            let path = operations::backup(None)?;
+            println!("备份已创建：{}", path.display());
+            Ok(())
+        }
+        7 => {
+            let archive = input::file_path("备份文件路径")?;
+            if input::confirm("恢复会替换当前配置，继续？", false)? {
+                let rollback = operations::restore(std::path::Path::new(&archive)).await?;
+                println!("{}", "恢复成功。".green());
+                if let Some(path) = rollback {
+                    println!("原配置保留于：{}", path.display());
                 }
-                Ok(())
             }
-            6 => {
-                let path = operations::backup(None)?;
-                println!("备份已创建：{}", path.display());
-                println!("备份含私钥和密码，请安全保管。");
-                Ok(())
-            }
-            7 => {
-                let archive = input::file_path("备份文件路径")?;
-                if input::confirm("恢复会替换当前配置，继续？", false)? {
-                    let rollback = operations::restore(std::path::Path::new(&archive)).await?;
-                    println!("{}", "恢复成功。".green());
-                    if let Some(path) = rollback {
-                        println!("原配置保留于：{}", path.display());
-                    }
-                }
-                Ok(())
-            }
-            _ => unreachable!("工具菜单编号已验证"),
-        }?;
-        return Ok(MenuControl::Continue);
-    }
+            Ok(())
+        }
+        _ => unreachable!("工具菜单编号已验证"),
+    }?;
+    Ok(MenuControl::Continue)
 }
 
 fn sni_check_command(domains: &str) -> Result<crate::sni::Command> {
@@ -1229,8 +1226,6 @@ async fn chain_proxy_menu() -> Result<()> {
 }
 
 async fn add_chain_node() -> Result<()> {
-    println!("支持：SOCKS5、HTTP(S)、Shadowsocks、VLESS（TCP/TLS/Reality/WS）、Trojan（TLS/WS）");
-    println!("不支持：Hysteria2、TUIC、WireGuard/WARP、未经验证的分享链接格式");
     let parsed = input::validated_text("粘贴分享链接", None, false, chain_proxy::parse_share_uri)?;
     println!(
         "识别结果：{} | {} | {}",
@@ -1238,9 +1233,6 @@ async fn add_chain_node() -> Result<()> {
         parsed.protocol_name(),
         parsed.address()
     );
-    if !parsed.supports_udp_over_tcp() {
-        println!("提示：该节点不支持 UDP-over-TCP；UDP 请求将失败，不会回退直连。");
-    }
     let name = input::checked_text(
         "节点名称",
         Some(&parsed.name),
@@ -1250,7 +1242,6 @@ async fn add_chain_node() -> Result<()> {
     let node = parsed.with_name(name)?;
     deployment::update_chain_proxy(ChainProxyChange::Add(node.clone())).await?;
     println!("{} {}", "节点已添加：".green(), node.name);
-    println!("默认路由仍为 DIRECT；可选择出口节点或设置默认路由。");
     Ok(())
 }
 
@@ -1311,7 +1302,6 @@ async fn test_chain_node() -> Result<()> {
         node.name,
         elapsed.as_millis()
     );
-    println!("已验证：地址可达、协议认证成功，并能通过该节点完成 HTTP 请求。");
     Ok(())
 }
 
@@ -1426,17 +1416,6 @@ fn export_menu() -> Result<()> {
     })?;
     let content = client::render(&state.profiles[selected], format, &server)?;
     println!("\n{content}\n");
-    if state.profiles[selected].h2mux.enabled && matches!(format, ClientFormat::Nekobox) {
-        println!("提示：NekoBox 分享链接不包含 H2MUX 客户端偏好；普通节点连接仍可使用。");
-    }
-    if state.profiles[selected].self_signed_certificate
-        && state.profiles[selected].protocol() != Protocol::NaiveProxy
-    {
-        println!(
-            "{}",
-            "注意：导出内容为自签名证书启用了 insecure；生产环境建议换用受信任证书。".yellow()
-        );
-    }
     Ok(())
 }
 
@@ -1507,7 +1486,7 @@ async fn fast_add_config_menu_once() -> Result<MenuControl> {
         } else {
             (None, None)
         };
-        cli::ensure_shoes_for_add(false).await?;
+        cli::ensure_shoes_for_add(true).await?;
         let server_address = resolve_menu_server_address().await?;
         let result = fast_add::execute(fast_add::AddRequest {
             interactive: true,
@@ -1541,7 +1520,7 @@ async fn fast_add_config_menu_once() -> Result<MenuControl> {
         let Some(cipher) = select_shadowsocks_cipher(shadowsocks_mode)? else {
             return Ok(MenuControl::Continue);
         };
-        let entered_password = input::password("请设置密码（留空安全随机生成）", true)?;
+        let entered_password = input::password("请设置密码（默认：随机生成）", true)?;
         if entered_password == "0" {
             return Ok(MenuControl::Continue);
         }
@@ -1789,7 +1768,7 @@ async fn deploy_fast_config(
     } else {
         Default::default()
     };
-    cli::ensure_shoes_for_add(false).await?;
+    cli::ensure_shoes_for_add(true).await?;
     let server_name = if protocol.uses_reality(anytls_mode) {
         Some(prompt_probed_sni("Reality SNI", crate::sni::Mode::Reality).await?)
     } else if shadowsocks_mode == config::ShadowsocksMode::ShadowTlsV3 {
@@ -1846,14 +1825,24 @@ async fn resolve_menu_server_address() -> Result<String> {
 }
 
 async fn advanced_add_config_menu() -> Result<()> {
-    let choices = Protocol::all()
-        .map(Protocol::advanced_label)
-        .collect::<Vec<_>>();
-    let Some(selected) = select_numbered("选择协议", &choices)? else {
-        return Ok(());
-    };
-    let protocol =
-        Protocol::from_menu_number(selected + 1).context("协议菜单与中央注册表不一致")?;
+    loop {
+        let choices = Protocol::all()
+            .map(Protocol::advanced_label)
+            .collect::<Vec<_>>();
+        let Some(selected) = select_numbered("选择协议", &choices)? else {
+            return Ok(());
+        };
+        let protocol =
+            Protocol::from_menu_number(selected + 1).context("协议菜单与中央注册表不一致")?;
+        match advanced_add_protocol(protocol).await {
+            Err(error) if input::is_back(&error) => continue,
+            Ok(()) if input::returned_to_parent() => continue,
+            result => return result,
+        }
+    }
+}
+
+async fn advanced_add_protocol(protocol: Protocol) -> Result<()> {
     let name = input::checked_text("配置名称", Some(protocol.slug()), false, |name| {
         config::validate_profile_name(name, &config::load_state()?.profiles, None)
     })?;
@@ -1931,20 +1920,19 @@ async fn advanced_add_config_menu() -> Result<()> {
             return Ok(());
         };
         options.snell_cipher = cipher;
-        let password = input::password("Snell v3 密码（留空则安全随机生成）", true)?;
+        let password = input::password("Snell v3 密码（默认：随机生成）", true)?;
         options.snell_password = (!password.is_empty()).then_some(password);
         options.udp_enabled = input::confirm("启用 Snell UDP-over-TCP？", true)?;
     }
     if matches!(protocol, Protocol::Socks5) {
-        let Some(authentication) =
-            select_numbered("认证", &["用户名 + 密码", "无认证（有滥用风险）"])?
+        let Some(authentication) = select_numbered("认证", &["用户名 + 密码", "无认证"])?
         else {
             return Ok(());
         };
         if authentication == 0 {
-            let username = input::text("SOCKS5 用户名（留空则安全随机生成）", None, true)?;
+            let username = input::text("SOCKS5 用户名（默认：随机生成）", None, true)?;
             options.socks5_username = (!username.is_empty()).then_some(username);
-            let password = input::password("SOCKS5 密码（留空则安全随机生成）", true)?;
+            let password = input::password("SOCKS5 密码（默认：随机生成）", true)?;
             options.socks5_password = (!password.is_empty()).then_some(password);
         } else {
             options.socks5_no_auth = true;
@@ -1963,7 +1951,7 @@ async fn advanced_add_config_menu() -> Result<()> {
                 format!("user{}", options.anytls_users.len() + 1)
             };
             let user_name = input::text("AnyTLS 用户名", Some(&default_name), false)?;
-            let password = input::password("AnyTLS 密码（留空则安全随机生成）", true)?;
+            let password = input::password("AnyTLS 密码（默认：随机生成）", true)?;
             options.anytls_users.push(if password.is_empty() {
                 config::generated_anytls_user(user_name)
             } else {
@@ -1993,9 +1981,9 @@ async fn advanced_add_config_menu() -> Result<()> {
         }
     }
     if protocol == Protocol::NaiveProxy {
-        let username = input::text("NaiveProxy 用户名（留空安全随机生成）", None, true)?;
+        let username = input::text("NaiveProxy 用户名（默认：随机生成）", None, true)?;
         options.naive_username = (!username.is_empty()).then_some(username);
-        let password = input::password("NaiveProxy 密码（留空安全随机生成）", true)?;
+        let password = input::password("NaiveProxy 密码（默认：随机生成）", true)?;
         options.naive_password = (!password.is_empty()).then_some(password);
         options.naive_padding = input::confirm("启用 NaiveProxy padding？", true)?;
         if input::confirm("配置静态 fallback 目录？", false)? {
@@ -2204,7 +2192,8 @@ mod tests {
         assert!(output.contains("错误！XHTTP path"));
         assert!(input::is_back(
             &read_xhttp_path_change(&mut io::Cursor::new("0\n"), &mut Vec::new(), "/current")
-                .unwrap_err()
+                .err()
+                .unwrap()
         ));
     }
 
