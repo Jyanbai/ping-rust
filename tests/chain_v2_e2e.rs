@@ -6,7 +6,7 @@ use std::{
     process::{Child, Command, Stdio},
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     thread,
     time::{Duration, Instant},
@@ -16,6 +16,10 @@ use std::{
 mod shoes_e2e;
 
 struct ChildGuard(Child);
+
+// Both tests allocate loopback listeners. In particular the release/rebind
+// regression must not race the traffic test's ephemeral client connections.
+static PORT_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 impl Drop for ChildGuard {
     fn drop(&mut self) {
@@ -134,14 +138,95 @@ fn serve_socks(mut incoming: TcpStream) -> io::Result<()> {
     Ok(())
 }
 
-fn ports(count: usize) -> io::Result<Vec<u16>> {
-    let listeners = (0..count)
-        .map(|_| TcpListener::bind("127.0.0.1:0"))
-        .collect::<io::Result<Vec<_>>>()?;
-    listeners
+fn reserve_ports(count: usize) -> io::Result<Vec<TcpListener>> {
+    // A released port from bind(:0) can become a client source port before
+    // shoes binds it. On Linux choose ports below the kernel ephemeral range.
+    let upper = if cfg!(target_os = "linux") {
+        fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range")?
+            .split_whitespace()
+            .next()
+            .ok_or_else(|| io::Error::other("missing ephemeral port range"))?
+            .parse::<u16>()
+            .map_err(io::Error::other)?
+    } else {
+        32768
+    };
+    let mut listeners = Vec::new();
+    for port in 1024..upper {
+        match TcpListener::bind(("127.0.0.1", port)) {
+            Ok(listener) => listeners.push(listener),
+            Err(error) if error.kind() == io::ErrorKind::AddrInUse => continue,
+            Err(error) => return Err(error),
+        }
+        if listeners.len() == count {
+            return Ok(listeners);
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AddrNotAvailable,
+        "not enough listener ports outside the ephemeral range",
+    ))
+}
+
+#[test]
+fn reserved_ingress_ports_cannot_be_reused_by_relays() -> io::Result<()> {
+    let _lock = PORT_TEST_LOCK.lock().expect("port test lock poisoned");
+    let reservations = reserve_ports(9)?;
+    let addresses = reservations
         .iter()
-        .map(|listener| listener.local_addr().map(|address| address.port()))
-        .collect()
+        .map(TcpListener::local_addr)
+        .collect::<io::Result<Vec<_>>>()?;
+    for address in &addresses {
+        if cfg!(target_os = "linux") {
+            let range = fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range")?;
+            let lower = range
+                .split_whitespace()
+                .next()
+                .unwrap()
+                .parse::<u16>()
+                .unwrap();
+            assert!(address.port() < lower);
+        }
+        let error = TcpListener::bind(address).expect_err("reserved address was reused");
+        assert_eq!(error.kind(), io::ErrorKind::AddrInUse);
+    }
+    let relay = SocksHop::start().map_err(|error| {
+        io::Error::new(error.kind(), format!("regression relay start: {error}"))
+    })?;
+    assert!(!addresses.contains(&relay.address));
+    drop(reservations);
+    let listeners = addresses
+        .iter()
+        .map(|address| {
+            TcpListener::bind(address).map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!("regression rebind {address}: {error}"),
+                )
+            })
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+    assert_eq!(listeners.len(), 9);
+    Ok(())
+}
+
+#[test]
+fn startup_diagnostics_report_exit_without_leaking_stderr() -> io::Result<()> {
+    // fork/exec may temporarily inherit another test's reserved sockets even
+    // with CLOEXEC. Do not spawn a child during the release/rebind regression.
+    let _lock = PORT_TEST_LOCK.lock().expect("port test lock poisoned");
+    let directory = tempfile::tempdir()?;
+    let log = directory.path().join("runtime.log");
+    fs::write(&log, "Address already in use password=diagnostic-secret")?;
+    let mut child = Command::new("sh").args(["-c", "exit 7"]).spawn()?;
+    child.wait()?;
+    let report = startup_diagnostics(&mut child, &[], &log);
+    assert!(report.contains("exited:"));
+    assert!(report.contains("7"));
+    assert!(report.contains("Address already in use"));
+    assert!(!report.contains("diagnostic-secret"));
+    assert!(!report.contains("password"));
+    Ok(())
 }
 
 fn wait_port(port: u16) -> io::Result<()> {
@@ -157,6 +242,43 @@ fn wait_port(port: u16) -> io::Result<()> {
         io::ErrorKind::TimedOut,
         format!("listener {port} did not start"),
     ))
+}
+
+// Only report known error categories from stderr; never print arbitrary log lines
+// or environment variables (which may contain credentials).
+fn startup_diagnostics(child: &mut Child, ports: &[u16], log: &Path) -> String {
+    let status = match child.try_wait() {
+        Ok(Some(status)) => format!("exited: {status}"),
+        Ok(None) => "running".to_owned(),
+        Err(error) => format!("status unavailable: {:?}", error.kind()),
+    };
+    let listening = ports
+        .iter()
+        .map(|port| {
+            let address = SocketAddr::from(([127, 0, 0, 1], *port));
+            let listening =
+                TcpStream::connect_timeout(&address, Duration::from_millis(100)).is_ok();
+            format!("{port}={listening}")
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let stderr = fs::read_to_string(log).unwrap_or_default();
+    let categories = [
+        "Address already in use",
+        "Permission denied",
+        "panicked",
+        "ERROR",
+    ]
+    .into_iter()
+    .filter(|category| stderr.contains(category))
+    .collect::<Vec<_>>()
+    .join(",");
+    format!(
+        "child={status}; listeners=[{listening}]; os={}; arch={}; stderr_bytes={}; stderr_categories=[{categories}]; stderr content suppressed",
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        stderr.len()
+    )
 }
 
 fn request(proxy: u16, target: &str, target_port: u16) -> io::Result<String> {
@@ -232,6 +354,7 @@ fn rule(mask: &str, action: &str, chains: Option<&str>) -> String {
 
 #[test]
 fn chain_v2_local_routing_traffic() -> io::Result<()> {
+    let _lock = PORT_TEST_LOCK.lock().expect("port test lock poisoned");
     let Some(binary) = shoes_e2e::shoes_binary(
         "chain_v2_local_routing_traffic",
         &[shoes_e2e::SHOES_E2E_BIN],
@@ -278,7 +401,13 @@ fn chain_v2_local_routing_traffic() -> io::Result<()> {
     }
     let _origin_guard = StopOrigin(origin_stop, Some(origin_worker));
 
-    let p = ports(9)?;
+    // Keep the ingress ports bound while relays and dry-run start, so those
+    // local allocations cannot steal a port selected for shoes.
+    let reservations = reserve_ports(9)?;
+    let p = reservations
+        .iter()
+        .map(|listener| listener.local_addr().map(|address| address.port()))
+        .collect::<io::Result<Vec<_>>>()?;
     let relay_a = SocksHop::start()?;
     let relay_b = SocksHop::start()?;
     let a = relay_a.address;
@@ -350,6 +479,7 @@ fn chain_v2_local_routing_traffic() -> io::Result<()> {
         String::from_utf8_lossy(&dry_run.stderr)
     );
     let runtime_log = directory.path().join("runtime.log");
+    drop(reservations);
     let child = Command::new(shoes)
         .arg(&config)
         .env("RUST_LOG", "debug")
@@ -357,9 +487,17 @@ fn chain_v2_local_routing_traffic() -> io::Result<()> {
         .stdout(Stdio::null())
         .stderr(fs::File::create(&runtime_log)?)
         .spawn()?;
-    let _shoes = ChildGuard(child);
+    let mut shoes_guard = ChildGuard(child);
     for port in &p[2..] {
-        wait_port(*port)?;
+        if let Err(error) = wait_port(*port) {
+            return Err(io::Error::new(
+                error.kind(),
+                format!(
+                    "{error}; {}",
+                    startup_diagnostics(&mut shoes_guard.0, &p[2..], &runtime_log)
+                ),
+            ));
+        }
     }
     let checked = |stage: &str, proxy: u16, target: &str| {
         let mut last_error = None;

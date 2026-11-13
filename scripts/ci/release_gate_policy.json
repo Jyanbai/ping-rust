@@ -1,0 +1,215 @@
+{
+  "ci.yml": {
+    "Menu input terminal regression": [
+      "Install expect",
+      "Install pinned shoes",
+      "Build menu regression test",
+      "Prepare one managed node",
+      "Run menu input regression",
+      "Run inconsistent config menu regression"
+    ],
+    "Debian 12": [
+      "Install build prerequisites",
+      "Install stable shoes for unit and chain traffic acceptance",
+      "Unit and integration tests",
+      "Prove stable shoes chain traffic has no direct fallback",
+      "Run cargo build --locked --release"
+    ],
+    "Xray Reality and Mihomo Snell clients": [
+      "Install external client tools",
+      "Build current ping-rust test binary",
+      "Run pinned Xray and Mihomo acceptance",
+      "Upload external client records"
+    ],
+    "Debian 12 v0.2.2 to shoes v0.3.6 migration": [
+      "Build Debian 12 systemd test image",
+      "Start clean Debian 12 systemd container",
+      "Build current ping-rust in Debian 12",
+      "Run v0.2.2 to pinned shoes migration acceptance",
+      "Collect migration records",
+      "Upload migration records",
+      "Remove Debian upgrade container"
+    ],
+    "Rocky Linux 9": [
+      "Install build prerequisites",
+      "Install stable shoes for unit and chain traffic acceptance",
+      "Unit and integration tests",
+      "Run cargo build --locked --release"
+    ],
+    "AlmaLinux 9": [
+      "Install build prerequisites",
+      "Install stable shoes for unit and chain traffic acceptance",
+      "Unit and integration tests",
+      "Run cargo build --locked --release"
+    ],
+    "Ubuntu ubuntu-22.04": [
+      "Check one-click installer",
+      "Check release metadata and upgrade guidance",
+      "Check Codex Dispatch keeps outside issue content away from Codex",
+      "Check main-watch failure classifier and issue rules",
+      "Check Codex CI Fix log excerpts survive escape sequences",
+      "Check Codex review admission and publication",
+      "Check complete Codex runtime installation",
+      "Run cargo fmt --all -- --check",
+      "Install stable shoes for unit and chain traffic acceptance",
+      "Unit and integration tests",
+      "Run cargo clippy --locked --all-targets -- -D warnings",
+      "Run cargo build --locked --release"
+    ],
+    "Ubuntu ubuntu-24.04": [
+      "Check one-click installer",
+      "Check release metadata and upgrade guidance",
+      "Check Codex Dispatch keeps outside issue content away from Codex",
+      "Check main-watch failure classifier and issue rules",
+      "Check Codex CI Fix log excerpts survive escape sequences",
+      "Check Codex review admission and publication",
+      "Check complete Codex runtime installation",
+      "Run cargo fmt --all -- --check",
+      "Install stable shoes for unit and chain traffic acceptance",
+      "Unit and integration tests",
+      "Prove stable shoes chain traffic has no direct fallback",
+      "Run cargo clippy --locked --all-targets -- -D warnings",
+      "Run cargo build --locked --release",
+      "Prove current tree install-self protocol",
+      "Gate public latest against install-self protocol"
+    ]
+  },
+  "shoes-schema.yml": {
+    "dry-run": [
+      "Build fixed shoes revision",
+      "Build ping-rust",
+      "Dry-run every checked-in example",
+      "Check H2MUX exports with sing-box 1.14.2",
+      "Probe repeated atomic replacements against pinned shoes",
+      "Validate complete shoes compatibility matrix"
+    ],
+    "source-matrix / Source matrix (github-release-v0.3.7)": [
+      "Install isolated runtime",
+      "Run cargo build --locked",
+      "Probe schema and authenticated data"
+    ],
+    "source-matrix / Source matrix (verified-pin)": [
+      "Install isolated runtime",
+      "Run cargo build --locked",
+      "Probe schema and authenticated data"
+    ],
+    "source-matrix / Default Release systemd acceptance": [
+      "Run sudo apt-get update && sudo apt-get install -y python3-pexpect",
+      "Run cargo build --locked",
+      "Run python3 -m unittest discover -s scripts/ci -p test_acceptance_diagnostics.py",
+      "Verify official sing-box",
+      "Test default Release lifecycle and H2MUX"
+    ]
+  },
+  "backward-compat.yml": {
+    "v0.2.1 Release reads files written by this build": [
+      "Build static ping-rust",
+      "Start privileged Debian 12 with systemd",
+      "Generate with new build, read with v0.2.1, compare"
+    ]
+  },
+  "vless-encryption.yml": {
+    "Pinned Xray and Mihomo VLESS-ENC matrix": [
+      "Build interoperability binary",
+      "Download pinned clients and shoes with checksum verification",
+      "Download v0.2.2 Release for the state downgrade probe",
+      "Nine proxy cases, controlled restart, listeners and credential audits",
+      "Upload audited records only"
+    ],
+    "VLESS-ENC artifact and uploaded job log secret audit": [
+      "Inspect exact uploaded artifact and completed client job log"
+    ]
+  },
+  "chain-systemd.yml": {
+    "Debian 12 real systemd and isolated exits": [
+      "Build static ping-rust and fixed shoes",
+      "Start privileged Debian 12 with systemd",
+      "Exercise Rust production menu, state, network exits and systemd",
+      "Remove Debian container"
+    ],
+    "Ubuntu 24.04 real systemd and isolated exits": [
+      "Build ping-rust and install test dependencies",
+      "Build and install fixed shoes revision",
+      "Exercise Chain Proxy 2.0 local traffic matrix",
+      "Exercise Rust production menu, state, network exits and systemd"
+    ]
+  },
+  "legacy-upgrade.yml": {
+    "L1 Ubuntu 24.04 upgrade": [
+      "Install current source under test",
+      "Exercise official legacy Release upgrade"
+    ],
+    "V3 Ubuntu 24.04 upgrade": [
+      "Install current source under test",
+      "Exercise official legacy Release upgrade"
+    ],
+    "C2 Ubuntu 24.04 upgrade": [
+      "Install current source under test",
+      "Exercise official legacy Release upgrade"
+    ]
+  },
+  "ubuntu-acceptance.yml": {
+    "Debian 12 root/systemd runtime": [
+      "Build Debian 12 systemd test image",
+      "Start clean Debian 12 systemd container",
+      "Build current source inside Debian 12",
+      "Bootstrap Reality and verify Debian systemd runtime",
+      "Add and inspect a second Debian configuration",
+      "Reject lossy AnyTLS exports on Debian 12",
+      "Roll back activation failure on Debian 12",
+      "Record Debian acceptance summary",
+      "Remove Debian test container"
+    ],
+    "Public install and root/systemd runtime": [
+      "Install PTY test dependency",
+      "Verify clean Ubuntu 24.04 x86_64 baseline",
+      "Verify public crates.io installation",
+      "Install current source under test",
+      "Exercise current Stage 0 and Rust install-self without a release",
+      "Installer bootstrap deploys random-port Reality without input",
+      "Switch runtime to the verified shoes pin",
+      "View the only profile without a selection menu",
+      "View advanced AnyTLS Reality without aborting on unsupported URI",
+      "Reject lossy multi-user AnyTLS client exports",
+      "Keep successful add --plain stdout machine-readable",
+      "Add Hysteria2 and confirm service reload",
+      "Add TUIC and confirm service reload",
+      "Add Shadowsocks and AnyTLS and confirm core protocol runtime",
+      "Verify prs numeric PTY flow for all protocol presets",
+      "Edit H2MUX client preference without shoes service action",
+      "Roll back exact config and runtime when hot reload times out",
+      "Roll back config and systemd state when activation fails",
+      "Verify client exports and operations",
+      "Record acceptance summary",
+      "Uninstall and verify cleanup"
+    ]
+  },
+  "performance-baseline.yml": {
+    "Ubuntu 24.04 baseline": [
+      "Install measurement dependencies",
+      "Build current binary and Rust baseline runner",
+      "Measure cold install, update, warm add and rollback",
+      "Measure verified Stage-0 manager installation",
+      "Validate and summarize report"
+    ],
+    "Debian 12 baseline": [
+      "Build and start clean Debian 12 systemd container",
+      "Build current binary and baseline runner in Debian",
+      "Measure Debian cold install, update, warm add and rollback",
+      "Measure Debian verified Stage-0 manager installation",
+      "Copy, validate and summarize Debian report",
+      "Remove Debian test container"
+    ]
+  },
+  "security-audit.yml": {
+    "Cargo.lock / RustSec": [
+      "Install pinned cargo-audit",
+      "Audit the committed lockfile"
+    ]
+  },
+  "release-gate-tests.yml": {
+    "regression": [
+      "Check strict release gate regression"
+    ]
+  }
+}
