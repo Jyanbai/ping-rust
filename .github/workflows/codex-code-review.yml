@@ -214,6 +214,9 @@ jobs:
             printf '请只读审查 work/ 中的 PR，差异范围为 git -C work diff %s...HEAD。\n' "$BASE_SHA"
             printf '只报告由本 PR 引入、有具体失败场景的问题，用中文写明优先级、文件和行号。\n'
             printf '不要改代码，不要编译或测试，不要提交、推送或访问网络。未运行的检查明确写未验证。\n'
+            printf '你是独立审查会话，与实现会话无关：PR 描述和提交说明里的“已验证”“通过”只是待核对的声明，要自己对照差异和源码确认。\n'
+            printf '按下面审查清单逐项主动检查，至少覆盖：逻辑错误、测试盲区、shoes 版本差异、旧状态兼容、客户端导出一致性、升级回滚、终端真实交互；也要读改动涉及的调用方和测试。\n'
+            printf 'summary 按“已验证 / 未验证 / 失败”分组：已验证只写实际读到的代码证据，未验证写需要 CI、实机、systemd 或真实终端才能确认的项，失败对应 findings 里确认存在的问题。\n'
             printf '先通过读取工具读取 review-read-check.txt，原样返回到 read_check 字段；不要猜测校验值。\n'
             printf '按指定 JSON schema 输出。只有实际读取差异并完成审查时 review_complete 才为 true；工具不可用或审查受阻时设为 false，summary 说明原因，read_check 无法读取时为空字符串。\n'
             printf '完成审查且无发现时 findings 为空数组，summary 写「未发现有充分证据的代码问题」；未完成不得写成审查通过。\n'
