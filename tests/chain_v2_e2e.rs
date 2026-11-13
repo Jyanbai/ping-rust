@@ -190,12 +190,18 @@ fn reserved_ingress_ports_cannot_be_reused_by_relays() -> io::Result<()> {
         let error = TcpListener::bind(address).expect_err("reserved address was reused");
         assert_eq!(error.kind(), io::ErrorKind::AddrInUse);
     }
-    let relay = SocksHop::start()?;
+    let relay = SocksHop::start().map_err(|error| {
+        io::Error::new(error.kind(), format!("regression relay start: {error}"))
+    })?;
     assert!(!addresses.contains(&relay.address));
     drop(reservations);
     let listeners = addresses
         .iter()
-        .map(TcpListener::bind)
+        .map(|address| {
+            TcpListener::bind(address).map_err(|error| {
+                io::Error::new(error.kind(), format!("regression rebind {address}: {error}"))
+            })
+        })
         .collect::<io::Result<Vec<_>>>()?;
     assert_eq!(listeners.len(), 9);
     Ok(())

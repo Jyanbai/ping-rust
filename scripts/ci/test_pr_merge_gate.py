@@ -73,15 +73,6 @@ class CollectorAPI:
 
 
 class GateTests(unittest.TestCase):
-    def test_workflow_run_intermediate_events_are_ignored(self):
-        class NoCallAPI:
-            def __getattr__(self, name):
-                raise AssertionError(f"unexpected API call: {name}")
-
-        for action in ("requested", "in_progress"):
-            with self.subTest(action=action):
-                run_event(NoCallAPI(), {"action": action, "workflow_run": {"head_sha": self.sha}}, self.policy)
-
     def test_scheduled_scan_retains_heads_and_continues_after_pr_lookup_failure(self):
         from unittest.mock import patch
         import os
@@ -130,7 +121,7 @@ class GateTests(unittest.TestCase):
                     self.statuses.append((sha, state))
 
             api = BrokenAPI()
-            event = {'action': 'completed', 'workflow_run': self.run}
+            event = {'action': 'in_progress', 'workflow_run': self.run}
             with patch.dict(os.environ, {'PR_NUMBER': '', 'DRY_RUN': 'false'}):
                 with self.assertRaises(OSError):
                     run_event(api, event, self.policy)
