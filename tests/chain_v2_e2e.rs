@@ -212,6 +212,9 @@ fn reserved_ingress_ports_cannot_be_reused_by_relays() -> io::Result<()> {
 
 #[test]
 fn startup_diagnostics_report_exit_without_leaking_stderr() -> io::Result<()> {
+    // fork/exec may temporarily inherit another test's reserved sockets even
+    // with CLOEXEC. Do not spawn a child during the release/rebind regression.
+    let _lock = PORT_TEST_LOCK.lock().expect("port test lock poisoned");
     let directory = tempfile::tempdir()?;
     let log = directory.path().join("runtime.log");
     fs::write(&log, "Address already in use password=diagnostic-secret")?;
