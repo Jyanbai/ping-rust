@@ -78,6 +78,7 @@ impl Error for ActivationFailure {
 
 pub async fn generate_and_activate(request: GenerationRequest) -> Result<GenerationResult> {
     utils::require_linux_root()?;
+    config::preflight_generation(&request)?;
     let needs_sudoku = crate::shoes_compat::managed_state_needs_sudoku(None)?;
     crate::shoes_compat::ensure_sudoku(
         needs_sudoku

@@ -42,6 +42,28 @@ def verify_sudoku_compatibility(binary, run, state, pid, free_port, menu_edit):
     args = ['add', 'vless-sudoku', '--name', 'compat-sudoku', '--port', str(port),
             '--server-address', '127.0.0.1', '--yes', '--plain']
     try:
+        # Invalid additions must be rejected before the independently committed
+        # kernel upgrade can migrate files or restart the existing service.
+        existing = state()['profiles'][0]
+        original_pid = pid()
+        invalid_requests = [
+            (['--port', '0'], '端口必须在'),
+            (['--port', str(existing['port'])], '已由现有配置使用'),
+            (['--port', str(port), '--name', ' ' + existing['name'].swapcase() + ' '],
+             '名称必须唯一'),
+            (['--port', str(port), '--name', ' '], '配置名称必须为'),
+        ]
+        for options, expected_error in invalid_requests:
+            result = subprocess.run(
+                [binary, 'generate', 'vless-sudoku', *options],
+                capture_output=True, timeout=360)
+            errors = result.stderr.decode()
+            assert result.returncode != 0 and expected_error in errors, errors
+            assert '正在自动升级' not in errors, errors
+            assert shoes.read_bytes() == original_binary
+            assert provenance_path.read_bytes() == original_provenance
+            assert files() == original_files, 'invalid request changed managed configuration'
+            assert pid() == original_pid, 'invalid request restarted the existing service'
         with tempfile.TemporaryDirectory(prefix='prs-sudoku-restart-failure-') as temporary:
             root = Path(temporary)
             marker = root / 'failed-once'

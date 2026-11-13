@@ -979,6 +979,32 @@ pub(crate) async fn generate_locked(
     generate_inner_with_lock(request, true, Some(lock)).await
 }
 
+pub(crate) fn preflight_generation(request: &GenerationRequest) -> Result<()> {
+    validate_request(request)?;
+    request.output.parent().context("配置输出路径没有父目录")?;
+    if request.output == Path::new(utils::CONFIG_FILE) {
+        let _lock = utils::exclusive_lock(Path::new(utils::LOCK_FILE))?;
+        let state = load_state_for_update()?;
+        validate_generation_conflicts(request, &state.profiles)?;
+    }
+    // Release the lock before a possible kernel upgrade, which takes this lock
+    // itself. Generation rechecks the current state under its own commit lock.
+    Ok(())
+}
+
+fn validate_generation_conflicts(
+    request: &GenerationRequest,
+    profiles: &[ManagedProfile],
+) -> Result<()> {
+    if profiles.iter().any(|profile| profile.port == request.port) {
+        bail!("端口 {} 已由现有配置使用", request.port);
+    }
+    if let Some(name) = &request.name {
+        validate_profile_name(name, profiles, None)?;
+    }
+    Ok(())
+}
+
 async fn generate_inner_with_lock(
     request: GenerationRequest,
     validate_with_shoes: bool,
@@ -1012,13 +1038,7 @@ async fn generate_inner_with_lock(
     } else {
         ManagedState::default()
     };
-    if state
-        .profiles
-        .iter()
-        .any(|profile| profile.port == request.port)
-    {
-        bail!("端口 {} 已由现有配置使用", request.port);
-    }
+    validate_generation_conflicts(&request, &state.profiles)?;
     let profile_id = Uuid::new_v4();
     let profile_name = request
         .name
@@ -3221,6 +3241,45 @@ mod tests {
             certificate_key: None,
             options: GenerationOptions::default(),
         }
+    }
+
+    #[test]
+    fn generation_preflight_rejects_invalid_request_before_managed_io() {
+        let mut request = request(Protocol::VlessSudoku, PathBuf::from(utils::CONFIG_FILE));
+        request.port = 0;
+        assert!(preflight_generation(&request)
+            .unwrap_err()
+            .to_string()
+            .contains("端口必须在"));
+        request.port = 24444;
+        request.name = Some(" ".to_owned());
+        assert!(preflight_generation(&request)
+            .unwrap_err()
+            .to_string()
+            .contains("配置名称必须为"));
+    }
+
+    #[test]
+    fn generation_preflight_rejects_managed_port_and_name_conflicts() {
+        let (_, mut existing) = reality_server_and_profile(24444);
+        existing.name = "Existing".to_owned();
+        let profiles = vec![existing];
+        let mut request = request(Protocol::VlessSudoku, PathBuf::from(utils::CONFIG_FILE));
+        request.port = 24444;
+        assert!(validate_generation_conflicts(&request, &profiles)
+            .unwrap_err()
+            .to_string()
+            .contains("已由现有配置使用"));
+        request.port = 24445;
+        request.name = Some(" existing ".to_owned());
+        assert!(validate_generation_conflicts(&request, &profiles)
+            .unwrap_err()
+            .to_string()
+            .contains("名称必须唯一"));
+        request.name = Some("new-node".to_owned());
+        validate_generation_conflicts(&request, &profiles).unwrap();
+        request.name = None;
+        validate_generation_conflicts(&request, &profiles).unwrap();
     }
 
     fn generate_parts(
