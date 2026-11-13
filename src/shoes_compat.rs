@@ -47,14 +47,17 @@ pub(crate) fn credentials_need_sudoku(credentials: &Credentials) -> bool {
     )
 }
 
-pub(crate) fn managed_state_needs_sudoku() -> Result<bool> {
+pub(crate) fn managed_state_needs_sudoku(exclude: Option<uuid::Uuid>) -> Result<bool> {
     if !Path::new(utils::STATE_FILE).exists() {
         return Ok(false);
     }
-    Ok(crate::config::load_state()?
-        .profiles
-        .iter()
-        .any(|profile| credentials_need_sudoku(&profile.credentials)))
+    Ok(state_needs_sudoku(&crate::config::load_state()?, exclude))
+}
+
+fn state_needs_sudoku(state: &crate::config::ManagedState, exclude: Option<uuid::Uuid>) -> bool {
+    state.profiles.iter().any(|profile| {
+        Some(profile.id) != exclude && credentials_need_sudoku(&profile.credentials)
+    })
 }
 
 pub(crate) async fn ensure_sudoku(required: bool) -> Result<()> {
@@ -88,6 +91,21 @@ mod tests {
         assert!(!unsupported_sudoku(b"invalid sudoku_mask password"));
     }
 
+    #[test]
+    fn removing_last_sudoku_does_not_require_upgrade() {
+        let state: crate::config::ManagedState = serde_json::from_str(include_str!(
+            "../tests/fixtures/yaml/vless-enc-sudoku/state.json"
+        ))
+        .unwrap();
+        assert!(state_needs_sudoku(&state, None));
+        assert!(!state_needs_sudoku(&state, Some(state.profiles[0].id)));
+        let mut two = state.clone();
+        let mut second = two.profiles[0].clone();
+        second.id = uuid::Uuid::new_v4();
+        two.profiles.push(second);
+        assert!(state_needs_sudoku(&two, Some(two.profiles[0].id)));
+    }
+
     #[cfg(unix)]
     async fn probe_script(script: &str) -> Result<bool> {
         use std::os::unix::fs::PermissionsExt;
@@ -101,7 +119,6 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn actual_binary_probe_distinguishes_old_new_and_broken() {
-
         assert!(probe_script("test \"$1\" = --dry-run && test -f \"$2\"")
             .await
             .unwrap());

@@ -78,7 +78,7 @@ impl Error for ActivationFailure {
 
 pub async fn generate_and_activate(request: GenerationRequest) -> Result<GenerationResult> {
     utils::require_linux_root()?;
-    let needs_sudoku = crate::shoes_compat::managed_state_needs_sudoku()?;
+    let needs_sudoku = crate::shoes_compat::managed_state_needs_sudoku(None)?;
     crate::shoes_compat::ensure_sudoku(
         needs_sudoku
             || request.protocol == config::Protocol::VlessSudoku
@@ -139,7 +139,8 @@ pub async fn generate_and_activate(request: GenerationRequest) -> Result<Generat
 
 pub async fn update_and_activate(id: Uuid, change: ProfileChange) -> Result<GenerationResult> {
     utils::require_linux_root()?;
-    let needs_sudoku = crate::shoes_compat::managed_state_needs_sudoku()?;
+    let exclude = matches!(&change, ProfileChange::Sudoku(None)).then_some(id);
+    let needs_sudoku = crate::shoes_compat::managed_state_needs_sudoku(exclude)?;
     crate::shoes_compat::ensure_sudoku(
         needs_sudoku || matches!(&change, ProfileChange::Sudoku(Some(_))),
     )
@@ -220,7 +221,7 @@ pub async fn update_and_activate(id: Uuid, change: ProfileChange) -> Result<Gene
 
 pub async fn delete_and_activate(id: Uuid) -> Result<config::ManagedProfile> {
     utils::require_linux_root()?;
-    let needs_sudoku = crate::shoes_compat::managed_state_needs_sudoku()?;
+    let needs_sudoku = crate::shoes_compat::managed_state_needs_sudoku(Some(id))?;
     crate::shoes_compat::ensure_sudoku(needs_sudoku).await?;
     let lock = utils::exclusive_lock(Path::new(utils::LOCK_FILE))?;
     let service_snapshot = service::capture_snapshot()?;
