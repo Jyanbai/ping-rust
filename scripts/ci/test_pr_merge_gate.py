@@ -65,6 +65,16 @@ class CollectorAPI:
 
 
 class GateTests(unittest.TestCase):
+    def test_cargo_executable_uses_current_artifact_not_directory_layout(self):
+        from cargo_test_executable import executable
+        artifact = {'reason': 'compiler-artifact', 'target': {'name': 'performance_baseline'},
+                    'profile': {'test': True}, 'executable': '/tmp/target/debug/build/pkg/out/test'}
+        self.assertEqual(executable([json.dumps(artifact)]), artifact['executable'])
+        for messages in [[], [artifact, artifact], [dict(artifact, executable=None)],
+                         [dict(artifact, profile={'test': False})]]:
+            with self.assertRaises(ValueError):
+                executable(map(json.dumps, messages))
+
     def test_status_publication_is_idempotent_but_revokes_success_on_new_run(self):
         class StatusAPI(GitHub):
             def __init__(self):
