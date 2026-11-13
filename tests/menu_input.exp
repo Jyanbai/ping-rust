@@ -162,6 +162,7 @@ foreach advanced {0 1} {
             expect_or_fail {请输入端口（默认：随机，输入 0 返回）：} "AnyTLS selected port"
         }
         send_choice 0
+        if {!$advanced} { anytls_modes; send_choice 0 }
         protocol_menu
         send_choice 0
         back_to_main $advanced
@@ -195,10 +196,46 @@ foreach advanced {0 1} {
         expect_or_fail [format {请选择 \[0-%s\]: } $count] "cipher prompt"
         empty_stays $count
         send_choice 0
+        if {!$advanced} { shadowsocks_modes 0; send_choice 0 }
         protocol_menu
         send_choice 0
         back_to_main $advanced
     }
+}
+foreach advanced {0 1} {
+    enter_protocol_menu $advanced
+    send_choice 5
+    if {$advanced} { advanced_name_port vless-enc } else {
+        expect_or_fail {请输入端口（默认：随机，输入 0 返回）：} "ENC port"
+        send_choice 25464
+    }
+    expect_or_fail {请选择 \[0-3\]: } "ENC mode"
+    empty_stays 3
+    send_choice 1
+    expect_or_fail {请选择 \[0-2\]: } "ENC auth"
+    empty_stays 2
+    send_choice 0
+    expect_or_fail {请选择 \[0-3\]: } "auth returns to mode"
+    send_choice 1
+    expect_or_fail {请选择 \[0-2\]: } "auth again"
+    send_choice 1
+    expect_or_fail {开启 Vision？ \[y/N\]（输入 0 返回）：} "Vision"
+    send_choice 0
+    expect_or_fail {请选择 \[0-2\]: } "Vision returns to auth"
+    send_choice 1
+    expect_or_fail {开启 Vision？ \[y/N\]（输入 0 返回）：} "Vision again"
+    send_choice ""
+    expect_or_fail {启用 Sudoku 外观？ \[y/N\]（输入 0 返回）：} "Sudoku without cost warning"
+    send_choice 0
+    expect_or_fail {开启 Vision？ \[y/N\]（输入 0 返回）：} "Sudoku returns to Vision"
+    send_choice 0
+    expect_or_fail {请选择 \[0-2\]: } "back to auth"
+    send_choice 0
+    expect_or_fail {请选择 \[0-3\]: } "back to mode"
+    send_choice 0
+    protocol_menu
+    send_choice 0
+    back_to_main $advanced
 }
 # Fast Sudoku now proceeds directly to its normal parameters, without substitute confirmation.
 enter_protocol_menu 0

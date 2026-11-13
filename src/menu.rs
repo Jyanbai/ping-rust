@@ -1438,114 +1438,124 @@ async fn fast_add_config_menu_once() -> Result<MenuControl> {
     }
     let protocol = Protocol::from_menu_number(protocol_number)
         .with_context(|| format!("协议编号无效：{protocol_number}"))?;
-    let shadowsocks_mode = if protocol == Protocol::Shadowsocks {
-        println!("\nShadowsocks 模式:\n\n1) Shadowsocks 2022\n2) Shadowsocks 2022 + ShadowTLS v3\n0) 返回\n");
-        loop {
-            match parse_shadowsocks_mode(&read_menu_choice(2)?) {
-                Some(Some(mode)) => break mode,
-                Some(None) => return Ok(MenuControl::Continue),
-                None => println!("无效序号！"),
+    'options: loop {
+        let shadowsocks_mode = if protocol == Protocol::Shadowsocks {
+            println!("\nShadowsocks 模式:\n\n1) Shadowsocks 2022\n2) Shadowsocks 2022 + ShadowTLS v3\n0) 返回\n");
+            loop {
+                match parse_shadowsocks_mode(&read_menu_choice(2)?) {
+                    Some(Some(mode)) => break mode,
+                    Some(None) => return Ok(MenuControl::Continue),
+                    None => println!("无效序号！"),
+                }
             }
-        }
-    } else {
-        config::ShadowsocksMode::Plain
-    };
-    let anytls_mode = if protocol == Protocol::AnyTls {
-        let Some(mode) = select_anytls_mode()? else {
-            return Ok(MenuControl::Continue);
+        } else {
+            config::ShadowsocksMode::Plain
         };
-        mode
-    } else {
-        AnyTlsMode::default()
-    };
-    let port = input::validated_text("请输入端口", Some("随机"), true, |value| {
-        if value == "随机" {
-            return Ok(PortChoice::Random);
-        }
-        parse_port_choice(value).context("请输入 1 到 65535 的端口")
-    })?;
-    let port = match port {
-        PortChoice::Back => return Ok(MenuControl::Continue),
-        PortChoice::Random => None,
-        PortChoice::Fixed(port) => Some(port),
-    };
-    if protocol == Protocol::NaiveProxy {
-        let server_name =
-            input::checked_text("请输入域名/SNI", None, false, config::validate_server_name)?;
-        let Some(mode) = select_numbered(
-            "TLS 证书模式",
-            &["已有受信任证书", "自签名测试模式（仅供测试）"],
-        )?
-        else {
-            return Ok(MenuControl::Continue);
+        let anytls_mode = if protocol == Protocol::AnyTls {
+            let Some(mode) = select_anytls_mode()? else {
+                return Ok(MenuControl::Continue);
+            };
+            mode
+        } else {
+            AnyTlsMode::default()
         };
-        let (certificate, certificate_key) = if mode == 0 {
-            let cert = input::file_path("PEM 证书路径")?;
-            let key = input::file_path("PEM 私钥路径")?;
-            (Some(cert.into()), Some(key.into()))
+        let port = match input::validated_text("请输入端口", Some("随机"), true, |value| {
+            if value == "随机" {
+                return Ok(PortChoice::Random);
+            }
+            parse_port_choice(value).context("请输入 1 到 65535 的端口")
+        }) {
+            Err(error)
+                if input::is_back(&error)
+                    && matches!(protocol, Protocol::Shadowsocks | Protocol::AnyTls) =>
+            {
+                continue 'options
+            }
+            result => result?,
+        };
+        let port = match port {
+            PortChoice::Back => return Ok(MenuControl::Continue),
+            PortChoice::Random => None,
+            PortChoice::Fixed(port) => Some(port),
+        };
+        if protocol == Protocol::NaiveProxy {
+            let server_name =
+                input::checked_text("请输入域名/SNI", None, false, config::validate_server_name)?;
+            let Some(mode) = select_numbered(
+                "TLS 证书模式",
+                &["已有受信任证书", "自签名测试模式（仅供测试）"],
+            )?
+            else {
+                return Ok(MenuControl::Continue);
+            };
+            let (certificate, certificate_key) = if mode == 0 {
+                let cert = input::file_path("PEM 证书路径")?;
+                let key = input::file_path("PEM 私钥路径")?;
+                (Some(cert.into()), Some(key.into()))
+            } else {
+                (None, None)
+            };
+            cli::ensure_shoes_for_add(true).await?;
+            let server_address = resolve_menu_server_address().await?;
+            let result = fast_add::execute(fast_add::AddRequest {
+                interactive: true,
+                vless_enc: Default::default(),
+                xhttp_path: None,
+                name: None,
+                protocol,
+                anytls_mode: AnyTlsMode::default(),
+                port,
+                server_address: Some(server_address),
+                server_name: Some(server_name),
+                shadowsocks_cipher: None,
+                shadowsocks_password: None,
+                shadowsocks_mode: config::ShadowsocksMode::Plain,
+                shadowtls_password: None,
+                shadowtls_handshake: None,
+                certificate,
+                certificate_key,
+                naive_self_signed: mode == 1,
+                naive_username: None,
+                naive_password: None,
+                naive_padding: true,
+                naive_fallback: None,
+            })
+            .await?;
+            let _ = result;
+            println!("{}", "配置添加成功。".green());
+            return Ok(control_after_success(1));
+        }
+        let (shadowsocks_cipher, shadowsocks_password) = if protocol == Protocol::Shadowsocks {
+            let Some(cipher) = select_shadowsocks_cipher(shadowsocks_mode)? else {
+                continue 'options;
+            };
+            let entered_password = input::password("请设置密码（默认：随机生成）", true)?;
+            if entered_password == "0" {
+                return Ok(MenuControl::Continue);
+            }
+            let (password, warning) = prepare_shadowsocks_password(cipher, entered_password);
+            if let Some(warning) = warning {
+                println!(
+                    "\n警告! Shadowsocks 协议 ({}) 不支持使用该密码。",
+                    cipher.as_str()
+                );
+                println!("原因：{warning}");
+                println!("脚本将自动创建可用密码。\n");
+            }
+            (Some(cipher), Some(password))
         } else {
             (None, None)
         };
-        cli::ensure_shoes_for_add(true).await?;
-        let server_address = resolve_menu_server_address().await?;
-        let result = fast_add::execute(fast_add::AddRequest {
-            interactive: true,
-            vless_enc: Default::default(),
-            xhttp_path: None,
-            name: None,
+        return deploy_fast_config(
             protocol,
-            anytls_mode: AnyTlsMode::default(),
             port,
-            server_address: Some(server_address),
-            server_name: Some(server_name),
-            shadowsocks_cipher: None,
-            shadowsocks_password: None,
-            shadowsocks_mode: config::ShadowsocksMode::Plain,
-            shadowtls_password: None,
-            shadowtls_handshake: None,
-            certificate,
-            certificate_key,
-            naive_self_signed: mode == 1,
-            naive_username: None,
-            naive_password: None,
-            naive_padding: true,
-            naive_fallback: None,
-        })
-        .await?;
-        let _ = result;
-        println!("{}", "配置添加成功。".green());
-        return Ok(control_after_success(1));
+            shadowsocks_cipher,
+            shadowsocks_password,
+            shadowsocks_mode,
+            anytls_mode,
+        )
+        .await;
     }
-    let (shadowsocks_cipher, shadowsocks_password) = if protocol == Protocol::Shadowsocks {
-        let Some(cipher) = select_shadowsocks_cipher(shadowsocks_mode)? else {
-            return Ok(MenuControl::Continue);
-        };
-        let entered_password = input::password("请设置密码（默认：随机生成）", true)?;
-        if entered_password == "0" {
-            return Ok(MenuControl::Continue);
-        }
-        let (password, warning) = prepare_shadowsocks_password(cipher, entered_password);
-        if let Some(warning) = warning {
-            println!(
-                "\n警告! Shadowsocks 协议 ({}) 不支持使用该密码。",
-                cipher.as_str()
-            );
-            println!("原因：{warning}");
-            println!("脚本将自动创建可用密码。\n");
-        }
-        (Some(cipher), Some(password))
-    } else {
-        (None, None)
-    };
-    deploy_fast_config(
-        protocol,
-        port,
-        shadowsocks_cipher,
-        shadowsocks_password,
-        shadowsocks_mode,
-        anytls_mode,
-    )
-    .await
 }
 
 const ANYTLS_MODE_LABELS: [&str; 2] = ["TLS", "REALITY"];
@@ -1669,15 +1679,12 @@ fn prompt_vless_enc_auth() -> Result<Option<config::VlessEncAuth>> {
 }
 
 fn prompt_vless_enc_options() -> Result<Option<crate::vless_encryption::Options>> {
-    let Some(mut options) =
-        prompt_vless_enc_options_with(prompt_vless_enc_mode, prompt_vless_enc_auth, || {
-            input::confirm("开启 Vision？", false)
-        })?
-    else {
-        return Ok(None);
-    };
-    options.sudoku.enabled = read_sudoku_prompt(&mut io::stdin().lock(), &mut io::stdout())?;
-    Ok(Some(options))
+    prompt_vless_enc_options_with(
+        prompt_vless_enc_mode,
+        prompt_vless_enc_auth,
+        || input::confirm("开启 Vision？", false),
+        || read_sudoku_prompt(&mut io::stdin().lock(), &mut io::stdout()),
+    )
 }
 
 fn read_sudoku_prompt(reader: &mut impl io::BufRead, writer: &mut impl io::Write) -> Result<bool> {
@@ -1733,23 +1740,40 @@ fn sudoku_menu_change(
 }
 
 fn prompt_vless_enc_options_with(
-    mode: impl FnOnce() -> Result<Option<config::VlessEncMode>>,
-    auth: impl FnOnce() -> Result<Option<config::VlessEncAuth>>,
-    vision: impl FnOnce() -> Result<bool>,
+    mut mode: impl FnMut() -> Result<Option<config::VlessEncMode>>,
+    mut auth: impl FnMut() -> Result<Option<config::VlessEncAuth>>,
+    mut vision: impl FnMut() -> Result<bool>,
+    mut sudoku: impl FnMut() -> Result<bool>,
 ) -> Result<Option<crate::vless_encryption::Options>> {
-    let Some(mode) = mode()? else {
-        return Ok(None);
-    };
-    let Some(auth) = auth()? else {
-        return Ok(None);
-    };
-    let vision = vision()?;
-    Ok(Some(crate::vless_encryption::Options {
-        mode,
-        auth,
-        vision,
-        sudoku: Default::default(),
-    }))
+    'mode: loop {
+        let Some(mode) = mode()? else {
+            return Ok(None);
+        };
+        'auth: loop {
+            let Some(auth) = auth()? else {
+                continue 'mode;
+            };
+            loop {
+                let vision = match vision() {
+                    Err(error) if input::is_back(&error) => continue 'auth,
+                    result => result?,
+                };
+                let enabled = match sudoku() {
+                    Err(error) if input::is_back(&error) => continue,
+                    result => result?,
+                };
+                return Ok(Some(crate::vless_encryption::Options {
+                    mode,
+                    auth,
+                    vision,
+                    sudoku: crate::sudoku::SudokuOptions {
+                        enabled,
+                        ..Default::default()
+                    },
+                }));
+            }
+        }
+    }
 }
 
 async fn deploy_fast_config(
@@ -2299,14 +2323,17 @@ mod tests {
         assert!(prompt_vless_enc_options_with(
             || Ok(None),
             || panic!("cancelled"),
+            || panic!("cancelled"),
             || panic!("cancelled")
         )
         .unwrap()
         .is_none());
+        let mut modes = [Some(config::VlessEncMode::default()), None].into_iter();
         assert!(prompt_vless_enc_options_with(
-            || Ok(Some(config::VlessEncMode::default())),
+            || Ok(modes.next().unwrap()),
             || Ok(None),
-            || panic!("cancelled")
+            || panic!("cancelled"),
+            || panic!("cancelled"),
         )
         .unwrap()
         .is_none());
@@ -2314,6 +2341,33 @@ mod tests {
         assert_eq!(parse_shadowsocks_mode("bad"), None);
         assert_eq!(parse_shadowsocks_mode("0"), Some(None));
         assert_eq!(parse_shadowsocks_mode(""), None);
+    }
+
+    #[test]
+    fn encryption_wizard_returns_one_level_and_preserves_selected_parameters() {
+        let mut modes = [config::VlessEncMode::Native, config::VlessEncMode::Xorpub].into_iter();
+        let mut auths = [
+            None,
+            Some(config::VlessEncAuth::X25519),
+            Some(config::VlessEncAuth::Mlkem768),
+        ]
+        .into_iter();
+        let mut visions = [Err(input::back()), Ok(true), Ok(false)].into_iter();
+        let mut sudokus = [Err(input::back()), Ok(true)].into_iter();
+        let options = prompt_vless_enc_options_with(
+            || Ok(Some(modes.next().expect("returned to mode"))),
+            || Ok(auths.next().expect("returned to auth")),
+            || visions.next().expect("returned to Vision"),
+            || sudokus.next().expect("retried Sudoku"),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(options.mode, config::VlessEncMode::Xorpub);
+        assert_eq!(options.auth, config::VlessEncAuth::Mlkem768);
+        assert!(!options.vision);
+        assert!(options.sudoku.enabled);
+        assert!(modes.next().is_none() && auths.next().is_none());
+        assert!(visions.next().is_none() && sudokus.next().is_none());
     }
 
     #[test]

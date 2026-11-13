@@ -126,7 +126,10 @@ pub(crate) fn read_text<T>(
         text_prompt(writer, prompt, default)?;
         let value = line(reader)?;
         match parse_text(&value, default, allow_empty, &parse) {
-            Ok(value) => return Ok(value),
+            Ok(value) => {
+                reset_navigation();
+                return Ok(value);
+            }
             Err(error) if is_back(&error) => return Err(error),
             Err(error) => writeln!(writer, "错误！{error:#}")?,
         }
@@ -147,9 +150,18 @@ pub(crate) fn read_confirm(
         )?;
         writer.flush()?;
         match line(reader)?.trim().to_ascii_lowercase().as_str() {
-            "y" | "yes" => return Ok(true),
-            "n" | "no" => return Ok(false),
-            "" => return Ok(default),
+            "y" | "yes" => {
+                reset_navigation();
+                return Ok(true);
+            }
+            "n" | "no" => {
+                reset_navigation();
+                return Ok(false);
+            }
+            "" => {
+                reset_navigation();
+                return Ok(default);
+            }
             "0" => return Err(back()),
             _ => writeln!(writer, "错误！请输入 y、yes、n、no 或 0")?,
         }
