@@ -2601,6 +2601,8 @@ mod tests {
                 "missing {expected:?} in {output}"
             );
         }
+        assert!(!output.contains("传输加密"));
+        assert!(!output.contains("请勿将其误认为"));
     }
 
     #[test]

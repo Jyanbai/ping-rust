@@ -83,6 +83,7 @@ fn vless_sudoku_yaml_link_exports_and_info_agree() {
     }
     let info = crate::cli::profile_details_text(&profile, Some(&link));
     assert!(!info.contains("加密：无"));
+    assert!(info.contains("UUID"));
     assert!(info.contains("外观：Sudoku（ascii、padding 0–10%）"));
     for required in [
         "没有任何加密和认证",

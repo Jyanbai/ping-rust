@@ -466,7 +466,7 @@ pub async fn run() -> Result<()> {
 async fn prompt_probed_sni(label: &str, mode: crate::sni::Mode) -> Result<String> {
     loop {
         let choice = select_keyed(
-            label,
+            "选择 SNI 方式",
             &[
                 (1, "自动选择"),
                 (2, "检测与推荐"),
