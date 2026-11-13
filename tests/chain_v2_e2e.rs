@@ -205,7 +205,8 @@ fn startup_diagnostics(child: &mut Child, ports: &[u16], log: &Path) -> String {
         .iter()
         .map(|port| {
             let address = SocketAddr::from(([127, 0, 0, 1], *port));
-            let listening = TcpStream::connect_timeout(&address, Duration::from_millis(100)).is_ok();
+            let listening =
+                TcpStream::connect_timeout(&address, Duration::from_millis(100)).is_ok();
             format!("{port}={listening}")
         })
         .collect::<Vec<_>>()
