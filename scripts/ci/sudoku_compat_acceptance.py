@@ -51,10 +51,19 @@ def verify_sudoku_compatibility(binary, run, state, pid, free_port, menu_edit):
         assert '正在自动升级' in errors
         assert shoes.read_bytes() != original_binary
         pid()
-        plain = next(p for p in state()['profiles'] if p['name'] == 'compat-sudoku')
+        entry = next(e for e in state()['sudoku_profiles'] if e['profile']['name'] == 'compat-sudoku')
+        plain = entry['profile']
         new_port = free_port()
-        menu_edit(state()['profiles'].index(plain), port=new_port)
-        run('delete', plain['id'], '--yes')
+        menu_edit(entry['position'], port=new_port)
+        # Deleting the last mask must work even with an incompatible, untracked
+        # binary: no download or implicit downgrade may be required to recover.
+        installed_binary = shoes.read_bytes()
+        shoes.write_bytes(original_binary)
+        try:
+            _, errors = run('delete', plain['id'], '--yes')
+            assert '正在自动升级' not in errors
+        finally:
+            shoes.write_bytes(installed_binary)
         run('add', 'vless-enc', '--sudoku', '--name', 'compat-enc-sudoku', '--port', str(free_port()),
             '--server-address', '127.0.0.1', '--yes', '--plain')
         encrypted = next(p for p in state()['profiles'] if p['name'] == 'compat-enc-sudoku')
