@@ -4,6 +4,7 @@
 """
 
 import copy
+import datetime
 import json
 import os
 import re
@@ -87,6 +88,9 @@ class WorkflowPolicyTest(unittest.TestCase):
         self.assertIn("github.actor == github.repository_owner", self.text)
         self.assertIn("environment: codex", self.text)
 
+    def test_all_plan_runs_share_one_serial_group(self):
+        self.assertIn("concurrency:\n  group: codex-plan\n  cancel-in-progress: false\n", self.text)
+
     def test_permissions_are_minimal_and_actions_pinned(self):
         self.assertIn("\npermissions:\n  contents: read\n\n", self.text)
         start = self.lines.index("    permissions:")
@@ -163,6 +167,10 @@ class PlanStepTest(unittest.TestCase):
             "GITHUB_WORKSPACE": str(self.work / "workspace"),
             "GITHUB_OUTPUT": str(self.work / "output"),
             "GITHUB_STEP_SUMMARY": str(self.work / "summary"),
+            "GITHUB_ENV": str(self.work / "github_env"),
+            "ALLOW_REFRESH": "false",
+            "REFRESH_GUARD_SECONDS": "604800",
+            "POSTED": "",
             "REPO": REPO,
             "OWNER": "owner",
             "RUN_URL": "https://example.com/run/1",
@@ -243,6 +251,36 @@ class PlanStepTest(unittest.TestCase):
                 self.env["ISSUE_INPUT"] = value
                 self.assertNotEqual(self.run_step("Select issue").returncode, 0)
         self.assertEqual(self.gh_calls(), "")
+
+    # Restore plan auth
+
+    def restore_auth(self, days_ago=None, allow="false"):
+        auth = {"auth_mode": "chatgpt", "tokens": {"refresh_token": "r" * 20}}
+        if days_ago is not None:
+            when = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days_ago)
+            auth["last_refresh"] = when.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        self.env.update(CODEX_AUTH_JSON=json.dumps(auth), ALLOW_REFRESH=allow)
+        (self.work / "output").write_text("")
+        return self.run_step("Restore plan auth")
+
+    def test_recent_login_is_restored_read_only(self):
+        result = self.restore_auth(days_ago=1)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ok=true", self.output())
+        config = (self.work / "codex-home/config.toml").read_text()
+        self.assertIn('extends = ":read-only"', config)
+        self.assertIn("enabled = false", config)
+
+    def test_login_near_refresh_requires_explicit_owner_confirmation(self):
+        for days in (7.5, 30, None):
+            with self.subTest(days=days):
+                result = self.restore_auth(days_ago=days)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("ok=true", self.output())
+                self.assertIn("allow_refresh", result.stdout)
+        result = self.restore_auth(days_ago=7.5, allow="true")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ok=true", self.output())
 
     # Run Codex plan
 
@@ -410,6 +448,29 @@ class PlanStepTest(unittest.TestCase):
         self.assertEqual(self.run_step("Publish plan").returncode, 0)
         self.assertFalse((self.work / "posted.json").exists())
         self.assertNotIn("posted=true", self.output())
+
+    # Report plan failure
+
+    def test_failure_before_publication_reports_no_plan(self):
+        result = self.run_step("Report plan failure")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        body = json.loads((self.work / "posted.json").read_text())["body"]
+        self.assertIn("没有产生可用方案", body)
+
+    def test_failure_after_publication_reports_only_auth_write_back(self):
+        self.env["POSTED"] = "true"
+        result = self.run_step("Report plan failure")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        body = json.loads((self.work / "posted.json").read_text())["body"]
+        self.assertIn("本次规划已发布", body)
+        self.assertIn("CODEX_AUTH_JSON", body)
+        self.assertNotIn("没有产生可用方案", body)
+
+    def test_failure_is_not_reported_on_closed_issue(self):
+        self.api[f"repos/{REPO}/issues/9"]["state"] = "closed"
+        result = self.run_step("Report plan failure")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((self.work / "posted.json").exists())
 
 
 if __name__ == "__main__":

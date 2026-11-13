@@ -22,6 +22,11 @@ on:
         required: false
         default: false
         type: boolean
+      allow_refresh:
+        description: 登录接近刷新期限时仍运行（先确认没有其他 Codex 任务在跑）
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -32,8 +37,10 @@ env:
   RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
   NO_COLOR: '1'
 
+# 所有规划任务共用一个组串行执行，避免两个规划同时刷新共享登录。
+# 与 Dispatch / Review 的互斥见 Restore plan auth 的刷新期限检查。
 concurrency:
-  group: codex-plan-${{ inputs.issue }}
+  group: codex-plan
   cancel-in-progress: false
 
 jobs:
@@ -124,6 +131,8 @@ jobs:
         shell: bash
         env:
           CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
+          ALLOW_REFRESH: ${{ inputs.allow_refresh }}
+          REFRESH_GUARD_SECONDS: '604800'
         run: |
           set -euo pipefail
           umask 077
@@ -133,6 +142,17 @@ jobs:
           printf '%s' "$CODEX_AUTH_JSON" > "$plan_home/auth.json"
           jq -e '.auth_mode == "chatgpt" and ((.tokens.refresh_token // "") != "")' \
             "$plan_home/auth.json" >/dev/null
+          # Codex 在 last_refresh 超过约 8 天时刷新登录；refresh token 只能用一次，
+          # 与同时运行的 Dispatch / Review 一起刷新会触发 refresh_token_reused。
+          # 规划是手动入口，接近期限（7 天）或无法判断时默认停止，交由所有者确认无并发后重试。
+          last="$(jq -r '.last_refresh // ""' "$plan_home/auth.json")"
+          refreshed=0
+          [ -z "$last" ] || refreshed="$(date -u -d "$last" +%s 2>/dev/null || echo 0)"
+          age=$(( $(date -u +%s) - refreshed ))
+          if [ "$age" -ge "$REFRESH_GUARD_SECONDS" ] && [ "$ALLOW_REFRESH" != true ]; then
+            echo '::error::Codex 登录接近刷新期限或无法判断上次刷新时间。为避免与其他 Codex 任务同时刷新共享登录，本次不运行；确认没有 Codex Dispatch / Code Review / CI Fix 在运行后，勾选 allow_refresh 重试。'
+            exit 1
+          fi
           {
             printf 'cli_auth_credentials_store = "file"\n'
             printf 'approval_policy = "never"\nweb_search = "disabled"\nproject_doc_max_bytes = 0\n'
@@ -423,15 +443,31 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           NUMBER: ${{ steps.target.outputs.number }}
+          POSTED: ${{ steps.publish.outputs.posted }}
         run: |
           set -euo pipefail
-          {
-            printf '⚠️ Codex 规划运行未完成，需要人工检查。\n\n'
-            printf '请查看运行中的失败步骤，处理登录、额度或沙箱故障后再手动重试。本次运行没有产生可用方案。\n\n'
-            printf '[运行日志](%s)\n' "$RUN_URL"
-          } > "$RUNNER_TEMP/failure-comment.md"
+          gh() { timeout 60s gh "$@"; }
+          current="$(gh api "repos/$REPO/issues/$NUMBER")"
+          if ! jq -e '.state == "open" and (has("pull_request") | not)' <<< "$current" >/dev/null; then
+            echo 'issue 已关闭，不评论失败说明。'
+            exit 0
+          fi
+          if [ "$POSTED" = true ]; then
+            # 方案已经发布，失败的只是之后的登录写回；不能说成没有方案。
+            {
+              printf '⚠️ 本次规划已发布，但之后刷新后的 Codex 登录写回失败，需要人工检查 `CODEX_AUTH_JSON`。\n\n'
+              printf '上面的方案仍然有效；请处理写回权限或 API 故障后再运行其他 Codex 任务。\n\n'
+              printf '[运行日志](%s)\n' "$RUN_URL"
+            } > "$RUNNER_TEMP/failure-comment.md"
+          else
+            {
+              printf '⚠️ Codex 规划运行未完成，需要人工检查。\n\n'
+              printf '请查看运行中的失败步骤，处理登录、额度或沙箱故障后再手动重试。本次运行没有产生可用方案。\n\n'
+              printf '[运行日志](%s)\n' "$RUN_URL"
+            } > "$RUNNER_TEMP/failure-comment.md"
+          fi
           jq -n --rawfile body "$RUNNER_TEMP/failure-comment.md" '{body: $body}' > "$RUNNER_TEMP/failure-comment.json"
-          timeout 60s gh api "repos/$REPO/issues/$NUMBER/comments" --input "$RUNNER_TEMP/failure-comment.json" >/dev/null
+          gh api "repos/$REPO/issues/$NUMBER/comments" --input "$RUNNER_TEMP/failure-comment.json" >/dev/null
 
       - name: Remove local credentials
         if: always()

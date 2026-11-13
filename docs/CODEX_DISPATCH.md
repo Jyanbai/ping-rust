@@ -97,6 +97,7 @@ Actions → Codex Architecture Plan → Run workflow，分支选 `main`，填 is
 | `issue` | 要规划的 issue 编号（必须是打开的 issue，不接受 PR） |
 | `notes` | 所有者补充说明。issue 不是所有者创建的时候必须填写，此时标题和正文不会交给 Codex |
 | `force_plan` | 默认关闭：模型判定为简单任务时只给要点并提示可直接 `/codex`；勾选后始终输出完整方案 |
+| `allow_refresh` | 默认关闭：登录上次刷新已满 7 天（Codex 约 8 天刷新一次）或无法判断时不运行；确认没有其他 Codex 任务在跑后勾选重试 |
 
 - 只接受仓库所有者在 `main` 上触发；使用 environment `codex` 的 `CODEX_AUTH_JSON` 和 `CODEX_MODEL` / `CODEX_REASONING_EFFORT`，不新增登录或 token。
 - 与 Codex Code Review 相同的只读沙箱（`:read-only`、禁止网络、读不到 `$RUNNER_TEMP`），运行前实测；模型步骤没有 GitHub token。分析的是触发时 `main` 的精确提交和该提交的 `AGENTS.md`。
@@ -104,6 +105,8 @@ Actions → Codex Architecture Plan → Run workflow，分支选 `main`，填 is
 - 方案包括相关源码与调用链、兼容性、技术风险与回滚、实施步骤、测试计划（回归测试排在最前）以及“已验证 / 未验证 / 失败”。规划不编译、不运行测试，所以“已验证”只代表读过源码。
 - workflow 权限只有 `contents: read` 和 `issues: write`；不推送、不开 PR、不派发 `/codex`。`CODEX_BOT_TOKEN` 只在写回刷新后登录的那一步使用，与审查工作流相同，没有扩大权限。
 - **方案如何交给实现**：实现会话读不到 issue 评论。所有者确认（或修改）方案后，在 issue 下评论 `/codex <确认后的方案要点>`，由现有 Codex Dispatch 实现，之后照常进入 CI、独立审查和回修。
+- 共享登录的刷新：所有规划任务在同一个并发组 `codex-plan` 里串行（GitHub 只保留一个排队任务，再排队会取消前一个排队中的任务）。规划与 Dispatch / Review 之间没有并发组互斥，所以登录接近刷新期限时默认停止，避免同时刷新触发 `refresh_token_reused`。
+- 失败时评论前会重新检查 issue 是否仍打开；方案已发布、只是之后写回登录失败时，评论只说明写回失败，不说没有方案。
 - 仓库变量 `CODEX_PLAN=off` 可以停用这个入口。
 
 ## 一次性配置
