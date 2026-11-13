@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import unittest
 
-from pr_merge_gate import evaluate, review_verdict, inspect_pr, latest_review, event_targets, REVIEW_STEPS
+from pr_merge_gate import evaluate, review_verdict, inspect_pr, latest_review, event_targets, REVIEW_STEPS, GitHub
 
 
 class CollectorAPI:
@@ -65,6 +65,38 @@ class CollectorAPI:
 
 
 class GateTests(unittest.TestCase):
+    def test_status_publication_is_idempotent_but_revokes_success_on_new_run(self):
+        class StatusAPI(GitHub):
+            def __init__(self):
+                self.history = []
+
+            def pages(self, path, key=None):
+                return list(reversed(self.history))
+
+            def request(self, path, data=None):
+                self.history.append(data)
+
+        import os
+        from unittest.mock import patch
+        api = StatusAPI()
+        initial = '正在核对当前 head 的必需运行及独立审查'
+        with patch.dict(os.environ, {'GATE_RUN_URL': 'https://example.com/run'}):
+            api.status('a' * 40, 'pending', initial)
+            api.status('a' * 40, 'success', 'verified')
+            for _ in range(1100):
+                api.status('a' * 40, 'pending', initial)
+                api.status('a' * 40, 'success', 'verified')
+            self.assertEqual(len(api.history), 2)
+            api.status('a' * 40, 'pending', '新的运行已开始')
+            api.status('a' * 40, 'pending', '新的运行已开始')
+            self.assertEqual(api.history[-1]['state'], 'pending')
+            self.assertEqual(len(api.history), 3)
+            api.status('a' * 40, 'failure', 'blocked')
+            for _ in range(1100):
+                api.status('a' * 40, 'pending', initial)
+                api.status('a' * 40, 'failure', 'blocked')
+            self.assertEqual(len(api.history), 4)
+
     def setUp(self):
         self.sha = "a" * 40
         self.policy = {"ci.yml": {"unit": ["Test"]}}

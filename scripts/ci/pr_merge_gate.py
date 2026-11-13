@@ -140,6 +140,15 @@ class GitHub:
         raise RuntimeError("分页超出上限，拒绝使用不完整证据")
 
     def status(self, sha, state, description):
+        # 同一 SHA/context 的 commit status 有数量上限。定时核对不能制造
+        # terminal -> pending -> terminal 的无效转换；真正的新运行仍撤销绿灯。
+        previous = next((s for s in self.pages(f"commits/{sha}/statuses")
+                         if s.get("context") == CONTEXT), None)
+        if previous:
+            if state == "pending" and description == "正在核对当前 head 的必需运行及独立审查":
+                return
+            if previous.get("state") == state and previous.get("description") == description[:140]:
+                return
         self.request(f"statuses/{sha}", {"state": state, "context": CONTEXT,
                      "description": description[:140],
                      "target_url": os.environ["GATE_RUN_URL"]})
