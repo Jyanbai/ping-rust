@@ -341,13 +341,13 @@ def process_event(api, event, policy):
             continue
         try:
             inspect_pr(api, number, policy, publish=os.environ.get("DRY_RUN") != "true")
-        except Exception:
+        except Exception as error:
             sha = known_heads.get(number) or expected_sha
             if sha and re.fullmatch(r'[0-9a-f]{40}', sha) and os.environ.get('DRY_RUN') != 'true':
                 api.status(sha, 'failure', 'PR 读取或验证失败，无法确认当前门禁')
-            failed.append(number)
+            failed.append(error)
     if failed:
-        raise RuntimeError(f'PR 检查异常：{failed}')
+        raise failed[0]
 
 
 def run_event(api, event, policy):

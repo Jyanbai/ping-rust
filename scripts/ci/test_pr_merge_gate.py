@@ -95,7 +95,7 @@ class GateTests(unittest.TestCase):
 
         api = ScanAPI()
         with patch.dict(os.environ, {'PR_NUMBER': '', 'DRY_RUN': 'false'}):
-            with self.assertRaises(RuntimeError):
+            with self.assertRaises(OSError):
                 run_event(api, {}, self.policy)
         self.assertEqual(api.reads, ['pulls/7', 'pulls/8'])
         self.assertEqual(api.statuses, [(self.sha, 'failure')])
