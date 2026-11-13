@@ -445,8 +445,6 @@ pub async fn run(cli: Cli) -> Result<()> {
             vless_enc.sudoku.validate_for(protocol)?;
             if protocol == Protocol::VlessEnc {
                 vless_enc.warn();
-            } else if protocol == Protocol::VlessSudoku {
-                crate::sudoku::warn_plain();
             }
             let shadowsocks_cipher = cipher.unwrap_or_default();
             let snell_cipher = if matches!(protocol, Protocol::Snell) {
@@ -556,9 +554,6 @@ pub async fn run(cli: Cli) -> Result<()> {
                 config::generate(request).await?
             };
             print_credentials(&result);
-            if matches!(protocol, Protocol::Socks5) && no_auth {
-                println!("警告：SOCKS5 无认证且无传输加密，公开到公网可能被第三方滥用。");
-            }
             if managed {
                 println!("{}", "配置验证通过，shoes 已启用并启动。".green());
             }
@@ -782,9 +777,6 @@ async fn run_add_inner(mut args: AddArgs) -> Result<()> {
         bail!("--xhttp-path 仅适用于 VLESS-XHTTP-REALITY");
     }
     args.vless_enc.sudoku.validate_for(args.protocol)?;
-    if args.protocol == Protocol::VlessSudoku {
-        crate::sudoku::warn_plain();
-    }
     if args.shadowtls && !matches!(args.protocol, Protocol::Shadowsocks) {
         bail!("--shadowtls 仅适用于 Shadowsocks");
     }
@@ -1017,7 +1009,6 @@ pub(crate) fn print_add_result(result: &fast_add::AddResult) {
     print_profile_details_with_qr(profile, result.share_uri.as_deref());
     if result.share_uri.is_some() {
         println!("\n复制上方链接即可导入客户端。");
-        println!("{}", "安全提示：分享链接包含访问凭据，请勿公开。".yellow());
     } else {
         if matches!(
             profile.credentials,
@@ -1068,11 +1059,9 @@ fn profile_details_lines(profile: &config::ManagedProfile, share_uri: Option<&st
         config::Credentials::VlessSudoku {
             user_id, sudoku, ..
         } => {
-            lines.push(crate::sudoku::PLAIN_WARNING.into());
             lines.push(format!("地址：{address}"));
             lines.push(format!("端口：{}", profile.port));
             lines.push(format!("UUID：{user_id}"));
-            lines.push("加密：无".into());
             lines.push(sudoku.description());
         }
         config::Credentials::VlessEnc {
@@ -1243,10 +1232,6 @@ fn profile_details_lines(profile: &config::ManagedProfile, share_uri: Option<&st
                 "UDP ASSOCIATE           = {}",
                 if *udp_enabled { "enabled" } else { "disabled" }
             ));
-            lines.push("传输加密               = none".to_owned());
-            lines.push(
-                "注意：SOCKS5 本身不提供传输加密，请勿将其误认为 TLS/Reality 代理。".to_owned(),
-            );
         }
         config::Credentials::NaiveProxy {
             username,
@@ -1535,7 +1520,7 @@ pub async fn run_self_update(version: Option<&str>, force: bool) -> Result<bool>
         } => {
             println!("{} {from} → {to}", "ping-rust 自更新完成：".green());
             println!("路径：{}", destination.display());
-            println!("当前旧进程即将退出，请重新运行 ping-rust 使用新版本。");
+            println!("重新运行 ping-rust 可使用新版本。");
         }
     };
     Ok(updated)
@@ -1679,12 +1664,6 @@ pub async fn print_update_status() -> Result<()> {
 }
 
 pub(crate) fn execute_service(action: ServiceAction) -> Result<()> {
-    if matches!(action, ServiceAction::Status) {
-        if let Some(notice) = installer::unverified_installed_notice(&installer::load_provenance())
-        {
-            eprintln!("{}", notice.yellow());
-        }
-    }
     if matches!(action, ServiceAction::Status) && Path::new(crate::utils::STATE_FILE).exists() {
         let state = config::load_state().context("读取测试证书状态失败")?;
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
@@ -1701,7 +1680,7 @@ pub(crate) async fn regenerate_test_certificate(id: Uuid) -> Result<()> {
     let result =
         deployment::update_and_activate(id, config::ProfileChange::RegenerateNaiveCertificate)
             .await?;
-    println!("NaiveProxy 测试证书已重新生成；受控重启已完成。");
+    println!("NaiveProxy 测试证书已重新生成。");
     print_profile_details_with_qr(&result.profile, None);
     Ok(())
 }
@@ -1780,7 +1759,6 @@ pub async fn show_info(selector: Option<&str>) -> Result<()> {
                         "  UDP ASSOCIATE：{}",
                         if *udp_enabled { "启用" } else { "关闭" }
                     );
-                    println!("  传输加密：无");
                 }
                 if let Some(server) = profile.server_address.as_deref() {
                     println!("  客户端地址：{server}");
@@ -1800,9 +1778,6 @@ pub async fn show_info(selector: Option<&str>) -> Result<()> {
 fn print_saved_url(selector: Option<&str>, server_address: Option<&str>) -> Result<()> {
     let state = config::load_state()?;
     let profile = client::select_profile(&state.profiles, selector)?;
-    if profile.protocol() == Protocol::VlessSudoku {
-        crate::sudoku::warn_plain();
-    }
     println!("{}", client::stored_share_uri(profile, server_address)?);
     if profile.h2mux.enabled {
         eprintln!("提示：标准 URI 不包含 H2MUX 客户端偏好；此链接仍可用于普通连接。");
@@ -1813,9 +1788,6 @@ fn print_saved_url(selector: Option<&str>, server_address: Option<&str>) -> Resu
 fn print_saved_qr(selector: Option<&str>, server_address: Option<&str>) -> Result<()> {
     let state = config::load_state()?;
     let profile = client::select_profile(&state.profiles, selector)?;
-    if profile.protocol() == Protocol::VlessSudoku {
-        crate::sudoku::warn_plain();
-    }
     let uri = client::stored_share_uri(profile, server_address)?;
     let (output, error) = terminal_qr_or_url_text(&uri);
     println!("{output}");
@@ -1854,8 +1826,7 @@ pub fn print_credentials(result: &config::GenerationResult) {
         config::Credentials::VlessSudoku {
             user_id, sudoku, ..
         } => {
-            println!("{}", crate::sudoku::PLAIN_WARNING);
-            println!("协议：VLESS-Sudoku（无加密）");
+            println!("协议：VLESS-Sudoku");
             println!("UUID：{user_id}");
             println!("加密：无");
             println!("{}", sudoku.description());
@@ -1948,8 +1919,6 @@ pub fn print_credentials(result: &config::GenerationResult) {
                 "UDP ASSOCIATE：{}",
                 if *udp_enabled { "启用" } else { "关闭" }
             );
-            println!("传输加密：无");
-            println!("注意：SOCKS5 本身不提供传输加密，请勿将其误认为 TLS/Reality 代理。");
         }
         config::Credentials::Tuic {
             user_id,
@@ -2049,7 +2018,6 @@ pub fn print_credentials(result: &config::GenerationResult) {
                     println!("Short ID：{short_id}");
                     println!("Reality 私钥：{private_key}");
                     println!("Reality 公钥：{public_key}");
-                    println!("{}", "安全提示：Reality 私钥不得导出或分享。".yellow());
                 }
             }
         }
@@ -2097,7 +2065,6 @@ pub fn print_credentials(result: &config::GenerationResult) {
                     println!("Short ID：{short_id}");
                     println!("Reality 私钥：{private_key}");
                     println!("Reality 公钥：{public_key}");
-                    println!("{}", "安全提示：Reality 私钥不得导出或分享。".yellow());
                 }
             }
         }
@@ -2706,8 +2673,6 @@ mod tests {
             "用户名 (username)       = default",
             "密码 (password)         = socks-secret",
             "UDP ASSOCIATE           = enabled",
-            "传输加密               = none",
-            "SOCKS5 本身不提供传输加密",
             "------------- 链接 (URL) -------------",
             "socks5://default:socks-secret@203.0.113.8:1080#socks-main",
             "------------- 二维码 (QR) -------------",

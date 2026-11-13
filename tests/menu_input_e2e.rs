@@ -63,6 +63,27 @@ fn menu_input_returns_retries_defaults_to_no_and_handles_eof() {
     // 只打印菜单及取消输入，不输出配置快照中的任何凭据。
     eprintln!("{}", String::from_utf8_lossy(&output.stdout));
     eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+    let transcript = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    for removed in [
+        "没有任何加密",
+        "旧分享链接",
+        "凭据失效",
+        "固定 pin",
+        "受控重启",
+        "TCP splice",
+        "64 KiB",
+        "UDP/QUIC",
+        "上行约",
+        "Mihomo 已验证",
+        "传输加密",
+    ] {
+        assert!(!transcript.contains(removed), "冗余提示仍出现：{removed}");
+    }
+    assert!(!transcript.contains("· menu-e2e"));
     let after = snapshot(directory);
     assert!(before == after, "取消输入、回车保持或默认否操作改动了配置");
     assert!(

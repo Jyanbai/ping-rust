@@ -40,6 +40,7 @@ pub enum HotReloadReason {
 }
 
 impl HotReloadReason {
+    #[cfg(test)]
     pub fn restart_notice(&self) -> String {
         let reason = match self {
             Self::ServiceNotRunning => "shoes 服务未运行".to_owned(),
@@ -92,13 +93,11 @@ impl HotReloadReadiness {
         }
     }
 
-    pub fn report_controlled_restart(&self, was_active: bool) {
+    pub fn report_controlled_restart(&self, _was_active: bool) {
         if let Self::Unavailable(reason) = self {
-            if was_active {
-                // Keep add --plain stdout as one URI line.
-                eprintln!("提示：{}", reason.restart_notice());
-            }
+            let _ = reason;
         }
+        // Restart reasons remain available for diagnostics and decision tests.
     }
 }
 

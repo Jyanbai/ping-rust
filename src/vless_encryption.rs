@@ -34,10 +34,10 @@ pub enum VlessEncAuth {
 
 #[derive(Clone, Debug, Default, clap::Args)]
 pub struct Options {
-    /// VLESS Encryption 外观；random 关闭 TCP splice
+    /// VLESS Encryption 外观
     #[arg(long = "encryption-mode", value_enum, default_value = "native")]
     pub mode: VlessEncMode,
-    /// mlkem768 链接约 1.6 KB，二维码可能无法扫描
+    /// VLESS Encryption 认证
     #[arg(long = "encryption-auth", value_enum, default_value = "x25519")]
     pub auth: VlessEncAuth,
     /// VLESS-ENC 开启 Vision（默认关闭）
@@ -48,17 +48,7 @@ pub struct Options {
 }
 
 impl Options {
-    pub fn warn(&self) {
-        if self.sudoku.enabled {
-            eprintln!("提示：{}", crate::sudoku::COST);
-        }
-        if self.mode == VlessEncMode::Random {
-            eprintln!("提示：random 外观会关闭 TCP splice。");
-        }
-        if self.auth == VlessEncAuth::Mlkem768 {
-            eprintln!("提示：mlkem768 分享链接约 1.6 KB，二维码可能无法扫描。");
-        }
-    }
+    pub fn warn(&self) {}
 }
 
 impl VlessEncAuth {

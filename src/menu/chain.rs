@@ -48,6 +48,9 @@ pub(super) async fn menu() -> Result<()> {
             if !input::is_back(&error) {
                 return Err(error);
             }
+        } else if !input::returned_to_parent() {
+            println!("{}", "操作成功。".green());
+            return Ok(());
         }
     }
 }
@@ -237,6 +240,9 @@ async fn nodes_menu() -> Result<()> {
             if !input::is_back(&error) {
                 return Err(error);
             }
+        } else if !input::returned_to_parent() {
+            println!("{}", "操作成功。".green());
+            return Ok(());
         }
     }
 }
@@ -338,6 +344,9 @@ async fn pools_menu() -> Result<()> {
             if !input::is_back(&error) {
                 return Err(error);
             }
+        } else if !input::returned_to_parent() {
+            println!("{}", "操作成功。".green());
+            return Ok(());
         }
     }
 }
@@ -521,6 +530,9 @@ async fn chains_menu() -> Result<()> {
             if !input::is_back(&error) {
                 return Err(error);
             }
+        } else if !input::returned_to_parent() {
+            println!("{}", "操作成功。".green());
+            return Ok(());
         }
     }
 }
@@ -681,6 +693,9 @@ async fn rules_menu() -> Result<()> {
             if !input::is_back(&error) {
                 return Err(error);
             }
+        } else if !input::returned_to_parent() {
+            println!("{}", "操作成功。".green());
+            return Ok(());
         }
     }
 }

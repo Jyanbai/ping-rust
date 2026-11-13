@@ -26,6 +26,51 @@ impl Display for MenuBack {
 }
 impl std::error::Error for MenuBack {}
 
+// Navigation state only controls the result-page pause; it never changes a
+// validation, transaction, or service decision. The interactive root future
+// stays on the main thread while background work uses Tokio workers.
+thread_local! {
+    static RETURNED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub(crate) fn reset_navigation() {
+    RETURNED.with(|value| value.set(false));
+}
+
+pub(crate) fn returned_to_parent() -> bool {
+    RETURNED.with(std::cell::Cell::get)
+}
+
+pub(crate) fn back() -> anyhow::Error {
+    RETURNED.with(|value| value.set(true));
+    MenuBack.into()
+}
+
+pub(crate) fn clear_screen() -> Result<()> {
+    let term = Term::stdout();
+    if term.is_term() {
+        term.clear_screen().context("清理终端失败")?;
+    }
+    Ok(())
+}
+
+pub(crate) fn pause_main_menu() -> Result<()> {
+    read_pause(&mut io::stdin().lock(), &mut io::stdout())
+}
+
+fn read_pause(reader: &mut impl BufRead, writer: &mut impl Write) -> Result<()> {
+    write!(writer, "\n按回车返回主菜单...")?;
+    writer.flush()?;
+    loop {
+        match line(reader) {
+            Ok(value) if value.trim().is_empty() => return Ok(()),
+            Ok(_) => continue,
+            Err(error) if error.is::<MenuEof>() => return Ok(()),
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 pub(crate) fn is_back(error: &anyhow::Error) -> bool {
     error.is::<MenuBack>()
 }
@@ -53,7 +98,7 @@ fn parse_text<T>(
     parse: &impl Fn(&str) -> Result<T>,
 ) -> Result<T> {
     if value.trim() == "0" {
-        return Err(MenuBack.into());
+        return Err(back());
     }
     let value = if value.is_empty() {
         default.unwrap_or(value)
@@ -105,7 +150,7 @@ pub(crate) fn read_confirm(
             "y" | "yes" => return Ok(true),
             "n" | "no" => return Ok(false),
             "" => return Ok(default),
-            "0" => return Err(MenuBack.into()),
+            "0" => return Err(back()),
             _ => writeln!(writer, "错误！请输入 y、yes、n、no 或 0")?,
         }
     }
@@ -144,9 +189,23 @@ pub(crate) fn read_menu_choice(
     writer: &mut impl Write,
     max: usize,
 ) -> Result<String> {
-    write!(writer, "请选择 [0-{max}]: ")?;
-    writer.flush().context("输出菜单提示失败")?;
-    line(reader)
+    loop {
+        write!(writer, "请选择 [0-{max}]: ")?;
+        writer.flush().context("输出菜单提示失败")?;
+        let value = line(reader)?;
+        if value.trim().is_empty() {
+            continue;
+        }
+        if value
+            .trim()
+            .parse::<usize>()
+            .is_ok_and(|value| value <= max)
+        {
+            RETURNED.with(|returned| returned.set(value.trim() == "0"));
+            return Ok(value);
+        }
+        writeln!(writer, "无效序号！")?;
+    }
 }
 
 pub(crate) fn text(
@@ -317,6 +376,32 @@ mod tests {
             },
         );
         (result, String::from_utf8(output).unwrap())
+    }
+
+    #[test]
+    fn numeric_menu_ignores_empty_and_unifies_invalid_choices() {
+        let mut output = Vec::new();
+        assert_eq!(
+            read_menu_choice(&mut Cursor::new("\n  \n-1\ntext\n11\n2\n"), &mut output, 10).unwrap(),
+            "2"
+        );
+        let output = String::from_utf8(output).unwrap();
+        assert_eq!(output.matches("无效序号！").count(), 3);
+        assert_eq!(output.matches("请选择 [0-10]: ").count(), 6);
+        assert!(!output.contains("可选"));
+        assert!(!returned_to_parent());
+        read_menu_choice(&mut Cursor::new("0\n"), &mut Vec::new(), 10).unwrap();
+        assert!(returned_to_parent());
+        reset_navigation();
+        assert!(!returned_to_parent());
+    }
+
+    #[test]
+    fn result_page_waits_for_enter_without_repeating_output() {
+        let mut output = Vec::new();
+        read_pause(&mut Cursor::new("1\n0\n\n"), &mut output).unwrap();
+        assert_eq!(String::from_utf8(output).unwrap(), "\n按回车返回主菜单...");
+        read_pause(&mut Cursor::new(""), &mut Vec::new()).unwrap();
     }
 
     #[test]
