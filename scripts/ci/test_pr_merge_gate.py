@@ -70,6 +70,8 @@ class GateTests(unittest.TestCase):
         artifact = {'reason': 'compiler-artifact', 'target': {'name': 'performance_baseline'},
                     'profile': {'test': True}, 'executable': '/tmp/target/debug/build/pkg/out/test'}
         self.assertEqual(executable([json.dumps(artifact)]), artifact['executable'])
+        chain = dict(artifact, target={'name': 'chain_systemd_e2e'})
+        self.assertEqual(executable(map(json.dumps, [artifact, chain]), 'chain_systemd_e2e'), chain['executable'])
         for messages in [[], [artifact, artifact], [dict(artifact, executable=None)],
                          [dict(artifact, profile={'test': False})]]:
             with self.assertRaises(ValueError):
