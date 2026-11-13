@@ -55,9 +55,10 @@ pub(crate) fn managed_state_needs_sudoku(exclude: Option<uuid::Uuid>) -> Result<
 }
 
 fn state_needs_sudoku(state: &crate::config::ManagedState, exclude: Option<uuid::Uuid>) -> bool {
-    state.profiles.iter().any(|profile| {
-        Some(profile.id) != exclude && credentials_need_sudoku(&profile.credentials)
-    })
+    state
+        .profiles
+        .iter()
+        .any(|profile| Some(profile.id) != exclude && credentials_need_sudoku(&profile.credentials))
 }
 
 pub(crate) async fn ensure_sudoku(required: bool) -> Result<()> {
@@ -122,9 +123,11 @@ mod tests {
         assert!(probe_script("test \"$1\" = --dry-run && test -f \"$2\"")
             .await
             .unwrap());
-        assert!(!probe_script("echo 'unknown variant `sudoku_mask`' >&2; exit 1")
-            .await
-            .unwrap());
+        assert!(
+            !probe_script("echo 'unknown variant `sudoku_mask`' >&2; exit 1")
+                .await
+                .unwrap()
+        );
         assert!(probe_script("echo 'permission denied' >&2; exit 1")
             .await
             .is_err());
@@ -134,7 +137,10 @@ mod tests {
     async fn pinned_shoes_accepts_capability_probe() {
         let Some(binary) = crate::shoes_e2e::shoes_binary(
             "shoes_compat::tests::pinned_shoes_accepts_capability_probe",
-            &[crate::shoes_e2e::SHOES_E2E_BIN, crate::shoes_e2e::TEST_SHOES],
+            &[
+                crate::shoes_e2e::SHOES_E2E_BIN,
+                crate::shoes_e2e::TEST_SHOES,
+            ],
         ) else {
             return;
         };
