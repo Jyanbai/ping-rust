@@ -70,7 +70,8 @@ requested/in_progress 只对关联 PR 轻量发布 pending，重新运行开始�
    尚未生效，不能把候选回归当作可信发布路径已上线。
 2. 为目标 `main` 创建/编辑 Active 分支 Ruleset，开启 Require a pull request before
    merging 和 Require status checks to pass。增加精确名称 **`PR Merge Gate`**，
-   来源选择 **GitHub Actions**；推荐开启 Require branches to be up to date before merging。
+   来源选择 **GitHub Actions**；必须开启 **Require branches to be up to date before merging**。
+   这是上线必要条件：main 前进时阻止旧 base 的成功状态在重新验证前用于合并。
 3. 若名称尚未出现，对一个打开的 PR 在 main 上手动运行 `PR Merge Gate`（pr 参数），
    等待状态创建后再选择。保留已有 required checks、安全限制和审核规则，勿新增 bypass。
 4. 配置后在打开的 PR 上核实该 status 绑定当前 head；新提交后等待完整测试与独立审查。

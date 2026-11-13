@@ -316,6 +316,7 @@ def event_targets(api, event, resolve=True):
 
 
 def process_event(api, event, policy):
+    known_heads = {}
     number = os.environ.get("PR_NUMBER", "")
     if not number and "pull_request" in event:
         number = str(event["pull_request"]["number"])
@@ -327,7 +328,10 @@ def process_event(api, event, policy):
             raise ValueError("PR 编号必须是正整数")
         numbers = [int(number)]
     else:
-        numbers = [p["number"] for p in api.pages("pulls?state=open&base=main")]
+        prs = api.pages("pulls?state=open&base=main")
+        numbers = [p['number'] for p in prs]
+        known_heads = {p['number']: p['head']['sha'] for p in prs}
+    failed = []
     for number in numbers:
         if event.get("workflow_run") and event.get("action") in ("requested", "in_progress"):
             pr = api.request(f"pulls/{number}")
@@ -335,7 +339,15 @@ def process_event(api, event, policy):
                     and (expected_sha is None or pr["head"]["sha"] == expected_sha)):
                 api.status(pr["head"]["sha"], "pending", "当前 head 的必需运行或独立审查已开始，等待最终证据")
             continue
-        inspect_pr(api, number, policy, publish=os.environ.get("DRY_RUN") != "true")
+        try:
+            inspect_pr(api, number, policy, publish=os.environ.get("DRY_RUN") != "true")
+        except Exception:
+            sha = known_heads.get(number) or expected_sha
+            if sha and re.fullmatch(r'[0-9a-f]{40}', sha) and os.environ.get('DRY_RUN') != 'true':
+                api.status(sha, 'failure', 'PR 读取或验证失败，无法确认当前门禁')
+            failed.append(number)
+    if failed:
+        raise RuntimeError(f'PR 检查异常：{failed}')
 
 
 def run_event(api, event, policy):

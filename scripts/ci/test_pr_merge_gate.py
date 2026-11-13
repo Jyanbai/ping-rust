@@ -73,6 +73,33 @@ class CollectorAPI:
 
 
 class GateTests(unittest.TestCase):
+    def test_scheduled_scan_retains_heads_and_continues_after_pr_lookup_failure(self):
+        from unittest.mock import patch
+        import os
+
+        class ScanAPI:
+            def __init__(self):
+                self.reads, self.statuses = [], []
+
+            def pages(inner, path, key=None):
+                return [{'number': n, 'head': {'sha': sha}} for n, sha in [(7, self.sha), (8, 'b' * 40)]]
+
+            def request(self, path):
+                self.reads.append(path)
+                if path == 'pulls/7':
+                    raise OSError('PR unavailable')
+                return {'state': 'closed'}
+
+            def status(self, sha, state, description):
+                self.statuses.append((sha, state))
+
+        api = ScanAPI()
+        with patch.dict(os.environ, {'PR_NUMBER': '', 'DRY_RUN': 'false'}):
+            with self.assertRaises(RuntimeError):
+                run_event(api, {}, self.policy)
+        self.assertEqual(api.reads, ['pulls/7', 'pulls/8'])
+        self.assertEqual(api.statuses, [(self.sha, 'failure')])
+
     def test_event_resolution_and_initial_pr_api_errors_revoke_known_head(self):
         from unittest.mock import patch
         import os
