@@ -53,10 +53,6 @@ pub fn verified_pin() -> &'static str {
     SHOES_SCHEMA_REVISION
 }
 
-pub fn verified_version() -> &'static str {
-    SHOES_SCHEMA_VERSION
-}
-
 pub fn load_provenance() -> ShoesProvenance {
     load_provenance_from(
         Path::new(utils::SHOES_PROVENANCE_FILE),
@@ -213,6 +209,7 @@ fn ensure_pinned_release_tag(tag: &str) -> Result<()> {
 }
 
 /// 已安装 shoes 来自 GitHub Release 且版本高于固定版本时返回提示；仅展示，绝不自动降级。
+#[cfg(test)]
 pub fn unverified_installed_notice(known: &ShoesProvenance) -> Option<String> {
     if known.source != "github-release" {
         return None;
@@ -229,6 +226,7 @@ pub fn unverified_installed_notice(known: &ShoesProvenance) -> Option<String> {
 }
 
 /// 上游存在比固定版本更新的 Release 时返回提示文本；仅用于展示，绝不触发安装。
+#[cfg(test)]
 pub fn newer_upstream_release_notice(upstream_tag: &str) -> Option<String> {
     let upstream = release_version(upstream_tag)?;
     let pinned = release_version(SHOES_RELEASE_TAG)?;

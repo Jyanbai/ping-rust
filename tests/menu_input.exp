@@ -196,7 +196,8 @@ foreach advanced {0 1} {
         expect_or_fail [format {请选择 \[0-%s\]: } $count] "cipher prompt"
         empty_stays $count
         send_choice 0
-        if {!$advanced} { shadowsocks_modes 0; send_choice 0 }
+        shadowsocks_modes $advanced
+        send_choice 0
         protocol_menu
         send_choice 0
         back_to_main $advanced
@@ -269,9 +270,11 @@ expect_or_fail {确认删除 [^\r\n]+？ \[y/N\]（输入 0 返回）：} "delet
 send_choice ""
 result_page
 # Successful view/help return via one result page and keep the process alive.
+log_user 0
 send_choice 3
 choose_profile
 result_page
+log_user 1
 send_choice 10
 result_page
 send_choice 9
@@ -280,6 +283,17 @@ send_choice 3
 expect_or_fail {输入 SNI 域名，空格分隔[^\r\n]*（输入 0 返回）：} "SNI input"
 send_choice 0
 tools_menu
+send_choice 0
+main_menu
+send_choice 6
+expect_or_fail {更新中心:} "update center"
+expect_or_fail {请选择 \[0-3\]: } "update prompt"
+send_choice 2
+expect_or_fail {shoes 内核:} "kernel picker"
+expect_or_fail {请选择 \[0-2\]: } "kernel prompt"
+send_choice 0
+expect_or_fail {更新中心:} "kernel returns to update center"
+expect_or_fail {请选择 \[0-3\]: } "update prompt again"
 send_choice 0
 main_menu
 send_choice 8

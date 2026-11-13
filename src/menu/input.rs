@@ -397,8 +397,10 @@ mod tests {
         assert_eq!(output.matches("请选择 [0-10]: ").count(), 6);
         assert!(!output.contains("可选"));
         assert!(!returned_to_parent());
-        read_menu_choice(&mut Cursor::new("0\n"), &mut Vec::new(), 10).unwrap();
-        assert!(returned_to_parent());
+        for zero in ["0\n", "00\n", "+0\n"] {
+            read_menu_choice(&mut Cursor::new(zero), &mut Vec::new(), 10).unwrap();
+            assert!(returned_to_parent());
+        }
         reset_navigation();
         assert!(!returned_to_parent());
     }

@@ -173,10 +173,10 @@ fn parse_port_change(input: &str) -> Option<PortChoice> {
 }
 
 fn parse_shadowsocks_mode(input: &str) -> Option<Option<config::ShadowsocksMode>> {
-    match input.trim() {
-        "1" => Some(Some(config::ShadowsocksMode::Plain)),
-        "2" => Some(Some(config::ShadowsocksMode::ShadowTlsV3)),
-        "0" => Some(None),
+    match input.trim().parse::<usize>().ok()? {
+        1 => Some(Some(config::ShadowsocksMode::Plain)),
+        2 => Some(Some(config::ShadowsocksMode::ShadowTlsV3)),
+        0 => Some(None),
         _ => None,
     }
 }
@@ -334,7 +334,7 @@ fn node_summary(state: Result<config::ManagedState>) -> String {
         }
     };
     if state.profiles.is_empty() {
-        return "节点：暂无，选择 1) 添加配置".to_owned();
+        return "节点 (0):\n暂无节点".to_owned();
     }
     let count = state.profiles.len();
     let mut lines = vec![format!("节点 ({count}):")];
@@ -559,14 +559,17 @@ async fn change_config_menu() -> Result<()> {
         println!("没有可更改的配置。");
         return Ok(());
     }
-    let Some(selected) = select_profile(&state.profiles)? else {
-        return Ok(());
-    };
-    let profile = state.profiles[selected].clone();
     loop {
-        match change_profile_menu(&profile).await {
-            Err(error) if input::is_back(&error) => continue,
-            result => return result,
+        let Some(selected) = select_profile(&state.profiles)? else {
+            return Ok(());
+        };
+        let profile = state.profiles[selected].clone();
+        loop {
+            match change_profile_menu(&profile).await {
+                Err(error) if input::is_back(&error) => continue,
+                Ok(()) if input::returned_to_parent() && state.profiles.len() > 1 => break,
+                result => return result,
+            }
         }
     }
 }
@@ -1590,14 +1593,10 @@ fn select_shadowsocks_cipher(mode: config::ShadowsocksMode) -> Result<Option<Sha
     println!();
     loop {
         let value = read_menu_choice(ciphers.len())?;
-        let value = value.trim();
-        if value == "0" {
-            return Ok(None);
-        }
-        if let Ok(selected) = value.parse::<usize>() {
-            if let Some(cipher) = ciphers.get(selected.saturating_sub(1)) {
-                return Ok(Some(*cipher));
-            }
+        match parse_numbered_choice(&value, ciphers.len()) {
+            Some(Some(index)) => return Ok(Some(ciphers[index])),
+            Some(None) => return Ok(None),
+            None => {}
         }
         println!("无效序号！");
     }
@@ -1883,60 +1882,64 @@ async fn advanced_add_protocol(protocol: Protocol) -> Result<()> {
     }
     let mut shadowtls_server_name = None;
     if matches!(protocol, Protocol::Shadowsocks) {
-        let Some(mode) = select_numbered(
-            "Shadowsocks 模式",
-            &["普通 SS2022", "SS2022 + ShadowTLS v3"],
-        )?
-        else {
-            return Ok(());
-        };
-        options.shadowsocks_mode = if mode == 1 {
-            config::ShadowsocksMode::ShadowTlsV3
-        } else {
-            config::ShadowsocksMode::Plain
-        };
-        let ciphers = if options.shadowsocks_mode == config::ShadowsocksMode::ShadowTlsV3 {
-            vec![
-                "2022-blake3-aes-256-gcm",
-                "2022-blake3-aes-128-gcm",
-                "2022-blake3-chacha20-ietf-poly1305",
-            ]
-        } else {
-            vec![
-                "2022-blake3-aes-256-gcm",
-                "2022-blake3-aes-128-gcm",
-                "2022-blake3-chacha20-ietf-poly1305",
-                "aes-256-gcm",
-                "aes-128-gcm",
-                "chacha20-ietf-poly1305",
-            ]
-        };
-        let Some(cipher) = select_numbered("选择加密方式", &ciphers)? else {
-            return Ok(());
-        };
-        options.shadowsocks_cipher = match cipher {
-            0 => ShadowsocksCipher::Aes256Gcm2022,
-            1 => ShadowsocksCipher::Aes128Gcm2022,
-            2 => ShadowsocksCipher::Chacha20IetfPoly13052022,
-            3 => ShadowsocksCipher::Aes256Gcm,
-            4 => ShadowsocksCipher::Aes128Gcm,
-            _ => ShadowsocksCipher::Chacha20IetfPoly1305,
-        };
-        if options.shadowsocks_mode == config::ShadowsocksMode::ShadowTlsV3 {
-            let password = input::password("SS2022 密钥（留空则安全生成）", true)?;
-            options.shadowsocks_password = (!password.is_empty()).then_some(password);
-            let shadow_password = input::password("ShadowTLS 密码（留空则安全生成）", true)?;
-            options.shadowtls_password = (!shadow_password.is_empty()).then_some(shadow_password);
-            let sni = prompt_probed_sni("ShadowTLS SNI", crate::sni::Mode::ShadowTls).await?;
-            shadowtls_server_name = Some(sni.clone());
-            let handshake = input::checked_text(
-                "Handshake destination（host:port）",
-                Some(&(format!("{sni}:443"))),
-                false,
-                config::validate_host_port,
-            )?;
-            options.shadowtls_handshake = Some(handshake);
-            options.udp_enabled = false;
+        loop {
+            let Some(mode) = select_numbered(
+                "Shadowsocks 模式",
+                &["普通 SS2022", "SS2022 + ShadowTLS v3"],
+            )?
+            else {
+                return Ok(());
+            };
+            options.shadowsocks_mode = if mode == 1 {
+                config::ShadowsocksMode::ShadowTlsV3
+            } else {
+                config::ShadowsocksMode::Plain
+            };
+            let ciphers = if options.shadowsocks_mode == config::ShadowsocksMode::ShadowTlsV3 {
+                vec![
+                    "2022-blake3-aes-256-gcm",
+                    "2022-blake3-aes-128-gcm",
+                    "2022-blake3-chacha20-ietf-poly1305",
+                ]
+            } else {
+                vec![
+                    "2022-blake3-aes-256-gcm",
+                    "2022-blake3-aes-128-gcm",
+                    "2022-blake3-chacha20-ietf-poly1305",
+                    "aes-256-gcm",
+                    "aes-128-gcm",
+                    "chacha20-ietf-poly1305",
+                ]
+            };
+            let Some(cipher) = select_numbered("选择加密方式", &ciphers)? else {
+                continue;
+            };
+            options.shadowsocks_cipher = match cipher {
+                0 => ShadowsocksCipher::Aes256Gcm2022,
+                1 => ShadowsocksCipher::Aes128Gcm2022,
+                2 => ShadowsocksCipher::Chacha20IetfPoly13052022,
+                3 => ShadowsocksCipher::Aes256Gcm,
+                4 => ShadowsocksCipher::Aes128Gcm,
+                _ => ShadowsocksCipher::Chacha20IetfPoly1305,
+            };
+            if options.shadowsocks_mode == config::ShadowsocksMode::ShadowTlsV3 {
+                let password = input::password("SS2022 密钥（默认：随机生成）", true)?;
+                options.shadowsocks_password = (!password.is_empty()).then_some(password);
+                let shadow_password = input::password("ShadowTLS 密码（默认：随机生成）", true)?;
+                options.shadowtls_password =
+                    (!shadow_password.is_empty()).then_some(shadow_password);
+                let sni = prompt_probed_sni("ShadowTLS SNI", crate::sni::Mode::ShadowTls).await?;
+                shadowtls_server_name = Some(sni.clone());
+                let handshake = input::checked_text(
+                    "Handshake destination（host:port）",
+                    Some(&(format!("{sni}:443"))),
+                    false,
+                    config::validate_host_port,
+                )?;
+                options.shadowtls_handshake = Some(handshake);
+                options.udp_enabled = false;
+            }
+            break;
         }
     }
     if matches!(protocol, Protocol::Snell) {
@@ -2094,20 +2097,21 @@ async fn advanced_add_protocol(protocol: Protocol) -> Result<()> {
 }
 
 async fn update_menu() -> Result<MenuControl> {
-    let Some(selected) = select_numbered("更新中心", &UPDATE_CENTER_ITEMS)? else {
-        return Ok(MenuControl::Continue);
-    };
-    match selected {
-        0 => {
-            cli::run_self_update(None, false).await?;
-            Ok(MenuControl::Continue)
+    loop {
+        let Some(selected) = select_numbered("更新中心", &UPDATE_CENTER_ITEMS)? else {
+            return Ok(MenuControl::Continue);
+        };
+        match selected {
+            0 => {
+                cli::run_self_update(None, false).await?;
+            }
+            1 => shoes_update_menu().await?,
+            2 => cli::print_update_status().await?,
+            _ => unreachable!("更新中心编号已验证"),
         }
-        1 => shoes_update_menu().await.map(|_| MenuControl::Continue),
-        2 => {
-            cli::print_update_status().await?;
-            Ok(MenuControl::Continue)
+        if !input::returned_to_parent() {
+            return Ok(MenuControl::Continue);
         }
-        _ => unreachable!("更新中心编号已验证"),
     }
 }
 
@@ -2734,7 +2738,7 @@ mod tests {
     fn node_summary_handles_empty_three_and_six_profiles_without_secrets() {
         assert_eq!(
             node_summary(Ok(config::ManagedState::default())),
-            "节点：暂无，选择 1) 添加配置"
+            "节点 (0):\n暂无节点"
         );
         let mut state = config::ManagedState {
             profiles: summary_profiles(),
@@ -2792,7 +2796,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let missing = directory.path().join("ping-rust-state.json");
         let state = summary_state(&missing, || anyhow::bail!("读取管理状态失败"));
-        assert_eq!(node_summary(state), "节点：暂无，选择 1) 添加配置");
+        assert_eq!(node_summary(state), "节点 (0):\n暂无节点");
         std::fs::write(&missing, "{").unwrap();
         let state = summary_state(&missing, || anyhow::bail!("管理状态 JSON 已损坏"));
         assert_eq!(
