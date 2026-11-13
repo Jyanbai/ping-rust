@@ -139,9 +139,33 @@ fn serve_socks(mut incoming: TcpStream) -> io::Result<()> {
 }
 
 fn reserve_ports(count: usize) -> io::Result<Vec<TcpListener>> {
-    (0..count)
-        .map(|_| TcpListener::bind("127.0.0.1:0"))
-        .collect()
+    // A released port from bind(:0) can become a client source port before
+    // shoes binds it. On Linux choose ports below the kernel ephemeral range.
+    let upper = if cfg!(target_os = "linux") {
+        fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range")?
+            .split_whitespace()
+            .next()
+            .ok_or_else(|| io::Error::other("missing ephemeral port range"))?
+            .parse::<u16>()
+            .map_err(io::Error::other)?
+    } else {
+        32768
+    };
+    let mut listeners = Vec::new();
+    for port in 1024..upper {
+        match TcpListener::bind(("127.0.0.1", port)) {
+            Ok(listener) => listeners.push(listener),
+            Err(error) if error.kind() == io::ErrorKind::AddrInUse => continue,
+            Err(error) => return Err(error),
+        }
+        if listeners.len() == count {
+            return Ok(listeners);
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AddrNotAvailable,
+        "not enough listener ports outside the ephemeral range",
+    ))
 }
 
 #[test]
@@ -153,6 +177,16 @@ fn reserved_ingress_ports_cannot_be_reused_by_relays() -> io::Result<()> {
         .map(TcpListener::local_addr)
         .collect::<io::Result<Vec<_>>>()?;
     for address in &addresses {
+        if cfg!(target_os = "linux") {
+            let range = fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range")?;
+            let lower = range
+                .split_whitespace()
+                .next()
+                .unwrap()
+                .parse::<u16>()
+                .unwrap();
+            assert!(address.port() < lower);
+        }
         let error = TcpListener::bind(address).expect_err("reserved address was reused");
         assert_eq!(error.kind(), io::ErrorKind::AddrInUse);
     }
