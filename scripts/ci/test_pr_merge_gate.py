@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import unittest
 
-from pr_merge_gate import evaluate, review_verdict, inspect_pr, latest_review, event_targets, REVIEW_STEPS, GitHub
+from pr_merge_gate import evaluate, review_verdict, inspect_pr, latest_review, event_targets, REVIEW_STEPS, GitHub, run_event
 
 
 class CollectorAPI:
@@ -73,6 +73,33 @@ class CollectorAPI:
 
 
 class GateTests(unittest.TestCase):
+    def test_event_resolution_and_initial_pr_api_errors_revoke_known_head(self):
+        from unittest.mock import patch
+        import os
+
+        for stage in ['targets', 'pr']:
+            class BrokenAPI:
+                def __init__(self):
+                    self.statuses = []
+
+                def pages(inner, path, key=None):
+                    if stage == 'targets':
+                        raise OSError('target lookup failed')
+                    return [{'number': 7, 'state': 'open', 'head': {'sha': self.sha}, 'base': {'ref': 'main'}}]
+
+                def request(self, path):
+                    raise OSError('PR lookup failed')
+
+                def status(self, sha, state, description):
+                    self.statuses.append((sha, state))
+
+            api = BrokenAPI()
+            event = {'action': 'in_progress', 'workflow_run': self.run}
+            with patch.dict(os.environ, {'PR_NUMBER': '', 'DRY_RUN': 'false'}):
+                with self.assertRaises(OSError):
+                    run_event(api, event, self.policy)
+            self.assertEqual(api.statuses[-1], (self.sha, 'failure'))
+
     def test_initial_status_read_failure_attempts_failure_publication(self):
         class InitialFailure(CollectorAPI):
             def status(self, sha, state, description):

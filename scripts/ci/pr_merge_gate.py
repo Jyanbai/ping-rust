@@ -288,7 +288,7 @@ def inspect_pr(api, number, policy, publish=True):
         raise
 
 
-def event_targets(api, event):
+def event_targets(api, event, resolve=True):
     """只核对事件关联的当前 PR；push 和旧 head 事件不扫描整个仓库。"""
     run = event.get("workflow_run")
     if run is None:
@@ -308,15 +308,14 @@ def event_targets(api, event):
         return [], None
     if not re.fullmatch(r"[0-9a-f]{40}", sha):
         return [], None
+    if not resolve:
+        return [], sha
     prs = api.pages(f"commits/{sha}/pulls")
     return [p["number"] for p in prs if p["state"] == "open"
             and p["head"]["sha"] == sha and p["base"]["ref"] == "main"], sha
 
 
-def main():
-    api = GitHub()
-    policy = json.loads(Path(__file__).with_name("pr_merge_gate_policy.json").read_text(encoding="utf-8"))
-    event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
+def process_event(api, event, policy):
     number = os.environ.get("PR_NUMBER", "")
     if not number and "pull_request" in event:
         number = str(event["pull_request"]["number"])
@@ -337,6 +336,25 @@ def main():
                 api.status(pr["head"]["sha"], "pending", "当前 head 的必需运行或独立审查已开始，等待最终证据")
             continue
         inspect_pr(api, number, policy, publish=os.environ.get("DRY_RUN") != "true")
+
+
+def run_event(api, event, policy):
+    try:
+        process_event(api, event, policy)
+    except Exception:
+        # 目标 API 失败也不能保留事件中已知 head 的旧绿灯。
+        _, sha = event_targets(None, event, resolve=False)
+        sha = sha or event.get('pull_request', {}).get('head', {}).get('sha', '')
+        if re.fullmatch(r'[0-9a-f]{40}', sha) and os.environ.get('DRY_RUN') != 'true':
+            api.status(sha, 'failure', '事件目标或证据读取失败，无法确认当前门禁')
+        raise
+
+
+def main():
+    api = GitHub()
+    policy = json.loads(Path(__file__).with_name("pr_merge_gate_policy.json").read_text(encoding="utf-8"))
+    event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
+    run_event(api, event, policy)
 
 
 if __name__ == "__main__":
