@@ -644,7 +644,7 @@ jobs:
           test -x "$inconsistent_bin"
           echo "test_bin=$test_bin" >> "$GITHUB_OUTPUT"
           echo "inconsistent_bin=$inconsistent_bin" >> "$GITHUB_OUTPUT"
-      - name: Prepare one managed node
+      - name: Prepare two managed nodes
         shell: bash
         run: |
           set -euo pipefail
@@ -652,6 +652,8 @@ jobs:
           # Output contains node credentials; keep it out of the log.
           sudo target/debug/ping-rust generate reality --name menu-e2e --port 24431 \
             --server-name www.amazon.com --dest www.amazon.com:443 \
+            --output /etc/shoes/config.yaml >/dev/null
+          sudo target/debug/ping-rust generate socks5 --name menu-socks --port 24432 \
             --output /etc/shoes/config.yaml >/dev/null
           sudo systemctl stop shoes.service 2>/dev/null || true
           sudo test -s /etc/shoes/ping-rust-state.json

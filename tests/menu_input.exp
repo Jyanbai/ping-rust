@@ -262,6 +262,11 @@ expect_or_fail {新配置名称（默认：[^\r\n]+，输入 0 返回）：} "re
 send_choice 0
 change_menu
 send_choice 0
+if {$profile_count > 1} {
+    expect_or_fail {请选择配置:} "change returns to profile picker"
+    expect_or_fail {请选择 \[0-[0-9]+\]: } "profile return prompt"
+    send_choice 0
+}
 main_menu
 # Delete defaults to no; all bytes checked by the Rust harness after exit.
 send_choice 4
