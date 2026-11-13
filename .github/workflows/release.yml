@@ -211,6 +211,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          echo 'attempted=true' >> "$GITHUB_OUTPUT"
           gh release edit "${GITHUB_REF_NAME}" --draft=false
           echo 'published=true' >> "$GITHUB_OUTPUT"
 
@@ -306,12 +307,15 @@ jobs:
           rm -f "${bootstrap_output}"
           sudo "${bootstrap_dir}/ping-rust" uninstall --purge
 
+      - name: Mark public acceptance complete
+        id: accepted
+        run: echo 'verified=true' >> "$GITHUB_OUTPUT"
+
       - name: Rollback public Release to draft on failure
-        if: ${{ failure() && steps.publish.outputs.published == 'true' }}
+        if: ${{ always() && steps.publish.outputs.attempted == 'true' && steps.accepted.outputs.verified != 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          echo "::error::Release 发布后公开下载或安装验收失败，尝试立即撤回为 draft"
-          gh release edit "${GITHUB_REF_NAME}" --draft=true
+          bash scripts/ci/release_rollback.sh

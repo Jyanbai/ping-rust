@@ -1,6 +1,8 @@
 """Strict Release gate positive and negative regression cases (GitHub Actions only)."""
 import copy
 import io
+import os
+import subprocess
 from pathlib import Path
 import tarfile
 import tempfile
@@ -42,6 +44,33 @@ class API:
 
 
 class Tests(unittest.TestCase):
+    def test_rollback_reconciles_public_draft_and_unknown_outcomes(self):
+        root=Path(__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory() as temp:
+            directory=Path(temp)
+            gh=directory/"gh"
+            gh.write_text('#!/bin/sh\nif [ "$2" = view ]; then\n'
+                          '  [ "$MOCK_DRAFT" != lookup-error ] || exit 1\n'
+                          '  printf "%s\\n" "$MOCK_DRAFT"\n'
+                          'else\n  printf "%s\\n" "$*" >> "$MOCK_EDITS"\nfi\n')
+            gh.chmod(0o755)
+            for draft,success,edited in [("false",True,True),("true",True,False),
+                                         ("lookup-error",False,False),("unknown",False,False)]:
+                edits=directory/"edits"
+                edits.unlink(missing_ok=True)
+                env=dict(os.environ,PATH=f"{directory}:{os.environ['PATH']}",
+                         MOCK_DRAFT=draft,MOCK_EDITS=str(edits),GITHUB_REF_NAME="v0.3.0")
+                result=subprocess.run(["bash",str(root/"scripts/ci/release_rollback.sh")],
+                                      env=env,capture_output=True)
+                with self.subTest(draft=draft):
+                    self.assertEqual(result.returncode==0,success)
+                    self.assertEqual(edits.exists(),edited)
+                    if edited:self.assertIn("--draft=true",edits.read_text())
+        workflow=(root/".github/workflows/release.yml").read_text()
+        self.assertLess(workflow.index("echo 'attempted=true'"),
+                        workflow.index('gh release edit "${GITHUB_REF_NAME}" --draft=false'))
+        self.assertIn("always() && steps.publish.outputs.attempted == 'true' && steps.accepted.outputs.verified != 'true'",workflow)
+
     def test_version_and_manifest_lock(self):
         self.assertEqual(verify_version("v0.3.0",MANIFEST,LOCK),"0.3.0")
         for tag,manifest,lock in [
