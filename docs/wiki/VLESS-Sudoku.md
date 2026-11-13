@@ -4,13 +4,7 @@
 
 shoes v0.3.7 的 `sudoku_mask` 是 Xray FinalMask Sudoku TCP 外层混淆，不是独立隧道，也不是 Mihomo 的 `sudoku` 协议。最外层是掩码，最内层是普通 VLESS；没有 encryption/decryption、Vision、TLS 或 REALITY。
 
-快速和高级协议列表均为 **16) VLESS-Sudoku**，末尾为 `0) 返回`，主菜单不变。添加前显示安全说明和代价，然后询问：
-
-```text
-仍要添加无加密的 VLESS-Sudoku 节点？ [y/N]（输入 0 返回）：
-```
-
-默认 N；0 返回。CLI 不读取 stdin，添加时安全说明写到 stderr：
+快速和高级协议列表均为 **16) VLESS-Sudoku**，末尾为 `0) 返回`，主菜单编号不变。选择后直接进入参数输入，不再打印安全/代价说明或追加确认；CLI 不读取 stdin，也不输出这些说明。
 
 ```sh
 sudo prs add vless-sudoku --server-address 203.0.113.10
@@ -27,7 +21,7 @@ Sudoku 始终开启，无需 `--sudoku`。复用 VLESS-ENC 的 Sudoku 参数：`
 该客户端导出不支持 Xray FinalMask Sudoku，请用分享链接导入 v2rayN 或 Xray ≥ v26.3.27
 ```
 
-`prs info` 明示“加密：无”与 Sudoku ascii、padding 范围。菜单“2 更改配置”支持修改端口、ascii、padding 和重新生成 Sudoku 密码；密码重置提示旧分享链接失效，默认 N。padding 编辑先确认（0 返回），输入值时 0 是合法百分比；无效范围会重新询问。变更走原有 dry-run、原子提交、服务激活与失败回滚流程。
+`prs info` 显示连接参数与 Sudoku ascii、padding 范围，不重复协议说明。菜单“2 更改配置”支持修改端口、ascii、padding 和重新生成 Sudoku 密码；密码重置不再追加确认。padding 编辑先确认（0 返回），输入值时 0 是合法百分比；无效范围会重新询问。变更走原有 dry-run、原子提交、服务激活与失败回滚流程。
 
 新节点写到 state 顶层 `sudoku_profiles` 扩展，记录绝对位置并保持与 XHTTP 等协议混排的顺序。已有协议输出不变，v0.2.1 可忽略扩展并读取旧节点；降级管理配置前先用新版删除新协议节点并备份。配置和 state 写入权限 0600。
 

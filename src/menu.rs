@@ -1097,6 +1097,7 @@ async fn change_profile_menu(profile: &config::ManagedProfile) -> Result<()> {
     };
 
     deployment::update_and_activate(profile.id, change).await?;
+    input::clear_screen()?;
     println!("{}", "配置更改成功。".green());
     Ok(())
 }
@@ -1112,6 +1113,7 @@ fn view_config_menu() -> Result<MenuControl> {
     };
     let profile = &state.profiles[selected];
     let (share_uri, share_warning) = share_uri_for_view(profile);
+    input::clear_screen()?;
     cli::print_profile_details_with_qr(profile, share_uri.as_deref());
     if let Some(warning) = share_warning {
         println!("未生成标准分享链接：{warning}");
@@ -1143,6 +1145,7 @@ async fn delete_config_menu() -> Result<()> {
         return Ok(());
     }
     deployment::delete_and_activate(profile.id).await?;
+    input::clear_screen()?;
     println!("{}", "配置删除成功。".green());
     Ok(())
 }
@@ -1525,6 +1528,7 @@ async fn fast_add_config_menu_once() -> Result<MenuControl> {
             })
             .await?;
             let _ = result;
+            input::clear_screen()?;
             println!("{}", "配置添加成功。".green());
             return Ok(control_after_success(1));
         }
@@ -1829,6 +1833,7 @@ async fn deploy_fast_config(
         fast_add::execute(request).await?
     };
     let _ = result;
+    input::clear_screen()?;
     println!("{}", "配置添加成功。".green());
     Ok(control_after_success(1))
 }
@@ -2092,6 +2097,7 @@ async fn advanced_add_protocol(protocol: Protocol) -> Result<()> {
     })
     .await?;
     let _ = result;
+    input::clear_screen()?;
     println!("{}", "配置添加成功。".green());
     Ok(())
 }
