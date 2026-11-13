@@ -1,0 +1,105 @@
+#!/usr/bin/expect -f
+# 在 Actions 专用 systemd 实例里覆盖快速/高级添加的 TLS / REALITY 两种模式。
+# 不记录终端详情，避免把随机凭据、分享链接或探测到的地址写入日志。
+set timeout 180
+log_user 0
+if {$argc != 4} {
+    puts stderr "usage: menu-anytls.exp <ping-rust> <quick|advanced> <1|2> <port>"
+    exit 2
+}
+set binary [lindex $argv 0]
+set flow [lindex $argv 1]
+set mode [lindex $argv 2]
+set port [lindex $argv 3]
+if {$flow ni {quick advanced} || $mode ni {1 2}} {
+    puts stderr "invalid AnyTLS menu flow or mode"
+    exit 2
+}
+proc wait_for {pattern stage} {
+    expect {
+        -re $pattern { return }
+        eof { puts stderr "unexpected EOF at $stage"; exit 1 }
+        timeout { puts stderr "timeout at $stage"; exit 1 }
+    }
+}
+# expect 会按分支顺序选择匹配，URI 与成功提示可能在同一次读取中到达。
+# 在消费任一结果模式前记录整个已消费缓冲区，避免丢掉更早的成功提示。
+proc record_result {output} {
+    global activated uri unsupported mode
+    if {[regexp {配置验证通过，服务已启动|部署成功，shoes 服务已启动} $output]} {
+        set activated 1
+    }
+    if {[regexp {anytls://} $output]} {
+        if {$mode == "2"} {
+            puts stderr "AnyTLS REALITY emitted a lossy TLS URI"
+            exit 1
+        }
+        set uri 1
+    }
+    if {[regexp {未生成标准分享链接|AnyTLS\+Reality 没有标准分享 URI} $output]} {
+        set unsupported 1
+    }
+}
+set selected 0
+set sni 0
+set activated 0
+set uri 0
+set unsupported 0
+spawn $binary
+wait_for {请选择 \[0-10\]} main-menu
+if {$flow == "quick"} {
+    send "1\r"
+} else {
+    send "9\r"
+    wait_for {请选择 \[0-8\]} tools-menu
+    send "2\r"
+}
+wait_for {请选择 \[0-16\]} protocol-menu
+send "7\r"
+expect {
+    -re {配置名称} { send "menu-anytls-$flow-$mode\r"; exp_continue }
+    -re {输入端口|监听端口} { send "$port\r"; exp_continue }
+    -re {AnyTLS 外层安全模式} { incr selected; send "$mode\r"; exp_continue }
+    -re {AnyTLS 用户名|AnyTLS 密码} { send "\r"; exp_continue }
+    -re {继续添加 AnyTLS 用户} { send "n\r"; exp_continue }
+    -re {使用[^\r\n]*padding_scheme} { send "y\r"; exp_continue }
+    -re {配置认证失败 fallback} { send "n\r"; exp_continue }
+    -re {证书域名/服务器名称} { send "anytls.example.com\r"; exp_continue }
+    -re {使用已有 PEM 证书和私钥} { send "n\r"; exp_continue }
+    -re {选择 SNI 方式} { incr sni; send "\r"; exp_continue }
+    -re {Reality fallback} { send "\r"; exp_continue }
+    -re {请输入 VPS 公网域名或 IP} { send "203.0.113.10\r"; exp_continue }
+    -re {未生成标准分享链接|AnyTLS\+Reality 没有标准分享 URI} {
+        record_result $expect_out(buffer)
+        exp_continue
+    }
+    -re {anytls://} {
+        record_result $expect_out(buffer)
+        exp_continue
+    }
+    -re {配置验证通过，服务已启动|部署成功，shoes 服务已启动} {
+        record_result $expect_out(buffer)
+        exp_continue
+    }
+    -re {请选择 \[0-10\]} {
+        record_result $expect_out(buffer)
+        if {!$activated} {
+            puts stderr "AnyTLS menu returned without successful activation"
+            exit 1
+        }
+        send "0\r"
+        exp_continue
+    }
+    eof {}
+    timeout { puts stderr "AnyTLS $flow mode $mode timed out"; exit 1 }
+}
+set result [wait]
+if {[lindex $result 2] != 0 || [lindex $result 3] != 0 || $selected != 1 || !$activated} {
+    puts stderr "AnyTLS $flow mode $mode did not activate and exit successfully"
+    exit 1
+}
+if {($mode == "1" && (!$uri || $sni != 0)) || ($mode == "2" && (!$unsupported || $sni != 1))} {
+    puts stderr "AnyTLS $flow mode $mode used incorrect SNI or URI behavior"
+    exit 1
+}
+puts "AnyTLS $flow mode $mode numeric PTY: PASS"

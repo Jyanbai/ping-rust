@@ -1,6 +1,6 @@
 # VLESS-ENC
 
-菜单第 **14** 项，或运行 `sudo prs add vless-enc`。默认使用 x25519、native、0rtt、600s，Vision 默认关闭。密钥由已安装的 shoes 生成。
+快速和高级添加菜单第 **5) VLESS-ENC** 项，或运行 `sudo prs add vless-enc`。默认使用 x25519、native、0rtt、600s，Vision 默认关闭。密钥由已安装的 shoes 生成。
 
 **此预设不套 TLS 或 Reality；安全性完全依赖 VLESS Encryption。** 服务端为原生 TCP，客户端为 `security=none&type=tcp`。decryption 只写入权限 0600 的节点 profile 和聚合运行配置；state、分享链接及客户端导出仅保存客户端 encryption。
 

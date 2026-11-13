@@ -37,10 +37,7 @@ fn sample() -> (ServerConfig, ManagedProfile) {
 fn vless_sudoku_yaml_link_exports_and_info_agree() {
     let (server, profile) = sample();
     assert_eq!(profile.protocol().slug(), "vless-sudoku");
-    assert_eq!(
-        profile.protocol().advanced_label(),
-        "VLESS-Sudoku（无加密）"
-    );
+    assert_eq!(profile.protocol().advanced_label(), "VLESS-Sudoku");
     assert!(commit::is_managed_profile_file_name(
         "VLESS-SUDOKU-443.yaml"
     ));

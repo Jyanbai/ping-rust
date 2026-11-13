@@ -8,6 +8,8 @@ Reality 和 ShadowTLS v3 的握手目标会影响节点可用性。以下三种�
 | 检测与推荐 | 上述握手，加 HTTPS GET 和真实 shoes 本机预检 | 希望自己挑目标、排除跨主机跳转或 Cloudflare、验证这台 VPS 上的实际兼容性 |
 | 手动输入 | 一次握手检测，失败只警告，仍使用指定值 | 已自行验证目标，或需要保留特定站点；输入者承担失败风险 |
 
+快速和高级添加均可在 `7) AnyTLS` 内选择 TLS / REALITY，在 `3) Shadowsocks` 内选择 SS2022 / ShadowTLS v3。AnyTLS TLS 不探测 SNI；REALITY 不需要 TLS 证书，且应使用 sing-box 导出（没有标准分享 URI，Mihomo / NekoBox 不支持）。
+
 新建 VLESS Reality、Trojan Reality、AnyTLS Reality 或 ShadowTLS v3 节点时，SNI 一步会显示以上三项。检测与推荐提供默认名单、现有节点 SNI、用户输入、导入本地扫描 CSV 和 VPS 扫描五种来源。所有来源使用同一检测流程。
 
 ## 只检测，不改配置

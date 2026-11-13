@@ -7,7 +7,7 @@ sudo prs add vless-xhttp-reality
 sudo prs add vless-xhttp-reality --port 443 --xhttp-path /my-path
 ```
 
-也可进入 `9) 工具 → 2) 高级添加配置 → 15) VLESS-XHTTP-REALITY`。原有 1–14 项编号保持不变，主菜单不变。`generate vless-xhttp-reality` 同样接受 `--xhttp-path`。
+也可进入 `1) 添加配置 → 4) VLESS-XHTTP-REALITY` 或 `9) 工具 → 2) 高级添加配置 → 4) VLESS-XHTTP-REALITY`。快速和高级添加使用相同的 16 项协议顺序，主菜单不变。`generate vless-xhttp-reality` 同样接受 `--xhttp-path`。
 
 默认 path 为 `/` 加 16 位安全随机小写十六进制；自定义 path 必须以 `/` 开头，只接受 ASCII 字母、数字、`/ - . _ ~`，拒绝空格、查询参数、片段和百分号编码。服务端固定 `mode: auto`。`2) 更改配置` 支持端口、SNI 和 path；更改 path 会使旧链接失效，确认默认 N，输入 `0` 返回。修改遵循 dry-run、原子提交、热重载或受控重启、失败回滚流程。
 

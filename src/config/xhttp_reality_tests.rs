@@ -50,7 +50,7 @@ fn xhttp_reality_yaml_nests_xhttp_inside_reality_without_vision() {
     assert!(!profile.h2mux_eligible());
     assert!(ensure_servers_match_state(&[server], &[profile]).is_ok());
     assert_eq!(
-        Protocol::from_menu_number(15),
+        Protocol::from_menu_number(4),
         Some(Protocol::VlessXhttpReality)
     );
     assert!(commit::is_managed_profile_file_name(

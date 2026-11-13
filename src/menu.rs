@@ -1504,7 +1504,7 @@ async fn fast_add_config_menu_once() -> Result<MenuControl> {
     let protocol = Protocol::from_menu_number(protocol_number)
         .with_context(|| format!("协议编号无效：{protocol_number}"))?;
     let shadowsocks_mode = if protocol == Protocol::Shadowsocks {
-        println!("\nShadowsocks 模式:\n\n1) Shadowsocks 2022\n2) Shadowsocks 2022 + ShadowTLS v3（推荐）\n0) 返回\n");
+        println!("\nShadowsocks 模式:\n\n1) Shadowsocks 2022\n2) Shadowsocks 2022 + ShadowTLS v3\n0) 返回\n");
         loop {
             match parse_shadowsocks_mode(&read_menu_choice(2)?) {
                 Some(Some(mode)) => break mode,
@@ -1514,6 +1514,14 @@ async fn fast_add_config_menu_once() -> Result<MenuControl> {
         }
     } else {
         config::ShadowsocksMode::Plain
+    };
+    let anytls_mode = if protocol == Protocol::AnyTls {
+        let Some(mode) = select_anytls_mode()? else {
+            return Ok(MenuControl::Continue);
+        };
+        mode
+    } else {
+        AnyTlsMode::default()
     };
     let port = input::validated_text(
         "请输入端口（直接回车随机）",
@@ -1531,7 +1539,7 @@ async fn fast_add_config_menu_once() -> Result<MenuControl> {
             input::checked_text("请输入域名/SNI", None, false, config::validate_server_name)?;
         let Some(mode) = select_numbered(
             "TLS 证书模式",
-            &["已有受信任证书（推荐）", "自签名测试模式（不推荐）"],
+            &["已有受信任证书", "自签名测试模式（仅供测试）"],
         )?
         else {
             return Ok(MenuControl::Continue);
@@ -1552,6 +1560,7 @@ async fn fast_add_config_menu_once() -> Result<MenuControl> {
             xhttp_path: None,
             name: None,
             protocol,
+            anytls_mode: AnyTlsMode::default(),
             port,
             server_address: Some(server_address),
             server_name: Some(server_name),
@@ -1593,15 +1602,22 @@ async fn fast_add_config_menu_once() -> Result<MenuControl> {
     } else {
         (None, None)
     };
-    cli::ensure_shoes_for_add(false).await?;
     deploy_fast_config(
         protocol,
         port,
         shadowsocks_cipher,
         shadowsocks_password,
         shadowsocks_mode,
+        anytls_mode,
     )
     .await
+}
+
+const ANYTLS_MODE_LABELS: [&str; 2] = ["TLS", "REALITY"];
+
+fn select_anytls_mode() -> Result<Option<AnyTlsMode>> {
+    Ok(select_numbered("AnyTLS 外层安全模式", &ANYTLS_MODE_LABELS)?
+        .map(|index| [AnyTlsMode::Tls, AnyTlsMode::Reality][index]))
 }
 
 fn select_shadowsocks_cipher(mode: config::ShadowsocksMode) -> Result<Option<ShadowsocksCipher>> {
@@ -1655,8 +1671,8 @@ const SNELL_CIPHERS: [SnellCipher; 3] = [
 ];
 const SNELL_CIPHER_LABELS: [&str; 3] = [
     "aes-128-gcm（默认，Mihomo 已验证）",
-    "高级：aes-256-gcm",
-    "高级：chacha20-ietf-poly1305",
+    "aes-256-gcm",
+    "chacha20-ietf-poly1305",
 ];
 
 fn snell_new_node_choice(value: &str) -> Option<Option<SnellCipher>> {
@@ -1884,6 +1900,7 @@ async fn deploy_fast_config(
     shadowsocks_cipher: Option<ShadowsocksCipher>,
     shadowsocks_password: Option<String>,
     shadowsocks_mode: config::ShadowsocksMode,
+    anytls_mode: AnyTlsMode,
 ) -> Result<MenuControl> {
     if protocol == Protocol::VlessSudoku
         && !read_vless_sudoku_prompt(&mut io::stdin().lock(), &mut io::stdout())?
@@ -1898,7 +1915,8 @@ async fn deploy_fast_config(
     } else {
         Default::default()
     };
-    let server_name = if protocol.uses_reality(AnyTlsMode::Tls) {
+    cli::ensure_shoes_for_add(false).await?;
+    let server_name = if protocol.uses_reality(anytls_mode) {
         Some(prompt_probed_sni("Reality SNI", crate::sni::Mode::Reality).await?)
     } else if shadowsocks_mode == config::ShadowsocksMode::ShadowTlsV3 {
         Some(prompt_probed_sni("ShadowTLS SNI", crate::sni::Mode::ShadowTls).await?)
@@ -1912,6 +1930,7 @@ async fn deploy_fast_config(
         xhttp_path: None,
         name: None,
         protocol,
+        anytls_mode,
         port,
         server_address: Some(server_address),
         server_name: None,
@@ -1984,7 +2003,7 @@ async fn advanced_add_config_menu() -> Result<()> {
     if matches!(protocol, Protocol::Shadowsocks) {
         let Some(mode) = select_numbered(
             "Shadowsocks 模式",
-            &["普通 SS2022", "SS2022 + ShadowTLS v3（推荐）"],
+            &["普通 SS2022", "SS2022 + ShadowTLS v3"],
         )?
         else {
             return Ok(());
@@ -1996,13 +2015,13 @@ async fn advanced_add_config_menu() -> Result<()> {
         };
         let ciphers = if options.shadowsocks_mode == config::ShadowsocksMode::ShadowTlsV3 {
             vec![
-                "2022-blake3-aes-256-gcm（推荐）",
+                "2022-blake3-aes-256-gcm",
                 "2022-blake3-aes-128-gcm",
                 "2022-blake3-chacha20-ietf-poly1305",
             ]
         } else {
             vec![
-                "2022-blake3-aes-256-gcm（推荐）",
+                "2022-blake3-aes-256-gcm",
                 "2022-blake3-aes-128-gcm",
                 "2022-blake3-chacha20-ietf-poly1305",
                 "aes-256-gcm",
@@ -2049,7 +2068,7 @@ async fn advanced_add_config_menu() -> Result<()> {
     }
     if matches!(protocol, Protocol::Socks5) {
         let Some(authentication) =
-            select_numbered("认证", &["用户名 + 密码（推荐）", "无认证（不推荐）"])?
+            select_numbered("认证", &["用户名 + 密码", "无认证（有滥用风险）"])?
         else {
             return Ok(());
         };
@@ -2065,15 +2084,10 @@ async fn advanced_add_config_menu() -> Result<()> {
         options.udp_enabled = input::confirm("启用 UDP ASSOCIATE？", true)?;
     }
     if matches!(protocol, Protocol::AnyTls) {
-        let Some(mode) =
-            select_numbered("AnyTLS 外层安全模式", &["TLS（推荐）", "Reality（高级）"])?
-        else {
+        let Some(mode) = select_anytls_mode()? else {
             return Ok(());
         };
-        options.anytls_mode = match mode {
-            0 => AnyTlsMode::Tls,
-            _ => AnyTlsMode::Reality,
-        };
+        options.anytls_mode = mode;
         loop {
             let default_name = if options.anytls_users.is_empty() {
                 "default".to_owned()
@@ -2094,7 +2108,7 @@ async fn advanced_add_config_menu() -> Result<()> {
                 break;
             }
         }
-        if input::confirm("使用推荐 padding_scheme？", true)? {
+        if input::confirm("使用默认 padding_scheme？", true)? {
             options.anytls_padding_scheme = Some(vec![
                 "stop=8".to_owned(),
                 "0=30-30".to_owned(),
@@ -2164,7 +2178,7 @@ async fn advanced_add_config_menu() -> Result<()> {
     let (certificate, certificate_key) = if needs_certificate
         && input::confirm(
             if protocol == Protocol::NaiveProxy {
-                "使用已有受信任 PEM 证书和私钥？（推荐）"
+                "使用已有受信任 PEM 证书和私钥？"
             } else {
                 "使用已有 PEM 证书和私钥？（否则自动生成自签名证书）"
             },
@@ -2654,6 +2668,53 @@ mod tests {
     }
 
     #[test]
+    fn issue_104_protocol_order_labels_and_numeric_mapping() {
+        let expected = [
+            (Protocol::Reality, "VLESS-REALITY"),
+            (Protocol::Hysteria2, "Hysteria2"),
+            (Protocol::Shadowsocks, "Shadowsocks"),
+            (Protocol::VlessXhttpReality, "VLESS-XHTTP-REALITY"),
+            (Protocol::VlessEnc, "VLESS-ENC"),
+            (Protocol::NaiveProxy, "NaiveProxy"),
+            (Protocol::AnyTls, "AnyTLS"),
+            (Protocol::Tuic, "TUIC"),
+            (Protocol::VlessTlsVision, "VLESS-TLS-Vision"),
+            (Protocol::TrojanTls, "Trojan-TLS"),
+            (Protocol::VlessWsTls, "VLESS-WS-TLS"),
+            (Protocol::TrojanReality, "Trojan-REALITY"),
+            (Protocol::Snell, "Snell v3"),
+            (Protocol::VmessWsTls, "VMess-WS-TLS"),
+            (Protocol::Socks5, "SOCKS5"),
+            (Protocol::VlessSudoku, "VLESS-Sudoku"),
+        ];
+        assert_eq!(
+            Protocol::all().collect::<Vec<_>>(),
+            expected.map(|(p, _)| p)
+        );
+        let mut items = Vec::new();
+        for (index, (protocol, label)) in expected.into_iter().enumerate() {
+            let number = index + 1;
+            assert_eq!(protocol.menu_number(), number);
+            assert_eq!(protocol.menu_label(), label);
+            assert_eq!(protocol.advanced_label(), label);
+            assert_eq!(Protocol::from_menu_number(number), Some(protocol));
+            items.push((number, label));
+            assert_eq!(
+                parse_keyed_choice(&number.to_string(), &protocol_menu_items()),
+                Some(number)
+            );
+        }
+        items.push((0, "返回"));
+        assert_eq!(protocol_menu_items(), items);
+        assert_eq!(parse_keyed_choice("0", &items), Some(0));
+        for invalid in ["17", "-1", "abc", ""] {
+            assert_eq!(parse_keyed_choice(invalid, &items), None);
+        }
+        assert_eq!(Protocol::from_menu_number(0), None);
+        assert_eq!(Protocol::from_menu_number(17), None);
+    }
+
+    #[test]
     fn uses_zero_for_exit_and_sequential_protocol_numbers() {
         let protocol_items = protocol_menu_items();
         assert_eq!(MAIN_MENU_ITEMS.first().unwrap().0, 1);
@@ -2668,12 +2729,12 @@ mod tests {
                 Some(protocol)
             );
         }
-        assert_eq!(Protocol::from_menu_number(10), Some(Protocol::VmessWsTls));
-        assert_eq!(Protocol::from_menu_number(11), Some(Protocol::Socks5));
-        assert_eq!(Protocol::from_menu_number(12), Some(Protocol::Snell));
-        assert_eq!(Protocol::from_menu_number(13), Some(Protocol::NaiveProxy));
-        assert_eq!(protocol_items[10], (11, "SOCKS5"));
-        assert_eq!(protocol_items[11], (12, "Snell v3"));
+        assert_eq!(Protocol::from_menu_number(14), Some(Protocol::VmessWsTls));
+        assert_eq!(Protocol::from_menu_number(15), Some(Protocol::Socks5));
+        assert_eq!(Protocol::from_menu_number(13), Some(Protocol::Snell));
+        assert_eq!(Protocol::from_menu_number(6), Some(Protocol::NaiveProxy));
+        assert_eq!(protocol_items[14], (15, "SOCKS5"));
+        assert_eq!(protocol_items[12], (13, "Snell v3"));
     }
 
     #[test]

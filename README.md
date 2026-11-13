@@ -11,7 +11,7 @@
 
 核心逻辑全部位于 Rust 源码中；`scripts/install.sh` 只负责执行 Rust 前的架构检测、下载、SHA-256 校验与严格解包，原子安装、快捷命令所有权判断和首次部署均由已校验的 Rust 二进制完成。
 
-> 当前版本：[`v0.3.0`](https://github.com/Jyanbai/ping-rust/releases/tag/v0.3.0)，升级要求见[正式发版说明](docs/RELEASE_NOTES_v0.3.0.md)。v0.3.0 新增 VLESS-ENC，自动迁移通配符路由规则，并将新建 Snell v3 节点默认 cipher 改为 aes-128-gcm。v0.2.0 引入 Update Center、Verified Hot Reload、Chain Proxy 2.0、规则路由和受验证范围内的 H2MUX；v0.2.1 增加 Pool 节点批量测试、热重载不可用原因提示和 NaiveProxy 测试证书有效期管理；v0.2.2 将默认安装的 shoes 固定为经过验证的 v0.2.7（已装更新的未验证版本时提示回退命令），YAML 库换成 serde-saphyr（修复 RUSTSEC-2024-0449），`--version` 额外输出构建 commit。**热重载需要固定 pin 构建；默认一键安装使用 GitHub Release 来源，监听变更使用受控重启。**支持 VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks、AnyTLS、VLESS-TLS-Vision、VLESS-WS-TLS、Trojan-TLS、Trojan-REALITY、VMess-WS-TLS、SOCKS5、Snell v3、NaiveProxy、VLESS-ENC、[VLESS-XHTTP-REALITY](docs/wiki/VLESS-XHTTP-REALITY.md) 和 [VLESS-Sudoku（无加密）](docs/wiki/VLESS-Sudoku.md) 十六种受管协议。用户只选择完整协议，不需要理解或手动组合传输层、安全层与内层协议。
+> 当前版本：[`v0.3.0`](https://github.com/Jyanbai/ping-rust/releases/tag/v0.3.0)，升级要求见[正式发版说明](docs/RELEASE_NOTES_v0.3.0.md)。v0.3.0 新增 VLESS-ENC，自动迁移通配符路由规则，并将新建 Snell v3 节点默认 cipher 改为 aes-128-gcm。v0.2.0 引入 Update Center、Verified Hot Reload、Chain Proxy 2.0、规则路由和受验证范围内的 H2MUX；v0.2.1 增加 Pool 节点批量测试、热重载不可用原因提示和 NaiveProxy 测试证书有效期管理；v0.2.2 将默认安装的 shoes 固定为经过验证的 v0.2.7（已装更新的未验证版本时提示回退命令），YAML 库换成 serde-saphyr（修复 RUSTSEC-2024-0449），`--version` 额外输出构建 commit。**热重载需要固定 pin 构建；默认一键安装使用 GitHub Release 来源，监听变更使用受控重启。**支持 VLESS-REALITY、Hysteria2、Shadowsocks、[VLESS-XHTTP-REALITY](docs/wiki/VLESS-XHTTP-REALITY.md)、VLESS-ENC、NaiveProxy、AnyTLS、TUIC、VLESS-TLS-Vision、Trojan-TLS、VLESS-WS-TLS、Trojan-REALITY、Snell v3、VMess-WS-TLS、SOCKS5 和 [VLESS-Sudoku](docs/wiki/VLESS-Sudoku.md) 十六种受管协议。用户只选择完整协议，不需要理解或手动组合传输层、安全层与内层协议。
 
 完整文档：[Wiki](https://github.com/Jyanbai/ping-rust/wiki) · [快速开始](https://github.com/Jyanbai/ping-rust/wiki/Quick-Start) · [链式代理](https://github.com/Jyanbai/ping-rust/wiki/Chain-Proxy) · [故障排查](https://github.com/Jyanbai/ping-rust/wiki/Troubleshooting)
 
@@ -75,7 +75,7 @@ bash <(curl --proto '=https' --tlsv1.2 -fsSL \
 
 ### VLESS-ENC（v0.3.0）
 
-菜单第 **14** 项，或运行 `sudo prs add vless-enc`。默认使用 x25519、native、0rtt、600s，Vision 默认关闭。密钥由已安装的 shoes 生成。
+快速和高级添加菜单第 **5) VLESS-ENC** 项，或运行 `sudo prs add vless-enc`。默认使用 x25519、native、0rtt、600s，Vision 默认关闭。密钥由已安装的 shoes 生成。
 
 **此预设不套 TLS 或 Reality；安全性完全依赖 VLESS Encryption。** 服务端为原生 TCP，客户端为 `security=none&type=tcp`。decryption 只写入权限 0600 的节点 profile 和聚合运行配置；state、分享链接及客户端导出仅保存客户端 encryption。
 
@@ -120,7 +120,7 @@ Sudoku 是混淆，不是加密或认证，传输安全仍由 VLESS Encryption �
 
 **VLESS-Sudoku 没有任何加密和认证。** Sudoku 只是混淆，下行打包编码没有密钥，上行置换种子空间有限；普通 VLESS 的 UUID、目标地址、非 HTTPS 内容都能在链路上被还原。需要加密时请使用 VLESS-ENC + Sudoku 或 VLESS-REALITY。
 
-普通 VLESS 外面始终包一层 shoes `sudoku_mask`，不使用 VLESS Encryption、TLS、REALITY 或 Vision。这是 Xray FinalMask Sudoku，不是 Mihomo 的 `sudoku` 隧道协议。高级协议列表保留 1–15，在末尾追加 **16) VLESS-Sudoku（无加密）**，主菜单不变。菜单先显示安全与代价说明，再询问“仍要添加无加密的 VLESS-Sudoku 节点？[y/N]（输入 0 返回）”，默认 N。
+普通 VLESS 外面始终包一层 shoes `sudoku_mask`，不使用 VLESS Encryption、TLS、REALITY 或 Vision。这是 Xray FinalMask Sudoku，不是 Mihomo 的 `sudoku` 隧道协议。快速和高级添加均为 **16) VLESS-Sudoku**，选择后仍显示无加密警告，主菜单不变。菜单先显示安全与代价说明，再询问“仍要添加无加密的 VLESS-Sudoku 节点？[y/N]（输入 0 返回）”，默认 N。
 
 ```sh
 sudo prs add vless-sudoku --server-address 203.0.113.10
@@ -133,12 +133,9 @@ sudo prs add vless-sudoku --sudoku-ascii ascii --sudoku-padding-min 0 --sudoku-p
 
 state 将新节点放在顶层 `sudoku_profiles` 扩展，v0.2.1 可忽略并读取原有节点；已有协议的 state 输出不变。旧版不支持管理该节点，降级操作前请先用新版删除并备份配置。详见 [VLESS-Sudoku wiki](docs/wiki/VLESS-Sudoku.md)。
 
-## 协议分级
+## 协议与客户端兼容
 
-| 标签 | 协议或功能 | 说明 |
-|---|---|---|
-| 稳定 | VLESS-Reality-Vision、Hysteria2、TUIC v5、Shadowsocks、AnyTLS、VLESS-TLS-Vision、VLESS-WS-TLS、Trojan-TLS、Trojan-REALITY、VMess-WS-TLS、SOCKS5、Shadowsocks 2022 + ShadowTLS v3 | 受管部署及对应范围的 CI 验收 |
-| 实验性 | Snell v3、NaiveProxy、H2MUX 客户端偏好 | 导出面受限，已验证的客户端兼容范围较窄；使用前核对下文各协议限制 |
+快速和高级添加使用相同的协议名称与顺序，不显示协议等级标签。各协议的安全提示、确认流程和客户端限制仍保留；Snell v3、NaiveProxy 和 H2MUX 的客户端支持范围见下文说明。
 
 ## 支持环境
 
@@ -242,27 +239,25 @@ shoes: running
 
 选择协议:
 
-1) TUIC
+1) VLESS-REALITY
 2) Hysteria2
 3) Shadowsocks
-   ├─ Shadowsocks 2022
-   └─ Shadowsocks 2022 + ShadowTLS v3（推荐）
-4) VLESS-REALITY（推荐）
-5) AnyTLS
-6) VLESS-TLS-Vision
-7) VLESS-WS-TLS
-8) Trojan-TLS
-9) Trojan-REALITY
-10) VMess-WS-TLS
-11) SOCKS5
-12) Snell v3
-13) NaiveProxy
-14) VLESS-ENC
-15) VLESS-XHTTP-REALITY
-16) VLESS-Sudoku（无加密）
+4) VLESS-XHTTP-REALITY
+5) VLESS-ENC
+6) NaiveProxy
+7) AnyTLS
+8) TUIC
+9) VLESS-TLS-Vision
+10) Trojan-TLS
+11) VLESS-WS-TLS
+12) Trojan-REALITY
+13) Snell v3
+14) VMess-WS-TLS
+15) SOCKS5
+16) VLESS-Sudoku
 0) 返回
 
-请选择 [0-16]: 4
+请选择 [0-16]: 1
 输入端口（直接回车自动选择随机端口）:
 
 部署成功，shoes 服务已启动。
@@ -290,6 +285,8 @@ vless://...security=reality...pbk=...&sid=...#VLESS-REALITY-25448
 | 9) 其他 → 其余工具 | 9) 工具（顺序见下） |
 | 9) 其他 → 更新 ping-rust | 删除重复入口，使用 6) 更新 |
 | 10) 关于 | 10) 帮助与关于 |
+
+快速添加与 `9) 工具 → 2) 高级添加配置` 的协议列表完全一致，末尾为 `0) 返回`。`3) Shadowsocks` 内选择 SS2022 / ShadowTLS v3，保留原有 cipher、密码校验与默认值；`5) VLESS-ENC` 内可选 Sudoku（默认 N），不占额外顶层编号；`7) AnyTLS` 内选择 TLS / REALITY。`16) VLESS-Sudoku` 选择后显示无加密安全与代价警告，继续确认默认 N。
 
 `9) 工具` 按顺序提供：1) 导出客户端配置、2) 高级添加配置、3) SNI 检测、4) SNI 扫描、5) 端口检查、6) 开启 BBR、7) 备份配置、8) 恢复配置，输入 0 返回。SNI 检测可输入空格分隔的域名，直接回车则检测默认名单和现有节点；SNI 扫描复用 `prs sni scan` 的确认流程。两者只输出结果，不修改节点配置。
 
@@ -394,7 +391,7 @@ sudo prs add vless-xhttp-reality
 
 SOCKS5 支持 TCP CONNECT 与 UDP ASSOCIATE，默认启用用户名/密码认证。SOCKS5 本身不提供传输加密，更适合作为工具型代理、内网代理或链式出口。高级添加可关闭 UDP，或在明确警告后主动选择无认证模式。Snell v3 高级添加可选择 cipher、密码和 UDP-over-TCP 开关；选择 `aes-256-gcm` 或 `chacha20-ietf-poly1305` 时会显示 Mihomo 兼容性警告。
 
-[VLESS-XHTTP-REALITY](docs/wiki/VLESS-XHTTP-REALITY.md) 使用 shoes 原生 XHTTP，放在 REALITY 目标内部，无需自己的域名或证书。只支持 v2rayN / Xray 客户端，通过分享链接或二维码导入；Mihomo、sing-box 和 NekoBox 导出明确拒绝。固定 `mode: auto`，REALITY 客户端默认走 stream-one，不支持 Vision。path 默认 `/` 加 16 位随机小写十六进制，可用 `--xhttp-path /my-path` 指定；“更改配置”支持端口、SNI 和 path，改 path 的确认默认 N。高级添加原有 1–14 项不变，末尾新增 **15) VLESS-XHTTP-REALITY**，主菜单不变。公网监听建议按 [shoes v0.3.7 文档](https://github.com/cfal/shoes/blob/v0.3.7/docs/src/content/docs/zh-cn/protocols/xhttp.md) 显式配置 `limits`，生成器不默认开启。XHTTP 节点写入 state 的独立顶层扩展，v0.2.1 可忽略该扩展并读取原有节点的 info 和导出；旧版不支持管理 XHTTP，降级操作前请用新版删除 XHTTP 节点并备份配置。
+[VLESS-XHTTP-REALITY](docs/wiki/VLESS-XHTTP-REALITY.md) 使用 shoes 原生 XHTTP，放在 REALITY 目标内部，无需自己的域名或证书。只支持 v2rayN / Xray 客户端，通过分享链接或二维码导入；Mihomo、sing-box 和 NekoBox 导出明确拒绝。固定 `mode: auto`，REALITY 客户端默认走 stream-one，不支持 Vision。path 默认 `/` 加 16 位随机小写十六进制，可用 `--xhttp-path /my-path` 指定；“更改配置”支持端口、SNI 和 path，改 path 的确认默认 N。快速和高级添加均为 **4) VLESS-XHTTP-REALITY**，主菜单不变。公网监听建议按 [shoes v0.3.7 文档](https://github.com/cfal/shoes/blob/v0.3.7/docs/src/content/docs/zh-cn/protocols/xhttp.md) 显式配置 `limits`，生成器不默认开启。XHTTP 节点写入 state 的独立顶层扩展，v0.2.1 可忽略该扩展并读取原有节点的 info 和导出；旧版不支持管理 XHTTP，降级操作前请用新版删除 XHTTP 节点并备份配置。
 
 WebSocket 路径默认安全随机生成；需要固定路径时可使用完整命令：
 
@@ -497,7 +494,7 @@ sudo ping-rust generate anytls \
   --fallback 127.0.0.1:80
 ```
 
-不指定 `--cert/--key` 时会生成自签名证书。高级 Reality+AnyTLS 组合使用：
+快速添加 `7) AnyTLS` 内可选择 TLS / REALITY，高级添加同样提供这两种模式。CLI `add anytls` 默认继续使用 TLS；不指定 `--cert/--key` 时会生成自签名证书。REALITY 不需要证书，复用 SNI 预检与激活流程；没有标准分享 URI 或普通二维码，请使用 sing-box 导出，Mihomo / NekoBox 明确不支持。`generate` 的 Reality+AnyTLS 组合使用：
 
 ```bash
 sudo ping-rust generate anytls \
@@ -561,7 +558,7 @@ sudo ping-rust export nekobox --profile <配置-UUID> --server 203.0.113.10
 
 只有一个配置时可以省略 `--profile`。SOCKS5 可导出 percent-encoded `socks5://` URI、终端 QR、sing-box `type: socks` 和 Clash Meta/Mihomo `type: socks5`；IPv6 地址会使用方括号。NekoBox 没有在本项目核实到稳定、明确的专用 SOCKS5 导入 schema，因此 `export nekobox` 会明确拒绝，不把普通 URI 冒充已验证的 NekoBox 格式。
 
-Snell v3 使用 shoes 原生服务端，新节点默认 `aes-128-gcm`；`aes-256-gcm` 和 `chacha20-ietf-poly1305` 保留为高级选项，选择时提示客户端兼容性。CI 的 Mihomo v1.19.33 实测仅 `aes-128-gcm` 可用；Mihomo/Clash Meta 仅对该 cipher 开放无损导出 `type: snell`、`version: 3`、`psk` 和 `udp`。已有节点的 cipher 不会自动修改；若已有 chacha20 或 aes-256 Snell 节点使用 Mihomo 客户端，请将节点改为 `aes-128-gcm` 并重新导出客户端配置。当前 sing-box Snell 只支持 v4/v6，NekoBox 也没有已核实的 v3 导入能力，因此两者明确拒绝。Snell v3 没有统一、跨客户端的标准 URI，`url`、`qr` 和 `--plain` 不会生成伪 `snell://`。链式代理 outbound 尚未实现 Snell。Mihomo 同样不支持 AnyTLS+Reality，标准 AnyTLS URI也无法表达 Reality 公钥；所有不兼容情况都会返回中文错误。所有 Reality 导出只包含公钥，永远不包含服务器私钥。
+Snell v3 使用 shoes 原生服务端，新节点默认 `aes-128-gcm`；`aes-256-gcm` 和 `chacha20-ietf-poly1305` 保留为可选 cipher，选择时提示客户端兼容性。CI 的 Mihomo v1.19.33 实测仅 `aes-128-gcm` 可用；Mihomo/Clash Meta 仅对该 cipher 开放无损导出 `type: snell`、`version: 3`、`psk` 和 `udp`。已有节点的 cipher 不会自动修改；若已有 chacha20 或 aes-256 Snell 节点使用 Mihomo 客户端，请将节点改为 `aes-128-gcm` 并重新导出客户端配置。当前 sing-box Snell 只支持 v4/v6，NekoBox 也没有已核实的 v3 导入能力，因此两者明确拒绝。Snell v3 没有统一、跨客户端的标准 URI，`url`、`qr` 和 `--plain` 不会生成伪 `snell://`。链式代理 outbound 尚未实现 Snell。Mihomo 同样不支持 AnyTLS+Reality，标准 AnyTLS URI也无法表达 Reality 公钥；所有不兼容情况都会返回中文错误。所有 Reality 导出只包含公钥，永远不包含服务器私钥。
 
 ## 备份与恢复
 
