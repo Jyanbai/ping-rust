@@ -159,6 +159,42 @@ fn wait_port(port: u16) -> io::Result<()> {
     ))
 }
 
+// Only report known error categories from stderr; never print arbitrary log lines
+// or environment variables (which may contain credentials).
+fn startup_diagnostics(child: &mut Child, ports: &[u16], log: &Path) -> String {
+    let status = match child.try_wait() {
+        Ok(Some(status)) => format!("exited: {status}"),
+        Ok(None) => "running".to_owned(),
+        Err(error) => format!("status unavailable: {:?}", error.kind()),
+    };
+    let listening = ports
+        .iter()
+        .map(|port| {
+            let address = SocketAddr::from(([127, 0, 0, 1], *port));
+            let listening = TcpStream::connect_timeout(&address, Duration::from_millis(100)).is_ok();
+            format!("{port}={listening}")
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let stderr = fs::read_to_string(log).unwrap_or_default();
+    let categories = [
+        "Address already in use",
+        "Permission denied",
+        "panicked",
+        "ERROR",
+    ]
+    .into_iter()
+    .filter(|category| stderr.contains(category))
+    .collect::<Vec<_>>()
+    .join(",");
+    format!(
+        "child={status}; listeners=[{listening}]; os={}; arch={}; stderr_bytes={}; stderr_categories=[{categories}]; stderr content suppressed",
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        stderr.len()
+    )
+}
+
 fn request(proxy: u16, target: &str, target_port: u16) -> io::Result<String> {
     let mut stream = TcpStream::connect(("127.0.0.1", proxy))?;
     stream.set_read_timeout(Some(Duration::from_secs(3)))?;
@@ -357,9 +393,17 @@ fn chain_v2_local_routing_traffic() -> io::Result<()> {
         .stdout(Stdio::null())
         .stderr(fs::File::create(&runtime_log)?)
         .spawn()?;
-    let _shoes = ChildGuard(child);
+    let mut shoes_guard = ChildGuard(child);
     for port in &p[2..] {
-        wait_port(*port)?;
+        if let Err(error) = wait_port(*port) {
+            return Err(io::Error::new(
+                error.kind(),
+                format!(
+                    "{error}; {}",
+                    startup_diagnostics(&mut shoes_guard.0, &p[2..], &runtime_log)
+                ),
+            ));
+        }
     }
     let checked = |stage: &str, proxy: u16, target: &str| {
         let mut last_error = None;
