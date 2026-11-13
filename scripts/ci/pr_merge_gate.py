@@ -142,8 +142,16 @@ class GitHub:
     def status(self, sha, state, description):
         # 同一 SHA/context 的 commit status 有数量上限。定时核对不能制造
         # terminal -> pending -> terminal 的无效转换；真正的新运行仍撤销绿灯。
-        previous = next((s for s in self.pages(f"commits/{sha}/statuses")
-                         if s.get("context") == CONTEXT), None)
+        try:
+            previous = next((s for s in self.pages(f"commits/{sha}/statuses")
+                             if s.get("context") == CONTEXT), None)
+        except Exception:
+            if state != 'failure':
+                # requested/in_progress 的轻量入口也必须撤销已有绿灯。
+                self.status(sha, 'failure', '状态读取失败，无法确认当前门禁证据')
+                raise
+            # 去重只是优化；读取状态出错不得阻止写入阻止状态。
+            previous = None
         if previous:
             if state == "pending" and description == "正在核对当前 head 的必需运行及独立审查":
                 return
@@ -195,9 +203,9 @@ def inspect_pr(api, number, policy, publish=True):
     if pr["state"] != "open" or pr["base"]["ref"] != "main":
         return
     sha, base = pr["head"]["sha"], pr["base"]["sha"]
-    if publish:
-        api.status(sha, "pending", "正在核对当前 head 的必需运行及独立审查")
     try:
+        if publish:
+            api.status(sha, "pending", "正在核对当前 head 的必需运行及独立审查")
         runs = api.pages(f"actions/runs?head_sha={sha}&event=pull_request", "workflow_runs")
         runs = [r for r in runs if r.get("path", "").removeprefix(".github/workflows/") in policy
                 and any(p.get("number") == number and p.get("head", {}).get("sha") == sha

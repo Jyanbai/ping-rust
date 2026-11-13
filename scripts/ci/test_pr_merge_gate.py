@@ -73,6 +73,39 @@ class CollectorAPI:
 
 
 class GateTests(unittest.TestCase):
+    def test_initial_status_read_failure_attempts_failure_publication(self):
+        class InitialFailure(CollectorAPI):
+            def status(self, sha, state, description):
+                if state == 'pending':
+                    raise OSError('status lookup failed')
+                super().status(sha, state, description)
+
+        api = InitialFailure(self)
+        with self.assertRaises(OSError):
+            inspect_pr(api, 7, self.policy)
+        self.assertEqual(api.statuses, ['failure'])
+
+    def test_failed_dedup_lookup_cannot_prevent_blocking_status(self):
+        from unittest.mock import patch
+        import os
+
+        class LookupFailure(GitHub):
+            def __init__(self):
+                self.posts = []
+
+            def pages(self, path, key=None):
+                raise OSError('status lookup unavailable')
+
+            def request(self, path, data=None):
+                self.posts.append(data)
+
+        api = LookupFailure()
+        with patch.dict(os.environ, {'GATE_RUN_URL': 'https://example.com/run'}):
+            with self.assertRaises(OSError):
+                api.status(self.sha, 'success', 'must not publish')
+            api.status(self.sha, 'failure', 'evidence unavailable')
+        self.assertEqual([p['state'] for p in api.posts], ['failure', 'failure'])
+
     def test_new_required_run_created_during_collection_blocks(self):
         api = CollectorAPI(self)
         api.new_run = dict(api.run, id=2, status='queued', conclusion=None)
