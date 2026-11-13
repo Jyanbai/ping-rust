@@ -6,7 +6,7 @@ use std::{
     process::{Child, Command, Stdio},
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     thread,
     time::{Duration, Instant},
@@ -16,6 +16,10 @@ use std::{
 mod shoes_e2e;
 
 struct ChildGuard(Child);
+
+// Both tests allocate loopback listeners. In particular the release/rebind
+// regression must not race the traffic test's ephemeral client connections.
+static PORT_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 impl Drop for ChildGuard {
     fn drop(&mut self) {
@@ -142,6 +146,7 @@ fn reserve_ports(count: usize) -> io::Result<Vec<TcpListener>> {
 
 #[test]
 fn reserved_ingress_ports_cannot_be_reused_by_relays() -> io::Result<()> {
+    let _lock = PORT_TEST_LOCK.lock().expect("port test lock poisoned");
     let reservations = reserve_ports(9)?;
     let addresses = reservations
         .iter()
@@ -303,6 +308,7 @@ fn rule(mask: &str, action: &str, chains: Option<&str>) -> String {
 
 #[test]
 fn chain_v2_local_routing_traffic() -> io::Result<()> {
+    let _lock = PORT_TEST_LOCK.lock().expect("port test lock poisoned");
     let Some(binary) = shoes_e2e::shoes_binary(
         "chain_v2_local_routing_traffic",
         &[shoes_e2e::SHOES_E2E_BIN],
