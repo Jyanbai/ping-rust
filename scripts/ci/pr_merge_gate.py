@@ -351,6 +351,10 @@ def process_event(api, event, policy):
 
 
 def run_event(api, event, policy):
+    # Keep a defensive guard in the evaluator as well as workflow-level filtering.
+    # This makes replayed/legacy requested and in_progress events side-effect free.
+    if event.get("workflow_run") and event.get("action") != "completed":
+        return
     try:
         process_event(api, event, policy)
     except Exception:

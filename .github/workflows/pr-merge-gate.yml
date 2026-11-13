@@ -17,7 +17,9 @@ on:
       - Rust dependency security audit
       - PR merge gate regression
       - Codex Code Review
-    types: [requested, in_progress, completed]
+    # 仅在上游检查结束时评估；requested / in_progress 会为每个 job 启动
+    # 重复的全局串行运行，造成 pending runs 被替换/取消。
+    types: [completed]
   schedule:
     - cron: '*/15 * * * *'
   workflow_dispatch:
