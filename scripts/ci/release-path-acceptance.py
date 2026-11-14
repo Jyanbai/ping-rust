@@ -172,6 +172,8 @@ def main():
     print(f"PASS github-release {SHOES_RELEASE_TAG} H2MUX preference/export/sing-box 1.14.2 data: small and 1MiB half-close")
     from naive_certificate_acceptance import verify_naive_certificate_lifecycle
     verify_naive_certificate_lifecycle(BIN, run, state, pid, h2.free_port)
+    from sudoku_compat_acceptance import verify_sudoku_compatibility
+    verify_sudoku_compatibility(BIN, run, state, pid, h2.free_port, menu_edit)
     run("uninstall", "--purge")
 
 

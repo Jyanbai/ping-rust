@@ -13,6 +13,7 @@ mod operations;
 mod performance;
 mod self_update;
 mod service;
+mod shoes_compat;
 mod sni;
 mod sni_probe;
 mod sudoku;
