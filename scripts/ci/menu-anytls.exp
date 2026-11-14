@@ -104,8 +104,44 @@ if {[lindex $result 2] != 0 || [lindex $result 3] != 0 || $selected != 1 || !$ac
     exit 1
 }
 # Sharing remains available through the explicit view path; the add result is concise.
-set profile_id [exec python3 -c {import json,sys; from pathlib import Path; print(next(p['id'] for p in json.loads(Path('/etc/shoes/ping-rust-state.json').read_text())['profiles'] if p['port'] == int(sys.argv[1])))} $port]
-set details [exec $binary info $profile_id 2>@1]
+# 详情（传输层安全等）只在菜单 3「查看配置」结果页展示；info CLI 保持与 v0.2.1 兼容。
+# 结果页输出只写入临时文件用于断言，读取后立即删除，不进入日志。
+set profile_number [exec python3 -c {import json,sys; from pathlib import Path; print(next(i for i, p in enumerate(json.loads(Path('/etc/shoes/ping-rust-state.json').read_text())['profiles'], 1) if p['port'] == int(sys.argv[1])))} $port]
+set profile_count [exec python3 -c {import json; from pathlib import Path; print(len(json.loads(Path('/etc/shoes/ping-rust-state.json').read_text())['profiles']))}]
+set view_log [exec mktemp]
+spawn $binary
+wait_for {请选择 \[0-10\]} view-main-menu
+if {$profile_count == 1} {
+    # 只有一个配置时菜单直接展示结果页，不出现选择列表。
+    log_file -a -noappend $view_log
+    send "3\r"
+} else {
+    send "3\r"
+    wait_for {请选择配置} view-profile-menu
+    wait_for {0\) 返回} view-profile-back
+    wait_for {请选择} view-profile-prompt
+    log_file -a -noappend $view_log
+    send "$profile_number\r"
+}
+wait_for {按回车返回主菜单} view-result-page
+log_file
+send "\r"
+wait_for {请选择 \[0-10\]} view-main-menu-after
+send "0\r"
+expect {
+    eof {}
+    timeout { puts stderr "AnyTLS view did not exit"; exit 1 }
+}
+set view_result [wait]
+if {[lindex $view_result 2] != 0 || [lindex $view_result 3] != 0} {
+    puts stderr "AnyTLS view menu did not exit successfully"
+    exit 1
+}
+set view_file [open $view_log r]
+fconfigure $view_file -encoding utf-8
+set details [regsub -all {\x1b\[[0-9;?]*[A-Za-z]} [read $view_file] {}]
+close $view_file
+file delete $view_log
 if {$mode == "1"} {
     if {![regexp {anytls://} $details] || $sni != 0} {
         puts stderr "AnyTLS TLS view lost its URI or used Reality SNI"
