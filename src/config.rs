@@ -123,7 +123,7 @@ pub enum Protocol {
     VlessEnc,
     #[value(name = "vless-xhttp-reality")]
     VlessXhttpReality,
-    #[value(name = "vless-sudoku", help = crate::sudoku::PLAIN_WARNING)]
+    #[value(name = "vless-sudoku")]
     VlessSudoku,
 }
 
@@ -765,7 +765,7 @@ impl ManagedProfile {
         match &self.credentials {
             Credentials::VlessXhttpReality { .. } => "VLESS-XHTTP-REALITY",
             Credentials::VlessEnc { .. } => "VLESS-ENC",
-            Credentials::VlessSudoku { .. } => "VLESS-Sudoku（无加密）",
+            Credentials::VlessSudoku { .. } => "VLESS-Sudoku",
             Credentials::Reality { .. } => "VLESS-Reality-Vision",
             Credentials::Hysteria2 { .. } => "Hysteria2",
             Credentials::Tuic { .. } => "TUIC v5",

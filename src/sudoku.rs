@@ -3,21 +3,6 @@ use clap::ValueEnum;
 use rand::distr::{Alphanumeric, SampleString};
 use serde::{Deserialize, Serialize};
 
-macro_rules! transport_cost {
-    () => { "上行约 4 倍（无 padding），10% padding 约 4.5 倍，单次写入最多约 9 倍；下行约 1.33 倍。关闭原始 TCP splice，每条连接多占约 64 KiB 缓冲。只支持 TCP，没有 UDP/QUIC 掩码；在 TCP 内转发的 UDP 仍可用。客户端需要 Xray ≥ v26.3.27 或 v2rayN 等基于它的客户端。" };
-}
-
-pub const COST: &str = concat!(
-    "Sudoku 是混淆，不是加密或认证，传输安全仍由 VLESS Encryption 提供。",
-    transport_cost!()
-);
-pub const PLAIN_WARNING: &str = "警告：VLESS-Sudoku 没有任何加密和认证。Sudoku 只是混淆，不是加密或身份验证；下行打包编码没有密钥，上行的置换种子空间有限。普通 VLESS 不加密，UUID、目标地址、非 HTTPS 内容都能在链路上被还原。需要加密时请使用 VLESS-ENC + Sudoku 或 VLESS-REALITY。";
-pub const PLAIN_COST: &str = transport_cost!();
-
-pub fn warn_plain() {
-    eprintln!("{PLAIN_WARNING}\n{PLAIN_COST}");
-}
-
 pub const UNSUPPORTED: &str =
     "该客户端导出不支持 Xray FinalMask Sudoku，请用分享链接导入 v2rayN 或 Xray ≥ v26.3.27";
 
@@ -97,7 +82,7 @@ impl SudokuConfig {
 #[derive(Clone, Debug, Default, clap::Args)]
 pub struct SudokuOptions {
     /// 开启可选的 Sudoku TCP 外观（默认关闭）
-    #[arg(id = "sudoku_enabled", long = "sudoku", long_help = COST)]
+    #[arg(id = "sudoku_enabled", long = "sudoku")]
     pub enabled: bool,
     /// Sudoku 共享密码，按原样使用；省略时安全随机生成 24 位字母数字
     #[arg(id = "sudoku_password", long = "sudoku-password")]
@@ -171,7 +156,7 @@ mod tests {
     }
 
     #[test]
-    fn sudoku_cli_help_explains_all_costs_and_restricts_protocol() {
+    fn sudoku_cli_help_is_concise_and_restricts_protocol() {
         use clap::CommandFactory;
         let mut cli = Cli::command();
         let help = cli
@@ -179,21 +164,15 @@ mod tests {
             .unwrap()
             .render_long_help()
             .to_string();
-        for required in [
+        for removed in [
             "混淆",
-            "不是加密或认证",
-            "VLESS Encryption",
             "4 倍",
-            "4.5 倍",
-            "9 倍",
-            "1.33 倍",
             "TCP splice",
             "64 KiB",
             "UDP/QUIC",
-            "TCP 内转发的 UDP 仍可用",
             "v26.3.27",
         ] {
-            assert!(help.contains(required), "{required}");
+            assert!(!help.contains(removed), "{removed}");
         }
         let sudoku = options(&["--sudoku"]).unwrap();
         assert!(sudoku

@@ -23,6 +23,10 @@ choice 1
 wait_for {选择测试节点} "node selection"
 choice 1
 wait_for {节点可用：} "Reality node probe"
+wait_for {按回车返回主菜单} "node probe result page"
+choice ""
+wait_for {请选择 \[0-10\]} "main menu after node probe"
+choice 8
 wait_for {Chain Proxy 2\.0} "chain menu after node probe"
 choice 7
 wait_for {测试完整 Chain} "test menu after node probe"
@@ -30,8 +34,8 @@ choice 2
 wait_for {选择 Chain} "Chain selection"
 choice 1
 wait_for {完整 Chain 测试通过} "Chain probe"
-wait_for {Chain Proxy 2\.0} "chain menu after Chain probe"
-choice 0
+wait_for {按回车返回主菜单} "Chain probe result page"
+choice ""
 wait_for {请选择 \[0-10\]} "main menu after probes"
 choice 0
 wait_for {已退出} "exit"

@@ -348,6 +348,10 @@ jobs:
               exit 52
             }
           }
+          expect -re {按回车返回主菜单}
+          send "\r"
+          expect -re {请选择 \[0-10\]}
+          send "0\r"
           expect {
             eof {}
             timeout {
@@ -388,8 +392,8 @@ jobs:
           send "y\r"
           expect -re {配置认证失败 fallback}
           send "n\r"
-          expect -re {Reality SNI}
-          send "\r"
+          expect -re {选择 SNI 方式}
+          send "1\r"
           expect -re {Reality fallback}
           send "\r"
           expect {
@@ -397,13 +401,14 @@ jobs:
               send "203.0.113.10\r"
               exp_continue
             }
-            -re {未生成标准分享链接} {}
+            -re {配置添加成功。} {}
             timeout {
               puts stderr "advanced AnyTLS Reality deployment did not finish"
               exit 53
             }
           }
-          expect -re {配置验证通过，服务已启动}
+          expect -re {按回车返回主菜单}
+          send "\r"
           expect -re {请选择 \[0-10\]}
           send "3\r"
           expect -re {请选择配置}
@@ -411,7 +416,10 @@ jobs:
           send "2\r"
           expect -re {协议 \(protocol\)[^\r\n]*= anytls}
           expect -re {未生成标准分享链接}
-          expect -re {配置详情仍可查看}
+          expect -re {按回车返回主菜单}
+          send "\r"
+          expect -re {请选择 \[0-10\]}
+          send "0\r"
           expect {
             eof {}
             timeout {
@@ -716,9 +724,9 @@ jobs:
           send "$env(MENU_PORT)\r"
           if {$env(PROTOCOL_NUMBER) in {1 12}} {
             # 菜单添加 Reality（1 VLESS-REALITY、12 Trojan-REALITY）会先选择 SNI 方式；
-            # 回车 = 1 自动选择。
+            # 显式选择 1；数字菜单回车不再默认选择。
             wait_for {选择 SNI 方式} reality-sni-choice
-            send "\r"
+            send "1\r"
           }
           if {$env(PROTOCOL_NUMBER) == "5"} {
             wait_for {VLESS Encryption 外观} encryption-mode
@@ -733,24 +741,65 @@ jobs:
           }
           if {$env(PROTOCOL_NUMBER) == "3"} {
             wait_for {请选择加密方式} shadowsocks-cipher-menu
-            send "\r"
+            send "5\r"
             wait_for {请设置密码} shadowsocks-password-prompt
             send "\r"
           }
-          if {$env(PROTOCOL_NUMBER) == "13"} {
-            wait_for {协议 \(protocol\)[^\r\n]*= snell} snell-details
-            wait_for {没有通用标准分享 URI} snell-uri-guidance
-          } else {
-            wait_for "$env(SHARE_SCHEME)://" share-uri
-            wait_for {二维码 \(QR\)} add-qr-heading
-            wait_for {▀|▄|█} add-qr-blocks
-            if {$env(PROTOCOL_NUMBER) == "5"} {
-              wait_for {重新生成密钥} encryption-regeneration
-              send "n\r"
-            }
-          }
+          wait_for {配置添加成功。} add-success
+          wait_for {按回车返回主菜单} add-result-page
+          send "\r"
+          wait_for {请选择 \[0-10\]} add-main-menu
+          send "0\r"
           expect { eof {} timeout { puts stderr "timeout waiting for add exit"; exit 23 } }
           EXPECT
+            # 添加结果页不再展示二维码；改从菜单 3「查看配置」结果页核对用户实际看到的链接与二维码，
+            # info CLI 输出保持与 v0.2.1 逐字节兼容，不含二维码。
+            view_log="$(sudo mktemp)"
+            view_number="$(sudo env MENU_PORT="$port" python3 - <<'PYNUM'
+          import json, os
+          with open('/etc/shoes/ping-rust-state.json', encoding='utf-8') as stream:
+              profiles = json.load(stream)['profiles']
+          print(next(index for index, profile in enumerate(profiles, 1) if profile['port'] == int(os.environ['MENU_PORT'])))
+          PYNUM
+            )"
+            sudo env PRS_COMMAND="$PRS" PROFILE_NUMBER="$view_number" VIEW_LOG="$view_log" expect <<'EXPECT'
+          log_user 0
+          set timeout 180
+          proc wait_for {pattern stage} {
+            expect {
+              -re $pattern { return }
+              eof { puts stderr "unexpected EOF at $stage"; exit 24 }
+              timeout { puts stderr "timeout at $stage"; exit 25 }
+            }
+          }
+          spawn $env(PRS_COMMAND)
+          wait_for {请选择 \[0-10\]} view-main-menu
+          send "3\r"
+          wait_for {请选择配置} view-profile-menu
+          wait_for {0\) 返回} view-profile-back
+          wait_for {请选择} view-profile-prompt
+          log_file -a -noappend $env(VIEW_LOG)
+          send "$env(PROFILE_NUMBER)\r"
+          wait_for {按回车返回主菜单} view-result-page
+          log_file
+          send "\r"
+          wait_for {请选择 \[0-10\]} view-main-menu-after
+          send "0\r"
+          expect { eof {} timeout { puts stderr "timeout waiting for view exit"; exit 26 } }
+          EXPECT
+            sudo env SHARE_SCHEME="$scheme" VIEW_LOG="$view_log" python3 - <<'PYVIEW'
+          import os, re
+          from pathlib import Path
+          details = re.sub(r'\x1b\[[0-9;?]*[A-Za-z]', '', Path(os.environ['VIEW_LOG']).read_text(encoding='utf-8', errors='replace'))
+          scheme = os.environ['SHARE_SCHEME']
+          if scheme == 'snell':
+              assert re.search(r'协议 \(protocol\)\s*= snell', details)
+              assert 'snell://' not in details
+          else:
+              assert scheme + '://' in details
+              assert '二维码 (QR)' in details and any(block in details for block in '▀▄█')
+          PYVIEW
+            sudo rm -f "$view_log"
           }
 
           run_menu_add 1 25448 vless
@@ -786,15 +835,17 @@ jobs:
           expect {输入端口}
           send "25462\r"
           expect {请选择加密方式}
-          send "\r"
+          send "2\r"
           expect {请设置密码}
           send "\r"
-          # #72 起菜单添加 ShadowTLS 会先选择 SNI 方式；回车 = 1 自动选择。
+          # 菜单添加 ShadowTLS 显式选择 SNI 方式 1。
           expect {选择 SNI 方式}
+          send "1\r"
+          expect {配置添加成功。}
+          expect {按回车返回主菜单}
           send "\r"
-          expect {传输/伪装}
-          expect {ShadowTLS v3}
-          expect {UDP/UoT}
+          expect -re {请选择 \[0-10\]}
+          send "0\r"
           expect eof
           EXPECT
           sudo test -s /etc/shoes/profiles/SHADOWSOCKS-25462.yaml
@@ -812,8 +863,8 @@ jobs:
               --server-address 203.0.113.10 --yes
           )"
           grep -F "ShadowTLS v3" <<<"$shadowtls_add_output"
-          grep -F "没有通用标准分享 URI" <<<"$shadowtls_add_output"
-          grep -F "普通二维码也不支持" <<<"$shadowtls_add_output"
+          ! grep -Fq "没有通用标准分享 URI" <<<"$shadowtls_add_output"
+          ! grep -Fq "普通二维码也不支持" <<<"$shadowtls_add_output"
           shadowtls_fast_profile_id="$(sudo python3 - <<'PY'
           import json
           with open('/etc/shoes/ping-rust-state.json', encoding='utf-8') as stream:
@@ -843,9 +894,11 @@ jobs:
           send "naive.example.com\r"
           expect {TLS 证书模式}
           send "2\r"
-          expect -re {协议[[:space:]]*= naiveproxy}
-          expect -re {ALPN[[:space:]]*= h2}
-          expect {没有通用标准分享 URI}
+          expect {配置添加成功。}
+          expect {按回车返回主菜单}
+          send "\r"
+          expect -re {请选择 \[0-10\]}
+          send "0\r"
           expect eof
           EXPECT
           sudo test -s /etc/shoes/profiles/NAIVEPROXY-25464.yaml
@@ -856,6 +909,44 @@ jobs:
           print(next(profile['id'] for profile in profiles if profile['port'] == 25464))
           PY
           )"
+          # NaiveProxy 详情（协议、ALPN）只在菜单 3「查看配置」结果页展示；info CLI 保持与 v0.2.1 兼容。
+          naive_view_log="$(sudo mktemp)"
+          naive_view_number="$(sudo python3 - <<'PY'
+          import json
+          with open('/etc/shoes/ping-rust-state.json', encoding='utf-8') as stream:
+              profiles = json.load(stream)['profiles']
+          print(next(index for index, profile in enumerate(profiles, 1) if profile['port'] == 25464))
+          PY
+          )"
+          sudo env PRS_COMMAND="$PRS" PROFILE_NUMBER="$naive_view_number" VIEW_LOG="$naive_view_log" expect <<'EXPECT'
+          log_user 0
+          set timeout 180
+          proc wait_for {pattern stage} {
+            expect {
+              -re $pattern { return }
+              eof { puts stderr "unexpected EOF at $stage"; exit 27 }
+              timeout { puts stderr "timeout at $stage"; exit 28 }
+            }
+          }
+          spawn $env(PRS_COMMAND)
+          wait_for {请选择 \[0-10\]} naive-view-main-menu
+          send "3\r"
+          wait_for {请选择配置} naive-view-profile-menu
+          wait_for {0\) 返回} naive-view-profile-back
+          wait_for {请选择} naive-view-profile-prompt
+          log_file -a -noappend $env(VIEW_LOG)
+          send "$env(PROFILE_NUMBER)\r"
+          wait_for {按回车返回主菜单} naive-view-result-page
+          log_file
+          send "\r"
+          wait_for {请选择 \[0-10\]} naive-view-main-menu-after
+          send "0\r"
+          expect { eof {} timeout { puts stderr "timeout waiting for naive view exit"; exit 29 } }
+          EXPECT
+          naive_menu_info="$(sudo cat "$naive_view_log" | sed -E 's/\x1b\[[0-9;?]*[A-Za-z]//g')"
+          sudo rm -f "$naive_view_log"
+          grep -Eq '协议[[:space:]]*= naiveproxy' <<<"$naive_menu_info"
+          grep -Eq 'ALPN[[:space:]]*= h2' <<<"$naive_menu_info"
           sudo "$PRS" delete "$naive_menu_profile_id" --yes >/dev/null
           if sudo "$PRS" add naiveproxy 25465 --server-name naive.example.com \
             --server-address 203.0.113.10 --yes >"$RUNNER_TEMP/naive-missing-cert.log" 2>&1; then
@@ -885,7 +976,7 @@ jobs:
             sudo "$PRS" add snell 25458 --server-address 203.0.113.10 --yes
           )"
           grep -F "协议 (protocol)         = snell" <<<"$snell_add_output" >/dev/null
-          grep -F "没有通用标准分享 URI" <<<"$snell_add_output" >/dev/null
+          ! grep -Fq "没有通用标准分享 URI" <<<"$snell_add_output"
           snell_alias_output="$(
             sudo "$PRS" a snell 25461 --server-address 203.0.113.10 --yes
           )"
@@ -1039,6 +1130,8 @@ jobs:
           wait_for {输入新端口} port-prompt
           send "25450\r"
           wait_for {配置更改成功} change-success
+          wait_for {按回车返回主菜单} change-result-page
+          send "\r"
           wait_for {请选择 \[0-10\]} main-menu-return
           send "0\r"
           wait_for {已退出} exit-message
@@ -1093,9 +1186,8 @@ jobs:
           wait_for {#VLESS-REALITY-25450} view-profile-label
           wait_for {二维码 \(QR\)} view-qr-heading
           wait_for {▀|▄|█} view-qr-blocks
-          expect { eof {} timeout { puts stderr "timeout waiting for view exit"; exit 36 } }
-
-          spawn $env(PRS_COMMAND)
+          wait_for {按回车返回主菜单} view-result-page
+          send "\r"
           wait_for {请选择 \[0-10\]} main-menu-after-view
           send "4\r"
           wait_for {请选择配置} delete-profile-menu
@@ -1109,7 +1201,9 @@ jobs:
           send "$env(SS_PROFILE_NUMBER)\r"
           wait_for {确认删除 SHADOWSOCKS-25449\.yaml} delete-confirm
           send "y\r"
-          wait_for {已删除.*SHADOWSOCKS-25449\.yaml} delete-success
+          wait_for {配置删除成功。} delete-success
+          wait_for {按回车返回主菜单} delete-result-page
+          send "\r"
           wait_for {请选择 \[0-10\]} main-menu-after-delete
           send "0\r"
           wait_for {已退出} exit-message
@@ -1253,6 +1347,8 @@ jobs:
           wait_for {启用 H2MUX padding} padding
           send "\r"
           wait_for {配置更改成功} change-success
+          wait_for {按回车返回主菜单} change-result-page
+          send "\r"
           wait_for {请选择 \[0-10\]} main-menu-return
           send "0\r"
           wait_for {已退出} exit-message

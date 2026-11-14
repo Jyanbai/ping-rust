@@ -62,7 +62,7 @@ def port_present(port):
 
 def notice(output):
     for marker in (f"GitHub Release {SHOES_RELEASE_TAG}", "固定 pin", "受控重启", "Update Center", "update --method cargo"):
-        assert marker in output, f"restart explanation missing {marker}"
+        assert marker not in output, f"redundant restart explanation: {marker}"
 
 
 def menu_edit(profile_index, h2mux=False, port=None):
@@ -95,6 +95,8 @@ def menu_edit(profile_index, h2mux=False, port=None):
             child.sendline(str(port))
         child.expect("配置更改成功")
         transcript.append(child.before)
+        child.expect("按回车返回主菜单...")
+        child.sendline("")
         child.expect(r"请选择 \[0-10\]")
         child.sendline("0")
         child.expect(pexpect.EOF)
@@ -103,6 +105,55 @@ def menu_edit(profile_index, h2mux=False, port=None):
         return "".join(transcript)
     except Exception:
         raise AssertionError("menu acceptance failed; private terminal transcript suppressed") from None
+    finally:
+        child.close(force=True)
+
+
+def menu_add_socks(port):
+    child = pexpect.spawn(BIN, encoding="utf-8", timeout=120)
+    try:
+        child.expect(r"请选择 \[0-10\]")
+        child.sendline("1")
+        child.expect(r"请选择 \[0-16\]")
+        child.sendline("15")
+        child.expect("请输入端口")
+        child.sendline(str(port))
+        child.expect("配置添加成功。")
+        notice(child.before)
+        child.expect("按回车返回主菜单...")
+        child.sendline("")
+        child.expect(r"请选择 \[0-10\]")
+        child.sendline("0")
+        child.expect(pexpect.EOF)
+        child.close()
+        assert child.exitstatus == 0
+    except Exception:
+        raise AssertionError("menu add failed; private terminal transcript suppressed") from None
+    finally:
+        child.close(force=True)
+
+
+def menu_delete(profile_index):
+    child = pexpect.spawn(BIN, encoding="utf-8", timeout=120)
+    try:
+        child.expect(r"请选择 \[0-10\]")
+        child.sendline("4")
+        child.expect("请选择配置")
+        child.expect(r"请选择 \[")
+        child.sendline(str(profile_index + 1))
+        child.expect("确认删除")
+        child.sendline("y")
+        child.expect("配置删除成功。")
+        notice(child.before)
+        child.expect("按回车返回主菜单...")
+        child.sendline("")
+        child.expect(r"请选择 \[0-10\]")
+        child.sendline("0")
+        child.expect(pexpect.EOF)
+        child.close()
+        assert child.exitstatus == 0
+    except Exception:
+        raise AssertionError("menu delete failed; private terminal transcript suppressed") from None
     finally:
         child.close(force=True)
 
@@ -135,7 +186,17 @@ def main():
     _, errors = run("delete", socks["id"], "--yes")
     notice(errors)
     assert pid() != before and not port_present(new_port)
-    print("PASS authenticated SOCKS add/edit/non-last delete: controlled restart notice and correct listeners")
+    print("PASS authenticated SOCKS add/edit/non-last delete: silent controlled restart and correct listeners")
+    before = pid()
+    menu_port = h2.free_port()
+    menu_add_socks(menu_port)
+    assert pid() != before and port_present(menu_port)
+    menu_profile = next(p for p in state()["profiles"] if p["port"] == menu_port)
+    before = pid()
+    menu_delete(state()["profiles"].index(menu_profile))
+    assert pid() != before and not port_present(menu_port)
+    assert all(p["port"] != menu_port for p in state()["profiles"])
+    print("PASS menu add/delete result pages return to main and retain service behavior")
     run("generate", "trojan-tls", "--name", "release-h2mux", "--port", str(h2.free_port()), "--server-name", h2.HOST)
     profile = next(p for p in state()["profiles"] if p["name"] == "release-h2mux")
     before = pid()

@@ -37,6 +37,6 @@ Sudoku 是混淆，不是加密或认证，传输安全仍由 VLESS Encryption �
 
 客户端需要 **Xray ≥ v26.3.27** 或 v2rayN 等基于它的客户端。分享链接以 URL 编码的紧凑 JSON `fm=` 携带整个 `streamSettings.finalmask` 对象，二维码内容与链接相同。开启后拒绝 Clash Meta / Mihomo、sing-box 和 NekoBox 导出，并提示：“该客户端导出不支持 Xray FinalMask Sudoku，请用分享链接导入 v2rayN 或 Xray ≥ v26.3.27”。关闭时保持原导出行为。
 
-在“2 更改配置”中可开启或关闭 Sudoku，或重新生成 Sudoku 密码。重新生成密码会使旧分享链接失效，确认默认 N；变更沿用 dry-run、原子提交和失败回滚流程。`prs info` 显示 ASCII 模式和 padding 范围，不额外显示服务端 decryption。
+在“2 更改配置”中可开启或关闭 Sudoku，或重新生成 Sudoku 密码。重新生成密码不再额外确认；变更沿用 dry-run、原子提交和失败回滚流程。`prs info` 显示 ASCII 模式和 padding 范围，不额外显示服务端 decryption。
 
 格式参考：[shoes v0.3.7 文档](https://github.com/cfal/shoes/blob/v0.3.7/docs/src/content/docs/zh-cn/protocols/sudoku.md)、[shoes 与 Xray 互通测试](https://github.com/cfal/shoes/blob/v0.3.7/tests/cases/optional_peer/vless_encryption/sudoku_mask.rs)、[v2rayN 分享链接处理](https://github.com/2dust/v2rayN/blob/master/v2rayN/ServiceLib/Handler/Fmt/BaseFmt.cs)。

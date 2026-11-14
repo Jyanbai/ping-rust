@@ -102,6 +102,7 @@ enum ChangeAction {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MenuControl {
+    Back,
     Continue,
     Exit,
 }
@@ -126,6 +127,14 @@ fn control_after_error(error: &anyhow::Error) -> MenuControl {
     }
 }
 
+fn control_after_pause(result: Result<()>) -> Result<MenuControl> {
+    match result {
+        Ok(()) => Ok(MenuControl::Continue),
+        Err(error) if control_after_error(&error) == MenuControl::Exit => Ok(MenuControl::Exit),
+        Err(error) => Err(error),
+    }
+}
+
 /// 首次默认部署失败（连不上 GitHub、没有 systemd 等）时提示错误并照常进入主菜单，
 /// 否则 state 一直不存在，每次启动都会重跑部署并退出，工具、更新、恢复等入口全部不可用。
 /// 输入结束（EOF）仍退出菜单；Ctrl+C 中断仍交给 main 恢复光标后退出。
@@ -143,23 +152,39 @@ fn control_after_bootstrap(result: Result<bool>) -> Result<MenuControl> {
     }
 }
 
+/// 首次默认部署打印了结果（成功时的连接信息和二维码）或失败原因时，终端里进入主菜单
+/// 清屏前要先暂停；跳过部署、Ctrl+C、输入结束，以及非终端输入（不清屏）都不暂停。
+fn bootstrap_result_needs_pause(result: &Result<bool>, terminal: bool) -> bool {
+    if !terminal {
+        return false;
+    }
+    match result {
+        Ok(deployed) => *deployed,
+        Err(error) => {
+            !input::is_back(error)
+                && !crate::is_interrupted(error)
+                && control_after_error(error) != MenuControl::Exit
+        }
+    }
+}
+
 /// 启动时的节点文件检查（含旧版本迁移）失败——聚合配置被手动改过、与管理状态不一致、
 /// 缺失或未通过 shoes 校验——时提示原因并照常进入主菜单，否则 `sudo prs` 直接退出，
 /// 连 9) 工具 → 8) 恢复配置 都用不了。检查失败时不写入（提交失败会自行回滚）；
 /// 之后添加、更改、删除节点和修改链式代理在提交前都会再次检查一致性并单独报错。
 /// Ctrl+C 中断仍交给 main 恢复光标后退出。
-fn continue_after_profile_check(result: Result<bool>) -> Result<()> {
+/// 启动检查失败时返回诊断与恢复指引，由主界面每次清屏后重新显示，避免被清屏抹掉。
+fn continue_after_profile_check(result: Result<bool>) -> Result<Option<(String, String)>> {
     match result {
-        Ok(_) => Ok(()),
+        Ok(_) => Ok(None),
         Err(error) if crate::is_interrupted(&error) => Err(error),
-        Err(error) => {
-            eprintln!("{}", format!("检查受管配置失败：{error:#}").red());
-            eprintln!(
+        Err(error) => Ok(Some((
+            format!("检查受管配置失败：{error:#}"),
+            format!(
                 "已进入主菜单，但添加、更改、删除节点和修改链式代理会继续报错；可在 9) 工具 → 8) 恢复配置 中恢复备份，或把 {} 改回与 ping-rust 管理状态一致。",
                 crate::utils::CONFIG_FILE
-            );
-            Ok(())
-        }
+            ),
+        ))),
     }
 }
 
@@ -172,19 +197,16 @@ fn parse_port_change(input: &str) -> Option<PortChoice> {
 }
 
 fn parse_shadowsocks_mode(input: &str) -> Option<Option<config::ShadowsocksMode>> {
-    match input.trim() {
-        "" | "1" => Some(Some(config::ShadowsocksMode::Plain)),
-        "2" => Some(Some(config::ShadowsocksMode::ShadowTlsV3)),
-        "0" => Some(None),
+    match input.trim().parse::<usize>().ok()? {
+        1 => Some(Some(config::ShadowsocksMode::Plain)),
+        2 => Some(Some(config::ShadowsocksMode::ShadowTlsV3)),
+        0 => Some(None),
         _ => None,
     }
 }
 
-fn control_after_success(main_menu_choice: usize) -> MenuControl {
-    match main_menu_choice {
-        1 | 3 => MenuControl::Exit,
-        _ => MenuControl::Continue,
-    }
+fn control_after_success(_main_menu_choice: usize) -> MenuControl {
+    MenuControl::Continue
 }
 
 fn protocol_menu_items() -> Vec<(usize, &'static str)> {
@@ -240,7 +262,7 @@ fn select_numbered<T: AsRef<str>>(prompt: &str, items: &[T]) -> Result<Option<us
         if let Some(selected) = parse_numbered_choice(&value, count) {
             return Ok(selected);
         }
-        println!("无效序号；请输入 0 到 {count} 之间的数字。");
+        println!("无效序号！");
     }
 }
 
@@ -258,14 +280,7 @@ pub(crate) fn select_keyed(prompt: &str, items: &[(usize, &str)]) -> Result<usiz
         if let Some(key) = parse_keyed_choice(&value, items) {
             return Ok(key);
         }
-        println!(
-            "无效序号；可选 {}。",
-            items
-                .iter()
-                .map(|(key, _)| key.to_string())
-                .collect::<Vec<_>>()
-                .join("、")
-        );
+        println!("无效序号！");
     }
 }
 
@@ -343,40 +358,45 @@ fn node_summary(state: Result<config::ManagedState>) -> String {
         }
     };
     if state.profiles.is_empty() {
-        return "节点：暂无，选择 1) 添加配置".to_owned();
+        return "节点 (0):\n暂无节点".to_owned();
     }
     let count = state.profiles.len();
-    let mut lines = vec![format!("节点（{count}）：")];
-    for profile in state.profiles.iter().take(5) {
+    let mut lines = vec![format!("节点 ({count}):")];
+    for profile in &state.profiles {
         // 与查看配置、分享信息使用同一个协议名，不另起一套显示名。
         lines.push(format!(
-            "  · {}  {}  {}",
-            profile.name,
+            "• {} - 端口: {}",
             profile.protocol_name(),
             profile.port
         ));
-    }
-    if count > 5 {
-        lines.push(format!("…共 {count} 个，进入 3) 查看配置"));
     }
     lines.join("\n")
 }
 
 pub async fn run() -> Result<()> {
-    if control_after_bootstrap(cli::bootstrap_default_reality_for_menu().await)?
-        == MenuControl::Exit
-    {
+    use std::io::IsTerminal;
+    let bootstrap = cli::bootstrap_default_reality_for_menu().await;
+    let pause = bootstrap_result_needs_pause(&bootstrap, std::io::stdin().is_terminal());
+    if control_after_bootstrap(bootstrap)? == MenuControl::Exit {
+        return Ok(());
+    }
+    // 主菜单每轮先清屏：首次部署的连接信息、二维码或失败原因必须先让用户确认看过。
+    if pause && control_after_pause(input::pause_enter_main_menu())? == MenuControl::Exit {
         return Ok(());
     }
     // 状态无法读取时仍提供工具、恢复等入口，节点摘要负责显示读取失败提示。
-    if config::load_state().is_ok() {
-        continue_after_profile_check(config::ensure_profile_files().await)?;
-    }
+    let mut profile_check = if config::load_state().is_ok() {
+        continue_after_profile_check(config::ensure_profile_files().await)?
+    } else {
+        None
+    };
     loop {
+        input::clear_screen()?;
         println!(
-            "\n------------- ping-rust v{} -------------",
+            "------------- ping-rust v{} -------------",
             env!("CARGO_PKG_VERSION")
         );
+        println!("https://github.com/Jyanbai/ping-rust\n");
         let shoes_status = if service::is_active().unwrap_or(false) {
             "running"
         } else if std::path::Path::new(crate::utils::SHOES_BIN).is_file() {
@@ -384,17 +404,26 @@ pub async fn run() -> Result<()> {
         } else {
             "not installed"
         };
-        println!("shoes: {shoes_status}");
-        println!("项目: https://github.com/Jyanbai/ping-rust");
+        if shoes_status == "running" {
+            println!("shoes: {}\n", "• running".green());
+        } else {
+            println!("shoes: • {shoes_status}\n");
+        }
         let state = summary_state(
             std::path::Path::new(crate::utils::STATE_FILE),
             config::load_state,
         );
         println!("{}\n", node_summary(state));
+        if let Some((failure, guidance)) = &profile_check {
+            eprintln!("{}", failure.red());
+            eprintln!("{guidance}\n");
+        }
         let selected = match select_keyed("", MAIN_MENU_ITEMS) {
             Err(error) if control_after_error(&error) == MenuControl::Exit => return Ok(()),
             result => result?,
         };
+        input::reset_navigation();
+        input::clear_screen()?;
         let result = async {
             match selected {
                 0 => {
@@ -445,7 +474,13 @@ pub async fn run() -> Result<()> {
         }
         .await;
         let control = match result {
-            Ok(control) => control,
+            Ok(control) => {
+                if control == MenuControl::Continue && !input::returned_to_parent() {
+                    control_after_pause(input::pause_main_menu())?
+                } else {
+                    control
+                }
+            }
             Err(error) => {
                 if crate::is_interrupted(&error) {
                     crate::restore_cursor_and_exit();
@@ -453,27 +488,37 @@ pub async fn run() -> Result<()> {
                 let control = control_after_error(&error);
                 if control == MenuControl::Continue && !input::is_back(&error) {
                     eprintln!("{}", format!("错误：{error:#}").red());
+                    control_after_pause(input::pause_main_menu())?
+                } else {
+                    control
                 }
-                control
             }
         };
         if control == MenuControl::Exit {
             return Ok(());
+        }
+        // 恢复配置等操作之后重新检查，问题已解决时不再显示过期诊断。
+        if profile_check.is_some() && config::load_state().is_ok() {
+            profile_check = continue_after_profile_check(config::ensure_profile_files().await)?;
         }
     }
 }
 
 async fn prompt_probed_sni(label: &str, mode: crate::sni::Mode) -> Result<String> {
     loop {
-        println!("\n{label}\n1) 自动选择（默认）\n2) 检测与推荐\n3) 手动输入\n0) 返回");
-        let choice =
-            input::validated_text("选择 SNI 方式", Some("1"), false, |value| match value {
-                "1" | "2" | "3" => Ok(value.to_owned()),
-                _ => bail!("请输入 1、2 或 3"),
-            })?;
-        match choice.as_str() {
-            "1" => return crate::sni_probe::resolve(None, true).await,
-            "2" => match recommend_sni(mode).await {
+        let choice = select_keyed(
+            "选择 SNI 方式",
+            &[
+                (1, "自动选择"),
+                (2, "检测与推荐"),
+                (3, "手动输入"),
+                (0, "返回"),
+            ],
+        )?;
+        match choice {
+            0 => return Err(input::back()),
+            1 => return crate::sni_probe::resolve(None, true).await,
+            2 => match recommend_sni(mode).await {
                 Ok(Some(domain)) => return Ok(domain),
                 Ok(None) => continue,
                 Err(error) if input::is_back(&error) => continue,
@@ -543,7 +588,7 @@ async fn recommend_sni(mode: crate::sni::Mode) -> Result<Option<String>> {
                     Err(error) => println!("{error}"),
                 },
                 Some(None) => break,
-                None => println!("无效编号，请重新输入。"),
+                None => println!("无效序号！"),
             }
         }
     }
@@ -555,14 +600,17 @@ async fn change_config_menu() -> Result<()> {
         println!("没有可更改的配置。");
         return Ok(());
     }
-    let Some(selected) = select_profile(&state.profiles)? else {
-        return Ok(());
-    };
-    let profile = state.profiles[selected].clone();
     loop {
-        match change_profile_menu(&profile).await {
-            Err(error) if input::is_back(&error) => continue,
-            result => return result,
+        let Some(selected) = select_profile(&state.profiles)? else {
+            return Ok(());
+        };
+        let profile = state.profiles[selected].clone();
+        loop {
+            match change_profile_menu(&profile).await {
+                Err(error) if input::is_back(&error) => continue,
+                Ok(()) if input::returned_to_parent() && state.profiles.len() > 1 => break,
+                result => return result,
+            }
         }
     }
 }
@@ -583,14 +631,7 @@ fn read_xhttp_path_change(
             Ok(path.to_owned())
         },
     )?;
-    if path == current
-        || !input::read_confirm(
-            reader,
-            writer,
-            "更改 path 会使旧链接失效，确认更改？",
-            false,
-        )?
-    {
+    if path == current {
         return Ok(None);
     }
     Ok(Some(ProfileChange::XhttpPath(path)))
@@ -708,9 +749,6 @@ fn change_actions(profile: &config::ManagedProfile) -> Vec<(ChangeAction, &'stat
 }
 
 async fn change_profile_menu(profile: &config::ManagedProfile) -> Result<()> {
-    if profile.protocol() == Protocol::VlessSudoku {
-        println!("{}", crate::sudoku::PLAIN_WARNING);
-    }
     let actions = change_actions(profile);
     let action_labels = actions.iter().map(|(_, label)| *label).collect::<Vec<_>>();
     let Some(action_index) = select_numbered("选择更改项目", &action_labels)? else {
@@ -755,9 +793,6 @@ async fn change_profile_menu(profile: &config::ManagedProfile) -> Result<()> {
                 _ => bail!("配置协议不一致"),
             };
             let regenerate = matches!(action, ChangeAction::RegenerateSudokuPassword);
-            if sudoku.is_none() && !regenerate {
-                println!("{}", crate::sudoku::COST);
-            }
             let Some(change) = sudoku_menu_change(sudoku, regenerate, |prompt, default| {
                 input::confirm(prompt, default)
             })?
@@ -829,7 +864,7 @@ async fn change_profile_menu(profile: &config::ManagedProfile) -> Result<()> {
         }
         ChangeAction::ServerAddress => {
             let value = input::checked_text(
-                "VPS 公网域名或 IP（留空自动检测）",
+                "VPS 公网域名或 IP（默认：自动检测）",
                 None,
                 true,
                 |value| client::normalize_server_address(value).map(|_| ()),
@@ -841,15 +876,9 @@ async fn change_profile_menu(profile: &config::ManagedProfile) -> Result<()> {
             };
             ProfileChange::ServerAddress(Some(address))
         }
-        ChangeAction::RegenerateCredentials => {
-            if !input::confirm("确认重新生成凭据？旧分享链接将立即失效", false)?
-            {
-                return Ok(());
-            }
-            ProfileChange::RegenerateCredentials
-        }
+        ChangeAction::RegenerateCredentials => ProfileChange::RegenerateCredentials,
         ChangeAction::Password => {
-            let password = input::password("新密码（留空安全随机生成）", true)?;
+            let password = input::password("新密码（默认：随机生成）", true)?;
             if matches!(profile.protocol(), Protocol::NaiveProxy) {
                 ProfileChange::NaivePassword(if password.is_empty() {
                     config::generated_password()
@@ -884,12 +913,6 @@ async fn change_profile_menu(profile: &config::ManagedProfile) -> Result<()> {
             let Some(domain) = recommend_sni(mode).await? else {
                 return Ok(());
             };
-            if !input::confirm(
-                format!("确认将 SNI 更改为 {domain}？客户端配置也需要同步更新"),
-                false,
-            )? {
-                return Ok(());
-            }
             let backup = operations::backup(Some(std::path::PathBuf::from(format!(
                 "/var/backups/ping-rust-sni-{}.tar.gz",
                 uuid::Uuid::new_v4()
@@ -956,7 +979,7 @@ async fn change_profile_menu(profile: &config::ManagedProfile) -> Result<()> {
             ProfileChange::ShadowsocksCipher(ciphers[selected])
         }
         ChangeAction::ShadowTlsPassword => {
-            let password = input::password("ShadowTLS 密码（留空安全随机生成）", true)?;
+            let password = input::password("ShadowTLS 密码（默认：随机生成）", true)?;
             ProfileChange::ShadowTlsPassword(if password.is_empty() {
                 config::generated_password()
             } else {
@@ -1017,9 +1040,6 @@ async fn change_profile_menu(profile: &config::ManagedProfile) -> Result<()> {
                 anyhow::bail!("配置协议与管理状态不一致");
             };
             let enabled = input::confirm("启用用户名 + 密码认证？", username.is_some())?;
-            if !enabled {
-                println!("警告：SOCKS5 无认证且无传输加密，公开到公网可能被第三方滥用。");
-            }
             ProfileChange::Socks5Authentication(enabled)
         }
         ChangeAction::UdpEnabled => {
@@ -1058,7 +1078,7 @@ async fn change_profile_menu(profile: &config::ManagedProfile) -> Result<()> {
             let Some(index) = select_numbered("选择 AnyTLS 用户", &user_labels)? else {
                 return Ok(());
             };
-            let password = input::password("新密码（留空安全随机生成）", true)?;
+            let password = input::password("新密码（默认：随机生成）", true)?;
             let password = if password.is_empty() {
                 config::generated_password()
             } else {
@@ -1117,29 +1137,9 @@ async fn change_profile_menu(profile: &config::ManagedProfile) -> Result<()> {
         }
     };
 
-    let result = deployment::update_and_activate(profile.id, change).await?;
-    println!(
-        "{} {}",
-        "配置更改成功：".green(),
-        result.profile.config_file_name()
-    );
-    if let Some(server) = result.profile.server_address.as_deref() {
-        match client::share_uri(&result.profile, server) {
-            Ok(uri)
-                if matches!(
-                    result.profile.protocol(),
-                    Protocol::VlessEnc | Protocol::VlessSudoku
-                ) =>
-            {
-                cli::print_share_uri_with_qr(&uri)
-            }
-            Ok(uri) => println!("\n{uri}\n"),
-            Err(error) => eprintln!("分享链接生成失败：{error:#}"),
-        }
-    }
-    if result.profile.h2mux.enabled {
-        println!("提示：分享链接不包含 H2MUX 客户端偏好；请使用 sing-box 导出。shoes 服务端自动识别 H2MUX。");
-    }
+    deployment::update_and_activate(profile.id, change).await?;
+    input::clear_screen()?;
+    println!("{}", "配置更改成功。".green());
     Ok(())
 }
 
@@ -1154,10 +1154,10 @@ fn view_config_menu() -> Result<MenuControl> {
     };
     let profile = &state.profiles[selected];
     let (share_uri, share_warning) = share_uri_for_view(profile);
+    input::clear_screen()?;
     cli::print_profile_details_with_qr(profile, share_uri.as_deref());
     if let Some(warning) = share_warning {
         println!("未生成标准分享链接：{warning}");
-        println!("配置详情仍可查看；请按上方提示选择受支持的客户端导出方式。");
     }
     Ok(control_after_success(3))
 }
@@ -1185,8 +1185,9 @@ async fn delete_config_menu() -> Result<()> {
     if !input::confirm(format!("确认删除 {}？", profile.config_file_name()), false)? {
         return Ok(());
     }
-    let deleted = deployment::delete_and_activate(profile.id).await?;
-    println!("{} {}", "已删除：".green(), deleted.config_file_name());
+    deployment::delete_and_activate(profile.id).await?;
+    input::clear_screen()?;
+    println!("{}", "配置删除成功。".green());
     Ok(())
 }
 
@@ -1194,70 +1195,67 @@ async fn operations_menu() -> Result<MenuControl> {
     loop {
         match operations_menu_once().await {
             Err(error) if input::is_back(&error) => continue,
+            Ok(MenuControl::Back) => return Ok(MenuControl::Continue),
+            Ok(MenuControl::Continue) if input::returned_to_parent() => continue,
             result => return result,
         }
     }
 }
 
 async fn operations_menu_once() -> Result<MenuControl> {
-    loop {
-        let Some(selected) = select_numbered("工具", &OPERATIONS_MENU_ITEMS)? else {
-            return Ok(MenuControl::Continue);
-        };
-        match selected {
-            0 => export_menu(),
-            1 => advanced_add_config_menu().await,
-            2 => {
-                let command = input::validated_text(
-                    "输入 SNI 域名，空格分隔（直接回车检测默认名单和现有节点）",
-                    None,
-                    true,
-                    sni_check_command,
-                )?;
-                crate::sni::run(command).await
-            }
-            3 => {
-                crate::sni::run(crate::sni::Command::Scan {
-                    yes: false,
-                    protocol: crate::sni::Mode::Reality,
-                })
-                .await
-            }
-            4 => {
-                let port = input::port("检查端口", Some(443))?;
-                cli::print_port_status(port, operations::check_port(port, true, true));
-                Ok(())
-            }
-            5 => {
-                if input::confirm("写入 sysctl 配置并启用 BBR？", false)? {
-                    operations::enable_bbr()?;
-                    println!("{}", "BBR 已启用。".green());
-                }
-                Ok(())
-            }
-            6 => {
-                let path = operations::backup(None)?;
-                println!("备份已创建：{}", path.display());
-                println!("备份含私钥和密码，请安全保管。");
-                Ok(())
-            }
-            7 => {
-                let archive = input::file_path("备份文件路径")?;
-                if input::confirm("恢复会替换当前配置，继续？", false)? {
-                    let rollback = operations::restore(std::path::Path::new(&archive)).await?;
-                    println!("{}", "恢复成功。".green());
-                    if let Some(path) = rollback {
-                        println!("原配置保留于：{}", path.display());
-                    }
-                }
-                Ok(())
-            }
-            _ => unreachable!("工具菜单编号已验证"),
-        }?;
-        if !matches!(selected, 2 | 3) {
-            return Ok(MenuControl::Continue);
+    let Some(selected) = select_numbered("工具", &OPERATIONS_MENU_ITEMS)? else {
+        return Ok(MenuControl::Back);
+    };
+    match selected {
+        0 => export_menu(),
+        1 => advanced_add_config_menu().await,
+        2 => {
+            let command = input::validated_text(
+                "输入 SNI 域名，空格分隔（默认：默认名单和现有节点）",
+                None,
+                true,
+                sni_check_command,
+            )?;
+            crate::sni::run(command).await
         }
-    }
+        3 => {
+            crate::sni::run(crate::sni::Command::Scan {
+                yes: false,
+                protocol: crate::sni::Mode::Reality,
+            })
+            .await
+        }
+        4 => {
+            let port = input::port("检查端口", Some(443))?;
+            cli::print_port_status(port, operations::check_port(port, true, true));
+            Ok(())
+        }
+        5 => {
+            if input::confirm("写入 sysctl 配置并启用 BBR？", false)? {
+                operations::enable_bbr()?;
+                println!("{}", "BBR 已启用。".green());
+            }
+            Ok(())
+        }
+        6 => {
+            let path = operations::backup(None)?;
+            println!("备份已创建：{}", path.display());
+            Ok(())
+        }
+        7 => {
+            let archive = input::file_path("备份文件路径")?;
+            if input::confirm("恢复会替换当前配置，继续？", false)? {
+                let rollback = operations::restore(std::path::Path::new(&archive)).await?;
+                println!("{}", "恢复成功。".green());
+                if let Some(path) = rollback {
+                    println!("原配置保留于：{}", path.display());
+                }
+            }
+            Ok(())
+        }
+        _ => unreachable!("工具菜单编号已验证"),
+    }?;
+    Ok(MenuControl::Continue)
 }
 
 fn sni_check_command(domains: &str) -> Result<crate::sni::Command> {
@@ -1275,8 +1273,6 @@ async fn chain_proxy_menu() -> Result<()> {
 }
 
 async fn add_chain_node() -> Result<()> {
-    println!("支持：SOCKS5、HTTP(S)、Shadowsocks、VLESS（TCP/TLS/Reality/WS）、Trojan（TLS/WS）");
-    println!("不支持：Hysteria2、TUIC、WireGuard/WARP、未经验证的分享链接格式");
     let parsed = input::validated_text("粘贴分享链接", None, false, chain_proxy::parse_share_uri)?;
     println!(
         "识别结果：{} | {} | {}",
@@ -1284,9 +1280,6 @@ async fn add_chain_node() -> Result<()> {
         parsed.protocol_name(),
         parsed.address()
     );
-    if !parsed.supports_udp_over_tcp() {
-        println!("提示：该节点不支持 UDP-over-TCP；UDP 请求将失败，不会回退直连。");
-    }
     let name = input::checked_text(
         "节点名称",
         Some(&parsed.name),
@@ -1296,7 +1289,6 @@ async fn add_chain_node() -> Result<()> {
     let node = parsed.with_name(name)?;
     deployment::update_chain_proxy(ChainProxyChange::Add(node.clone())).await?;
     println!("{} {}", "节点已添加：".green(), node.name);
-    println!("默认路由仍为 DIRECT；可选择出口节点或设置默认路由。");
     Ok(())
 }
 
@@ -1357,7 +1349,6 @@ async fn test_chain_node() -> Result<()> {
         node.name,
         elapsed.as_millis()
     );
-    println!("已验证：地址可达、协议认证成功，并能通过该节点完成 HTTP 请求。");
     Ok(())
 }
 
@@ -1470,26 +1461,33 @@ fn export_menu() -> Result<()> {
     let server = input::checked_text("VPS 公网域名或 IP", None, false, |value| {
         client::normalize_server_address(value).map(|_| ())
     })?;
-    let content = client::render(&state.profiles[selected], format, &server)?;
-    println!("\n{content}\n");
-    if state.profiles[selected].h2mux.enabled && matches!(format, ClientFormat::Nekobox) {
-        println!("提示：NekoBox 分享链接不包含 H2MUX 客户端偏好；普通节点连接仍可使用。");
-    }
-    if state.profiles[selected].self_signed_certificate
-        && state.profiles[selected].protocol() != Protocol::NaiveProxy
-    {
-        println!(
-            "{}",
-            "注意：导出内容为自签名证书启用了 insecure；生产环境建议换用受信任证书。".yellow()
-        );
-    }
+    println!(
+        "{}",
+        export_menu_output(&state.profiles[selected], format, &server)?
+    );
     Ok(())
+}
+
+/// 菜单导出的完整输出：内容之后附上与 CLI 导出相同的能力说明（如 NekoBox 丢失 H2MUX 偏好）。
+fn export_menu_output(
+    profile: &config::ManagedProfile,
+    format: ClientFormat,
+    server: &str,
+) -> Result<String> {
+    let content = client::render(profile, format, server)?;
+    let mut output = format!("\n{content}\n");
+    if let Some(notice) = client::export_notice(profile, format) {
+        output.push_str(&format!("{notice}\n"));
+    }
+    Ok(output)
 }
 
 async fn fast_add_config_menu() -> Result<MenuControl> {
     loop {
         match fast_add_config_menu_once().await {
             Err(error) if input::is_back(&error) => continue,
+            Ok(MenuControl::Back) => return Ok(MenuControl::Continue),
+            Ok(MenuControl::Continue) if input::returned_to_parent() => continue,
             result => return result,
         }
     }
@@ -1499,118 +1497,129 @@ async fn fast_add_config_menu_once() -> Result<MenuControl> {
     let protocol_items = protocol_menu_items();
     let protocol_number = select_keyed("选择协议", &protocol_items)?;
     if protocol_number == 0 {
-        return Ok(MenuControl::Continue);
+        return Ok(MenuControl::Back);
     }
     let protocol = Protocol::from_menu_number(protocol_number)
         .with_context(|| format!("协议编号无效：{protocol_number}"))?;
-    let shadowsocks_mode = if protocol == Protocol::Shadowsocks {
-        println!("\nShadowsocks 模式:\n\n1) Shadowsocks 2022\n2) Shadowsocks 2022 + ShadowTLS v3\n0) 返回\n");
-        loop {
-            match parse_shadowsocks_mode(&read_menu_choice(2)?) {
-                Some(Some(mode)) => break mode,
-                Some(None) => return Ok(MenuControl::Continue),
-                None => println!("无效序号；请输入 0 到 2 之间的数字。"),
+    'options: loop {
+        let shadowsocks_mode = if protocol == Protocol::Shadowsocks {
+            println!("\nShadowsocks 模式:\n\n1) Shadowsocks 2022\n2) Shadowsocks 2022 + ShadowTLS v3\n0) 返回\n");
+            loop {
+                match parse_shadowsocks_mode(&read_menu_choice(2)?) {
+                    Some(Some(mode)) => break mode,
+                    Some(None) => return Ok(MenuControl::Continue),
+                    None => println!("无效序号！"),
+                }
             }
-        }
-    } else {
-        config::ShadowsocksMode::Plain
-    };
-    let anytls_mode = if protocol == Protocol::AnyTls {
-        let Some(mode) = select_anytls_mode()? else {
-            return Ok(MenuControl::Continue);
-        };
-        mode
-    } else {
-        AnyTlsMode::default()
-    };
-    let port = input::validated_text(
-        "请输入端口（直接回车随机）",
-        None,
-        true,
-        |value| parse_port_choice(value).context("请输入 1 到 65535 的端口"),
-    )?;
-    let port = match port {
-        PortChoice::Back => return Ok(MenuControl::Continue),
-        PortChoice::Random => None,
-        PortChoice::Fixed(port) => Some(port),
-    };
-    if protocol == Protocol::NaiveProxy {
-        let server_name =
-            input::checked_text("请输入域名/SNI", None, false, config::validate_server_name)?;
-        let Some(mode) = select_numbered(
-            "TLS 证书模式",
-            &["已有受信任证书", "自签名测试模式（仅供测试）"],
-        )?
-        else {
-            return Ok(MenuControl::Continue);
-        };
-        let (certificate, certificate_key) = if mode == 0 {
-            let cert = input::file_path("PEM 证书路径")?;
-            let key = input::file_path("PEM 私钥路径")?;
-            (Some(cert.into()), Some(key.into()))
         } else {
-            println!("警告：自签名证书仅供测试，不推荐用于生产环境。");
+            config::ShadowsocksMode::Plain
+        };
+        let anytls_mode = if protocol == Protocol::AnyTls {
+            let Some(mode) = select_anytls_mode()? else {
+                return Ok(MenuControl::Continue);
+            };
+            mode
+        } else {
+            AnyTlsMode::default()
+        };
+        let port = match input::validated_text("请输入端口", Some("随机"), true, |value| {
+            if value == "随机" {
+                return Ok(PortChoice::Random);
+            }
+            parse_port_choice(value).context("请输入 1 到 65535 的端口")
+        }) {
+            Err(error)
+                if input::is_back(&error)
+                    && matches!(protocol, Protocol::Shadowsocks | Protocol::AnyTls) =>
+            {
+                continue 'options
+            }
+            result => result?,
+        };
+        let port = match port {
+            PortChoice::Back => return Ok(MenuControl::Continue),
+            PortChoice::Random => None,
+            PortChoice::Fixed(port) => Some(port),
+        };
+        if protocol == Protocol::NaiveProxy {
+            let server_name =
+                input::checked_text("请输入域名/SNI", None, false, config::validate_server_name)?;
+            let Some(mode) = select_numbered(
+                "TLS 证书模式",
+                &["已有受信任证书", "自签名测试模式（仅供测试）"],
+            )?
+            else {
+                return Ok(MenuControl::Continue);
+            };
+            let (certificate, certificate_key) = if mode == 0 {
+                let cert = input::file_path("PEM 证书路径")?;
+                let key = input::file_path("PEM 私钥路径")?;
+                (Some(cert.into()), Some(key.into()))
+            } else {
+                (None, None)
+            };
+            cli::ensure_shoes_for_add(true).await?;
+            let server_address = resolve_menu_server_address().await?;
+            let result = fast_add::execute(fast_add::AddRequest {
+                interactive: true,
+                vless_enc: Default::default(),
+                xhttp_path: None,
+                name: None,
+                protocol,
+                anytls_mode: AnyTlsMode::default(),
+                port,
+                server_address: Some(server_address),
+                server_name: Some(server_name),
+                shadowsocks_cipher: None,
+                shadowsocks_password: None,
+                shadowsocks_mode: config::ShadowsocksMode::Plain,
+                shadowtls_password: None,
+                shadowtls_handshake: None,
+                certificate,
+                certificate_key,
+                naive_self_signed: mode == 1,
+                naive_username: None,
+                naive_password: None,
+                naive_padding: true,
+                naive_fallback: None,
+            })
+            .await?;
+            let _ = result;
+            input::clear_screen()?;
+            println!("{}", "配置添加成功。".green());
+            return Ok(control_after_success(1));
+        }
+        let (shadowsocks_cipher, shadowsocks_password) = if protocol == Protocol::Shadowsocks {
+            let Some(cipher) = select_shadowsocks_cipher(shadowsocks_mode)? else {
+                continue 'options;
+            };
+            let entered_password = input::password("请设置密码（默认：随机生成）", true)?;
+            if entered_password == "0" {
+                return Ok(MenuControl::Continue);
+            }
+            let (password, warning) = prepare_shadowsocks_password(cipher, entered_password);
+            if let Some(warning) = warning {
+                println!(
+                    "\n警告! Shadowsocks 协议 ({}) 不支持使用该密码。",
+                    cipher.as_str()
+                );
+                println!("原因：{warning}");
+                println!("脚本将自动创建可用密码。\n");
+            }
+            (Some(cipher), Some(password))
+        } else {
             (None, None)
         };
-        cli::ensure_shoes_for_add(false).await?;
-        let server_address = resolve_menu_server_address().await?;
-        let result = fast_add::execute(fast_add::AddRequest {
-            interactive: true,
-            vless_enc: Default::default(),
-            xhttp_path: None,
-            name: None,
+        return deploy_fast_config(
             protocol,
-            anytls_mode: AnyTlsMode::default(),
             port,
-            server_address: Some(server_address),
-            server_name: Some(server_name),
-            shadowsocks_cipher: None,
-            shadowsocks_password: None,
-            shadowsocks_mode: config::ShadowsocksMode::Plain,
-            shadowtls_password: None,
-            shadowtls_handshake: None,
-            certificate,
-            certificate_key,
-            naive_self_signed: mode == 1,
-            naive_username: None,
-            naive_password: None,
-            naive_padding: true,
-            naive_fallback: None,
-        })
-        .await?;
-        cli::print_add_result(&result);
-        return Ok(control_after_success(1));
+            shadowsocks_cipher,
+            shadowsocks_password,
+            shadowsocks_mode,
+            anytls_mode,
+        )
+        .await;
     }
-    let (shadowsocks_cipher, shadowsocks_password) = if protocol == Protocol::Shadowsocks {
-        let Some(cipher) = select_shadowsocks_cipher(shadowsocks_mode)? else {
-            return Ok(MenuControl::Continue);
-        };
-        let entered_password = input::password("请设置密码（留空安全随机生成）", true)?;
-        if entered_password == "0" {
-            return Ok(MenuControl::Continue);
-        }
-        let (password, warning) = prepare_shadowsocks_password(cipher, entered_password);
-        if let Some(warning) = warning {
-            println!(
-                "\n警告! Shadowsocks 协议 ({}) 不支持使用该密码。",
-                cipher.as_str()
-            );
-            println!("原因：{warning}");
-            println!("脚本将自动创建可用密码。\n");
-        }
-        (Some(cipher), Some(password))
-    } else {
-        (None, None)
-    };
-    deploy_fast_config(
-        protocol,
-        port,
-        shadowsocks_cipher,
-        shadowsocks_password,
-        shadowsocks_mode,
-        anytls_mode,
-    )
-    .await
 }
 
 const ANYTLS_MODE_LABELS: [&str; 2] = ["TLS", "REALITY"];
@@ -1642,25 +1651,15 @@ fn select_shadowsocks_cipher(mode: config::ShadowsocksMode) -> Result<Option<Sha
         println!("{}) {}", index + 1, cipher.as_str());
     }
     println!("0) 返回");
-    println!("\n(默认 {}):\n", ShadowsocksCipher::default().as_str());
+    println!();
     loop {
         let value = read_menu_choice(ciphers.len())?;
-        let value = value.trim();
-        if value.is_empty() {
-            return Ok(Some(ShadowsocksCipher::default()));
+        match parse_numbered_choice(&value, ciphers.len()) {
+            Some(Some(index)) => return Ok(Some(ciphers[index])),
+            Some(None) => return Ok(None),
+            None => {}
         }
-        if value == "0" {
-            return Ok(None);
-        }
-        if let Ok(selected) = value.parse::<usize>() {
-            if let Some(cipher) = ciphers.get(selected.saturating_sub(1)) {
-                return Ok(Some(*cipher));
-            }
-        }
-        println!(
-            "无效序号；请输入 0 到 {} 之间的数字，或直接回车使用默认值。",
-            ciphers.len()
-        );
+        println!("无效序号！");
     }
 }
 
@@ -1669,24 +1668,11 @@ const SNELL_CIPHERS: [SnellCipher; 3] = [
     SnellCipher::Aes256Gcm,
     SnellCipher::Chacha20IetfPoly1305,
 ];
-const SNELL_CIPHER_LABELS: [&str; 3] = [
-    "aes-128-gcm（默认，Mihomo 已验证）",
-    "aes-256-gcm",
-    "chacha20-ietf-poly1305",
-];
+const SNELL_CIPHER_LABELS: [&str; 3] = ["aes-128-gcm", "aes-256-gcm", "chacha20-ietf-poly1305"];
 
 fn snell_new_node_choice(value: &str) -> Option<Option<SnellCipher>> {
-    if value.trim().is_empty() {
-        return Some(Some(SnellCipher::default()));
-    }
     parse_numbered_choice(value, SNELL_CIPHERS.len())
         .map(|selected| selected.map(|index| SNELL_CIPHERS[index]))
-}
-
-fn warn_unverified_snell_cipher(cipher: SnellCipher) {
-    if let Some(warning) = cipher.mihomo_warning() {
-        println!("{warning}");
-    }
 }
 
 fn select_snell_cipher(prompt: &str) -> Result<Option<SnellCipher>> {
@@ -1694,12 +1680,11 @@ fn select_snell_cipher(prompt: &str) -> Result<Option<SnellCipher>> {
         return Ok(None);
     };
     let cipher = SNELL_CIPHERS[selected];
-    warn_unverified_snell_cipher(cipher);
     Ok(Some(cipher))
 }
 
 fn select_new_snell_cipher() -> Result<Option<SnellCipher>> {
-    println!("\n选择 Snell v3 加密方式（回车使用 aes-128-gcm）:\n");
+    println!("\n选择 Snell v3 加密方式:\n");
     for (index, label) in SNELL_CIPHER_LABELS.iter().enumerate() {
         println!("{}) {label}", index + 1);
     }
@@ -1708,11 +1693,10 @@ fn select_new_snell_cipher() -> Result<Option<SnellCipher>> {
         let value = read_menu_choice(SNELL_CIPHERS.len())?;
         match snell_new_node_choice(&value) {
             Some(Some(cipher)) => {
-                warn_unverified_snell_cipher(cipher);
                 return Ok(Some(cipher));
             }
             Some(None) => return Ok(None),
-            None => println!("无效序号；请输入 0 到 3，或直接回车使用默认值。"),
+            None => println!("无效序号！"),
         }
     }
 }
@@ -1734,14 +1718,7 @@ fn prepare_shadowsocks_password(
 }
 
 fn prompt_vless_enc_mode() -> Result<Option<config::VlessEncMode>> {
-    let Some(index) = select_numbered(
-        "VLESS Encryption 外观",
-        &[
-            "native（默认）",
-            "xorpub（混淆公钥）",
-            "random（关闭 TCP splice）",
-        ],
-    )?
+    let Some(index) = select_numbered("VLESS Encryption 外观", &["native", "xorpub", "random"])?
     else {
         return Ok(None);
     };
@@ -1750,63 +1727,28 @@ fn prompt_vless_enc_mode() -> Result<Option<config::VlessEncMode>> {
         config::VlessEncMode::Xorpub,
         config::VlessEncMode::Random,
     ][index];
-    if mode == config::VlessEncMode::Random {
-        println!("提示：random 会关闭 TCP splice。");
-    }
     Ok(Some(mode))
 }
 
 fn prompt_vless_enc_auth() -> Result<Option<config::VlessEncAuth>> {
-    let Some(index) = select_numbered(
-        "VLESS Encryption 认证",
-        &[
-            "x25519（默认）",
-            "mlkem768（链接约 1.6 KB，二维码可能无法扫描）",
-        ],
-    )?
-    else {
+    let Some(index) = select_numbered("VLESS Encryption 认证", &["x25519", "mlkem768"])? else {
         return Ok(None);
     };
     let auth = [config::VlessEncAuth::X25519, config::VlessEncAuth::Mlkem768][index];
-    if auth == config::VlessEncAuth::Mlkem768 {
-        println!("提示：mlkem768 分享链接约 1.6 KB，二维码可能无法扫描。");
-    }
     Ok(Some(auth))
 }
 
 fn prompt_vless_enc_options() -> Result<Option<crate::vless_encryption::Options>> {
-    let Some(mut options) =
-        prompt_vless_enc_options_with(prompt_vless_enc_mode, prompt_vless_enc_auth, || {
-            input::confirm("开启 Vision？", false)
-        })?
-    else {
-        return Ok(None);
-    };
-    options.sudoku.enabled = read_sudoku_prompt(&mut io::stdin().lock(), &mut io::stdout())?;
-    Ok(Some(options))
+    prompt_vless_enc_options_with(
+        prompt_vless_enc_mode,
+        prompt_vless_enc_auth,
+        || input::confirm("开启 Vision？", false),
+        || read_sudoku_prompt(&mut io::stdin().lock(), &mut io::stdout()),
+    )
 }
 
 fn read_sudoku_prompt(reader: &mut impl io::BufRead, writer: &mut impl io::Write) -> Result<bool> {
-    writeln!(writer, "{}", crate::sudoku::COST)?;
     input::read_confirm(reader, writer, "启用 Sudoku 外观？", false)
-}
-
-fn read_vless_sudoku_prompt(
-    reader: &mut impl io::BufRead,
-    writer: &mut impl io::Write,
-) -> Result<bool> {
-    writeln!(
-        writer,
-        "{}\n{}",
-        crate::sudoku::PLAIN_WARNING,
-        crate::sudoku::PLAIN_COST
-    )?;
-    input::read_confirm(
-        reader,
-        writer,
-        "仍要添加无加密的 VLESS-Sudoku 节点？",
-        false,
-    )
 }
 
 fn read_sudoku_padding(
@@ -1840,13 +1782,10 @@ fn sudoku_menu_change(
         if current.is_none() {
             bail!("请先开启 Sudoku 外观");
         }
-        return Ok(
-            confirm("重新生成 Sudoku 密码？（会使旧分享链接失效）", false)?
-                .then_some(ProfileChange::RegenerateSudokuPassword),
-        );
+        return Ok(Some(ProfileChange::RegenerateSudokuPassword));
     }
     let prompt = if current.is_some() {
-        "关闭 Sudoku 外观？（会使旧分享链接失效）"
+        "关闭 Sudoku 外观？"
     } else {
         "启用 Sudoku 外观？"
     };
@@ -1861,37 +1800,40 @@ fn sudoku_menu_change(
 }
 
 fn prompt_vless_enc_options_with(
-    mode: impl FnOnce() -> Result<Option<config::VlessEncMode>>,
-    auth: impl FnOnce() -> Result<Option<config::VlessEncAuth>>,
-    vision: impl FnOnce() -> Result<bool>,
+    mut mode: impl FnMut() -> Result<Option<config::VlessEncMode>>,
+    mut auth: impl FnMut() -> Result<Option<config::VlessEncAuth>>,
+    mut vision: impl FnMut() -> Result<bool>,
+    mut sudoku: impl FnMut() -> Result<bool>,
 ) -> Result<Option<crate::vless_encryption::Options>> {
-    let Some(mode) = mode()? else {
-        return Ok(None);
-    };
-    let Some(auth) = auth()? else {
-        return Ok(None);
-    };
-    let vision = vision()?;
-    Ok(Some(crate::vless_encryption::Options {
-        mode,
-        auth,
-        vision,
-        sudoku: Default::default(),
-    }))
-}
-
-async fn offer_vless_enc_regeneration(profile: &config::ManagedProfile) -> Result<()> {
-    if profile.protocol() != Protocol::VlessEnc {
-        return Ok(());
+    'mode: loop {
+        let Some(mode) = mode()? else {
+            return Ok(None);
+        };
+        'auth: loop {
+            let Some(auth) = auth()? else {
+                continue 'mode;
+            };
+            loop {
+                let vision = match vision() {
+                    Err(error) if input::is_back(&error) => continue 'auth,
+                    result => result?,
+                };
+                let enabled = match sudoku() {
+                    Err(error) if input::is_back(&error) => continue,
+                    result => result?,
+                };
+                return Ok(Some(crate::vless_encryption::Options {
+                    mode,
+                    auth,
+                    vision,
+                    sudoku: crate::sudoku::SudokuOptions {
+                        enabled,
+                        ..Default::default()
+                    },
+                }));
+            }
+        }
     }
-    while input::confirm("重新生成密钥？（会使刚才的分享链接失效）", false)? {
-        let result =
-            deployment::update_and_activate(profile.id, ProfileChange::RegenerateCredentials)
-                .await?;
-        let uri = client::stored_share_uri(&result.profile, None)?;
-        cli::print_profile_details_with_qr(&result.profile, Some(&uri));
-    }
-    Ok(())
 }
 
 async fn deploy_fast_config(
@@ -1902,11 +1844,6 @@ async fn deploy_fast_config(
     shadowsocks_mode: config::ShadowsocksMode,
     anytls_mode: AnyTlsMode,
 ) -> Result<MenuControl> {
-    if protocol == Protocol::VlessSudoku
-        && !read_vless_sudoku_prompt(&mut io::stdin().lock(), &mut io::stdout())?
-    {
-        return Ok(MenuControl::Continue);
-    }
     let vless_enc = if protocol == Protocol::VlessEnc {
         let Some(options) = prompt_vless_enc_options()? else {
             return Ok(MenuControl::Continue);
@@ -1915,7 +1852,7 @@ async fn deploy_fast_config(
     } else {
         Default::default()
     };
-    cli::ensure_shoes_for_add(false).await?;
+    cli::ensure_shoes_for_add(true).await?;
     let server_name = if protocol.uses_reality(anytls_mode) {
         Some(prompt_probed_sni("Reality SNI", crate::sni::Mode::Reality).await?)
     } else if shadowsocks_mode == config::ShadowsocksMode::ShadowTlsV3 {
@@ -1952,8 +1889,9 @@ async fn deploy_fast_config(
     } else {
         fast_add::execute(request).await?
     };
-    cli::print_add_result(&result);
-    offer_vless_enc_regeneration(&result.generation.profile).await?;
+    let _ = result;
+    input::clear_screen()?;
+    println!("{}", "配置添加成功。".green());
     Ok(control_after_success(1))
 }
 
@@ -1972,19 +1910,24 @@ async fn resolve_menu_server_address() -> Result<String> {
 }
 
 async fn advanced_add_config_menu() -> Result<()> {
-    let choices = Protocol::all()
-        .map(Protocol::advanced_label)
-        .collect::<Vec<_>>();
-    let Some(selected) = select_numbered("选择协议", &choices)? else {
-        return Ok(());
-    };
-    let protocol =
-        Protocol::from_menu_number(selected + 1).context("协议菜单与中央注册表不一致")?;
-    if protocol == Protocol::VlessSudoku
-        && !read_vless_sudoku_prompt(&mut io::stdin().lock(), &mut io::stdout())?
-    {
-        return Ok(());
+    loop {
+        let choices = Protocol::all()
+            .map(Protocol::advanced_label)
+            .collect::<Vec<_>>();
+        let Some(selected) = select_numbered("选择协议", &choices)? else {
+            return Ok(());
+        };
+        let protocol =
+            Protocol::from_menu_number(selected + 1).context("协议菜单与中央注册表不一致")?;
+        match advanced_add_protocol(protocol).await {
+            Err(error) if input::is_back(&error) => continue,
+            Ok(()) if input::returned_to_parent() => continue,
+            result => return result,
+        }
     }
+}
+
+async fn advanced_add_protocol(protocol: Protocol) -> Result<()> {
     let name = input::checked_text("配置名称", Some(protocol.slug()), false, |name| {
         config::validate_profile_name(name, &config::load_state()?.profiles, None)
     })?;
@@ -2001,60 +1944,64 @@ async fn advanced_add_config_menu() -> Result<()> {
     }
     let mut shadowtls_server_name = None;
     if matches!(protocol, Protocol::Shadowsocks) {
-        let Some(mode) = select_numbered(
-            "Shadowsocks 模式",
-            &["普通 SS2022", "SS2022 + ShadowTLS v3"],
-        )?
-        else {
-            return Ok(());
-        };
-        options.shadowsocks_mode = if mode == 1 {
-            config::ShadowsocksMode::ShadowTlsV3
-        } else {
-            config::ShadowsocksMode::Plain
-        };
-        let ciphers = if options.shadowsocks_mode == config::ShadowsocksMode::ShadowTlsV3 {
-            vec![
-                "2022-blake3-aes-256-gcm",
-                "2022-blake3-aes-128-gcm",
-                "2022-blake3-chacha20-ietf-poly1305",
-            ]
-        } else {
-            vec![
-                "2022-blake3-aes-256-gcm",
-                "2022-blake3-aes-128-gcm",
-                "2022-blake3-chacha20-ietf-poly1305",
-                "aes-256-gcm",
-                "aes-128-gcm",
-                "chacha20-ietf-poly1305",
-            ]
-        };
-        let Some(cipher) = select_numbered("选择加密方式", &ciphers)? else {
-            return Ok(());
-        };
-        options.shadowsocks_cipher = match cipher {
-            0 => ShadowsocksCipher::Aes256Gcm2022,
-            1 => ShadowsocksCipher::Aes128Gcm2022,
-            2 => ShadowsocksCipher::Chacha20IetfPoly13052022,
-            3 => ShadowsocksCipher::Aes256Gcm,
-            4 => ShadowsocksCipher::Aes128Gcm,
-            _ => ShadowsocksCipher::Chacha20IetfPoly1305,
-        };
-        if options.shadowsocks_mode == config::ShadowsocksMode::ShadowTlsV3 {
-            let password = input::password("SS2022 密钥（留空则安全生成）", true)?;
-            options.shadowsocks_password = (!password.is_empty()).then_some(password);
-            let shadow_password = input::password("ShadowTLS 密码（留空则安全生成）", true)?;
-            options.shadowtls_password = (!shadow_password.is_empty()).then_some(shadow_password);
-            let sni = prompt_probed_sni("ShadowTLS SNI", crate::sni::Mode::ShadowTls).await?;
-            shadowtls_server_name = Some(sni.clone());
-            let handshake = input::checked_text(
-                "Handshake destination（host:port）",
-                Some(&(format!("{sni}:443"))),
-                false,
-                config::validate_host_port,
-            )?;
-            options.shadowtls_handshake = Some(handshake);
-            options.udp_enabled = false;
+        loop {
+            let Some(mode) = select_numbered(
+                "Shadowsocks 模式",
+                &["普通 SS2022", "SS2022 + ShadowTLS v3"],
+            )?
+            else {
+                return Ok(());
+            };
+            options.shadowsocks_mode = if mode == 1 {
+                config::ShadowsocksMode::ShadowTlsV3
+            } else {
+                config::ShadowsocksMode::Plain
+            };
+            let ciphers = if options.shadowsocks_mode == config::ShadowsocksMode::ShadowTlsV3 {
+                vec![
+                    "2022-blake3-aes-256-gcm",
+                    "2022-blake3-aes-128-gcm",
+                    "2022-blake3-chacha20-ietf-poly1305",
+                ]
+            } else {
+                vec![
+                    "2022-blake3-aes-256-gcm",
+                    "2022-blake3-aes-128-gcm",
+                    "2022-blake3-chacha20-ietf-poly1305",
+                    "aes-256-gcm",
+                    "aes-128-gcm",
+                    "chacha20-ietf-poly1305",
+                ]
+            };
+            let Some(cipher) = select_numbered("选择加密方式", &ciphers)? else {
+                continue;
+            };
+            options.shadowsocks_cipher = match cipher {
+                0 => ShadowsocksCipher::Aes256Gcm2022,
+                1 => ShadowsocksCipher::Aes128Gcm2022,
+                2 => ShadowsocksCipher::Chacha20IetfPoly13052022,
+                3 => ShadowsocksCipher::Aes256Gcm,
+                4 => ShadowsocksCipher::Aes128Gcm,
+                _ => ShadowsocksCipher::Chacha20IetfPoly1305,
+            };
+            if options.shadowsocks_mode == config::ShadowsocksMode::ShadowTlsV3 {
+                let password = input::password("SS2022 密钥（默认：随机生成）", true)?;
+                options.shadowsocks_password = (!password.is_empty()).then_some(password);
+                let shadow_password = input::password("ShadowTLS 密码（默认：随机生成）", true)?;
+                options.shadowtls_password =
+                    (!shadow_password.is_empty()).then_some(shadow_password);
+                let sni = prompt_probed_sni("ShadowTLS SNI", crate::sni::Mode::ShadowTls).await?;
+                shadowtls_server_name = Some(sni.clone());
+                let handshake = input::checked_text(
+                    "Handshake destination（host:port）",
+                    Some(&(format!("{sni}:443"))),
+                    false,
+                    config::validate_host_port,
+                )?;
+                options.shadowtls_handshake = Some(handshake);
+                options.udp_enabled = false;
+            }
+            break;
         }
     }
     if matches!(protocol, Protocol::Snell) {
@@ -2062,24 +2009,22 @@ async fn advanced_add_config_menu() -> Result<()> {
             return Ok(());
         };
         options.snell_cipher = cipher;
-        let password = input::password("Snell v3 密码（留空则安全随机生成）", true)?;
+        let password = input::password("Snell v3 密码（默认：随机生成）", true)?;
         options.snell_password = (!password.is_empty()).then_some(password);
         options.udp_enabled = input::confirm("启用 Snell UDP-over-TCP？", true)?;
     }
     if matches!(protocol, Protocol::Socks5) {
-        let Some(authentication) =
-            select_numbered("认证", &["用户名 + 密码", "无认证（有滥用风险）"])?
+        let Some(authentication) = select_numbered("认证", &["用户名 + 密码", "无认证"])?
         else {
             return Ok(());
         };
         if authentication == 0 {
-            let username = input::text("SOCKS5 用户名（留空则安全随机生成）", None, true)?;
+            let username = input::text("SOCKS5 用户名（默认：随机生成）", None, true)?;
             options.socks5_username = (!username.is_empty()).then_some(username);
-            let password = input::password("SOCKS5 密码（留空则安全随机生成）", true)?;
+            let password = input::password("SOCKS5 密码（默认：随机生成）", true)?;
             options.socks5_password = (!password.is_empty()).then_some(password);
         } else {
             options.socks5_no_auth = true;
-            println!("警告：SOCKS5 无认证且无传输加密，公开到公网可能被第三方滥用。");
         }
         options.udp_enabled = input::confirm("启用 UDP ASSOCIATE？", true)?;
     }
@@ -2095,7 +2040,7 @@ async fn advanced_add_config_menu() -> Result<()> {
                 format!("user{}", options.anytls_users.len() + 1)
             };
             let user_name = input::text("AnyTLS 用户名", Some(&default_name), false)?;
-            let password = input::password("AnyTLS 密码（留空则安全随机生成）", true)?;
+            let password = input::password("AnyTLS 密码（默认：随机生成）", true)?;
             options.anytls_users.push(if password.is_empty() {
                 config::generated_anytls_user(user_name)
             } else {
@@ -2125,9 +2070,9 @@ async fn advanced_add_config_menu() -> Result<()> {
         }
     }
     if protocol == Protocol::NaiveProxy {
-        let username = input::text("NaiveProxy 用户名（留空安全随机生成）", None, true)?;
+        let username = input::text("NaiveProxy 用户名（默认：随机生成）", None, true)?;
         options.naive_username = (!username.is_empty()).then_some(username);
-        let password = input::password("NaiveProxy 密码（留空安全随机生成）", true)?;
+        let password = input::password("NaiveProxy 密码（默认：随机生成）", true)?;
         options.naive_password = (!password.is_empty()).then_some(password);
         options.naive_padding = input::confirm("启用 NaiveProxy padding？", true)?;
         if input::confirm("配置静态 fallback 目录？", false)? {
@@ -2190,7 +2135,6 @@ async fn advanced_add_config_menu() -> Result<()> {
     } else {
         if protocol == Protocol::NaiveProxy {
             options.naive_self_signed = true;
-            println!("警告：NaiveProxy 自签名证书仅供测试，不推荐用于生产环境。");
         }
         (None, None)
     };
@@ -2209,35 +2153,28 @@ async fn advanced_add_config_menu() -> Result<()> {
         options,
     })
     .await?;
-    cli::print_credentials(&result);
-    match client::share_uri(&result.profile, &server_address) {
-        Ok(share_uri) => cli::print_share_uri_with_qr(&share_uri),
-        Err(error) => {
-            println!("\n未生成标准分享链接：{error:#}");
-            println!("配置已成功部署；客户端导出请按上方提示处理。");
-        }
-    }
-    println!("{}", "配置验证通过，服务已启动。".green());
-    offer_vless_enc_regeneration(&result.profile).await?;
+    let _ = result;
+    input::clear_screen()?;
+    println!("{}", "配置添加成功。".green());
     Ok(())
 }
 
 async fn update_menu() -> Result<MenuControl> {
-    let Some(selected) = select_numbered("更新中心", &UPDATE_CENTER_ITEMS)? else {
-        return Ok(MenuControl::Continue);
-    };
-    match selected {
-        0 => Ok(if cli::run_self_update(None, false).await? {
-            MenuControl::Exit
-        } else {
-            MenuControl::Continue
-        }),
-        1 => shoes_update_menu().await.map(|_| MenuControl::Continue),
-        2 => {
-            cli::print_update_status().await?;
-            Ok(MenuControl::Continue)
+    loop {
+        let Some(selected) = select_numbered("更新中心", &UPDATE_CENTER_ITEMS)? else {
+            return Ok(MenuControl::Continue);
+        };
+        match selected {
+            0 => {
+                cli::run_self_update(None, false).await?;
+            }
+            1 => shoes_update_menu().await?,
+            2 => cli::print_update_status().await?,
+            _ => unreachable!("更新中心编号已验证"),
         }
-        _ => unreachable!("更新中心编号已验证"),
+        if !input::returned_to_parent() {
+            return Ok(MenuControl::Continue);
+        }
     }
 }
 
@@ -2315,7 +2252,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn xhttp_reality_menu_exposes_sni_and_path_and_confirms_with_default_no() {
+    fn first_deployment_result_pauses_before_main_menu_clear() {
+        let failure = || -> Result<bool> { Err(anyhow::anyhow!("下载 shoes 失败")) };
+        assert!(bootstrap_result_needs_pause(&Ok(true), true));
+        assert!(bootstrap_result_needs_pause(&failure(), true));
+        assert!(!bootstrap_result_needs_pause(&Ok(false), true));
+        assert!(!bootstrap_result_needs_pause(&Ok(true), false));
+        assert!(!bootstrap_result_needs_pause(&failure(), false));
+        assert!(!bootstrap_result_needs_pause(
+            &Err(input::MenuEof.into()),
+            true
+        ));
+    }
+
+    #[test]
+    fn menu_nekobox_export_keeps_h2mux_notice() {
+        let state: config::ManagedState =
+            serde_json::from_str(include_str!("../tests/fixtures/yaml/compat/state.json")).unwrap();
+        let mut profile = state
+            .profiles
+            .iter()
+            .find(|profile| matches!(profile.credentials, config::Credentials::VmessTls { .. }))
+            .expect("兼容夹具包含支持 H2MUX 的 VMess 节点")
+            .clone();
+        let notice = "提示：NekoBox 分享链接不包含 H2MUX 客户端偏好；普通节点连接仍可使用。";
+        let plain = export_menu_output(&profile, ClientFormat::Nekobox, "example.com").unwrap();
+        assert!(!plain.contains(notice), "{plain}");
+        profile.h2mux.enabled = true;
+        let nekobox = export_menu_output(&profile, ClientFormat::Nekobox, "example.com").unwrap();
+        assert!(
+            nekobox.contains("vmess://") && nekobox.contains(notice),
+            "{nekobox}"
+        );
+    }
+
+    #[test]
+    fn xhttp_reality_menu_validates_path_without_extra_confirmation() {
         let state: config::ManagedState = serde_json::from_str(include_str!(
             "../tests/fixtures/yaml/vless-xhttp-reality/state.json"
         ))
@@ -2327,34 +2299,28 @@ mod tests {
         assert!(!actions
             .iter()
             .any(|(_, label)| label.contains("Vision") || label.contains("H2MUX")));
-        for entered in ["/changed\n\n", "/changed\nn\n", "\n"] {
-            assert!(read_xhttp_path_change(
-                &mut io::Cursor::new(entered),
-                &mut Vec::new(),
-                "/current"
-            )
-            .unwrap()
-            .is_none());
-        }
+        assert!(
+            read_xhttp_path_change(&mut io::Cursor::new("\n"), &mut Vec::new(), "/current")
+                .unwrap()
+                .is_none()
+        );
         let mut output = Vec::new();
         let change = read_xhttp_path_change(
-            &mut io::Cursor::new("invalid\n/changed\ny\n"),
+            &mut io::Cursor::new("invalid\n/changed\n"),
             &mut output,
             "/current",
         )
         .unwrap();
         assert!(matches!(change, Some(ProfileChange::XhttpPath(path)) if path == "/changed"));
         let output = String::from_utf8(output).unwrap();
-        assert!(output.contains("旧链接失效"));
-        assert!(output.contains("[y/N]（输入 0 返回）"));
+        assert!(!output.contains("失效"));
+        assert!(!output.contains("[y/N]"));
         assert!(output.contains("错误！XHTTP path"));
-        for entered in ["0\n", "/changed\n0\n"] {
-            assert!(input::is_back(
-                &read_xhttp_path_change(&mut io::Cursor::new(entered), &mut Vec::new(), "/current")
-                    .err()
-                    .unwrap()
-            ));
-        }
+        assert!(input::is_back(
+            &read_xhttp_path_change(&mut io::Cursor::new("0\n"), &mut Vec::new(), "/current")
+                .err()
+                .unwrap()
+        ));
     }
 
     #[test]
@@ -2424,21 +2390,41 @@ mod tests {
 
     #[test]
     fn profile_check_failure_continues_to_main_menu_but_interrupt_does_not() {
-        assert!(continue_after_profile_check(Ok(true)).is_ok());
-        assert!(continue_after_profile_check(Ok(false)).is_ok());
+        assert!(continue_after_profile_check(Ok(true)).unwrap().is_none());
+        assert!(continue_after_profile_check(Ok(false)).unwrap().is_none());
         for failure in [
             anyhow::anyhow!("第 1 项监听地址 0.0.0.0:24432 与管理状态端口 24431 不一致")
                 .context("旧版聚合配置与管理状态不一致，无法安全迁移节点文件"),
             anyhow::anyhow!("读取配置 /etc/shoes/config.yaml 失败"),
             anyhow::anyhow!("shoes --dry-run 拒绝了候选配置"),
         ] {
-            assert!(continue_after_profile_check(Err(failure)).is_ok());
+            let reason = format!("{failure:#}");
+            let (message, guidance) = continue_after_profile_check(Err(failure))
+                .unwrap()
+                .expect("启动检查失败必须返回供主界面重新显示的诊断");
+            assert_eq!(message, format!("检查受管配置失败：{reason}"));
+            assert!(guidance.contains("9) 工具 → 8) 恢复配置"), "{guidance}");
         }
         let interrupted = anyhow::Error::new(io::Error::from(io::ErrorKind::Interrupted))
             .context("等待 shoes 校验");
         assert!(crate::is_interrupted(
             &continue_after_profile_check(Err(interrupted)).unwrap_err()
         ));
+    }
+
+    #[test]
+    fn result_page_enter_continues_eof_exits_and_other_errors_propagate() {
+        assert_eq!(control_after_pause(Ok(())).unwrap(), MenuControl::Continue);
+        for eof in [
+            anyhow::Error::new(MenuEof).context("读取结果页"),
+            anyhow::Error::new(io::Error::from(io::ErrorKind::UnexpectedEof)),
+        ] {
+            assert_eq!(control_after_pause(Err(eof)).unwrap(), MenuControl::Exit);
+        }
+        for kind in [io::ErrorKind::BrokenPipe, io::ErrorKind::Interrupted] {
+            let error = control_after_pause(Err(io::Error::from(kind).into())).unwrap_err();
+            assert_eq!(error.downcast_ref::<io::Error>().unwrap().kind(), kind);
+        }
     }
 
     #[test]
@@ -2459,48 +2445,55 @@ mod tests {
         assert!(prompt_vless_enc_options_with(
             || Ok(None),
             || panic!("cancelled"),
+            || panic!("cancelled"),
             || panic!("cancelled")
         )
         .unwrap()
         .is_none());
+        let mut modes = [Some(config::VlessEncMode::default()), None].into_iter();
         assert!(prompt_vless_enc_options_with(
-            || Ok(Some(config::VlessEncMode::default())),
+            || Ok(modes.next().unwrap()),
             || Ok(None),
-            || panic!("cancelled")
+            || panic!("cancelled"),
+            || panic!("cancelled"),
         )
         .unwrap()
         .is_none());
         assert_eq!(parse_shadowsocks_mode("3"), None);
         assert_eq!(parse_shadowsocks_mode("bad"), None);
         assert_eq!(parse_shadowsocks_mode("0"), Some(None));
-        assert_eq!(parse_shadowsocks_mode(""), parse_shadowsocks_mode("1"));
+        assert_eq!(parse_shadowsocks_mode(""), None);
     }
 
     #[test]
-    fn vless_sudoku_menu_warning_confirmation_defaults_back_and_retry() {
-        for (answer, expected) in [
-            ("\n", false),
-            ("n\n", false),
-            ("y\n", true),
-            ("bad\ny\n", true),
-        ] {
-            let mut output = Vec::new();
-            assert_eq!(
-                read_vless_sudoku_prompt(&mut answer.as_bytes(), &mut output).unwrap(),
-                expected
-            );
-            let text = String::from_utf8(output).unwrap();
-            assert!(text.contains(crate::sudoku::PLAIN_WARNING));
-            assert!(text.contains(crate::sudoku::PLAIN_COST));
-            assert!(text.contains("仍要添加无加密的 VLESS-Sudoku 节点？ [y/N]（输入 0 返回）"));
-            assert!(
-                text.find(crate::sudoku::PLAIN_WARNING).unwrap() < text.find("仍要添加").unwrap()
-            );
-            assert!(!text.contains("传输安全仍由 VLESS Encryption 提供"));
-        }
-        let error = read_vless_sudoku_prompt(&mut "0\n".as_bytes(), &mut Vec::new()).unwrap_err();
-        assert!(input::is_back(&error));
-        assert_eq!(control_after_error(&error), MenuControl::Continue);
+    fn encryption_wizard_returns_one_level_and_preserves_selected_parameters() {
+        let mut modes = [config::VlessEncMode::Native, config::VlessEncMode::Xorpub].into_iter();
+        let mut auths = [
+            None,
+            Some(config::VlessEncAuth::X25519),
+            Some(config::VlessEncAuth::Mlkem768),
+        ]
+        .into_iter();
+        let mut visions = [Err(input::back()), Ok(true), Ok(false)].into_iter();
+        let mut sudokus = [Err(input::back()), Ok(true)].into_iter();
+        let options = prompt_vless_enc_options_with(
+            || Ok(Some(modes.next().expect("returned to mode"))),
+            || Ok(auths.next().expect("returned to auth")),
+            || visions.next().expect("returned to Vision"),
+            || sudokus.next().expect("retried Sudoku"),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(options.mode, config::VlessEncMode::Xorpub);
+        assert_eq!(options.auth, config::VlessEncAuth::Mlkem768);
+        assert!(!options.vision);
+        assert!(options.sudoku.enabled);
+        assert!(modes.next().is_none() && auths.next().is_none());
+        assert!(visions.next().is_none() && sudokus.next().is_none());
+    }
+
+    #[test]
+    fn vless_sudoku_menu_keeps_actions_and_padding_validation() {
         let state: config::ManagedState = serde_json::from_str(include_str!(
             "../tests/fixtures/yaml/vless-sudoku/state.json"
         ))
@@ -2518,13 +2511,10 @@ mod tests {
             .iter()
             .any(|(action, _)| *action == ChangeAction::Sudoku));
         let current = crate::sudoku::SudokuConfig::generated();
-        assert!(sudoku_menu_change(Some(&current), true, |prompt, default| {
-            assert!(!default);
-            assert!(prompt.contains("旧分享链接失效"));
-            Ok(default)
-        })
-        .unwrap()
-        .is_none());
+        assert!(matches!(
+            sudoku_menu_change(Some(&current), true, |_, _| panic!("no confirmation")).unwrap(),
+            Some(ProfileChange::RegenerateSudokuPassword)
+        ));
         assert!(
             read_sudoku_padding(&mut "\n".as_bytes(), &mut Vec::new(), &current)
                 .unwrap()
@@ -2559,8 +2549,7 @@ mod tests {
             );
         }
         let text = String::from_utf8(output).unwrap();
-        assert!(text.contains(crate::sudoku::COST));
-        assert!(text.find(crate::sudoku::COST).unwrap() < text.find("启用 Sudoku 外观？").unwrap());
+        assert!(!text.contains("TCP splice"));
         assert!(text.contains("[y/N]（输入 0 返回）"));
         assert!(input::is_back(
             &read_sudoku_prompt(&mut "0\n".as_bytes(), &mut Vec::new()).unwrap_err()
@@ -2588,13 +2577,10 @@ mod tests {
             .unwrap(),
             Some(ProfileChange::Sudoku(None))
         ));
-        assert!(sudoku_menu_change(Some(&config), true, |prompt, default| {
-            assert!(prompt.contains("旧分享链接失效"));
-            assert!(!default);
-            Ok(false)
-        })
-        .unwrap()
-        .is_none());
+        assert!(matches!(
+            sudoku_menu_change(Some(&config), true, |_, _| panic!("no confirmation")).unwrap(),
+            Some(ProfileChange::RegenerateSudokuPassword)
+        ));
         assert!(matches!(
             sudoku_menu_change(Some(&config), true, |_, default| {
                 assert!(!default);
@@ -2740,10 +2726,7 @@ mod tests {
     #[test]
     fn snell_new_node_defaults_to_mihomo_verified_cipher_and_keeps_advanced_choices() {
         assert_eq!(SnellCipher::default(), SnellCipher::Aes128Gcm);
-        assert_eq!(
-            snell_new_node_choice(""),
-            Some(Some(SnellCipher::Aes128Gcm))
-        );
+        assert_eq!(snell_new_node_choice(""), None);
         assert_eq!(
             snell_new_node_choice("2"),
             Some(Some(SnellCipher::Aes256Gcm))
@@ -2873,7 +2856,7 @@ mod tests {
     fn node_summary_handles_empty_three_and_six_profiles_without_secrets() {
         assert_eq!(
             node_summary(Ok(config::ManagedState::default())),
-            "节点：暂无，选择 1) 添加配置"
+            "节点 (0):\n暂无节点"
         );
         let mut state = config::ManagedState {
             profiles: summary_profiles(),
@@ -2883,7 +2866,7 @@ mod tests {
         assert_eq!(
             three,
             format!(
-                "节点（3）：\n  · reality-20443  {}  20443\n  · ss-31002  {}  31002\n  · hy2-40001  {}  40001",
+                "节点 (3):\n• {} - 端口: 20443\n• {} - 端口: 31002\n• {} - 端口: 40001",
                 state.profiles[0].protocol_name(),
                 state.profiles[1].protocol_name(),
                 state.profiles[2].protocol_name(),
@@ -2896,16 +2879,16 @@ mod tests {
             state.profiles.push(profile);
         }
         let six = node_summary(Ok(state));
-        assert!(six.starts_with("节点（6）：\n"));
+        assert!(six.starts_with("节点 (6):\n"));
         assert_eq!(
             six.lines()
-                .filter(|line| line.trim_start().starts_with('·'))
+                .filter(|line| line.trim_start().starts_with('•'))
                 .count(),
-            5
+            6
         );
-        assert!(six.contains("  · node-5  VLESS-Reality-Vision  20445"));
-        assert!(!six.contains("node-6"));
-        assert!(six.ends_with("…共 6 个，进入 3) 查看配置"));
+        assert!(six.contains("• VLESS-Reality-Vision - 端口: 20445"));
+        assert!(six.contains("• VLESS-Reality-Vision - 端口: 20446"));
+        assert!(!six.contains("node-"));
         for summary in [three, six] {
             for line in summary.lines() {
                 assert!(!line.trim_start().starts_with(|c: char| c.is_ascii_digit()));
@@ -2931,7 +2914,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let missing = directory.path().join("ping-rust-state.json");
         let state = summary_state(&missing, || anyhow::bail!("读取管理状态失败"));
-        assert_eq!(node_summary(state), "节点：暂无，选择 1) 添加配置");
+        assert_eq!(node_summary(state), "节点 (0):\n暂无节点");
         std::fs::write(&missing, "{").unwrap();
         let state = summary_state(&missing, || anyhow::bail!("管理状态 JSON 已损坏"));
         assert_eq!(
@@ -2999,9 +2982,9 @@ mod tests {
     }
 
     #[test]
-    fn add_and_view_success_exit_the_menu() {
-        assert_eq!(control_after_success(1), MenuControl::Exit);
-        assert_eq!(control_after_success(3), MenuControl::Exit);
+    fn all_successful_operations_return_to_main_menu() {
+        assert_eq!(control_after_success(1), MenuControl::Continue);
+        assert_eq!(control_after_success(3), MenuControl::Continue);
         assert_eq!(control_after_success(2), MenuControl::Continue);
         assert_eq!(control_after_success(4), MenuControl::Continue);
     }

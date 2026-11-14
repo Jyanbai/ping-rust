@@ -45,6 +45,8 @@ send_choice 1
 expect_or_fail {输入新端口} "port prompt"
 send_choice ""
 expect_or_fail {配置更改成功} "change result"
+expect_or_fail {按回车返回主菜单} "result page"
+send_choice ""
 expect_or_fail {请选择 \[0-10\]} "return to main menu"
 send_choice 0
 expect_or_fail {已退出} "program exit"

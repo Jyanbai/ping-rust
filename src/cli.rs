@@ -445,8 +445,6 @@ pub async fn run(cli: Cli) -> Result<()> {
             vless_enc.sudoku.validate_for(protocol)?;
             if protocol == Protocol::VlessEnc {
                 vless_enc.warn();
-            } else if protocol == Protocol::VlessSudoku {
-                crate::sudoku::warn_plain();
             }
             let shadowsocks_cipher = cipher.unwrap_or_default();
             let snell_cipher = if matches!(protocol, Protocol::Snell) {
@@ -556,9 +554,6 @@ pub async fn run(cli: Cli) -> Result<()> {
                 config::generate(request).await?
             };
             print_credentials(&result);
-            if matches!(protocol, Protocol::Socks5) && no_auth {
-                println!("警告：SOCKS5 无认证且无传输加密，公开到公网可能被第三方滥用。");
-            }
             if managed {
                 println!("{}", "配置验证通过，shoes 已启用并启动。".green());
             }
@@ -782,9 +777,6 @@ async fn run_add_inner(mut args: AddArgs) -> Result<()> {
         bail!("--xhttp-path 仅适用于 VLESS-XHTTP-REALITY");
     }
     args.vless_enc.sudoku.validate_for(args.protocol)?;
-    if args.protocol == Protocol::VlessSudoku {
-        crate::sudoku::warn_plain();
-    }
     if args.shadowtls && !matches!(args.protocol, Protocol::Shadowsocks) {
         bail!("--shadowtls 仅适用于 Shadowsocks");
     }
@@ -1015,34 +1007,6 @@ pub(crate) fn print_add_result(result: &fast_add::AddResult) {
     let profile = &result.generation.profile;
     println!("{}", "部署成功，shoes 服务已启动。".green().bold());
     print_profile_details_with_qr(profile, result.share_uri.as_deref());
-    if result.share_uri.is_some() {
-        println!("\n复制上方链接即可导入客户端。");
-        println!("{}", "安全提示：分享链接包含访问凭据，请勿公开。".yellow());
-    } else {
-        if matches!(
-            profile.credentials,
-            config::Credentials::Shadowsocks {
-                shadowtls: Some(_),
-                ..
-            }
-        ) {
-            println!(
-                "\nShadowTLS v3 没有通用标准分享 URI；普通二维码也不支持；请使用 sing-box 或 Mihomo 导出。"
-            );
-        } else if matches!(
-            profile.credentials,
-            config::Credentials::AnyTls {
-                security: config::AnyTlsSecurity::Reality { .. },
-                ..
-            }
-        ) {
-            println!("\nAnyTLS+Reality 没有标准分享 URI 或普通二维码；请改用 sing-box 导出。Mihomo 和 NekoBox 不支持该组合。");
-        } else if matches!(profile.credentials, config::Credentials::NaiveProxy { .. }) {
-            println!("\nNaiveProxy 没有通用标准分享 URI 或普通二维码；请使用包含 Naive 支持的 sing-box JSON 导出。");
-        } else {
-            println!("\nSnell v3 没有通用标准分享 URI；配置已成功部署，请按客户端支持情况手动填写或导出 Clash Meta（仅 AES-128-GCM）。");
-        }
-    }
 }
 
 pub(crate) fn print_profile_details_with_qr(
@@ -1068,11 +1032,9 @@ fn profile_details_lines(profile: &config::ManagedProfile, share_uri: Option<&st
         config::Credentials::VlessSudoku {
             user_id, sudoku, ..
         } => {
-            lines.push(crate::sudoku::PLAIN_WARNING.into());
             lines.push(format!("地址：{address}"));
             lines.push(format!("端口：{}", profile.port));
             lines.push(format!("UUID：{user_id}"));
-            lines.push("加密：无".into());
             lines.push(sudoku.description());
         }
         config::Credentials::VlessEnc {
@@ -1243,10 +1205,6 @@ fn profile_details_lines(profile: &config::ManagedProfile, share_uri: Option<&st
                 "UDP ASSOCIATE           = {}",
                 if *udp_enabled { "enabled" } else { "disabled" }
             ));
-            lines.push("传输加密               = none".to_owned());
-            lines.push(
-                "注意：SOCKS5 本身不提供传输加密，请勿将其误认为 TLS/Reality 代理。".to_owned(),
-            );
         }
         config::Credentials::NaiveProxy {
             username,
@@ -1424,16 +1382,12 @@ fn profile_details_lines(profile: &config::ManagedProfile, share_uri: Option<&st
             profile.h2mux.max_streams,
             profile.h2mux.padding
         ));
-        lines.push("shoes 服务端自动识别 H2MUX；普通 URI/QR 不包含此偏好。".to_owned());
     } else if profile.h2mux_eligible() {
         lines.push("H2MUX 客户端偏好       = off".to_owned());
     }
     if let Some(uri) = share_uri {
         lines.push("------------- 链接 (URL) -------------".to_owned());
         lines.push(uri.to_owned());
-    }
-    if profile.self_signed_certificate && profile.protocol() != Protocol::NaiveProxy {
-        lines.push("警告! 客户端需启用跳过证书验证 (allowInsecure)，或换用受信任证书。".to_owned());
     }
     lines
 }
@@ -1475,6 +1429,7 @@ fn terminal_qr_or_url_text(value: &str) -> (String, Option<String>) {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn share_uri_with_qr_text(uri: &str) -> Result<String> {
     Ok([
         "------------- 链接 (URL) -------------".to_owned(),
@@ -1484,18 +1439,6 @@ pub(crate) fn share_uri_with_qr_text(uri: &str) -> Result<String> {
         "------------- END -------------".to_owned(),
     ]
     .join("\n"))
-}
-
-pub(crate) fn print_share_uri_with_qr(uri: &str) {
-    match share_uri_with_qr_text(uri) {
-        Ok(text) => println!("\n{text}"),
-        Err(error) => {
-            println!(
-                "\n------------- 链接 (URL) -------------\n{uri}\n------------- END -------------"
-            );
-            eprintln!("二维码生成失败：{error:#}；URL 已保留，可直接复制。");
-        }
-    }
 }
 
 pub(crate) async fn ensure_shoes_for_add(yes: bool) -> Result<()> {
@@ -1513,7 +1456,7 @@ pub(crate) async fn ensure_shoes_for_add(yes: bool) -> Result<()> {
     }
     let report = installer::install(InstallMethod::Release, false).await?;
     service::install_unit(false)?;
-    eprintln!("shoes 安装成功：{}（{}）", report.version, report.source);
+    let _ = report;
     Ok(())
 }
 
@@ -1535,7 +1478,7 @@ pub async fn run_self_update(version: Option<&str>, force: bool) -> Result<bool>
         } => {
             println!("{} {from} → {to}", "ping-rust 自更新完成：".green());
             println!("路径：{}", destination.display());
-            println!("当前旧进程即将退出，请重新运行 ping-rust 使用新版本。");
+            println!("重新运行 ping-rust 可使用新版本。");
         }
     };
     Ok(updated)
@@ -1620,45 +1563,10 @@ pub async fn print_update_status() -> Result<()> {
     }
     println!("shoes:");
     println!("  二进制：{}", if installed { "已安装" } else { "未安装" });
-    println!(
-        "  已知安装来源：{}",
-        if known.source.is_empty() {
-            "unknown"
-        } else {
-            &known.source
-        }
-    );
-    println!(
-        "  已知安装版本：{}",
-        known.version.as_deref().unwrap_or("未知")
-    );
-    if let Some(notice) = installer::unverified_installed_notice(&known) {
-        println!("  {}", notice.yellow());
-    }
-    println!(
-        "  已知 revision/tag：{}",
-        known
-            .revision
-            .as_deref()
-            .or(known.release_tag.as_deref())
-            .unwrap_or("未知")
-    );
-    println!("ping-rust 验证 pin:");
-    println!("  commit: {}", installer::verified_pin());
-    println!("  version: {}", installer::verified_version());
-    println!(
-        "shoes 默认安装 Release（已验证固定）: {}",
-        installer::SHOES_RELEASE_TAG
-    );
-    println!("shoes GitHub Latest Release:");
+    println!("  当前版本：{}", known.version.as_deref().unwrap_or("未知"));
     match shoes_latest {
-        Ok(tag) => {
-            println!("  tag: {tag}");
-            if let Some(notice) = installer::newer_upstream_release_notice(&tag) {
-                println!("  {notice}");
-            }
-        }
-        Err(error) => println!("  tag: 查询失败（{error}）"),
+        Ok(tag) => println!("  最新版本：{tag}"),
+        Err(error) => println!("  最新版本：查询失败（{error}）"),
     }
     println!("shoes upstream master:");
     match upstream {
@@ -1667,7 +1575,7 @@ pub async fn print_update_status() -> Result<()> {
             println!(
                 "Upstream drift: {}",
                 if upstream_drift(installer::verified_pin(), &sha) {
-                    "detected；生产 pin 保持不变，请查看 shoes upstream drift CI"
+                    "detected"
                 } else {
                     "none"
                 }
@@ -1679,12 +1587,6 @@ pub async fn print_update_status() -> Result<()> {
 }
 
 pub(crate) fn execute_service(action: ServiceAction) -> Result<()> {
-    if matches!(action, ServiceAction::Status) {
-        if let Some(notice) = installer::unverified_installed_notice(&installer::load_provenance())
-        {
-            eprintln!("{}", notice.yellow());
-        }
-    }
     if matches!(action, ServiceAction::Status) && Path::new(crate::utils::STATE_FILE).exists() {
         let state = config::load_state().context("读取测试证书状态失败")?;
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
@@ -1701,7 +1603,7 @@ pub(crate) async fn regenerate_test_certificate(id: Uuid) -> Result<()> {
     let result =
         deployment::update_and_activate(id, config::ProfileChange::RegenerateNaiveCertificate)
             .await?;
-    println!("NaiveProxy 测试证书已重新生成；受控重启已完成。");
+    println!("NaiveProxy 测试证书已重新生成。");
     print_profile_details_with_qr(&result.profile, None);
     Ok(())
 }
@@ -1800,9 +1702,6 @@ pub async fn show_info(selector: Option<&str>) -> Result<()> {
 fn print_saved_url(selector: Option<&str>, server_address: Option<&str>) -> Result<()> {
     let state = config::load_state()?;
     let profile = client::select_profile(&state.profiles, selector)?;
-    if profile.protocol() == Protocol::VlessSudoku {
-        crate::sudoku::warn_plain();
-    }
     println!("{}", client::stored_share_uri(profile, server_address)?);
     if profile.h2mux.enabled {
         eprintln!("提示：标准 URI 不包含 H2MUX 客户端偏好；此链接仍可用于普通连接。");
@@ -1813,9 +1712,6 @@ fn print_saved_url(selector: Option<&str>, server_address: Option<&str>) -> Resu
 fn print_saved_qr(selector: Option<&str>, server_address: Option<&str>) -> Result<()> {
     let state = config::load_state()?;
     let profile = client::select_profile(&state.profiles, selector)?;
-    if profile.protocol() == Protocol::VlessSudoku {
-        crate::sudoku::warn_plain();
-    }
     let uri = client::stored_share_uri(profile, server_address)?;
     let (output, error) = terminal_qr_or_url_text(&uri);
     println!("{output}");
@@ -1854,8 +1750,7 @@ pub fn print_credentials(result: &config::GenerationResult) {
         config::Credentials::VlessSudoku {
             user_id, sudoku, ..
         } => {
-            println!("{}", crate::sudoku::PLAIN_WARNING);
-            println!("协议：VLESS-Sudoku（无加密）");
+            println!("协议：VLESS-Sudoku");
             println!("UUID：{user_id}");
             println!("加密：无");
             println!("{}", sudoku.description());
@@ -1905,10 +1800,6 @@ pub fn print_credentials(result: &config::GenerationResult) {
             println!("Short ID：{short_id}");
             println!("Reality 私钥：{private_key}");
             println!("Reality 公钥：{public_key}");
-            println!(
-                "{}",
-                "安全提示：私钥仅保存在服务器配置中，请勿分享。".yellow()
-            );
         }
         config::Credentials::Hysteria2 {
             password,
@@ -1948,8 +1839,6 @@ pub fn print_credentials(result: &config::GenerationResult) {
                 "UDP ASSOCIATE：{}",
                 if *udp_enabled { "启用" } else { "关闭" }
             );
-            println!("传输加密：无");
-            println!("注意：SOCKS5 本身不提供传输加密，请勿将其误认为 TLS/Reality 代理。");
         }
         config::Credentials::Tuic {
             user_id,
@@ -2049,7 +1938,6 @@ pub fn print_credentials(result: &config::GenerationResult) {
                     println!("Short ID：{short_id}");
                     println!("Reality 私钥：{private_key}");
                     println!("Reality 公钥：{public_key}");
-                    println!("{}", "安全提示：Reality 私钥不得导出或分享。".yellow());
                 }
             }
         }
@@ -2097,7 +1985,6 @@ pub fn print_credentials(result: &config::GenerationResult) {
                     println!("Short ID：{short_id}");
                     println!("Reality 私钥：{private_key}");
                     println!("Reality 公钥：{public_key}");
-                    println!("{}", "安全提示：Reality 私钥不得导出或分享。".yellow());
                 }
             }
         }
@@ -2706,8 +2593,6 @@ mod tests {
             "用户名 (username)       = default",
             "密码 (password)         = socks-secret",
             "UDP ASSOCIATE           = enabled",
-            "传输加密               = none",
-            "SOCKS5 本身不提供传输加密",
             "------------- 链接 (URL) -------------",
             "socks5://default:socks-secret@203.0.113.8:1080#socks-main",
             "------------- 二维码 (QR) -------------",
@@ -2717,6 +2602,8 @@ mod tests {
                 "missing {expected:?} in {output}"
             );
         }
+        assert!(!output.contains("传输加密"));
+        assert!(!output.contains("请勿将其误认为"));
     }
 
     #[test]

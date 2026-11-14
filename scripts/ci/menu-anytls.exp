@@ -26,7 +26,7 @@ proc wait_for {pattern stage} {
 # 在消费任一结果模式前记录整个已消费缓冲区，避免丢掉更早的成功提示。
 proc record_result {output} {
     global activated uri unsupported mode
-    if {[regexp {配置验证通过，服务已启动|部署成功，shoes 服务已启动} $output]} {
+    if {[regexp {配置添加成功。} $output]} {
         set activated 1
     }
     if {[regexp {anytls://} $output]} {
@@ -66,7 +66,7 @@ expect {
     -re {配置认证失败 fallback} { send "n\r"; exp_continue }
     -re {证书域名/服务器名称} { send "anytls.example.com\r"; exp_continue }
     -re {使用已有 PEM 证书和私钥} { send "n\r"; exp_continue }
-    -re {选择 SNI 方式} { incr sni; send "\r"; exp_continue }
+    -re {选择 SNI 方式} { incr sni; send "1\r"; exp_continue }
     -re {Reality fallback} { send "\r"; exp_continue }
     -re {请输入 VPS 公网域名或 IP} { send "203.0.113.10\r"; exp_continue }
     -re {未生成标准分享链接|AnyTLS\+Reality 没有标准分享 URI} {
@@ -77,8 +77,13 @@ expect {
         record_result $expect_out(buffer)
         exp_continue
     }
-    -re {配置验证通过，服务已启动|部署成功，shoes 服务已启动} {
+    -re {配置添加成功。} {
         record_result $expect_out(buffer)
+        exp_continue
+    }
+    -re {按回车返回主菜单} {
+        if {!$activated} { puts stderr "AnyTLS result page preceded activation"; exit 1 }
+        send "\r"
         exp_continue
     }
     -re {请选择 \[0-10\]} {
@@ -98,8 +103,54 @@ if {[lindex $result 2] != 0 || [lindex $result 3] != 0 || $selected != 1 || !$ac
     puts stderr "AnyTLS $flow mode $mode did not activate and exit successfully"
     exit 1
 }
-if {($mode == "1" && (!$uri || $sni != 0)) || ($mode == "2" && (!$unsupported || $sni != 1))} {
-    puts stderr "AnyTLS $flow mode $mode used incorrect SNI or URI behavior"
+# Sharing remains available through the explicit view path; the add result is concise.
+# 详情（传输层安全等）只在菜单 3「查看配置」结果页展示；info CLI 保持与 v0.2.1 兼容。
+# 结果页输出只写入临时文件用于断言，读取后立即删除，不进入日志。
+set profile_number [exec python3 -c {import json,sys; from pathlib import Path; print(next(i for i, p in enumerate(json.loads(Path('/etc/shoes/ping-rust-state.json').read_text())['profiles'], 1) if p['port'] == int(sys.argv[1])))} $port]
+set profile_count [exec python3 -c {import json; from pathlib import Path; print(len(json.loads(Path('/etc/shoes/ping-rust-state.json').read_text())['profiles']))}]
+set view_log [exec mktemp]
+spawn $binary
+wait_for {请选择 \[0-10\]} view-main-menu
+if {$profile_count == 1} {
+    # 只有一个配置时菜单直接展示结果页，不出现选择列表。
+    log_file -a -noappend $view_log
+    send "3\r"
+} else {
+    send "3\r"
+    wait_for {请选择配置} view-profile-menu
+    wait_for {0\) 返回} view-profile-back
+    wait_for {请选择} view-profile-prompt
+    log_file -a -noappend $view_log
+    send "$profile_number\r"
+}
+wait_for {按回车返回主菜单} view-result-page
+log_file
+send "\r"
+wait_for {请选择 \[0-10\]} view-main-menu-after
+send "0\r"
+expect {
+    eof {}
+    timeout { puts stderr "AnyTLS view did not exit"; exit 1 }
+}
+set view_result [wait]
+if {[lindex $view_result 2] != 0 || [lindex $view_result 3] != 0} {
+    puts stderr "AnyTLS view menu did not exit successfully"
     exit 1
+}
+set view_file [open $view_log r]
+fconfigure $view_file -encoding utf-8
+set details [regsub -all {\x1b\[[0-9;?]*[A-Za-z]} [read $view_file] {}]
+close $view_file
+file delete $view_log
+if {$mode == "1"} {
+    if {![regexp {anytls://} $details] || $sni != 0} {
+        puts stderr "AnyTLS TLS view lost its URI or used Reality SNI"
+        exit 1
+    }
+} else {
+    if {[regexp {anytls://} $details] || ![regexp {传输层安全 \(TLS\)[^\r\n]*= reality} $details] || $sni != 1} {
+        puts stderr "AnyTLS REALITY view lost metadata or emitted a lossy URI"
+        exit 1
+    }
 }
 puts "AnyTLS $flow mode $mode numeric PTY: PASS"

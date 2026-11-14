@@ -112,7 +112,7 @@ Sudoku 是混淆，不是加密或认证，传输安全仍由 VLESS Encryption �
 
 客户端需要 **Xray ≥ v26.3.27** 或 v2rayN 等基于它的客户端。分享链接以 URL 编码的紧凑 JSON `fm=` 携带整个 `streamSettings.finalmask` 对象，二维码内容与链接相同。开启后拒绝 Clash Meta / Mihomo、sing-box 和 NekoBox 导出，并提示：“该客户端导出不支持 Xray FinalMask Sudoku，请用分享链接导入 v2rayN 或 Xray ≥ v26.3.27”。关闭时保持原导出行为。
 
-在“2 更改配置”中可开启或关闭 Sudoku，或重新生成 Sudoku 密码。重新生成密码会使旧分享链接失效，确认默认 N；变更沿用 dry-run、原子提交和失败回滚流程。`prs info` 显示 ASCII 模式和 padding 范围，不额外显示服务端 decryption。
+在“2 更改配置”中可开启或关闭 Sudoku，或重新生成 Sudoku 密码。重新生成密码不再额外确认；变更沿用 dry-run、原子提交和失败回滚流程。`prs info` 显示 ASCII 模式和 padding 范围，不额外显示服务端 decryption。
 
 格式参考：[shoes v0.3.7 文档](https://github.com/cfal/shoes/blob/v0.3.7/docs/src/content/docs/zh-cn/protocols/sudoku.md)、[shoes 与 Xray 互通测试](https://github.com/cfal/shoes/blob/v0.3.7/tests/cases/optional_peer/vless_encryption/sudoku_mask.rs)、[v2rayN 分享链接处理](https://github.com/2dust/v2rayN/blob/master/v2rayN/ServiceLib/Handler/Fmt/BaseFmt.cs)。
 
@@ -120,7 +120,7 @@ Sudoku 是混淆，不是加密或认证，传输安全仍由 VLESS Encryption �
 
 **VLESS-Sudoku 没有任何加密和认证。** Sudoku 只是混淆，下行打包编码没有密钥，上行置换种子空间有限；普通 VLESS 的 UUID、目标地址、非 HTTPS 内容都能在链路上被还原。需要加密时请使用 VLESS-ENC + Sudoku 或 VLESS-REALITY。
 
-普通 VLESS 外面始终包一层 shoes `sudoku_mask`，不使用 VLESS Encryption、TLS、REALITY 或 Vision。这是 Xray FinalMask Sudoku，不是 Mihomo 的 `sudoku` 隧道协议。快速和高级添加均为 **16) VLESS-Sudoku**，选择后仍显示无加密警告，主菜单不变。菜单先显示安全与代价说明，再询问“仍要添加无加密的 VLESS-Sudoku 节点？[y/N]（输入 0 返回）”，默认 N。
+普通 VLESS 外面始终包一层 shoes `sudoku_mask`，不使用 VLESS Encryption、TLS、REALITY 或 Vision。这是 Xray FinalMask Sudoku，不是 Mihomo 的 `sudoku` 隧道协议。快速和高级添加均为 **16) VLESS-Sudoku**，选择后直接进入参数输入，不再输出协议警告或追加确认，主菜单编号不变。
 
 ```sh
 sudo prs add vless-sudoku --server-address 203.0.113.10
@@ -129,7 +129,7 @@ sudo prs add vless-sudoku --sudoku-ascii ascii --sudoku-padding-min 0 --sudoku-p
 
 无需 `--sudoku`；密码、ascii、padding 参数与 VLESS-ENC Sudoku 相同。上行约 4 倍（无 padding），10% padding 约 4.5 倍，单次写入最多约 9 倍；下行约 1.33 倍。关闭原始 TCP splice，每条连接多占约 64 KiB 缓冲。只支持 TCP，没有 UDP/QUIC 掩码；TCP 内转发的 UDP 仍可用。客户端需要 **Xray ≥ v26.3.27** 或基于它的 v2rayN。
 
-链接使用 `encryption=none&security=none&type=tcp&fm=`（URL 编码的紧凑 FinalMask JSON），二维码内容相同。`prs info` 显示“加密：无”和 ascii、padding 范围。Clash Meta / Mihomo、sing-box、NekoBox 导出均明确拒绝。菜单“2 更改配置”支持端口、ascii、padding 和重新生成 Sudoku 密码；重置密码会使旧链接失效，确认默认 N。配置修改沿用 dry-run、原子提交和失败回滚。
+链接使用 `encryption=none&security=none&type=tcp&fm=`（URL 编码的紧凑 FinalMask JSON），二维码内容相同。`prs info` 显示连接参数和 ascii、padding 范围，不重复输出协议说明。Clash Meta / Mihomo、sing-box、NekoBox 导出均明确拒绝。菜单“2 更改配置”支持端口、ascii、padding 和重新生成 Sudoku 密码；重置密码不再额外确认。配置修改沿用 dry-run、原子提交和失败回滚。
 
 state 将新节点放在顶层 `sudoku_profiles` 扩展，v0.2.1 可忽略并读取原有节点；已有协议的 state 输出不变。旧版不支持管理该节点，降级操作前请先用新版删除并备份配置。详见 [VLESS-Sudoku wiki](docs/wiki/VLESS-Sudoku.md)。
 
@@ -216,12 +216,14 @@ vless://...security=reality...pbk=...&sid=...#VLESS-REALITY-30060
 $ sudo prs
 
 ------------- ping-rust v0.3.1 -------------
-shoes: running
-项目: https://github.com/Jyanbai/ping-rust
-节点（3）：
-  · reality-20443  VLESS-REALITY  20443
-  · ss-31002  Shadowsocks 2022  31002
-  · hy2-40001  Hysteria2  40001
+https://github.com/Jyanbai/ping-rust
+
+shoes: • running
+
+节点 (3):
+• VLESS-Reality-Vision - 端口: 20443
+• Shadowsocks 2022 - 端口: 31002
+• Hysteria2 - 端口: 40001
 
 1) 添加配置
 2) 更改配置
@@ -258,17 +260,11 @@ shoes: running
 0) 返回
 
 请选择 [0-16]: 1
-输入端口（直接回车自动选择随机端口）:
+请输入端口（默认：随机，输入 0 返回）：
 
-部署成功，shoes 服务已启动。
--------------- VLESS-REALITY-25448.yaml -------------
-协议 (protocol)         = vless
-端口 (port)             = 25448
-------------- 链接 (URL) -------------
-vless://...security=reality...pbk=...&sid=...#VLESS-REALITY-25448
-------------- 二维码 (QR) -------------
-（终端在这里显示可直接扫描的块字符二维码）
-------------- END -------------
+配置添加成功。
+
+按回车返回主菜单...
 ```
 
 主菜单 1–7 保持原位置和功能，8–10 调整如下，方便老用户查找：
@@ -286,11 +282,11 @@ vless://...security=reality...pbk=...&sid=...#VLESS-REALITY-25448
 | 9) 其他 → 更新 ping-rust | 删除重复入口，使用 6) 更新 |
 | 10) 关于 | 10) 帮助与关于 |
 
-快速添加与 `9) 工具 → 2) 高级添加配置` 的协议列表完全一致，末尾为 `0) 返回`。`3) Shadowsocks` 内选择 SS2022 / ShadowTLS v3，保留原有 cipher、密码校验与默认值；`5) VLESS-ENC` 内可选 Sudoku（默认 N），不占额外顶层编号；`7) AnyTLS` 内选择 TLS / REALITY。`16) VLESS-Sudoku` 选择后显示无加密安全与代价警告，继续确认默认 N。
+快速添加与 `9) 工具 → 2) 高级添加配置` 的协议列表完全一致，末尾为 `0) 返回`。`3) Shadowsocks` 内选择 SS2022 / ShadowTLS v3，保留原有 cipher、密码校验与默认值；`5) VLESS-ENC` 内可选 Sudoku（默认 N），不占额外顶层编号；`7) AnyTLS` 内选择 TLS / REALITY。`16) VLESS-Sudoku` 直接进入参数输入，不追加协议说明和确认。
 
 `9) 工具` 按顺序提供：1) 导出客户端配置、2) 高级添加配置、3) SNI 检测、4) SNI 扫描、5) 端口检查、6) 开启 BBR、7) 备份配置、8) 恢复配置，输入 0 返回。SNI 检测可输入空格分隔的域名，直接回车则检测默认名单和现有节点；SNI 扫描复用 `prs sni scan` 的确认流程。两者只输出结果，不修改节点配置。
 
-主界面节点摘要只显示配置名称、协议和端口，最多列出 5 个；更多节点可进入 `3) 查看配置`。没有节点或读取 state 失败时显示提示，菜单仍可使用。`10) 帮助与关于` 汇总版本、项目链接和常用命令。
+主界面保留节点数量，逐个以“• 协议 - 端口: 数字”显示，不显示节点名称；运行状态的“• running”为绿色，`shoes:` 为默认颜色。没有节点或读取 state 失败时显示提示，菜单仍可使用。`10) 帮助与关于` 汇总版本、项目链接和常用命令。
 
 菜单 `2. 更改配置` 会先选择现有配置，再按协议提供端口、名称、公网地址、凭据、Reality SNI、Shadowsocks/Snell cipher、Snell/SOCKS5 UDP 开关或 AnyTLS 用户密码等修改项。新配置必须通过真实 `shoes --dry-run` 才会原子提交；应用失败时自动恢复修改前的配置与 systemd 状态。Snell v3 没有统一标准分享 URI，因此成功后显示完整手动连接参数，不生成伪 URI 或二维码。
 
@@ -350,7 +346,7 @@ VMess WebSocket TLS、非 Vision VLESS WebSocket TLS 和 Trojan TLS 可在“更
 
 sing-box 导出会携带 `multiplex.protocol=h2mux`；固定 shoes 上的 VMess/VLESS WebSocket TLS 和 Trojan TLS 已通过本地 TCP、并发流、half-close 与大 payload 验证，sing-box 1.14.2 已通过导出配置检查及 Trojan H2MUX 数据面测试。Mihomo H2MUX 存在已知兼容问题，开启偏好时拒绝 Mihomo 导出；NekoBox、普通分享 URI 与 QR 仍可用于普通连接，但不携带 H2MUX 设置。VLESS Vision、Shadowsocks、SS2022 + ShadowTLS、Snell v3 及其它协议不提供 H2MUX 开关。H2MUX UDP 尚未验证或启用；Pool、Chain 和路由语义不受该偏好影响。
 
-首次安装流程是：`install.sh → 自动安装 ping-rust/shoes → 自动随机端口部署 VLESS-REALITY → 复制 URL`，中间零输入。Reality 未指定 SNI 时会自动检测内置名单并选择可用目标（规则见下文）；客户端指纹固定为 `chrome`。后续日常流程是：`prs → 1 → 选择协议 → 输入端口/直接回车随机`；Shadowsocks 会额外选择加密方式和密码，SS 2022 密码不符合所选 cipher 的 Base64 密钥长度时会警告并自动替换。其余协议自动生成 UUID、密码、Reality 密钥、WebSocket 路径或证书。SOCKS5 快速添加默认生成安全随机用户名和密码并启用 UDP ASSOCIATE；Snell v3 快速添加默认使用 `aes-128-gcm`，生成随机密码并启用 UDP-over-TCP。NaiveProxy 要求明确选择受信任证书或自签名测试模式，不会静默生成生产自签名配置。添加或查看配置成功后直接退出 `prs`；主菜单输入 `0` 退出，任意子菜单输入 `0` 返回主菜单。自动端口从 `20000..=65535` 的高位范围选择；菜单协议选择固定使用连续编号 `1..=16`。信息只会在配置通过 `shoes --dry-run`、原子写入、systemd 启动且确认为 active 后输出；失败会恢复原配置和服务状态。
+首次安装流程是：`install.sh → 自动安装 ping-rust/shoes → 自动随机端口部署 VLESS-REALITY → 复制 URL`，中间零输入。Reality 未指定 SNI 时会自动检测内置名单并选择可用目标（规则见下文）；客户端指纹固定为 `chrome`。后续日常流程是：`prs → 1 → 选择协议 → 输入端口/直接回车随机`；Shadowsocks 会额外选择加密方式和密码，SS 2022 密码不符合所选 cipher 的 Base64 密钥长度时会警告并自动替换。其余协议自动生成 UUID、密码、Reality 密钥、WebSocket 路径或证书。SOCKS5 快速添加默认生成安全随机用户名和密码并启用 UDP ASSOCIATE；Snell v3 快速添加默认使用 `aes-128-gcm`，生成随机密码并启用 UDP-over-TCP。NaiveProxy 要求明确选择受信任证书或自签名测试模式，不会静默生成生产自签名配置。常规操作成功后按回车返回主菜单；主菜单输入 `0` 退出，子菜单输入 `0` 返回上一级。数字菜单空输入停留，无效编号仅提示“无效序号！”，参数默认值明确标注。自动端口从 `20000..=65535` 的高位范围选择；菜单协议选择固定使用连续编号 `1..=16`。信息只会在配置通过 `shoes --dry-run`、原子写入、systemd 启动且确认为 active 后输出；失败会恢复原配置和服务状态。
 
 非交互方式：
 
@@ -535,7 +531,7 @@ sudo ping-rust update --method release --allow-downgrade
 
 已添加 VLESS-ENC 节点时不能降级到 v0.2.x，详见[发版说明的降级限制](docs/RELEASE_NOTES_v0.3.0.md#降级限制)。
 
-成功自更新后当前旧进程会退出，请重新运行 ping-rust。shoes 安装来源记录在 `/var/lib/ping-rust/shoes-install.json`；legacy 安装没有来源记录时显示为 unknown。定期运行的 `shoes-upstream-drift` workflow 会构建并验证 cfal/shoes master，但不会自动修改生产 pin。
+菜单内自更新完成后按回车返回主菜单，重新运行 ping-rust 可使用新版本。shoes 安装来源记录在 `/var/lib/ping-rust/shoes-install.json`；legacy 安装没有来源记录时显示为 unknown。定期运行的 `shoes-upstream-drift` workflow 会构建并验证 cfal/shoes master，但不会自动修改生产 pin。
 
 从 v0.1.x 安装、之后只做过 `self-update` 的实例没有来源记录，执行 `sudo ping-rust update --method release` 时会提示无法确认安装来源。如确认没有手动替换过 `/usr/local/bin/shoes`，可执行 `sudo ping-rust update --method release --allow-downgrade`；安装成功后会记录来源，之后的更新不再需要该参数。也可以在菜单 `6) 更新` 中确认后继续。
 

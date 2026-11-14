@@ -68,7 +68,9 @@ def verify_naive_certificate_lifecycle(binary, run, state, pid, free_port):
         pid()  # The original service must be active after rollback.
     before = pid()
     output, _ = run("regenerate-test-certificate", name)
-    assert "受控重启已完成" in output and pid() != before
+    assert "测试证书已重新生成" in output
+    assert "受控重启" not in output
+    assert pid() != before
     fresh = next(p for p in state()["profiles"] if p["name"] == name)
     assert fresh["certificate_path"] != profile["certificate_path"]
     assert not Path(profile["certificate_path"]).exists()

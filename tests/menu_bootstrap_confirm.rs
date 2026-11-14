@@ -1,4 +1,5 @@
-//! 终端里首次进入菜单时，自动部署前要先确认，选择跳过后不做任何部署尝试（回归）：
+//! 终端里首次进入菜单时，自动部署前要先确认，选择跳过后不做任何部署尝试；部署失败时
+//! 失败原因要在主菜单首次清屏前保留到用户回车确认（回归）：
 //! cargo test --test menu_bootstrap_confirm
 //!
 //! 部署失败后 state 不存在，每次启动都会重试默认部署；连不上 GitHub 的机器每次都要
@@ -139,5 +140,39 @@ fn accepting_first_deployment_with_enter_keeps_the_default_flow() {
     assert!(
         output.contains("请选择 [0-10]: "),
         "没有进入主菜单\n{output}"
+    );
+}
+
+#[test]
+fn first_deployment_failure_stays_visible_before_main_menu_clears() {
+    if let Some(reason) = should_skip() {
+        eprintln!("跳过：{reason}");
+        return;
+    }
+    // 回车部署；离线探测失败后输入地址继续，shoes 安装在离线、非 root 下必然失败。
+    // 失败原因必须在主菜单首次清屏前显示，并等用户回车确认后才清屏进入主菜单。
+    let (success, output) = run_menu_in_pty(&["", "203.0.113.10", "", "0"]);
+
+    assert!(success, "菜单没有正常退出\n{output}");
+    let failure = output
+        .find("首次默认部署失败")
+        .unwrap_or_else(|| panic!("缺少首次默认部署失败原因\n{output}"));
+    let pause = output[failure..]
+        .find("按回车进入主菜单")
+        .map(|offset| failure + offset)
+        .unwrap_or_else(|| panic!("失败原因之后没有等待回车，主菜单清屏会立即抹掉它\n{output}"));
+    let first_clear = ["\x1b[2J", "\x1b[J", "\x1b[0J", "\x1bc"]
+        .iter()
+        .filter_map(|sequence| output[failure..].find(sequence))
+        .min()
+        .map(|offset| failure + offset)
+        .unwrap_or_else(|| panic!("PTY 下主菜单没有清屏，无法验证失败原因是否保留\n{output}"));
+    assert!(
+        pause < first_clear,
+        "失败原因在用户确认前就被主菜单清屏抹掉\n{output}"
+    );
+    assert!(
+        output[first_clear..].contains("请选择 [0-10]: "),
+        "确认后没有进入主菜单\n{output}"
     );
 }

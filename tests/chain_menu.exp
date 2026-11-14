@@ -52,16 +52,14 @@ switch -- $action {
         expect_or_fail {节点名称（默认：[^\r\n]+，输入 0 返回）：} "node name prompt"
         send_choice ""
         expect_or_fail {节点已添加} "node add result"
-        expect_or_fail {节点管理:} "node menu after add"
-        send_choice 0
     }
     enable {
         send_choice 6
-        expect_or_fail {状态：启用} "enable result"
+        expect_or_fail {操作成功。} "enable result"
     }
     disable {
         send_choice 6
-        expect_or_fail {状态：禁用} "disable result"
+        expect_or_fail {操作成功。} "disable result"
     }
     select {
         if {![string is integer -strict $argument] || $argument < 1} {
@@ -74,8 +72,6 @@ switch -- $action {
         expect_or_fail {选择出口节点} "node selector"
         send_choice $argument
         expect_or_fail {当前出口已切换为} "select result"
-        expect_or_fail {节点管理:} "node menu after select"
-        send_choice 0
     }
     test {
         if {![string is integer -strict $argument] || $argument < 1} {
@@ -97,8 +93,7 @@ switch -- $action {
         send_choice "acceptance-pool"
         expect_or_fail {成员编号（逗号分隔）（输入 0 返回）：} "pool member prompt"
         send_choice "1,2"
-        expect_or_fail {Pool 管理} "pool created"
-        send_choice 0
+        expect_or_fail {操作成功。} "pool created"
     }
     pool_test {
         send_choice 7
@@ -122,14 +117,12 @@ switch -- $action {
         expect_or_fail {确认删除链式节点 [^\r\n]+？ \[y/N\]（输入 0 返回）：} "delete confirmation"
         send_choice y
         expect_or_fail {节点已删除} "delete result"
-        expect_or_fail {节点管理:} "node menu after delete"
-        send_choice 0
     }
     set_direct {
         send_choice 5
         expect_or_fail {路由动作} "default route selector"
         send_choice 1
-        expect_or_fail {默认路由：DIRECT} "direct default result"
+        expect_or_fail {操作成功。} "direct default result"
     }
     delete_chain {
         send_choice 3
@@ -137,8 +130,7 @@ switch -- $action {
         send_choice 4
         expect_or_fail {选择 Chain} "chain selector"
         send_choice 1
-        expect_or_fail {Chain 管理：} "chain deleted"
-        send_choice 0
+        expect_or_fail {操作成功。} "chain deleted"
     }
     default {
         puts stderr "unknown action: $action"
@@ -146,10 +138,8 @@ switch -- $action {
     }
 }
 
-if {$action ni {enable disable set_direct pool_test}} {
-    expect_or_fail {Chain Proxy 2.0} "return to chain menu"
-}
-send_choice 0
+expect_or_fail {按回车返回主菜单} "result page"
+send_choice ""
 expect_or_fail {请选择 \[0-10\]} "return to main menu"
 send_choice 0
 expect_or_fail {已退出} "program exit"
