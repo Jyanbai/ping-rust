@@ -1682,6 +1682,7 @@ pub async fn show_info(selector: Option<&str>) -> Result<()> {
                         "  UDP ASSOCIATE：{}",
                         if *udp_enabled { "启用" } else { "关闭" }
                     );
+                    println!("  传输加密：无");
                 }
                 if let Some(server) = profile.server_address.as_deref() {
                     println!("  客户端地址：{server}");
