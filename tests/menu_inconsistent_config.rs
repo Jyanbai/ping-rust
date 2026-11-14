@@ -3,7 +3,8 @@
 //!
 //! 需要 Linux、root，以及 /etc/shoes 下至少一份已初始化的当前版本受管配置（使用专用测试机，
 //! 与 menu_input_e2e 相同）。测试把 config.yaml 第一个节点的监听端口改成与 state 不一致，
-//! 用管道输入 `0` 运行菜单，然后逐字节恢复 config.yaml（断言失败时也恢复）。
+//! 用管道输入 `0` 运行菜单，再用 expect 在真实 PTY 下运行一次，确认清屏后主界面仍保留
+//! 诊断与恢复指引（PTY 需要 expect），然后逐字节恢复 config.yaml（断言失败时也恢复）。
 //! 不需要 shoes 运行、systemd 或网络：HTTPS 代理指向本机关闭的端口。
 #![cfg(target_os = "linux")]
 
@@ -135,5 +136,71 @@ fn inconsistent_config_still_opens_main_menu_without_writing() {
     assert!(
         stdout.contains("已退出。"),
         "主菜单没有处理退出\nstdout:\n{stdout}"
+    );
+
+    // 真实终端（PTY）下主菜单会清屏：诊断和恢复指引必须出现在进入主菜单前最后一次
+    // 清屏之后，不能被首次清屏抹掉。管道输出不会清屏，覆盖不到这一场景。
+    let expect_available = Command::new("expect")
+        .arg("-v")
+        .output()
+        .is_ok_and(|output| output.status.success());
+    assert!(expect_available, "PTY 回归需要 expect");
+    let pty = Command::new("expect")
+        .arg("-c")
+        .arg(
+            r#"log_user 1
+set timeout 60
+spawn -noecho $env(PING_RUST_BIN)
+expect {
+    -re {请选择 \[0-10\]} {}
+    timeout { exit 3 }
+    eof { exit 4 }
+}
+send "0\r"
+expect {
+    eof {}
+    timeout { exit 5 }
+}
+lassign [wait] pid spawn_id os_error status
+exit $status"#,
+        )
+        .env("PING_RUST_BIN", env!("CARGO_BIN_EXE_ping-rust"))
+        .env("NO_COLOR", "1")
+        .env("HTTPS_PROXY", CLOSED_PROXY)
+        .env("https_proxy", CLOSED_PROXY)
+        .env("ALL_PROXY", CLOSED_PROXY)
+        .env("all_proxy", CLOSED_PROXY)
+        .env_remove("NO_PROXY")
+        .env_remove("no_proxy")
+        .output()
+        .expect("运行 PTY 菜单回归");
+    let transcript = String::from_utf8_lossy(&pty.stdout);
+    assert!(
+        before == snapshot(Path::new(CONFIG_DIR)),
+        "PTY 菜单在配置不一致时改动了 /etc/shoes"
+    );
+    assert!(
+        pty.status.success(),
+        "PTY 菜单没有正常退出：{}\nstderr:\n{}",
+        pty.status,
+        String::from_utf8_lossy(&pty.stderr)
+    );
+    let prompt = transcript
+        .find("请选择 [0-10]")
+        .expect("PTY 下没有进入主菜单");
+    let before_prompt = &transcript[..prompt];
+    let last_clear = ["\x1b[2J", "\x1b[J", "\x1b[0J", "\x1bc"]
+        .iter()
+        .filter_map(|sequence| before_prompt.rfind(sequence))
+        .max()
+        .expect("PTY 下主菜单前没有清屏，无法验证诊断是否保留");
+    let main_screen = &before_prompt[last_clear..];
+    assert!(
+        main_screen.contains("检查受管配置失败") && main_screen.contains("不一致"),
+        "首次清屏后主界面没有保留启动检查错误"
+    );
+    assert!(
+        main_screen.contains("9) 工具 → 8) 恢复配置"),
+        "首次清屏后主界面没有保留恢复配置指引"
     );
 }

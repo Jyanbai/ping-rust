@@ -157,18 +157,18 @@ fn control_after_bootstrap(result: Result<bool>) -> Result<MenuControl> {
 /// 连 9) 工具 → 8) 恢复配置 都用不了。检查失败时不写入（提交失败会自行回滚）；
 /// 之后添加、更改、删除节点和修改链式代理在提交前都会再次检查一致性并单独报错。
 /// Ctrl+C 中断仍交给 main 恢复光标后退出。
-fn continue_after_profile_check(result: Result<bool>) -> Result<()> {
+/// 启动检查失败时返回诊断与恢复指引，由主界面每次清屏后重新显示，避免被清屏抹掉。
+fn continue_after_profile_check(result: Result<bool>) -> Result<Option<(String, String)>> {
     match result {
-        Ok(_) => Ok(()),
+        Ok(_) => Ok(None),
         Err(error) if crate::is_interrupted(&error) => Err(error),
-        Err(error) => {
-            eprintln!("{}", format!("检查受管配置失败：{error:#}").red());
-            eprintln!(
+        Err(error) => Ok(Some((
+            format!("检查受管配置失败：{error:#}"),
+            format!(
                 "已进入主菜单，但添加、更改、删除节点和修改链式代理会继续报错；可在 9) 工具 → 8) 恢复配置 中恢复备份，或把 {} 改回与 ping-rust 管理状态一致。",
                 crate::utils::CONFIG_FILE
-            );
-            Ok(())
-        }
+            ),
+        ))),
     }
 }
 
@@ -364,9 +364,11 @@ pub async fn run() -> Result<()> {
         return Ok(());
     }
     // 状态无法读取时仍提供工具、恢复等入口，节点摘要负责显示读取失败提示。
-    if config::load_state().is_ok() {
-        continue_after_profile_check(config::ensure_profile_files().await)?;
-    }
+    let mut profile_check = if config::load_state().is_ok() {
+        continue_after_profile_check(config::ensure_profile_files().await)?
+    } else {
+        None
+    };
     loop {
         input::clear_screen()?;
         println!(
@@ -391,6 +393,10 @@ pub async fn run() -> Result<()> {
             config::load_state,
         );
         println!("{}\n", node_summary(state));
+        if let Some((failure, guidance)) = &profile_check {
+            eprintln!("{}", failure.red());
+            eprintln!("{guidance}\n");
+        }
         let selected = match select_keyed("", MAIN_MENU_ITEMS) {
             Err(error) if control_after_error(&error) == MenuControl::Exit => return Ok(()),
             result => result?,
@@ -469,6 +475,10 @@ pub async fn run() -> Result<()> {
         };
         if control == MenuControl::Exit {
             return Ok(());
+        }
+        // 恢复配置等操作之后重新检查，问题已解决时不再显示过期诊断。
+        if profile_check.is_some() && config::load_state().is_ok() {
+            profile_check = continue_after_profile_check(config::ensure_profile_files().await)?;
         }
     }
 }
@@ -2308,15 +2318,20 @@ mod tests {
 
     #[test]
     fn profile_check_failure_continues_to_main_menu_but_interrupt_does_not() {
-        assert!(continue_after_profile_check(Ok(true)).is_ok());
-        assert!(continue_after_profile_check(Ok(false)).is_ok());
+        assert!(continue_after_profile_check(Ok(true)).unwrap().is_none());
+        assert!(continue_after_profile_check(Ok(false)).unwrap().is_none());
         for failure in [
             anyhow::anyhow!("第 1 项监听地址 0.0.0.0:24432 与管理状态端口 24431 不一致")
                 .context("旧版聚合配置与管理状态不一致，无法安全迁移节点文件"),
             anyhow::anyhow!("读取配置 /etc/shoes/config.yaml 失败"),
             anyhow::anyhow!("shoes --dry-run 拒绝了候选配置"),
         ] {
-            assert!(continue_after_profile_check(Err(failure)).is_ok());
+            let reason = format!("{failure:#}");
+            let (message, guidance) = continue_after_profile_check(Err(failure))
+                .unwrap()
+                .expect("启动检查失败必须返回供主界面重新显示的诊断");
+            assert_eq!(message, format!("检查受管配置失败：{reason}"));
+            assert!(guidance.contains("9) 工具 → 8) 恢复配置"), "{guidance}");
         }
         let interrupted = anyhow::Error::new(io::Error::from(io::ErrorKind::Interrupted))
             .context("等待 shoes 校验");
