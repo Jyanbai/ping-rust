@@ -65,7 +65,6 @@ fn read_pause(reader: &mut impl BufRead, writer: &mut impl Write) -> Result<()> 
         match line(reader) {
             Ok(value) if value.trim().is_empty() => return Ok(()),
             Ok(_) => continue,
-            Err(error) if error.is::<MenuEof>() => return Ok(()),
             Err(error) => return Err(error),
         }
     }
@@ -410,7 +409,17 @@ mod tests {
         let mut output = Vec::new();
         read_pause(&mut Cursor::new("1\n0\n\n"), &mut output).unwrap();
         assert_eq!(String::from_utf8(output).unwrap(), "\n按回车返回主菜单...");
-        read_pause(&mut Cursor::new(""), &mut Vec::new()).unwrap();
+    }
+
+    #[test]
+    fn result_page_preserves_eof_instead_of_returning_to_main_menu() {
+        for input in ["", "1\n0\n"] {
+            let mut output = Vec::new();
+            assert!(read_pause(&mut Cursor::new(input), &mut output)
+                .unwrap_err()
+                .is::<MenuEof>());
+            assert_eq!(String::from_utf8(output).unwrap(), "\n按回车返回主菜单...");
+        }
     }
 
     #[test]

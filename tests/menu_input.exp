@@ -75,6 +75,7 @@ proc port_prompt {} {
 }
 proc successful_exit {} {
     expect {
+        -re {请选择 \[0-10\]: } { puts stderr "EOF redrew main menu"; exit 1 }
         eof {}
         timeout { puts stderr "EOF did not exit menu"; exit 1 }
     }
@@ -307,6 +308,18 @@ send_choice 8
 result_page
 send -- "\004"
 successful_exit
+# A single terminal EOF on a result page must exit without redrawing the menu.
+foreach choice {3 10} {
+    log_user 0
+    spawn $binary
+    main_menu
+    send_choice $choice
+    if {$choice == 3} { choose_profile }
+    expect_or_fail {按回车返回主菜单\.\.\.} "result page EOF"
+    send -- "\004"
+    successful_exit
+    log_user 1
+}
 # EOF at all menu and text depths remains a normal exit.
 foreach advanced {0 1} {
     spawn $binary

@@ -127,6 +127,14 @@ fn control_after_error(error: &anyhow::Error) -> MenuControl {
     }
 }
 
+fn control_after_pause(result: Result<()>) -> Result<MenuControl> {
+    match result {
+        Ok(()) => Ok(MenuControl::Continue),
+        Err(error) if control_after_error(&error) == MenuControl::Exit => Ok(MenuControl::Exit),
+        Err(error) => Err(error),
+    }
+}
+
 /// 首次默认部署失败（连不上 GitHub、没有 systemd 等）时提示错误并照常进入主菜单，
 /// 否则 state 一直不存在，每次启动都会重跑部署并退出，工具、更新、恢复等入口全部不可用。
 /// 输入结束（EOF）仍退出菜单；Ctrl+C 中断仍交给 main 恢复光标后退出。
@@ -441,9 +449,10 @@ pub async fn run() -> Result<()> {
         let control = match result {
             Ok(control) => {
                 if control == MenuControl::Continue && !input::returned_to_parent() {
-                    input::pause_main_menu()?;
+                    control_after_pause(input::pause_main_menu())?
+                } else {
+                    control
                 }
-                control
             }
             Err(error) => {
                 if crate::is_interrupted(&error) {
@@ -452,9 +461,10 @@ pub async fn run() -> Result<()> {
                 let control = control_after_error(&error);
                 if control == MenuControl::Continue && !input::is_back(&error) {
                     eprintln!("{}", format!("错误：{error:#}").red());
-                    input::pause_main_menu()?;
+                    control_after_pause(input::pause_main_menu())?
+                } else {
+                    control
                 }
-                control
             }
         };
         if control == MenuControl::Exit {
@@ -2313,6 +2323,21 @@ mod tests {
         assert!(crate::is_interrupted(
             &continue_after_profile_check(Err(interrupted)).unwrap_err()
         ));
+    }
+
+    #[test]
+    fn result_page_enter_continues_eof_exits_and_other_errors_propagate() {
+        assert_eq!(control_after_pause(Ok(())).unwrap(), MenuControl::Continue);
+        for eof in [
+            anyhow::Error::new(MenuEof).context("读取结果页"),
+            anyhow::Error::new(io::Error::from(io::ErrorKind::UnexpectedEof)),
+        ] {
+            assert_eq!(control_after_pause(Err(eof)).unwrap(), MenuControl::Exit);
+        }
+        for kind in [io::ErrorKind::BrokenPipe, io::ErrorKind::Interrupted] {
+            let error = control_after_pause(Err(io::Error::from(kind).into())).unwrap_err();
+            assert_eq!(error.downcast_ref::<io::Error>().unwrap().kind(), kind);
+        }
     }
 
     #[test]
