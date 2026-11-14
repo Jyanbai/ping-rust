@@ -18,6 +18,17 @@ def succeeded(item):
     return item.get("status") == "completed" and item.get("conclusion") == "success"
 
 
+def step_aliases(step):
+    """策略步骤可写成字符串，或 {"any_of": [...]} 显式别名清单（用于步骤更名过渡）。"""
+    if isinstance(step, str):
+        return [step]
+    names = step.get("any_of") if isinstance(step, dict) and set(step) == {"any_of"} else None
+    if (not isinstance(names, list) or len(names) < 2 or len(set(names)) != len(names)
+            or not all(isinstance(n, str) and n for n in names)):
+        raise ValueError(f"无效的策略步骤：{step!r}")
+    return names
+
+
 def check_jobs(expected, jobs):
     errors = []
     for name, steps in expected.items():
@@ -26,9 +37,11 @@ def check_jobs(expected, jobs):
             errors.append(f"job 未成功或缺失/重复：{name}")
             continue
         for step in steps:
-            matches_s = [s for s in matches[0].get("steps", []) if s.get("name") == step]
+            aliases = step_aliases(step)
+            # 别名中恰好一个步骤出现且实际成功；同时出现多个别名同样拒绝。
+            matches_s = [s for s in matches[0].get("steps", []) if s.get("name") in aliases]
             if len(matches_s) != 1 or not succeeded(matches_s[0]):
-                errors.append(f"step 未实际成功：{name} / {step}")
+                errors.append(f"step 未实际成功：{name} / {' | '.join(aliases)}")
     # 新增的 job 同样不得失败或跳过。
     if any(not succeeded(j) for j in jobs):
         errors.append("存在未成功的 job")
