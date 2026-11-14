@@ -752,11 +752,45 @@ jobs:
           send "0\r"
           expect { eof {} timeout { puts stderr "timeout waiting for add exit"; exit 23 } }
           EXPECT
-            sudo env PRS_COMMAND="$PRS" MENU_PORT="$port" SHARE_SCHEME="$scheme" python3 - <<'PYVIEW'
-          import json, os, re, subprocess
+            # 添加结果页不再展示二维码；改从菜单 3「查看配置」结果页核对用户实际看到的链接与二维码，
+            # info CLI 输出保持与 v0.2.1 逐字节兼容，不含二维码。
+            view_log="$(mktemp)"
+            view_number="$(sudo env MENU_PORT="$port" python3 - <<'PYNUM'
+          import json, os
+          with open('/etc/shoes/ping-rust-state.json', encoding='utf-8') as stream:
+              profiles = json.load(stream)['profiles']
+          print(next(index for index, profile in enumerate(profiles, 1) if profile['port'] == int(os.environ['MENU_PORT'])))
+          PYNUM
+            )"
+            sudo env PRS_COMMAND="$PRS" PROFILE_NUMBER="$view_number" VIEW_LOG="$view_log" expect <<'EXPECT'
+          log_user 0
+          set timeout 180
+          proc wait_for {pattern stage} {
+            expect {
+              -re $pattern { return }
+              eof { puts stderr "unexpected EOF at $stage"; exit 24 }
+              timeout { puts stderr "timeout at $stage"; exit 25 }
+            }
+          }
+          spawn $env(PRS_COMMAND)
+          wait_for {请选择 \[0-10\]} view-main-menu
+          send "3\r"
+          wait_for {请选择配置} view-profile-menu
+          wait_for {0\) 返回} view-profile-back
+          wait_for {请选择} view-profile-prompt
+          log_file -noappend $env(VIEW_LOG)
+          send "$env(PROFILE_NUMBER)\r"
+          wait_for {按回车返回主菜单} view-result-page
+          log_file
+          send "\r"
+          wait_for {请选择 \[0-10\]} view-main-menu-after
+          send "0\r"
+          expect { eof {} timeout { puts stderr "timeout waiting for view exit"; exit 26 } }
+          EXPECT
+            sudo env SHARE_SCHEME="$scheme" VIEW_LOG="$view_log" python3 - <<'PYVIEW'
+          import os, re
           from pathlib import Path
-          profile = next(p for p in json.loads(Path('/etc/shoes/ping-rust-state.json').read_text())['profiles'] if p['port'] == int(os.environ['MENU_PORT']))
-          details = subprocess.check_output([os.environ['PRS_COMMAND'], 'info', profile['id']], text=True)
+          details = re.sub(r'\x1b\[[0-9;?]*[A-Za-z]', '', Path(os.environ['VIEW_LOG']).read_text(encoding='utf-8', errors='replace'))
           scheme = os.environ['SHARE_SCHEME']
           if scheme == 'snell':
               assert re.search(r'协议 \(protocol\)\s*= snell', details)
@@ -765,6 +799,7 @@ jobs:
               assert scheme + '://' in details
               assert '二维码 (QR)' in details and any(block in details for block in '▀▄█')
           PYVIEW
+            sudo rm -f "$view_log"
           }
 
           run_menu_add 1 25448 vless
