@@ -31,7 +31,13 @@ Codex 负责实现、独立只读审查及回修，Grok bot 只读播报进度�
 `codex` 的 `CODEX_AUTH_JSON`、`CODEX_BOT_TOKEN` 和模型变量，不需要新增登录或 API key。
 现有 `/codex <任务>` 仍负责写代码，循环如下：
 
-**issue / 验收标准 → Codex 实现同一个 PR → CI → Codex 独立审查 → 自动回修 → 再次 CI / 审查 → 用户最终检查**。
+**issue / 验收标准 →（复杂任务）只读规划并由所有者确认方案 → Codex 实现同一个 PR → CI → Codex 独立审查 → 自动回修 → 再次 CI / 审查 → PR Merge Gate → 用户最终检查**。
+
+这就是 AGENTS.md 里的 Agent Pipeline 2.0：Architecture → Implementation → Independent Review → CI Verification → Repair → Merge Gate。
+何时需要先规划、确认后的方案怎么交给实现会话、以及“已验证 / 未验证 / 失败”的写法，统一以 AGENTS.md 为准。
+实现和回修的 prompt 都要求先补会在旧代码上失败的回归测试，不删除、不放宽断言，只修同一个 PR；
+审查 prompt 要求独立只读，并逐项检查逻辑错误、测试盲区、shoes 版本差异、旧状态兼容、客户端导出一致性、
+升级回滚和终端真实交互。审查读取的是默认分支的 AGENTS.md，所以这些规则合并到 `main` 后才对审查生效。
 
 - PR 的 **CI** 结束后自动审查（CI 失败也会审查）；只接受所有者在本仓库创建、以 `main`
   为目标的非草稿 PR。来自 fork 或其他作者的 PR 不自动消耗登录额度。
