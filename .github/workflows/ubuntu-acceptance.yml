@@ -778,7 +778,7 @@ jobs:
           wait_for {请选择配置} view-profile-menu
           wait_for {0\) 返回} view-profile-back
           wait_for {请选择} view-profile-prompt
-          log_file -noappend $env(VIEW_LOG)
+          log_file -a -noappend $env(VIEW_LOG)
           send "$env(PROFILE_NUMBER)\r"
           wait_for {按回车返回主菜单} view-result-page
           log_file
