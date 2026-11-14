@@ -45,6 +45,16 @@ def success(obj):
     return obj.get("status") == "completed" and obj.get("conclusion") == "success"
 
 
+def step_aliases(step):
+    """策略步骤可写成字符串，或 {"any_of": [...]} 显式别名清单（用于步骤更名过渡）。"""
+    if isinstance(step, str):
+        return [step]
+    names = step.get("any_of") if isinstance(step, dict) and set(step) == {"any_of"} else None
+    require(isinstance(names, list) and len(names) >= 2 and len(set(names)) == len(names)
+            and all(isinstance(n, str) and n for n in names), f"无效的策略步骤：{step!r}")
+    return names
+
+
 def verify_jobs(required, jobs):
     by_name = {}
     for job in jobs:
@@ -59,9 +69,11 @@ def verify_jobs(required, jobs):
         for step in by_name[name].get("steps", []):
             steps.setdefault(step.get("name"), []).append(step)
         for title in required_steps:
-            found = steps.get(title, [])
+            aliases = step_aliases(title)
+            # 别名中恰好一个步骤出现且实际成功；同时出现多个别名同样拒绝。
+            found = [step for alias in aliases for step in steps.get(alias, [])]
             require(len(found) == 1 and success(found[0]),
-                    f"必需步骤缺失/失败/跳过：{name} / {title}")
+                    f"必需步骤缺失/失败/跳过：{name} / {' | '.join(aliases)}")
 
 
 def combined_jobs(api, run):

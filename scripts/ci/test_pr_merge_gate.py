@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import unittest
 
-from pr_merge_gate import evaluate, review_verdict, inspect_pr, latest_review, event_targets, REVIEW_STEPS, GitHub, run_event
+from pr_merge_gate import evaluate, review_verdict, step_aliases, inspect_pr, latest_review, event_targets, REVIEW_STEPS, GitHub, run_event
 
 
 class CollectorAPI:
@@ -313,7 +313,7 @@ class GateTests(unittest.TestCase):
         runs, jobs = [], {}
         for rid, (workflow, expected) in enumerate(policy.items(), 1):
             runs.append(dict(self.run, id=rid, path=f'.github/workflows/{workflow}'))
-            jobs[rid] = [dict(self.job, name=name, steps=[dict(self.job['steps'][0], name=s) for s in steps])
+            jobs[rid] = [dict(self.job, name=name, steps=[dict(self.job['steps'][0], name=step_aliases(s)[0]) for s in steps])
                          for name, steps in expected.items()]
         self.assertEqual(evaluate(self.sha, policy, runs, jobs), [])
         for run in runs:
@@ -324,6 +324,26 @@ class GateTests(unittest.TestCase):
                     step['conclusion'] = 'skipped'
                     self.assertTrue(evaluate(self.sha, policy, runs, jobs), step['name'])
                     step['conclusion'] = 'success'
+
+    def test_step_alias_requires_exactly_one_successful_listed_name(self):
+        old, new = 'Prepare one managed node', 'Prepare two managed nodes'
+        policy = {'ci.yml': {'unit': [{'any_of': [old, new]}]}}
+        step = self.job['steps'][0]
+        def jobs_with(*names, conclusion='success'):
+            return {1: [dict(self.job, steps=[dict(step, name=n, conclusion=conclusion) for n in names])]}
+        self.assertEqual(evaluate(self.sha, policy, [self.run], jobs_with(old)), [])
+        self.assertEqual(evaluate(self.sha, policy, [self.run], jobs_with(new)), [])
+        # 两个别名都出现、都不出现、只出现未列出的名称或步骤未成功，均拒绝。
+        for names, conclusion in [((old, new), 'success'), ((), 'success'),
+                                  (('Prepare three managed nodes',), 'success'),
+                                  ((new,), 'skipped'), ((old,), 'failure')]:
+            with self.subTest(names=names, conclusion=conclusion):
+                self.assertTrue(evaluate(self.sha, policy, [self.run], jobs_with(*names, conclusion=conclusion)))
+        for bad in [{'any_of': [old]}, {'any_of': [old, old]}, {'any_of': []}, {'any_of': old},
+                    {'any_of': [old, new], 'extra': 1}, {'all_of': [old, new]}, [old, new], None]:
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    evaluate(self.sha, {'ci.yml': {'unit': [bad]}}, [self.run], jobs_with(old))
 
     def test_collector_fails_closed_on_api_error_or_head_change(self):
         outer = self

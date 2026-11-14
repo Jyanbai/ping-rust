@@ -198,6 +198,14 @@ class WorkflowDryRunTest(unittest.TestCase):
         self.assertNotIn("2026-11-03T15:40:01", prompt)
         self.assertIn("--allow-escape-sequences", calls)
 
+    def test_dry_run_prompt_requires_regression_test_on_same_pr(self):
+        result, _ = self.run_step()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        prompt = result.stdout
+        self.assertIn("不删除、不放宽已有断言", prompt)
+        self.assertIn("先补能在修复前失败的回归测试再改代码", prompt)
+        self.assertIn("只修同一个 PR", prompt)
+
 
 class ExcerptSectionTest(unittest.TestCase):
     class FakeGh:

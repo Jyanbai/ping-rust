@@ -116,6 +116,26 @@ class Tests(unittest.TestCase):
             with self.subTest(mode=mode):
                 with self.assertRaises(GateError):api.check()
 
+    def test_step_alias_requires_exactly_one_successful_listed_name(self):
+        old,new="Prepare one managed node","Prepare two managed nodes"
+        for names,conclusion,ok in [((old,),"success",True),((new,),"success",True),
+                                    ((old,new),"success",False),((),"success",False),
+                                    (("Prepare three managed nodes",),"success",False),
+                                    ((new,),"skipped",False)]:
+            api=API()
+            api.policy={"ci.yml":{"unit":[{"any_of":[old,new]}]}}
+            api.job["steps"]=[dict(name=n,status="completed",conclusion=conclusion) for n in names]
+            with self.subTest(names=names,conclusion=conclusion):
+                if ok:self.assertEqual(api.check(),{"ci.yml":"15/attempt-1"})
+                else:
+                    with self.assertRaises(GateError):api.check()
+        for bad in [{"any_of":[old]},{"any_of":[old,old]},{"any_of":old},{"all_of":[old,new]},[old,new]]:
+            api=API()
+            api.policy={"ci.yml":{"unit":[bad]}}
+            api.job["steps"]=[dict(name=old,status="completed",conclusion="success")]
+            with self.subTest(bad=bad):
+                with self.assertRaises(GateError):api.check()
+
     def test_attempt_merge_and_race_protection(self):
         api=API()
         api.policy["ci.yml"]["extra"]=["Execute tests"]

@@ -337,6 +337,41 @@ exec "$@"
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse((self.work / "posted.json").exists())
 
+    def build_review_prompt(self):
+        """执行 Run Codex review 步骤，用假 git / codex 只捕获发给模型的 prompt。"""
+        policy = self.work / "policy"
+        policy.mkdir()
+        (policy / "AGENTS.md").write_text((ROOT / "AGENTS.md").read_text(encoding="utf-8"), encoding="utf-8")
+        (self.work / "review-pr.json").write_text(json.dumps(PR), encoding="utf-8")
+        self.mock_command("git", "exit 0\n")
+        self.mock_command("codex", 'cat > "$RUNNER_TEMP/captured-prompt.txt"\n')
+        env = {**self.env, "CODEX_MODEL": "", "CODEX_REASONING_EFFORT": ""}
+        result = subprocess.run(
+            ["bash", "-e", "-o", "pipefail", "-c", step_script("Run Codex review")],
+            cwd=self.work, env=env, text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return (self.work / "captured-prompt.txt").read_text(encoding="utf-8")
+
+    def test_review_prompt_is_independent_read_only_and_covers_pipeline_checklist(self):
+        prompt = self.build_review_prompt()
+        self.assertIn("不要改代码，不要编译或测试，不要提交、推送或访问网络", prompt)
+        self.assertIn("独立审查会话", prompt)
+        for item in ("逻辑错误", "测试盲区", "shoes 版本差异", "旧状态兼容",
+                     "客户端导出一致性", "升级回滚", "终端真实交互"):
+            with self.subTest(item=item):
+                self.assertIn(item, prompt)
+        self.assertIn("已验证 / 未验证 / 失败", prompt)
+        # 清单来自默认分支的 AGENTS.md，每个检查项在那里都有展开说明。
+        for heading in ("**逻辑错误**", "**测试盲区**", "**shoes 版本差异**", "**旧状态兼容**",
+                        "**客户端导出一致性**", "**升级与回滚**", "**终端真实交互**"):
+            with self.subTest(heading=heading):
+                self.assertIn(heading, prompt)
+        # 随机校验值只写进工作区文件，不能出现在 prompt 里。
+        check = (self.work / "workspace/review-read-check.txt").read_text().strip()
+        self.assertRegex(check, r"^[0-9a-f]{64}$")
+        self.assertNotIn(check, prompt)
+
     def test_installer_preserves_runtime_helpers_and_resources(self):
         # 裸二进制能启动 CLI，却无法读取代码；移动它时必须保留同包的相邻依赖。
         executable = b'''#!/usr/bin/env bash
