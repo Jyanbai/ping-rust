@@ -31,7 +31,13 @@ Codex 负责实现、独立只读审查及回修，Grok bot 只读播报进度�
 `codex` 的 `CODEX_AUTH_JSON`、`CODEX_BOT_TOKEN` 和模型变量，不需要新增登录或 API key。
 现有 `/codex <任务>` 仍负责写代码，循环如下：
 
-**issue / 验收标准 → Codex 实现同一个 PR → CI → Codex 独立审查 → 自动回修 → 再次 CI / 审查 → 用户最终检查**。
+**issue / 验收标准 →（复杂任务）只读规划并由所有者确认方案 → Codex 实现同一个 PR → CI → Codex 独立审查 → 自动回修 → 再次 CI / 审查 → PR Merge Gate → 用户最终检查**。
+
+这就是 AGENTS.md 里的 Agent Pipeline 2.0：Architecture → Implementation → Independent Review → CI Verification → Repair → Merge Gate。
+何时需要先规划、确认后的方案怎么交给实现会话、以及“已验证 / 未验证 / 失败”的写法，统一以 AGENTS.md 为准。
+实现和回修的 prompt 都要求先补会在旧代码上失败的回归测试，不删除、不放宽断言，只修同一个 PR；
+审查 prompt 要求独立只读，并逐项检查逻辑错误、测试盲区、shoes 版本差异、旧状态兼容、客户端导出一致性、
+升级回滚和终端真实交互。审查读取的是默认分支的 AGENTS.md，所以这些规则合并到 `main` 后才对审查生效。
 
 - PR 的 **CI** 结束后自动审查（CI 失败也会审查）；只接受所有者在本仓库创建、以 `main`
   为目标的非草稿 PR。来自 fork 或其他作者的 PR 不自动消耗登录额度。
@@ -86,6 +92,28 @@ Codex 负责实现、独立只读审查及回修，Grok bot 只读播报进度�
 派发用的是 `GITHUB_TOKEN` 触发 `codex-dispatch.yml` 的 `workflow_dispatch`（GitHub 允许 `GITHUB_TOKEN` 触发这种事件）。`codex-dispatch.yml` 只放行 `github-actions[bot]` 带 `pr` 参数的这一种触发，所以**其他 workflow 不要给 `GITHUB_TOKEN` `actions: write`，也不要使用 `pull_request_target`**。
 
 为什么不用 Codex 云端环境（`codex cloud exec`）：网页上建的云端环境，Codex CLI 和 GitHub 上的 `@codex` 目前都查不到（接口返回空列表），所以改为在 runner 上直接运行 `codex exec`。
+
+## 只读规划（Architecture 阶段）
+
+`.github/workflows/codex-plan.yml`（**Codex Architecture Plan**）是 Agent Pipeline 2.0 的规划阶段，目前**只能手动触发**：
+Actions → Codex Architecture Plan → Run workflow，分支选 `main`，填 issue 编号。经过真实 issue → PR → CI → 审查 → 回修验证后，再考虑自动启用。
+
+| 输入 | 说明 |
+|---|---|
+| `issue` | 要规划的 issue 编号（必须是打开的 issue，不接受 PR） |
+| `notes` | 所有者补充说明。issue 不是所有者创建的时候必须填写，此时标题和正文不会交给 Codex |
+| `force_plan` | 默认关闭：模型判定为简单任务时只给要点并提示可直接 `/codex`；勾选后始终输出完整方案 |
+| `allow_refresh` | 默认关闭：登录上次刷新已满 7 天（Codex 约 8 天刷新一次）或无法判断时不运行；确认没有其他 Codex 任务在跑后勾选重试 |
+
+- 只接受仓库所有者在 `main` 上触发；使用 environment `codex` 的 `CODEX_AUTH_JSON` 和 `CODEX_MODEL` / `CODEX_REASONING_EFFORT`，不新增登录或 token。
+- 与 Codex Code Review 相同的只读沙箱（`:read-only`、禁止网络、读不到 `$RUNNER_TEMP`），运行前实测；模型步骤没有 GitHub token。分析的是触发时 `main` 的精确提交和该提交的 `AGENTS.md`。
+- 模型必须读取 prompt 中没有的随机校验值并返回 `plan_complete=true`，结构化结果通过格式和凭据检查后，才由 `github-actions[bot]` 以 **Codex Architecture Plan** 为标题评论到 issue。同一 run/attempt 只评论一次；失败时评论“未完成”，不发布方案。
+- 方案包括相关源码与调用链、兼容性、技术风险与回滚、实施步骤、测试计划（回归测试排在最前）以及“已验证 / 未验证 / 失败”。规划不编译、不运行测试，所以“已验证”只代表读过源码。
+- workflow 权限只有 `contents: read` 和 `issues: write`；不推送、不开 PR、不派发 `/codex`。`CODEX_BOT_TOKEN` 只在写回刷新后登录的那一步使用，与审查工作流相同，没有扩大权限。
+- **方案如何交给实现**：实现会话读不到 issue 评论。所有者确认（或修改）方案后，在 issue 下评论 `/codex <确认后的方案要点>`，由现有 Codex Dispatch 实现，之后照常进入 CI、独立审查和回修。
+- 共享登录的刷新：所有规划任务在同一个并发组 `codex-plan` 里串行（GitHub 只保留一个排队任务，再排队会取消前一个排队中的任务）。规划与 Dispatch / Review 之间没有并发组互斥，所以登录接近刷新期限时默认停止，避免同时刷新触发 `refresh_token_reused`。
+- 失败时评论前会重新检查 issue 是否仍打开；方案已发布、只是之后写回登录失败时，评论只说明写回失败，不说没有方案。
+- 仓库变量 `CODEX_PLAN=off` 可以停用这个入口。
 
 ## 一次性配置
 

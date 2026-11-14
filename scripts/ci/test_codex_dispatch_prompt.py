@@ -177,6 +177,13 @@ class SandboxRulesTest(unittest.TestCase):
         self.assertIn("未验证", prompt)
         self.assertNotIn("跳过即可", prompt)
 
+    def test_rules_require_confirmed_plan_and_regression_tests_first(self):
+        prompt = self.build_prompt()
+        self.assertIn("所有者确认的实施方案", prompt)
+        self.assertIn("在旧代码上会失败的回归测试", prompt)
+        self.assertIn("不要为了通过 CI 删除、跳过或放宽", prompt)
+        self.assertIn("tests/fixtures/yaml/compat/", prompt)
+
 
 if __name__ == "__main__":
     unittest.main()
