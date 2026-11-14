@@ -277,11 +277,36 @@ pub fn capture_hot_reload_snapshot(snapshot: &ServiceSnapshot) -> Result<HotRelo
     let main_pid = snapshot
         .main_pid
         .context("shoes.service active but MainPID is unavailable")?;
+    if !same_executable(
+        Path::new(&format!("/proc/{main_pid}/exe")),
+        Path::new(utils::SHOES_BIN),
+    )? {
+        return Ok(HotReloadReadiness::Unavailable(
+            HotReloadReason::InspectionFailed("运行中的 shoes 与已检测二进制不同".to_owned()),
+        ));
+    }
     let snapshot = HotReloadSnapshot {
         main_pid,
         listening_ports: listening_ports(main_pid)?,
     };
     Ok(HotReloadReadiness::Ready(snapshot))
+}
+
+// Atomic upgrades can leave a process running the unlinked old executable.
+// Version/provenance for the on-disk file cannot establish that process's schema.
+fn same_executable(running: &Path, installed: &Path) -> Result<bool> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let running = fs::metadata(running).context("无法检查运行中的 shoes 二进制")?;
+        let installed = fs::metadata(installed).context("无法检查已安装 shoes 二进制")?;
+        Ok(running.dev() == installed.dev() && running.ino() == installed.ino())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (running, installed);
+        Ok(false)
+    }
 }
 
 pub fn hot_reload_and_verify(
@@ -565,6 +590,21 @@ fn ensure_systemctl() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn replaced_binary_cannot_prove_running_process_compatibility() {
+        let directory = tempfile::tempdir().unwrap();
+        let installed = directory.path().join("shoes");
+        let running = directory.path().join("running-executable");
+        fs::write(&installed, b"old kernel").unwrap();
+        fs::hard_link(&installed, &running).unwrap();
+        assert!(same_executable(&running, &installed).unwrap());
+        let replacement = directory.path().join("new-shoes");
+        fs::write(&replacement, b"new kernel").unwrap();
+        fs::rename(&replacement, &installed).unwrap();
+        assert!(!same_executable(&running, &installed).unwrap());
+    }
 
     #[test]
     fn complete_release_metadata_does_not_change_existing_protocol_restart_policy() {
