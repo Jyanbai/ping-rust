@@ -13,7 +13,7 @@ def verify_sudoku_compatibility(binary, run, state, pid, free_port, menu_edit):
     shoes = Path('/usr/local/bin/shoes')
 
     def replace_binary(content):
-        with tempfile.NamedTempFile(dir=shoes.parent, delete=False) as candidate:
+        with tempfile.NamedTemporaryFile(dir=shoes.parent, delete=False) as candidate:
             candidate.write(content)
             candidate_path = Path(candidate.name)
         candidate_path.chmod(0o755)
