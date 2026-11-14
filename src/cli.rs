@@ -1761,6 +1761,7 @@ pub fn print_credentials(result: &config::GenerationResult) {
             mode,
             auth,
             vision,
+            sudoku,
             ..
         } => {
             println!("协议：VLESS-ENC");
@@ -1771,6 +1772,9 @@ pub fn print_credentials(result: &config::GenerationResult) {
                 auth.as_str()
             );
             println!("Encryption：{encryption}");
+            if let Some(sudoku) = sudoku {
+                println!("{}", sudoku.description());
+            }
         }
         config::Credentials::VlessXhttpReality {
             user_id,

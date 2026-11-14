@@ -264,6 +264,8 @@ shoes: • running
 
 配置添加成功。
 
+（此处显示当前配置的连接参数、分享链接和终端二维码）
+
 按回车返回主菜单...
 ```
 
@@ -306,7 +308,7 @@ sudo ping-rust update --method cargo
 
 只改显示名称或公网地址等不影响运行 YAML 的信息无需服务动作。凭据等无法从监听端口证明已生效的修改继续重启 shoes；首次部署仍启动服务，删除最后一个节点仍停止服务。备份恢复、链式代理切换和 shoes 二进制更新保持原有服务处理流程。
 
-每个节点都会保存为 `/etc/shoes/profiles/` 下的真实独立 YAML 文件；查看、更改和删除时直接显示该文件名，例如 `VLESS-REALITY-53453.yaml` 或 `SNELL-8389.yaml`。支持分享 URI 的协议会以相同文件基名作为 URI 标签，并在添加或查看时显示终端二维码；Snell v3 只显示手动连接参数。只有一个配置时自动选中，多个配置时才显示数字列表。shoes 继续加载由 Rust 确定性聚合的 `/etc/shoes/config.yaml`，内部 UUID 仅用于安全定位。
+每个节点都会保存为 `/etc/shoes/profiles/` 下的真实独立 YAML 文件；查看、更改和删除时直接显示该文件名，例如 `VLESS-REALITY-53453.yaml` 或 `SNELL-8389.yaml`。支持分享 URI 的协议会以相同文件基名作为 URI 标签，并在菜单添加、更改成功的结果页或查看时显示连接参数、分享链接和终端二维码；Snell v3 只显示手动连接参数，其他不支持标准分享 URI 的组合会显示参数和原因。只有一个配置时自动选中，多个配置时才显示数字列表。shoes 继续加载由 Rust 确定性聚合的 `/etc/shoes/config.yaml`，内部 UUID 仅用于安全定位。
 
 ### 链式代理 2.0
 
@@ -404,7 +406,7 @@ sudo prs url reality-main
 sudo prs qr reality-main
 ```
 
-添加配置、`qr` 与菜单中的 `3) 查看配置` 使用内置 Rust 编码器在终端生成二维码，不依赖 `qrencode`，也不会把含凭据的 URL 发送给第三方网站。`add --plain` 和 `url` 始终只输出一行链接，适合脚本调用。
+添加配置、菜单更改成功的结果页、`qr` 与菜单中的 `3) 查看配置` 使用内置 Rust 编码器在终端生成二维码，不依赖 `qrencode`，也不会把含凭据的 URL 发送给第三方网站。`add --plain` 和 `url` 始终只输出一行链接，适合脚本调用。
 
 ## Hysteria2 与 TUIC
 

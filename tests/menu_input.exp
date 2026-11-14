@@ -279,6 +279,12 @@ result_page
 log_user 0
 send_choice 3
 choose_profile
+expect_or_fail {地址 \(address\)[^\r\n]*= } "view address"
+expect_or_fail [format {端口 \(port\)[^\r\n]*= %s} $port] "view port"
+expect_or_fail {用户ID \(id\)[^\r\n]*= } "view UUID"
+# The generate-only fixture has no saved server address, hence no URI/QR.
+# Successful add/edit URI and QR are checked by release-path-acceptance.py.
+expect_or_fail {------------- END -------------} "complete view details"
 result_page
 log_user 1
 send_choice 10

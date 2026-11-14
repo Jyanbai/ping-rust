@@ -65,7 +65,70 @@ def notice(output):
         assert marker not in output, f"redundant restart explanation: {marker}"
 
 
-def menu_edit(profile_index, h2mux=False, port=None):
+def assert_connection_result(output, port=None, sudoku=False, share=True):
+    """Check private PTY output without including credentials in assertion errors."""
+    assert re.search(r"地址(?: \(address\)[^\r\n]*=|：)", output), "result missing address"
+    if port is not None:
+        assert re.search(rf"端口(?: \(port\)[^\r\n]*= |：){port}(?:\r?\n)", output), "result missing current port"
+    if not share:
+        assert "链接 (URL)" not in output and "二维码 (QR)" not in output, "result invented unsaved server address"
+        return
+    assert "链接 (URL)" in output, "result missing share heading"
+    assert re.search(r"(?:vless|socks5|trojan)://", output), "result missing share URI"
+    assert "二维码 (QR)" in output and any(c in output for c in "▀▄█"), "result missing QR"
+    if sudoku:
+        assert "UUID：" in output and "外观：Sudoku（prefer_entropy、padding 0–0%）" in output, "result missing Sudoku fields"
+        assert "fm=" in output, "result URI missing Sudoku"
+
+
+def menu_add_sudoku(flow, protocol, port):
+    child = pexpect.spawn(BIN, encoding="utf-8", timeout=180)
+    try:
+        child.expect(r"请选择 \[0-10\]")
+        if flow == "advanced":
+            child.sendline("9")
+            child.expect(r"请选择 \[0-8\]")
+            child.sendline("2")
+        else:
+            child.sendline("1")
+        child.expect(r"请选择 \[0-16\]")
+        child.sendline("16" if protocol == "vless-sudoku" else "5")
+        if flow == "advanced":
+            child.expect("配置名称")
+            child.sendline(f"result-{flow}-{protocol}")
+        child.expect("监听端口" if flow == "advanced" else "请输入端口")
+        child.sendline(str(port))
+        if protocol == "vless-enc":
+            for prompt in ("VLESS Encryption 外观", "VLESS Encryption 认证"):
+                child.expect(prompt)
+                child.expect(r"请选择 \[")
+                child.sendline("1")
+            child.expect("开启 Vision？")
+            child.sendline("n")
+            child.expect("启用 Sudoku 外观？")
+            child.sendline("y")
+        # Public-address discovery may fall back to explicit input on this runner.
+        index = child.expect(["请输入 VPS 公网域名或 IP", "配置添加成功。"])
+        if index == 0:
+            child.sendline("203.0.113.10")
+            child.expect("配置添加成功。")
+        child.expect("按回车返回主菜单...")
+        assert_connection_result(child.before, port, sudoku=True)
+        if protocol == "vless-enc":
+            assert "Encryption：" in child.before and "模式：native / x25519 / Vision=false" in child.before
+        child.sendline("")
+        child.expect(r"请选择 \[0-10\]")
+        child.sendline("0")
+        child.expect(pexpect.EOF)
+        child.close()
+        assert child.exitstatus == 0
+    except Exception:
+        raise AssertionError(f"{flow} {protocol} add result failed; private terminal transcript suppressed") from None
+    finally:
+        child.close(force=True)
+
+
+def menu_edit(profile_index, h2mux=False, port=None, sudoku=False):
     child = pexpect.spawn(BIN, encoding="utf-8", timeout=120)
     transcript = []
     try:
@@ -96,6 +159,8 @@ def menu_edit(profile_index, h2mux=False, port=None):
         child.expect("配置更改成功")
         transcript.append(child.before)
         child.expect("按回车返回主菜单...")
+        # The generate-only H2MUX fixture has no saved server address.
+        assert_connection_result(child.before, port, sudoku=sudoku, share=not h2mux)
         child.sendline("")
         child.expect(r"请选择 \[0-10\]")
         child.sendline("0")
@@ -121,6 +186,7 @@ def menu_add_socks(port):
         child.expect("配置添加成功。")
         notice(child.before)
         child.expect("按回车返回主菜单...")
+        assert_connection_result(child.before, port)
         child.sendline("")
         child.expect(r"请选择 \[0-10\]")
         child.sendline("0")
@@ -233,6 +299,30 @@ def main():
     print(f"PASS github-release {SHOES_RELEASE_TAG} H2MUX preference/export/sing-box 1.14.2 data: small and 1MiB half-close")
     from naive_certificate_acceptance import verify_naive_certificate_lifecycle
     verify_naive_certificate_lifecycle(BIN, run, state, pid, h2.free_port)
+    for flow in ("quick", "advanced"):
+        for protocol in ("vless-sudoku", "vless-enc"):
+            port = h2.free_port()
+            menu_add_sudoku(flow, protocol, port)
+            current = state()
+            if protocol == "vless-sudoku":
+                entry = next(e for e in current["sudoku_profiles"] if e["profile"]["port"] == port)
+                profile, position = entry["profile"], entry["position"]
+            else:
+                position, profile = next((i, p) for i, p in enumerate(current["profiles"]) if p["port"] == port)
+            menu_edit(position, port=h2.free_port(), sudoku=True)
+            run("delete", profile["id"], "--yes")
+    # Exercise the actual generate printer, including non-default Sudoku settings.
+    with tempfile.TemporaryDirectory(prefix="prs-generate-result-") as temporary:
+        for enabled in (False, True):
+            options = (["--sudoku", "--sudoku-ascii", "ascii", "--sudoku-padding-min", "10",
+                        "--sudoku-padding-max", "20"] if enabled else [])
+            output, _ = run("generate", "vless-enc", "--port", str(h2.free_port()),
+                            "--output", str(Path(temporary) / "config.yaml"), *options)
+            if enabled:
+                assert "外观：Sudoku（ascii、padding 10–20%）" in output, "generate missing Sudoku appearance"
+            else:
+                assert "外观：Sudoku" not in output, "generate invented Sudoku appearance"
+    print("PASS quick/advanced Sudoku add/edit result parameters, URI, QR and generate appearance")
     from sudoku_compat_acceptance import verify_sudoku_compatibility
     verify_sudoku_compatibility(BIN, run, state, pid, h2.free_port, menu_edit)
     run("uninstall", "--purge")
