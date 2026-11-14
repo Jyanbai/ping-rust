@@ -754,7 +754,7 @@ jobs:
           EXPECT
             # 添加结果页不再展示二维码；改从菜单 3「查看配置」结果页核对用户实际看到的链接与二维码，
             # info CLI 输出保持与 v0.2.1 逐字节兼容，不含二维码。
-            view_log="$(mktemp)"
+            view_log="$(sudo mktemp)"
             view_number="$(sudo env MENU_PORT="$port" python3 - <<'PYNUM'
           import json, os
           with open('/etc/shoes/ping-rust-state.json', encoding='utf-8') as stream:
