@@ -25,7 +25,8 @@ proc wait_for {pattern stage} {
 # expect 会按分支顺序选择匹配，URI 与成功提示可能在同一次读取中到达。
 # 在消费任一结果模式前记录整个已消费缓冲区，避免丢掉更早的成功提示。
 proc record_result {output} {
-    global activated uri unsupported mode
+    global activated uri unsupported mode result_output
+    append result_output $output
     if {[regexp {配置添加成功。} $output]} {
         set activated 1
     }
@@ -45,6 +46,8 @@ set sni 0
 set activated 0
 set uri 0
 set unsupported 0
+set result_output ""
+match_max -d 65536
 spawn $binary
 wait_for {请选择 \[0-10\]} main-menu
 if {$flow == "quick"} {
@@ -82,7 +85,24 @@ expect {
         exp_continue
     }
     -re {按回车返回主菜单} {
+        record_result $expect_out(buffer)
         if {!$activated} { puts stderr "AnyTLS result page preceded activation"; exit 1 }
+        set details [regsub -all {\x1b\[[0-9;?]*[A-Za-z]} $result_output {}]
+        foreach pattern [list {地址 \(address\)[^\r\n]*= } [format {端口 \(port\)[^\r\n]*= %s} $port] {密码 \(password\)[^\r\n]*= }] {
+            if {![regexp $pattern $details]} {
+                puts stderr "AnyTLS add result lost connection parameters"
+                exit 1
+            }
+        }
+        if {$mode == "1"} {
+            if {!$uri || $unsupported || ![regexp {二维码 \(QR\)} $details] || ![regexp {[▀▄█]} $details]} {
+                puts stderr "AnyTLS TLS add result lost URI or QR"
+                exit 1
+            }
+        } elseif {$uri || !$unsupported || [regexp {二维码 \(QR\)} $details] || ![regexp {传输层安全 \(TLS\)[^\r\n]*= reality} $details]} {
+            puts stderr "AnyTLS REALITY add result lost metadata or unsupported-sharing explanation"
+            exit 1
+        }
         send "\r"
         exp_continue
     }
@@ -103,8 +123,7 @@ if {[lindex $result 2] != 0 || [lindex $result 3] != 0 || $selected != 1 || !$ac
     puts stderr "AnyTLS $flow mode $mode did not activate and exit successfully"
     exit 1
 }
-# Sharing remains available through the explicit view path; the add result is concise.
-# 详情（传输层安全等）只在菜单 3「查看配置」结果页展示；info CLI 保持与 v0.2.1 兼容。
+# 添加结果页与菜单 3「查看配置」均须展示详情；info CLI 保持与 v0.2.1 兼容。
 # 结果页输出只写入临时文件用于断言，读取后立即删除，不进入日志。
 set profile_number [exec python3 -c {import json,sys; from pathlib import Path; print(next(i for i, p in enumerate(json.loads(Path('/etc/shoes/ping-rust-state.json').read_text())['profiles'], 1) if p['port'] == int(sys.argv[1])))} $port]
 set profile_count [exec python3 -c {import json; from pathlib import Path; print(len(json.loads(Path('/etc/shoes/ping-rust-state.json').read_text())['profiles']))}]

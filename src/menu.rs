@@ -1137,9 +1137,10 @@ async fn change_profile_menu(profile: &config::ManagedProfile) -> Result<()> {
         }
     };
 
-    deployment::update_and_activate(profile.id, change).await?;
+    let result = deployment::update_and_activate(profile.id, change).await?;
     input::clear_screen()?;
     println!("{}", "配置更改成功。".green());
+    print_menu_profile_details(&result.profile);
     Ok(())
 }
 
@@ -1153,13 +1154,17 @@ fn view_config_menu() -> Result<MenuControl> {
         return Ok(MenuControl::Continue);
     };
     let profile = &state.profiles[selected];
-    let (share_uri, share_warning) = share_uri_for_view(profile);
     input::clear_screen()?;
+    print_menu_profile_details(profile);
+    Ok(control_after_success(3))
+}
+
+fn print_menu_profile_details(profile: &config::ManagedProfile) {
+    let (share_uri, share_warning) = share_uri_for_view(profile);
     cli::print_profile_details_with_qr(profile, share_uri.as_deref());
     if let Some(warning) = share_warning {
         println!("未生成标准分享链接：{warning}");
     }
-    Ok(control_after_success(3))
 }
 
 fn share_uri_for_view(profile: &config::ManagedProfile) -> (Option<String>, Option<String>) {
@@ -1584,9 +1589,9 @@ async fn fast_add_config_menu_once() -> Result<MenuControl> {
                 naive_fallback: None,
             })
             .await?;
-            let _ = result;
             input::clear_screen()?;
             println!("{}", "配置添加成功。".green());
+            print_menu_profile_details(&result.generation.profile);
             return Ok(control_after_success(1));
         }
         let (shadowsocks_cipher, shadowsocks_password) = if protocol == Protocol::Shadowsocks {
@@ -1889,9 +1894,9 @@ async fn deploy_fast_config(
     } else {
         fast_add::execute(request).await?
     };
-    let _ = result;
     input::clear_screen()?;
     println!("{}", "配置添加成功。".green());
+    print_menu_profile_details(&result.generation.profile);
     Ok(control_after_success(1))
 }
 
@@ -2153,9 +2158,9 @@ async fn advanced_add_protocol(protocol: Protocol) -> Result<()> {
         options,
     })
     .await?;
-    let _ = result;
     input::clear_screen()?;
     println!("{}", "配置添加成功。".green());
+    print_menu_profile_details(&result.profile);
     Ok(())
 }
 

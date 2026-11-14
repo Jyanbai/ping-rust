@@ -84,7 +84,7 @@ def verify_sudoku_compatibility(binary, run, state, pid, free_port, menu_edit):
         entry = next(e for e in state()['sudoku_profiles'] if e['profile']['name'] == 'compat-sudoku')
         plain = entry['profile']
         new_port = free_port()
-        menu_edit(entry['position'], port=new_port)
+        menu_edit(entry['position'], port=new_port, sudoku=True)
         # Deleting the last mask must work even with an incompatible, untracked
         # binary: no download or implicit downgrade may be required to recover.
         installed_binary = shoes.read_bytes()
@@ -135,7 +135,7 @@ def verify_sudoku_compatibility(binary, run, state, pid, free_port, menu_edit):
         run('add', 'vless-enc', '--sudoku', '--name', 'compat-enc-sudoku', '--port', str(free_port()),
             '--server-address', '127.0.0.1', '--yes', '--plain')
         encrypted = next(p for p in state()['profiles'] if p['name'] == 'compat-enc-sudoku')
-        menu_edit(state()['profiles'].index(encrypted), port=free_port())
+        menu_edit(state()['profiles'].index(encrypted), port=free_port(), sudoku=True)
         run('delete', encrypted['id'], '--yes')
         pid()
         print('PASS Sudoku automatic upgrade rollback and plain/encrypted add/edit/delete lifecycle')
