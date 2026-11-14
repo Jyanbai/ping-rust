@@ -220,9 +220,18 @@ pub async fn update_and_activate(id: Uuid, change: ProfileChange) -> Result<Gene
     Ok(result)
 }
 
+fn deletion_needs_sudoku(state: &config::ManagedState, id: Uuid) -> Result<bool> {
+    if !state.profiles.iter().any(|profile| profile.id == id) {
+        bail!("未找到配置 {id}");
+    }
+    Ok(state.profiles.iter().any(|profile| {
+        profile.id != id && crate::shoes_compat::credentials_need_sudoku(&profile.credentials)
+    }))
+}
+
 pub async fn delete_and_activate(id: Uuid) -> Result<config::ManagedProfile> {
     utils::require_linux_root()?;
-    let needs_sudoku = crate::shoes_compat::managed_state_needs_sudoku(Some(id))?;
+    let needs_sudoku = deletion_needs_sudoku(&config::load_state()?, id)?;
     crate::shoes_compat::ensure_sudoku(needs_sudoku).await?;
     let lock = utils::exclusive_lock(Path::new(utils::LOCK_FILE))?;
     let service_snapshot = service::capture_snapshot()?;
@@ -314,6 +323,37 @@ pub async fn update_chain_proxy(change: ChainProxyChange) -> Result<config::Mana
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deletion_preflight_rejects_missing_profile_before_sudoku_upgrade() {
+        let mut state: config::ManagedState = serde_json::from_str(include_str!(
+            "../tests/fixtures/yaml/vless-enc-sudoku/state.json"
+        ))
+        .unwrap();
+        let missing = Uuid::nil();
+        assert!(state.profiles.iter().all(|profile| profile.id != missing));
+        let error = deletion_needs_sudoku(&state, missing).unwrap_err();
+        assert_eq!(error.to_string(), format!("未找到配置 {missing}"));
+
+        state.profiles.clear();
+        let error = deletion_needs_sudoku(&state, missing).unwrap_err();
+        assert_eq!(error.to_string(), format!("未找到配置 {missing}"));
+    }
+
+    #[test]
+    fn deletion_preflight_requires_sudoku_only_for_remaining_profiles() {
+        let mut state: config::ManagedState = serde_json::from_str(include_str!(
+            "../tests/fixtures/yaml/vless-enc-sudoku/state.json"
+        ))
+        .unwrap();
+        let id = state.profiles[0].id;
+        assert!(!deletion_needs_sudoku(&state, id).unwrap());
+
+        let mut second = state.profiles[0].clone();
+        second.id = Uuid::nil();
+        state.profiles.push(second);
+        assert!(deletion_needs_sudoku(&state, id).unwrap());
+    }
 
     #[test]
     fn apply_planner_preserves_start_stop_and_verified_reload_boundaries() {

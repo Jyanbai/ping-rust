@@ -88,12 +88,35 @@ def verify_sudoku_compatibility(binary, run, state, pid, free_port, menu_edit):
         # Deleting the last mask must work even with an incompatible, untracked
         # binary: no download or implicit downgrade may be required to recover.
         installed_binary = shoes.read_bytes()
+        installed_provenance = provenance_path.read_bytes()
         replace_binary(original_binary)
         try:
+            # With a Sudoku node still managed, an invalid deletion must not
+            # upgrade even when the old binary's provenance permits it.
+            provenance_path.write_bytes(original_provenance)
+            missing_id = '00000000-0000-0000-0000-000000000000'
+            current_state = state()
+            assert all(p['id'] != missing_id for p in current_state['profiles'])
+            assert all(e['profile']['id'] != missing_id
+                       for e in current_state['sudoku_profiles'])
+            before_files = files()
+            before_pid = pid()
+            result = subprocess.run(
+                [binary, 'delete', missing_id, '--yes'],
+                capture_output=True, timeout=360)
+            errors = result.stderr.decode()
+            assert result.returncode != 0 and f'未找到配置 {missing_id}' in errors, errors
+            assert '正在自动升级' not in errors, errors
+            assert shoes.read_bytes() == original_binary
+            assert provenance_path.read_bytes() == original_provenance
+            assert files() == before_files, 'invalid deletion changed managed configuration'
+            assert pid() == before_pid, 'invalid deletion restarted the existing service'
+            provenance_path.write_bytes(installed_provenance)
             _, errors = run('delete', plain['id'], '--yes')
             assert '正在自动升级' not in errors
         finally:
             replace_binary(installed_binary)
+            provenance_path.write_bytes(installed_provenance)
         run('add', 'vless-enc', '--sudoku', '--name', 'compat-enc-sudoku', '--port', str(free_port()),
             '--server-address', '127.0.0.1', '--yes', '--plain')
         encrypted = next(p for p in state()['profiles'] if p['name'] == 'compat-enc-sudoku')
