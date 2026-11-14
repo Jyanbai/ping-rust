@@ -909,7 +909,42 @@ jobs:
           print(next(profile['id'] for profile in profiles if profile['port'] == 25464))
           PY
           )"
-          naive_menu_info="$(sudo "$PRS" info "$naive_menu_profile_id")"
+          # NaiveProxy 详情（协议、ALPN）只在菜单 3「查看配置」结果页展示；info CLI 保持与 v0.2.1 兼容。
+          naive_view_log="$(sudo mktemp)"
+          naive_view_number="$(sudo python3 - <<'PY'
+          import json
+          with open('/etc/shoes/ping-rust-state.json', encoding='utf-8') as stream:
+              profiles = json.load(stream)['profiles']
+          print(next(index for index, profile in enumerate(profiles, 1) if profile['port'] == 25464))
+          PY
+          )"
+          sudo env PRS_COMMAND="$PRS" PROFILE_NUMBER="$naive_view_number" VIEW_LOG="$naive_view_log" expect <<'EXPECT'
+          log_user 0
+          set timeout 180
+          proc wait_for {pattern stage} {
+            expect {
+              -re $pattern { return }
+              eof { puts stderr "unexpected EOF at $stage"; exit 27 }
+              timeout { puts stderr "timeout at $stage"; exit 28 }
+            }
+          }
+          spawn $env(PRS_COMMAND)
+          wait_for {请选择 \[0-10\]} naive-view-main-menu
+          send "3\r"
+          wait_for {请选择配置} naive-view-profile-menu
+          wait_for {0\) 返回} naive-view-profile-back
+          wait_for {请选择} naive-view-profile-prompt
+          log_file -a -noappend $env(VIEW_LOG)
+          send "$env(PROFILE_NUMBER)\r"
+          wait_for {按回车返回主菜单} naive-view-result-page
+          log_file
+          send "\r"
+          wait_for {请选择 \[0-10\]} naive-view-main-menu-after
+          send "0\r"
+          expect { eof {} timeout { puts stderr "timeout waiting for naive view exit"; exit 29 } }
+          EXPECT
+          naive_menu_info="$(sudo cat "$naive_view_log" | sed -E 's/\x1b\[[0-9;?]*[A-Za-z]//g')"
+          sudo rm -f "$naive_view_log"
           grep -Eq '协议[[:space:]]*= naiveproxy' <<<"$naive_menu_info"
           grep -Eq 'ALPN[[:space:]]*= h2' <<<"$naive_menu_info"
           sudo "$PRS" delete "$naive_menu_profile_id" --yes >/dev/null
