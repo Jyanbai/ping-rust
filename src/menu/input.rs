@@ -58,8 +58,21 @@ pub(crate) fn pause_main_menu() -> Result<()> {
     read_pause(&mut io::stdin().lock(), &mut io::stdout())
 }
 
+/// 首次默认部署结束后、主菜单首次清屏前等待回车，让用户看清部署结果或失败原因。
+pub(crate) fn pause_enter_main_menu() -> Result<()> {
+    read_pause_with(
+        &mut io::stdin().lock(),
+        &mut io::stdout(),
+        "按回车进入主菜单...",
+    )
+}
+
 fn read_pause(reader: &mut impl BufRead, writer: &mut impl Write) -> Result<()> {
-    write!(writer, "\n按回车返回主菜单...")?;
+    read_pause_with(reader, writer, "按回车返回主菜单...")
+}
+
+fn read_pause_with(reader: &mut impl BufRead, writer: &mut impl Write, text: &str) -> Result<()> {
+    write!(writer, "\n{text}")?;
     writer.flush()?;
     loop {
         match line(reader) {

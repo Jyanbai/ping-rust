@@ -152,6 +152,22 @@ fn control_after_bootstrap(result: Result<bool>) -> Result<MenuControl> {
     }
 }
 
+/// 首次默认部署打印了结果（成功时的连接信息和二维码）或失败原因时，终端里进入主菜单
+/// 清屏前要先暂停；跳过部署、Ctrl+C、输入结束，以及非终端输入（不清屏）都不暂停。
+fn bootstrap_result_needs_pause(result: &Result<bool>, terminal: bool) -> bool {
+    if !terminal {
+        return false;
+    }
+    match result {
+        Ok(deployed) => *deployed,
+        Err(error) => {
+            !input::is_back(error)
+                && !crate::is_interrupted(error)
+                && control_after_error(error) != MenuControl::Exit
+        }
+    }
+}
+
 /// 启动时的节点文件检查（含旧版本迁移）失败——聚合配置被手动改过、与管理状态不一致、
 /// 缺失或未通过 shoes 校验——时提示原因并照常进入主菜单，否则 `sudo prs` 直接退出，
 /// 连 9) 工具 → 8) 恢复配置 都用不了。检查失败时不写入（提交失败会自行回滚）；
@@ -358,9 +374,14 @@ fn node_summary(state: Result<config::ManagedState>) -> String {
 }
 
 pub async fn run() -> Result<()> {
-    if control_after_bootstrap(cli::bootstrap_default_reality_for_menu().await)?
-        == MenuControl::Exit
-    {
+    use std::io::IsTerminal;
+    let bootstrap = cli::bootstrap_default_reality_for_menu().await;
+    let pause = bootstrap_result_needs_pause(&bootstrap, std::io::stdin().is_terminal());
+    if control_after_bootstrap(bootstrap)? == MenuControl::Exit {
+        return Ok(());
+    }
+    // 主菜单每轮先清屏：首次部署的连接信息、二维码或失败原因必须先让用户确认看过。
+    if pause && control_after_pause(input::pause_enter_main_menu())? == MenuControl::Exit {
         return Ok(());
     }
     // 状态无法读取时仍提供工具、恢复等入口，节点摘要负责显示读取失败提示。
@@ -1440,9 +1461,25 @@ fn export_menu() -> Result<()> {
     let server = input::checked_text("VPS 公网域名或 IP", None, false, |value| {
         client::normalize_server_address(value).map(|_| ())
     })?;
-    let content = client::render(&state.profiles[selected], format, &server)?;
-    println!("\n{content}\n");
+    println!(
+        "{}",
+        export_menu_output(&state.profiles[selected], format, &server)?
+    );
     Ok(())
+}
+
+/// 菜单导出的完整输出：内容之后附上与 CLI 导出相同的能力说明（如 NekoBox 丢失 H2MUX 偏好）。
+fn export_menu_output(
+    profile: &config::ManagedProfile,
+    format: ClientFormat,
+    server: &str,
+) -> Result<String> {
+    let content = client::render(profile, format, server)?;
+    let mut output = format!("\n{content}\n");
+    if let Some(notice) = client::export_notice(profile, format) {
+        output.push_str(&format!("{notice}\n"));
+    }
+    Ok(output)
 }
 
 async fn fast_add_config_menu() -> Result<MenuControl> {
@@ -2213,6 +2250,41 @@ fn uninstall_menu() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn first_deployment_result_pauses_before_main_menu_clear() {
+        let failure = || -> Result<bool> { Err(anyhow::anyhow!("下载 shoes 失败")) };
+        assert!(bootstrap_result_needs_pause(&Ok(true), true));
+        assert!(bootstrap_result_needs_pause(&failure(), true));
+        assert!(!bootstrap_result_needs_pause(&Ok(false), true));
+        assert!(!bootstrap_result_needs_pause(&Ok(true), false));
+        assert!(!bootstrap_result_needs_pause(&failure(), false));
+        assert!(!bootstrap_result_needs_pause(
+            &Err(input::MenuEof.into()),
+            true
+        ));
+    }
+
+    #[test]
+    fn menu_nekobox_export_keeps_h2mux_notice() {
+        let state: config::ManagedState =
+            serde_json::from_str(include_str!("../tests/fixtures/yaml/compat/state.json")).unwrap();
+        let mut profile = state
+            .profiles
+            .iter()
+            .find(|profile| matches!(profile.credentials, config::Credentials::VmessTls { .. }))
+            .expect("兼容夹具包含支持 H2MUX 的 VMess 节点")
+            .clone();
+        let notice = "提示：NekoBox 分享链接不包含 H2MUX 客户端偏好；普通节点连接仍可使用。";
+        let plain = export_menu_output(&profile, ClientFormat::Nekobox, "example.com").unwrap();
+        assert!(!plain.contains(notice), "{plain}");
+        profile.h2mux.enabled = true;
+        let nekobox = export_menu_output(&profile, ClientFormat::Nekobox, "example.com").unwrap();
+        assert!(
+            nekobox.contains("vmess://") && nekobox.contains(notice),
+            "{nekobox}"
+        );
+    }
 
     #[test]
     fn xhttp_reality_menu_validates_path_without_extra_confirmation() {

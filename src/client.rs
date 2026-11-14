@@ -39,13 +39,22 @@ pub fn export(
         None => bail!("存在多个配置，请用 --profile <UUID> 指定导出对象"),
     };
     let content = render(profile, format, server)?;
-    if profile.h2mux.enabled && matches!(format, ClientFormat::Nekobox) {
-        eprintln!("提示：NekoBox 分享链接不包含 H2MUX 客户端偏好；普通节点连接仍可使用。");
+    if let Some(notice) = export_notice(profile, format) {
+        eprintln!("{notice}");
     }
     if let Some(path) = output {
         utils::atomic_write(path, content.as_bytes(), 0o600)?;
     }
     Ok(content)
+}
+
+/// 导出格式无法完整表达节点偏好时的能力说明；CLI 与菜单导出共用同一提示。
+pub(crate) fn export_notice(
+    profile: &ManagedProfile,
+    format: ClientFormat,
+) -> Option<&'static str> {
+    (profile.h2mux.enabled && matches!(format, ClientFormat::Nekobox))
+        .then_some("提示：NekoBox 分享链接不包含 H2MUX 客户端偏好；普通节点连接仍可使用。")
 }
 
 pub fn select_profile<'a>(
