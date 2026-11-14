@@ -91,11 +91,13 @@ jobs:
           PY
 
       - name: Refuse if this version is already on crates.io
+        timeout-minutes: 2
         shell: bash
         run: |
           set -euo pipefail
           version="${TAG#v}"
           status="$(curl -sS -o /dev/null -w '%{http_code}' \
+            --connect-timeout 10 --max-time 30 \
             -A "ping-rust-crates-publish (github.com/${GITHUB_REPOSITORY})" \
             "https://crates.io/api/v1/crates/ping-rust/${version}")"
           if [ "${status}" = "200" ]; then
@@ -116,12 +118,21 @@ jobs:
         run: cargo publish --locked
 
       - name: Verify the version is visible on crates.io
+        timeout-minutes: 7
         shell: bash
         run: |
           set -euo pipefail
           version="${TAG#v}"
-          for attempt in $(seq 1 30); do
-            body="$(curl -sS -A "ping-rust-crates-publish (github.com/${GITHUB_REPOSITORY})" \
+          # 以实际截止时间限制确认窗口：每次请求有连接/总超时，且不会超过剩余时间。
+          deadline=$(( $(date +%s) + 300 ))
+          while :; do
+            remaining=$(( deadline - $(date +%s) ))
+            if [ "${remaining}" -le 0 ]; then
+              break
+            fi
+            max_time=$(( remaining < 30 ? remaining : 30 ))
+            body="$(curl -sS --connect-timeout 10 --max-time "${max_time}" \
+              -A "ping-rust-crates-publish (github.com/${GITHUB_REPOSITORY})" \
               "https://crates.io/api/v1/crates/ping-rust/${version}" || true)"
             if CRATE_JSON="${body}" VERSION="${version}" python3 - <<'PY'
           import json, os
@@ -136,7 +147,11 @@ jobs:
               echo "crates.io 已可见 ping-rust ${version}"
               exit 0
             fi
-            sleep 10
+            remaining=$(( deadline - $(date +%s) ))
+            if [ "${remaining}" -le 0 ]; then
+              break
+            fi
+            sleep $(( remaining < 10 ? remaining : 10 ))
           done
           echo "error: 5 分钟内 crates.io API 未返回 ping-rust ${version}" >&2
           exit 1
