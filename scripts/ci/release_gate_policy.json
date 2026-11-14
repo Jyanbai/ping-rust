@@ -4,7 +4,7 @@
       "Install expect",
       "Install pinned shoes",
       "Build menu regression test",
-      "Prepare two managed nodes",
+      "Prepare one managed node",
       "Run menu input regression",
       "Run inconsistent config menu regression"
     ],
