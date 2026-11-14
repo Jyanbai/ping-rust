@@ -140,6 +140,8 @@ pub async fn generate_and_activate(request: GenerationRequest) -> Result<Generat
 
 pub async fn update_and_activate(id: Uuid, change: ProfileChange) -> Result<GenerationResult> {
     utils::require_linux_root()?;
+    // 先校验节点和修改类型，再决定是否自动升级 shoes：无效请求不能留下升级、迁移或重启。
+    config::preflight_profile_change(id, &change)?;
     let exclude = matches!(&change, ProfileChange::Sudoku(None)).then_some(id);
     let needs_sudoku = crate::shoes_compat::managed_state_needs_sudoku(exclude)?;
     crate::shoes_compat::ensure_sudoku(

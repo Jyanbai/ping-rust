@@ -449,6 +449,7 @@ pub struct GenerationRequest {
     pub options: GenerationOptions,
 }
 
+#[derive(Clone)]
 pub enum ProfileChange {
     XhttpPath(String),
     Sudoku(Option<crate::sudoku::SudokuConfig>),
@@ -1137,27 +1138,14 @@ async fn generate_inner_with_lock(
     })
 }
 
-pub(crate) async fn update_profile_locked(
+/// 修改请求的纯校验；不读写文件，供提交前和自动升级前的预检共用。
+fn validate_profile_change(
+    state: &ManagedState,
+    index: usize,
     id: Uuid,
-    change: ProfileChange,
-    lock: utils::ExclusiveLock,
-) -> Result<GenerationResult> {
-    utils::require_linux_root()?;
-    utils::ensure_directory(Path::new(utils::CONFIG_DIR), 0o700)?;
-    let config_path = Path::new(utils::CONFIG_FILE);
-    let state_path = Path::new(utils::STATE_FILE);
-    let mut state = load_state_for_update()?;
-    let index = state
-        .profiles
-        .iter()
-        .position(|profile| profile.id == id)
-        .with_context(|| format!("未找到配置 {id}"))?;
-    let mut servers = load_servers(config_path)?;
-    ensure_servers_match_state(&servers, &state.profiles)
-        .context("配置文件与管理状态不一致；请先备份并修复，ping-rust 不会覆盖现有配置")?;
-    ensure_chain_proxy_matches_state(&servers, &state)?;
-
-    match &change {
+    change: &ProfileChange,
+) -> Result<()> {
+    match change {
         ProfileChange::H2Mux(options) => {
             let mut candidate = state.profiles[index].clone();
             candidate.h2mux = options.clone();
@@ -1217,6 +1205,50 @@ pub(crate) async fn update_profile_locked(
         ProfileChange::NaiveFallback(Some(path)) => validate_naive_fallback(path)?,
         _ => {}
     }
+    Ok(())
+}
+
+/// 在任何内核自动升级之前预检修改请求：节点必须存在、文件与状态一致，
+/// 且修改能在内存中完整应用。无效请求因此不会触发升级、迁移或重启。
+/// 预检后释放锁；真正提交时 update_profile_locked 会在自己的锁内重新校验。
+pub(crate) fn preflight_profile_change(id: Uuid, change: &ProfileChange) -> Result<()> {
+    let _lock = utils::exclusive_lock(Path::new(utils::LOCK_FILE))?;
+    let state = load_state_for_update()?;
+    let index = state
+        .profiles
+        .iter()
+        .position(|profile| profile.id == id)
+        .with_context(|| format!("未找到配置 {id}"))?;
+    let mut servers = load_servers(Path::new(utils::CONFIG_FILE))?;
+    ensure_servers_match_state(&servers, &state.profiles)
+        .context("配置文件与管理状态不一致；请先备份并修复，ping-rust 不会覆盖现有配置")?;
+    ensure_chain_proxy_matches_state(&servers, &state)?;
+    validate_profile_change(&state, index, id, change)?;
+    let mut profile = state.profiles[index].clone();
+    apply_profile_change(&mut servers[index], &mut profile, change.clone())
+}
+
+pub(crate) async fn update_profile_locked(
+    id: Uuid,
+    change: ProfileChange,
+    lock: utils::ExclusiveLock,
+) -> Result<GenerationResult> {
+    utils::require_linux_root()?;
+    utils::ensure_directory(Path::new(utils::CONFIG_DIR), 0o700)?;
+    let config_path = Path::new(utils::CONFIG_FILE);
+    let state_path = Path::new(utils::STATE_FILE);
+    let mut state = load_state_for_update()?;
+    let index = state
+        .profiles
+        .iter()
+        .position(|profile| profile.id == id)
+        .with_context(|| format!("未找到配置 {id}"))?;
+    let mut servers = load_servers(config_path)?;
+    ensure_servers_match_state(&servers, &state.profiles)
+        .context("配置文件与管理状态不一致；请先备份并修复，ping-rust 不会覆盖现有配置")?;
+    ensure_chain_proxy_matches_state(&servers, &state)?;
+
+    validate_profile_change(&state, index, id, &change)?;
 
     let retire_owned_certificate = state.profiles[index].self_signed_certificate
         && matches!(

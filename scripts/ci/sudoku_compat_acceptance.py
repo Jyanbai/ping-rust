@@ -111,6 +111,21 @@ def verify_sudoku_compatibility(binary, run, state, pid, free_port, menu_edit):
             assert provenance_path.read_bytes() == original_provenance
             assert files() == before_files, 'invalid deletion changed managed configuration'
             assert pid() == before_pid, 'invalid deletion restarted the existing service'
+            # 修改请求同样必须先校验再自动升级：对非 NaiveProxy 节点重新生成测试证书
+            # 不得升级内核、迁移配置、改动来源记录或重启服务。
+            not_naive = next(p for p in current_state['profiles']
+                             if 'NaiveProxy' not in p['credentials'])
+            result = subprocess.run(
+                [binary, 'regenerate-test-certificate', not_naive['id']],
+                capture_output=True, timeout=360)
+            errors = result.stderr.decode()
+            assert (result.returncode != 0
+                    and '只有 NaiveProxy 自签测试节点支持重新生成测试证书' in errors), errors
+            assert '正在自动升级' not in errors, errors
+            assert shoes.read_bytes() == original_binary
+            assert provenance_path.read_bytes() == original_provenance
+            assert files() == before_files, 'invalid modification changed managed configuration'
+            assert pid() == before_pid, 'invalid modification restarted the existing service'
             provenance_path.write_bytes(installed_provenance)
             _, errors = run('delete', plain['id'], '--yes')
             assert '正在自动升级' not in errors
