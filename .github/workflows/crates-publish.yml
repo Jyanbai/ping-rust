@@ -1,0 +1,142 @@
+name: Publish to crates.io
+
+# 只允许维护者手动触发：GitHub Release 公开并通过验收后，再把同一 tag 发布到 crates.io。
+# 使用 crates.io Trusted Publishing（OIDC 换取短期令牌），仓库不保存长期 crates.io token。
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 已公开发布的 tag（严格 vX.Y.Z，例如 v0.3.2）
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: crates-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish tagged version to crates.io
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      TAG: ${{ inputs.tag }}
+    steps:
+      - name: Require strict vX.Y.Z tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! [[ "${TAG}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "error: tag 非严格 vX.Y.Z：${TAG}" >&2
+            exit 1
+          fi
+
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Require tag on main and matching Cargo.toml / Cargo.lock version
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag_commit="$(git rev-parse "refs/tags/${TAG}^{commit}")"
+          test "$(git rev-parse HEAD)" = "${tag_commit}"
+          if ! git merge-base --is-ancestor "${tag_commit}" refs/remotes/origin/main; then
+            echo "error: tag ${TAG} -> ${tag_commit} 不在 main 历史上" >&2
+            exit 1
+          fi
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          from scripts.ci.release_gate import verify_version
+          verify_version(os.environ["TAG"],
+                         Path("Cargo.toml").read_text(),
+                         Path("Cargo.lock").read_text())
+          PY
+          echo "tag ${TAG} -> ${tag_commit} 在 main 上，版本与 Cargo.toml / Cargo.lock 一致"
+
+      - name: Require published (non-draft, non-prerelease) GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # 草稿 Release 不会出现在按 tag 查询的结果里，查询失败即拒绝。
+          release="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}")"
+          RELEASE_JSON="${release}" python3 - <<'PY'
+          import json, os
+          release = json.loads(os.environ["RELEASE_JSON"])
+          tag = os.environ["TAG"]
+          problems = []
+          if release.get("tag_name") != tag:
+              problems.append(f"Release tag 不匹配：{release.get('tag_name')!r}")
+          if release.get("draft") is not False:
+              problems.append("Release 仍是 draft")
+          if release.get("prerelease") is not False:
+              problems.append("Release 被标为 prerelease")
+          if not release.get("published_at"):
+              problems.append("Release 尚未公开")
+          if problems:
+              raise SystemExit("error: " + "；".join(problems))
+          print(f"GitHub Release {tag} 已公开：{release['published_at']}")
+          PY
+
+      - name: Refuse if this version is already on crates.io
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          status="$(curl -sS -o /dev/null -w '%{http_code}' \
+            -A "ping-rust-crates-publish (github.com/${GITHUB_REPOSITORY})" \
+            "https://crates.io/api/v1/crates/ping-rust/${version}")"
+          if [ "${status}" = "200" ]; then
+            echo "error: ping-rust ${version} 已在 crates.io 上，crates.io 版本不可覆盖" >&2
+            exit 1
+          fi
+          test "${status}" = "404" || { echo "error: crates.io 查询返回 HTTP ${status}" >&2; exit 1; }
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+
+      - name: Authenticate with crates.io (Trusted Publishing)
+        id: auth
+        uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
+
+      - name: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: cargo publish --locked
+
+      - name: Verify the version is visible on crates.io
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          for attempt in $(seq 1 30); do
+            body="$(curl -sS -A "ping-rust-crates-publish (github.com/${GITHUB_REPOSITORY})" \
+              "https://crates.io/api/v1/crates/ping-rust/${version}" || true)"
+            if CRATE_JSON="${body}" VERSION="${version}" python3 - <<'PY'
+          import json, os
+          try:
+              data = json.loads(os.environ["CRATE_JSON"])["version"]
+          except (ValueError, KeyError, TypeError):
+              raise SystemExit(1)
+          ok = data.get("crate") == "ping-rust" and data.get("num") == os.environ["VERSION"] and not data.get("yanked")
+          raise SystemExit(0 if ok else 1)
+          PY
+            then
+              echo "crates.io 已可见 ping-rust ${version}"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "error: 5 分钟内 crates.io API 未返回 ping-rust ${version}" >&2
+          exit 1
