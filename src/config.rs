@@ -33,12 +33,19 @@ pub use naive_certificate::NaiveCertificateValidity;
 mod presets;
 mod routing;
 mod schema;
+mod socks5;
+use socks5::socks5_address;
+#[cfg(test)]
+use socks5::socks5_is_loopback;
+pub use socks5::Socks5Listen;
 mod state;
 mod transaction;
 mod validation;
 
 #[cfg(test)]
 mod naive_certificate_tests;
+#[cfg(test)]
+mod socks5_tests;
 #[cfg(test)]
 mod vless_encryption_tests;
 #[cfg(test)]
@@ -573,6 +580,8 @@ pub enum Credentials {
     },
     Socks5 {
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        listen: Option<Socks5Listen>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         username: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         password: Option<String>,
@@ -1090,6 +1099,7 @@ async fn generate_inner_with_lock(
     ensure_chain_proxy_matches_state(&servers, &state)?;
     servers.push(server);
     state.profiles.push(profile.clone());
+    ensure_servers_match_state(&servers, &state.profiles)?;
     ensure_chain_proxy_has_no_direct_udp_path(&state)?;
     if state.chain_proxy.enabled {
         apply_chain_proxy_rules(&mut servers, &state);
@@ -1368,8 +1378,8 @@ fn apply_profile_change(
         ProfileChange::H2Mux(options) => profile.h2mux = options,
         ProfileChange::Name(name) => profile.name = name.trim().to_owned(),
         ProfileChange::Port(port) => {
-            server.address = format!("0.0.0.0:{port}");
             profile.port = port;
+            server.address = profile.listen_address()?;
         }
         ProfileChange::ServerAddress(address) => profile.server_address = address,
         ProfileChange::RegenerateCredentials => regenerate_profile_credentials(server, profile)?,
@@ -1808,6 +1818,9 @@ fn apply_profile_change(
             }
         }
         ProfileChange::Socks5Authentication(enabled) => {
+            if !enabled {
+                profile.validate_socks5_anonymous()?;
+            }
             match (&mut server.protocol, &mut profile.credentials) {
                 (
                     ServerProtocol::Socks {
@@ -1883,6 +1896,7 @@ fn apply_profile_change(
             *anytls_users_mut(server)? = users.clone();
         }
     }
+    profile.validate_socks5_listen()?;
     Ok(())
 }
 
@@ -2351,7 +2365,9 @@ pub async fn ensure_profile_files() -> Result<bool> {
         .context("旧版聚合配置与管理状态不一致，无法安全迁移节点文件")?;
     ensure_chain_proxy_matches_state(&servers, &state)?;
     let documents = profile_documents(&servers, &state.profiles)?;
-    if profile_documents_are_current(Path::new(utils::PROFILES_DIR), &documents)? {
+    if profile_documents_are_current(Path::new(utils::PROFILES_DIR), &documents)?
+        && !socks5::listen_migration_pending(state_path)?
+    {
         return Ok(false);
     }
     let yaml = crate::yaml::to_string(&servers).context("序列化迁移聚合配置失败")?;
@@ -2376,10 +2392,22 @@ pub(crate) fn prepare_managed_snapshot(directory: &Path) -> Result<bool> {
     ensure_chain_proxy_has_no_direct_udp_path(&state).context("备份内容不安全")?;
     let documents = profile_documents(&servers, &state.profiles)?;
     let profiles_path = directory.join("profiles");
-    if profile_documents_are_current(&profiles_path, &documents)? {
+    let migrate_listen = socks5::listen_migration_pending(&state_path)?;
+    if profile_documents_are_current(&profiles_path, &documents)? && !migrate_listen {
         return Ok(false);
     }
-    write_profile_documents(&profiles_path, &documents)?;
+    if migrate_listen {
+        commit::commit_managed_with_state_writer(
+            &config_path,
+            &state_path,
+            &profiles_path,
+            &servers,
+            &state,
+            save_state_to,
+        )?;
+    } else {
+        write_profile_documents(&profiles_path, &documents)?;
+    }
     Ok(true)
 }
 
@@ -2392,7 +2420,8 @@ fn ensure_servers_match_state(servers: &[ServerConfig], profiles: &[ManagedProfi
         );
     }
     for (index, (server, profile)) in servers.iter().zip(profiles).enumerate() {
-        let expected_address = format!("0.0.0.0:{}", profile.port);
+        profile.validate_socks5_listen()?;
+        let expected_address = profile.listen_address()?;
         if server.address != expected_address {
             bail!(
                 "第 {} 项监听地址 {} 与管理状态端口 {} 不一致",
@@ -2515,8 +2544,19 @@ fn ensure_servers_match_state(servers: &[ServerConfig], profiles: &[ManagedProfi
             (ServerProtocol::Hysteria2 { .. }, Protocol::Hysteria2)
             | (ServerProtocol::Tuic { .. }, Protocol::Tuic)
             | (ServerProtocol::Shadowsocks { .. }, Protocol::Shadowsocks)
-            | (ServerProtocol::Snell { .. }, Protocol::Snell)
-            | (ServerProtocol::Socks { .. }, Protocol::Socks5) => true,
+            | (ServerProtocol::Snell { .. }, Protocol::Snell) => true,
+            (
+                ServerProtocol::Socks {
+                    username,
+                    password,
+                    udp_enabled,
+                },
+                Protocol::Socks5,
+            ) => {
+                matches!(&profile.credentials, Credentials::Socks5 {
+                    username: stored_user, password: stored_password, udp_enabled: stored_udp, ..
+                } if username == stored_user && password == stored_password && udp_enabled == stored_udp)
+            }
             (
                 ServerProtocol::Tls {
                     shadowtls_targets, ..
@@ -2686,7 +2726,18 @@ fn load_state_from(path: &Path) -> Result<ManagedState> {
             .context("迁移旧版链式代理状态失败")?;
     }
     state.chain_proxy.validate().context("链式代理状态无效")?;
+    if state.profiles.iter().any(|profile| {
+        matches!(
+            profile.credentials,
+            Credentials::Socks5 { listen: None, .. }
+        )
+    }) {
+        let servers = load_servers(&path.with_file_name("config.yaml"))
+            .context("迁移 SOCKS5 监听地址需要原有聚合配置；请恢复 config.yaml 后重试")?;
+        socks5::migrate_listen(&mut state, &servers)?;
+    }
     for profile in &state.profiles {
+        profile.validate_socks5_listen()?;
         profile
             .validate_h2mux()
             .with_context(|| format!("配置 {} 的 H2MUX 状态无效", profile.name))?;
@@ -5249,6 +5300,18 @@ mod tests {
         .unwrap();
         apply_profile_change(&mut server, &mut profile, ProfileChange::Port(20_880)).unwrap();
         apply_profile_change(&mut server, &mut profile, ProfileChange::UdpEnabled(true)).unwrap();
+        assert!(apply_profile_change(
+            &mut server,
+            &mut profile,
+            ProfileChange::Socks5Authentication(false),
+        )
+        .is_err());
+        // 关闭认证前必须显式收紧监听，公网认证节点不能直接成为开放代理。
+        let Credentials::Socks5 { listen, .. } = &mut profile.credentials else {
+            unreachable!()
+        };
+        *listen = Some(Socks5Listen::new("127.0.0.1"));
+        server.address = profile.listen_address().unwrap();
         apply_profile_change(
             &mut server,
             &mut profile,
@@ -5264,7 +5327,8 @@ mod tests {
             Credentials::Socks5 {
                 username: None,
                 password: None,
-                udp_enabled: true
+                udp_enabled: true,
+                ..
             }
         ));
 
@@ -5278,6 +5342,7 @@ mod tests {
             username,
             password,
             udp_enabled,
+            ..
         } = &profile.credentials
         else {
             unreachable!()
@@ -5306,6 +5371,7 @@ mod tests {
             username,
             password,
             udp_enabled,
+            ..
         } = credentials
         else {
             unreachable!()
@@ -5328,7 +5394,8 @@ mod tests {
             Credentials::Socks5 {
                 username: None,
                 password: None,
-                udp_enabled: true
+                udp_enabled: true,
+                ..
             }
         ));
         let anonymous = crate::yaml::to_string(&vec![anonymous]).unwrap();

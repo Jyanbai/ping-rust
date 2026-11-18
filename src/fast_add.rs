@@ -193,7 +193,7 @@ fn share_uri_after_activation(
     ) {
         Ok(None)
     } else {
-        client::share_uri(profile, server_address).map(Some)
+        client::share_uri(profile, profile.socks5_loopback().unwrap_or(server_address)).map(Some)
     }
 }
 
