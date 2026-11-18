@@ -101,7 +101,10 @@ async fn socks5_legacy_public_migration_preserves_binding_and_warns() {
         assert_eq!(rebuilt[0].address, socks5_address(host, 1080));
         let warning = state.profiles[0].socks5_risk_warning().unwrap();
         assert!(warning.contains("1080"));
-        assert!(warning.contains(&format!("prs socks5 secure {}", state.profiles[0].name)));
+        assert!(warning.contains(&state.profiles[0].name));
+        assert!(warning.contains("`sudo prs menu`"));
+        assert!(warning.contains("更改认证模式"));
+        assert!(warning.contains("启用用户名 + 密码认证"));
         assert!(!warning.contains(host));
         save_state_to(&state_path, &state).unwrap();
         let restored = load_state_from(&state_path).unwrap();

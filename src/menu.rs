@@ -2881,7 +2881,27 @@ mod tests {
         assert!(text.contains("开放代理风险"));
         assert!(text.contains("old-socks5"));
         assert!(text.contains("20443"));
-        assert!(text.contains("prs socks5 secure old-socks5"));
+        let command = text.split('`').nth(1).expect("风险警告应提供菜单命令");
+        let args = command
+            .strip_prefix("sudo ")
+            .expect("修改配置需要 root 权限")
+            .split_whitespace();
+        let cli = <cli::Cli as clap::Parser>::try_parse_from(args).unwrap();
+        assert!(matches!(cli.command, Some(cli::Command::Menu)));
+        let (number, label) = MAIN_MENU_ITEMS
+            .iter()
+            .find(|(_, label)| *label == "更改配置")
+            .unwrap();
+        assert!(text.contains(&format!("{number}) {label}")));
+        let actions = change_actions(&profile);
+        let (_, label) = actions
+            .iter()
+            .find(|(action, _)| *action == ChangeAction::Socks5Authentication)
+            .unwrap();
+        assert!(text.contains(label));
+        assert!(text.contains("选择该节点"));
+        assert!(text.contains("启用用户名 + 密码认证"));
+        assert!(text.contains("输入 y"));
         for secret in [
             "203.0.113.1",
             "test-private-key",

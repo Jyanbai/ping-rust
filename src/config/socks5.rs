@@ -103,20 +103,9 @@ impl ManagedProfile {
         {
             return None;
         }
-        // 节点名允许空格和引号，提示中的命令参数必须可安全复制到 shell。
-        let selector = if self
-            .name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
-            && !self.name.starts_with('-')
-        {
-            self.name.clone()
-        } else {
-            self.id.to_string()
-        };
         Some(format!(
-            "警告：旧节点 {}（端口 {}）为无认证非回环 SOCKS5，有开放代理风险；修复：prs socks5 secure {}",
-            self.name, self.port, selector
+            "警告：旧节点 {}（端口 {}）为无认证非回环 SOCKS5，有开放代理风险；修复：运行 `sudo prs menu` → 2) 更改配置 → 选择该节点 → 更改认证模式 → 启用用户名 + 密码认证（输入 y）",
+            self.name, self.port
         ))
     }
 }
