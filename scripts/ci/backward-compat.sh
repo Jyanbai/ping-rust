@@ -131,3 +131,140 @@ python3 "$(dirname "$0")/compare-compat-outputs.py" "$WORK/new" "$WORK/old"
 find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$WORK/hash-sudoku-after"
 diff -u "$WORK/hash-sudoku-before" "$WORK/hash-sudoku-after"
 echo 'v0.2.1: legacy info/exports unchanged with Sudoku and XHTTP extensions: PASS'
+
+# v0.2.1 ignores the SOCKS5 `listen` extension, so a newly generated anonymous
+# node must also persist its loopback address in the legacy client-address field.
+"$NEW" generate socks5 --port 24435 --name compat-socks5-no-auth --no-auth \
+  >"$WORK/socks5-no-auth-generate.txt" 2>&1
+jq -e '.profiles[] | select(.name == "compat-socks5-no-auth") |
+  .server_address == "127.0.0.1" and
+  .credentials.Socks5.listen.address == "127.0.0.1" and
+  .credentials.Socks5.username == null and .credentials.Socks5.password == null' \
+  /etc/shoes/ping-rust-state.json >/dev/null
+find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$WORK/hash-socks5-before"
+capture_anonymous_socks5() {
+  local bin="$1" out="$2"
+  mkdir -p "$out"
+  "$bin" url compat-socks5-no-auth >"$out/url"
+  "$bin" qr compat-socks5-no-auth >"$out/qr"
+  "$bin" info compat-socks5-no-auth >"$out/info"
+  grep -Eq '^socks5://127\.0\.0\.1:24435#' "$out/url"
+  grep -F '客户端地址：127.0.0.1' "$out/info" >/dev/null
+  grep -F -f "$out/url" "$out/info" >/dev/null
+}
+capture_anonymous_socks5 "$NEW" "$WORK/socks5-new"
+capture_anonymous_socks5 "$OLD" "$WORK/socks5-old"
+diff -u "$WORK/socks5-new/url" "$WORK/socks5-old/url"
+diff -u "$WORK/socks5-new/qr" "$WORK/socks5-old/qr"
+find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$WORK/hash-socks5-after"
+diff -u "$WORK/hash-socks5-before" "$WORK/hash-socks5-after"
+echo 'v0.2.1: anonymous SOCKS5 URL/QR/info preserve loopback address: PASS'
+
+# Exercise the same address-edit menu used by owners before reading with v0.2.1.
+# This node was appended last; include extension profiles in the menu count.
+socks5_index="$(jq '[.profiles[], .xhttp_profiles[]?.profile, .sudoku_profiles[]?.profile] |
+  length' /etc/shoes/ping-rust-state.json)"
+edit_socks5() {
+  # Inline Expect reads stdin and environment values using the process locale.
+  # Debian's default C locale would misdecode the UTF-8 Chinese menu patterns.
+  SOCKS5_EDIT_BINARY="$NEW" SOCKS5_EDIT_INDEX="$socks5_index" \
+    SOCKS5_EDIT_ACTION="$1" SOCKS5_EDIT_INPUT="$2" SOCKS5_EDIT_RESULT="$3" \
+    LC_ALL=C.UTF-8 LANG=C.UTF-8 expect <<'TCL'
+set timeout 180
+log_user 0
+proc expect_or_fail {pattern} {
+    expect {
+        -re $pattern { return $expect_out(0,string) }
+        eof { puts stderr "SOCKS5 address edit ended before $pattern"; exit 1 }
+        timeout { puts stderr "SOCKS5 address edit timed out before $pattern"; exit 1 }
+    }
+}
+spawn $env(SOCKS5_EDIT_BINARY)
+expect_or_fail {请选择 \[0-10\]: }
+send -- "2\r"
+expect_or_fail {请选择配置:}
+expect_or_fail {请选择 \[0-[0-9]+\]: }
+send -- "$env(SOCKS5_EDIT_INDEX)\r"
+if {$env(SOCKS5_EDIT_ACTION) eq "authentication"} {
+    regexp {^([0-9]+)} [expect_or_fail {[0-9]+\) 更改认证模式}] unused action
+} else {
+    expect_or_fail {3\) 更改客户端公网地址}
+    set action 3
+}
+expect_or_fail {请选择 \[0-[0-9]+\]: }
+send -- "$action\r"
+if {$env(SOCKS5_EDIT_ACTION) eq "authentication"} {
+    expect_or_fail {启用用户名 \+ 密码认证？}
+} else {
+    expect_or_fail {VPS 公网域名或 IP（默认：自动检测）（输入 0 返回）：}
+}
+send -- "$env(SOCKS5_EDIT_INPUT)\r"
+expect_or_fail $env(SOCKS5_EDIT_RESULT)
+expect_or_fail {按回车返回主菜单}
+send -- "\r"
+expect_or_fail {请选择 \[0-10\]: }
+send -- "0\r"
+expect_or_fail {已退出}
+expect eof
+set result [wait]
+if {[lindex $result 2] != 0 || [lindex $result 3] != 0} {
+    puts stderr "SOCKS5 address edit menu failed: $result"
+    exit 1
+}
+TCL
+}
+edit_socks5 address "$SERVER" '安全加固流程'
+find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$WORK/hash-socks5-rejected"
+diff -u "$WORK/hash-socks5-after" "$WORK/hash-socks5-rejected"
+edit_socks5 address 127.0.0.2 '配置更改成功。'
+python3 - <<'PY'
+import json
+import yaml
+with open('/etc/shoes/ping-rust-state.json') as source:
+    state = json.load(source)
+profile = next(p for p in state['profiles'] if p['name'] == 'compat-socks5-no-auth')
+assert profile['server_address'] == '127.0.0.2'
+assert profile['credentials']['Socks5']['listen']['address'] == '127.0.0.2'
+with open('/etc/shoes/config.yaml') as source:
+    servers = yaml.safe_load(source)
+assert any(s['address'] == '127.0.0.2:24435' for s in servers)
+PY
+ss -H -ltn 'sport = :24435' | grep -F '127.0.0.2:24435' >/dev/null
+find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$WORK/hash-socks5-edited-before"
+"$NEW" url compat-socks5-no-auth >"$WORK/socks5-new/edited-url"
+"$OLD" url compat-socks5-no-auth >"$WORK/socks5-old/edited-url"
+grep -Eq '^socks5://127\.0\.0\.2:24435#' "$WORK/socks5-old/edited-url"
+diff -u "$WORK/socks5-new/edited-url" "$WORK/socks5-old/edited-url"
+find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$WORK/hash-socks5-edited-after"
+diff -u "$WORK/hash-socks5-edited-before" "$WORK/hash-socks5-edited-after"
+echo 'v0.2.1: edited anonymous SOCKS5 URL matches loopback listener: PASS'
+
+# Enabling authentication must not allow a loopback listener to advertise a
+# public client address, including when rolling back to v0.2.1.
+edit_socks5 authentication y '配置更改成功。'
+find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$WORK/hash-socks5-auth-before"
+edit_socks5 address "$SERVER" '安全加固流程'
+find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$WORK/hash-socks5-auth-rejected"
+diff -u "$WORK/hash-socks5-auth-before" "$WORK/hash-socks5-auth-rejected"
+edit_socks5 address 127.0.0.3 '配置更改成功。'
+jq -e '.profiles[] | select(.name == "compat-socks5-no-auth") |
+  .server_address == "127.0.0.3" and
+  .credentials.Socks5.listen.address == "127.0.0.3" and
+  (.credentials.Socks5.username | type) == "string" and
+  (.credentials.Socks5.password | type) == "string"' \
+  /etc/shoes/ping-rust-state.json >/dev/null
+python3 - <<'PY'
+import yaml
+with open('/etc/shoes/config.yaml') as source:
+    servers = yaml.safe_load(source)
+assert any(s['address'] == '127.0.0.3:24435' for s in servers)
+PY
+ss -H -ltn 'sport = :24435' | grep -F '127.0.0.3:24435' >/dev/null
+find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$WORK/hash-socks5-auth-edited-before"
+"$NEW" url compat-socks5-no-auth >"$WORK/socks5-new/auth-edited-url"
+"$OLD" url compat-socks5-no-auth >"$WORK/socks5-old/auth-edited-url"
+grep -Eq '^socks5://[^[:space:]@]+@127\.0\.0\.3:24435#' "$WORK/socks5-old/auth-edited-url"
+diff -u "$WORK/socks5-new/auth-edited-url" "$WORK/socks5-old/auth-edited-url"
+find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$WORK/hash-socks5-auth-edited-after"
+diff -u "$WORK/hash-socks5-auth-edited-before" "$WORK/hash-socks5-auth-edited-after"
+echo 'v0.2.1: edited authenticated SOCKS5 URL matches loopback listener: PASS'

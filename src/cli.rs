@@ -1027,7 +1027,10 @@ fn profile_details_lines(profile: &config::ManagedProfile, share_uri: Option<&st
         "\n-------------- {} -------------",
         profile.config_file_name()
     )];
-    let address = profile.server_address.as_deref().unwrap_or("未保存");
+    let address = profile
+        .socks5_loopback()
+        .or(profile.server_address.as_deref())
+        .unwrap_or("未保存");
     match &profile.credentials {
         config::Credentials::VlessSudoku {
             user_id, sudoku, ..
@@ -1191,6 +1194,7 @@ fn profile_details_lines(profile: &config::ManagedProfile, share_uri: Option<&st
             username,
             password,
             udp_enabled,
+            ..
         } => {
             lines.push("协议 (protocol)         = socks5".to_owned());
             lines.push(format!("地址 (address)          = {address}"));
@@ -1588,9 +1592,12 @@ pub async fn print_update_status() -> Result<()> {
 
 pub(crate) fn execute_service(action: ServiceAction) -> Result<()> {
     if matches!(action, ServiceAction::Status) && Path::new(crate::utils::STATE_FILE).exists() {
-        let state = config::load_state().context("读取测试证书状态失败")?;
+        let state = config::load_state().context("读取节点风险状态失败")?;
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
         for profile in &state.profiles {
+            if let Some(warning) = profile.socks5_risk_warning() {
+                eprintln!("{warning}");
+            }
             if let Some(warning) = profile.naive_certificate_warning(now) {
                 eprintln!("{}：{warning}", profile.name);
             }
@@ -1647,10 +1654,10 @@ pub async fn show_info(selector: Option<&str>) -> Result<()> {
                     println!("  {line}");
                 }
                 println!(
-                    "- {} | {} | 0.0.0.0:{} | {} | {}",
+                    "- {} | {} | {} | {} | {}",
                     profile.id,
                     profile.name,
-                    profile.port,
+                    profile.listen_address()?,
                     profile.protocol_name(),
                     profile.server_name()
                 );
@@ -1672,6 +1679,7 @@ pub async fn show_info(selector: Option<&str>) -> Result<()> {
                     username,
                     password,
                     udp_enabled,
+                    ..
                 } = &profile.credentials
                 {
                     println!("  用户名：{}", username.as_deref().unwrap_or("无认证"));
@@ -1684,7 +1692,10 @@ pub async fn show_info(selector: Option<&str>) -> Result<()> {
                     );
                     println!("  传输加密：无");
                 }
-                if let Some(server) = profile.server_address.as_deref() {
+                if let Some(server) = profile
+                    .socks5_loopback()
+                    .or(profile.server_address.as_deref())
+                {
                     println!("  客户端地址：{server}");
                     match client::share_uri(profile, server) {
                         Ok(uri) => println!("  URL：{uri}"),
@@ -1833,6 +1844,7 @@ pub fn print_credentials(result: &config::GenerationResult) {
             username,
             password,
             udp_enabled,
+            ..
         } => {
             println!("协议：SOCKS5");
             println!("用户名：{}", username.as_deref().unwrap_or("无认证"));
@@ -2575,6 +2587,7 @@ mod tests {
             port: 1080,
             server_address: Some("203.0.113.8".to_owned()),
             credentials: config::Credentials::Socks5 {
+                listen: Some(crate::config::Socks5Listen::new("0.0.0.0")),
                 username: Some("default".to_owned()),
                 password: Some("socks-secret".to_owned()),
                 udp_enabled: true,

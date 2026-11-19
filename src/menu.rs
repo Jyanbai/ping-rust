@@ -369,6 +369,9 @@ fn node_summary(state: Result<config::ManagedState>) -> String {
             profile.protocol_name(),
             profile.port
         ));
+        if let Some(warning) = profile.socks5_risk_warning() {
+            lines.push(warning);
+        }
     }
     lines.join("\n")
 }
@@ -1168,7 +1171,10 @@ fn print_menu_profile_details(profile: &config::ManagedProfile) {
 }
 
 fn share_uri_for_view(profile: &config::ManagedProfile) -> (Option<String>, Option<String>) {
-    let Some(server) = profile.server_address.as_deref() else {
+    let Some(server) = profile
+        .socks5_loopback()
+        .or(profile.server_address.as_deref())
+    else {
         return (None, None);
     };
     match client::share_uri(profile, server) {
@@ -2855,6 +2861,63 @@ mod tests {
             alpn_protocols: vec!["h3".into()],
         };
         vec![reality, ss, hy2]
+    }
+
+    #[test]
+    fn node_summary_warns_about_public_anonymous_socks5_without_secrets() {
+        let mut profile = summary_profiles().remove(0);
+        profile.name = "old-socks5".to_owned();
+        profile.credentials = Credentials::Socks5 {
+            listen: Some(config::Socks5Listen::new("0.0.0.0")),
+            username: None,
+            password: None,
+            udp_enabled: true,
+        };
+        let state = config::ManagedState {
+            profiles: vec![profile.clone()],
+            ..Default::default()
+        };
+        let text = node_summary(Ok(state));
+        assert!(text.contains("开放代理风险"));
+        assert!(text.contains("old-socks5"));
+        assert!(text.contains("20443"));
+        let command = text.split('`').nth(1).expect("风险警告应提供菜单命令");
+        let args = command
+            .strip_prefix("sudo ")
+            .expect("修改配置需要 root 权限")
+            .split_whitespace();
+        let cli = <cli::Cli as clap::Parser>::try_parse_from(args).unwrap();
+        assert!(matches!(cli.command, Some(cli::Command::Menu)));
+        let (number, label) = MAIN_MENU_ITEMS
+            .iter()
+            .find(|(_, label)| *label == "更改配置")
+            .unwrap();
+        assert!(text.contains(&format!("{number}) {label}")));
+        let actions = change_actions(&profile);
+        let (_, label) = actions
+            .iter()
+            .find(|(action, _)| *action == ChangeAction::Socks5Authentication)
+            .unwrap();
+        assert!(text.contains(label));
+        assert!(text.contains("选择该节点"));
+        assert!(text.contains("启用用户名 + 密码认证"));
+        assert!(text.contains("输入 y"));
+        for secret in [
+            "203.0.113.1",
+            "test-private-key",
+            "test-public-key",
+            "test-short-id",
+            "0.0.0.0",
+        ] {
+            assert!(!text.contains(secret));
+        }
+        profile.credentials = Credentials::Socks5 {
+            listen: Some(config::Socks5Listen::new("127.0.0.1")),
+            username: None,
+            password: None,
+            udp_enabled: true,
+        };
+        assert!(profile.socks5_risk_warning().is_none());
     }
 
     #[test]

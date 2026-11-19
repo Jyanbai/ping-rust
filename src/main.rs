@@ -55,6 +55,15 @@ async fn main() -> Result<()> {
         eprintln!("{stderr}");
         return Ok(());
     }
+    if std::path::Path::new(utils::STATE_FILE).exists() {
+        if let Ok(state) = config::load_state() {
+            for profile in &state.profiles {
+                if let Some(warning) = profile.socks5_risk_warning() {
+                    eprintln!("{warning}");
+                }
+            }
+        }
+    }
     let result = cli::run(cli::Cli::parse()).await;
     if result.as_ref().is_err_and(is_interrupted) {
         restore_cursor_and_exit();

@@ -88,12 +88,26 @@ pub fn select_profile<'a>(
 
 pub fn stored_share_uri(profile: &ManagedProfile, override_server: Option<&str>) -> Result<String> {
     let server = override_server
+        .or(profile.socks5_loopback())
         .or(profile.server_address.as_deref())
         .context("该配置没有保存公网地址；请使用 --server-address 指定")?;
     share_uri(profile, server)
 }
 
+fn validate_socks5_export(profile: &ManagedProfile, server: &str) -> Result<()> {
+    profile.validate_socks5_listen()?;
+    if let Some(listen) = profile.socks5_loopback() {
+        let server = normalize_server_address(server)?;
+        let parse_ip = |host: &str| host.trim_matches(['[', ']']).parse::<IpAddr>().ok();
+        if parse_ip(&server) != parse_ip(listen) {
+            bail!("该 SOCKS5 仅监听本机 {listen}；请使用相同回环地址导出，不能生成公网分享链接");
+        }
+    }
+    Ok(())
+}
+
 pub fn render(profile: &ManagedProfile, format: ClientFormat, server: &str) -> Result<String> {
+    validate_socks5_export(profile, server)?;
     if matches!(profile.credentials, Credentials::VlessXhttpReality { .. }) {
         bail!("该客户端不支持 XHTTP，请用分享链接导入 v2rayN 或 Xray");
     }
@@ -237,6 +251,7 @@ fn clash_meta(profile: &ManagedProfile, server: &str) -> Result<String> {
             username,
             password,
             udp_enabled,
+            ..
         } => {
             let mut proxy = json!({
                 "name": profile.name,
@@ -705,6 +720,7 @@ fn vless_tcp_uri(
 }
 
 pub fn share_uri(profile: &ManagedProfile, server: &str) -> Result<String> {
+    validate_socks5_export(profile, server)?;
     let server = normalize_server_address(server)?;
     let host = authority_host(&server);
     let fragment = encode(&profile.display_name());
@@ -1722,6 +1738,7 @@ mod tests {
             port: 1080,
             server_address: None,
             credentials: Credentials::Socks5 {
+                listen: Some(crate::config::Socks5Listen::new("0.0.0.0")),
                 username: Some("用@户:%".to_owned()),
                 password: Some("密:码@#%".to_owned()),
                 udp_enabled: false,
@@ -1756,13 +1773,15 @@ mod tests {
 
         let mut anonymous = profile;
         anonymous.credentials = Credentials::Socks5 {
+            listen: Some(crate::config::Socks5Listen::new("127.0.0.1")),
             username: None,
             password: None,
             udp_enabled: true,
         };
-        let uri = share_uri(&anonymous, "198.51.100.8").unwrap();
+        assert!(share_uri(&anonymous, "198.51.100.8").is_err());
+        let uri = share_uri(&anonymous, "127.0.0.1").unwrap();
         assert!(!uri.contains('@'));
-        let clash = render(&anonymous, ClientFormat::ClashMeta, "198.51.100.8").unwrap();
+        let clash = render(&anonymous, ClientFormat::ClashMeta, "127.0.0.1").unwrap();
         assert!(!clash.contains("username:"));
         assert!(!clash.contains("password:"));
     }
@@ -1777,6 +1796,7 @@ mod tests {
             port: 1080,
             server_address: None,
             credentials: Credentials::Socks5 {
+                listen: Some(crate::config::Socks5Listen::new("0.0.0.0")),
                 username: Some(username.clone()),
                 password: Some("generated-secret".to_owned()),
                 udp_enabled: true,
