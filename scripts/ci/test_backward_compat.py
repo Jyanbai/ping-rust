@@ -10,7 +10,7 @@ import unittest
 class Socks5MenuEncodingTest(unittest.TestCase):
     def test_inline_driver_matches_utf8_prompt_with_c_or_utf8_parent_locale(self):
         script = Path(__file__).with_name("backward-compat.sh").read_text(encoding="utf-8")
-        function = script.split("edit_anonymous_socks5_address() {", 1)[1].split("\nTCL\n}", 1)[0] + "\nTCL"
+        function = script.split("edit_socks5() {", 1)[1].split("\nTCL\n}", 1)[0] + "\nTCL"
         # Tcl uses the same stdin decoding as inline Expect. Unicode escapes keep
         # the expected characters independent of the probe file's own decoding.
         # Stop at the first match: no menu process, sockets or system files.
@@ -24,7 +24,7 @@ proc expect {args} {
         puts stderr "inline driver did not decode the Chinese menu prompt as UTF-8"
         exit 1
     }
-    set results [list "\u5148\u542f\u7528\u8ba4\u8bc1" "\u914d\u7f6e\u66f4\u6539\u6210\u529f\u3002"]
+    set results [list "\u5b89\u5168\u52a0\u56fa\u6d41\u7a0b" "\u914d\u7f6e\u66f4\u6539\u6210\u529f\u3002"]
     if {$::env(SOCKS5_EDIT_RESULT) ni $results} {
         puts stderr "inline driver did not decode the Chinese result environment as UTF-8"
         exit 1
@@ -38,16 +38,16 @@ set -euo pipefail
 NEW=unused
 socks5_index=5
 expect() { tclsh "$TCL_PROBE"; }
-edit_anonymous_socks5_address() {''' + function + r'''
+edit_socks5() {''' + function + r'''
 }
-edit_anonymous_socks5_address "$ADDRESS" "$RESULT"
+edit_socks5 address "$ADDRESS" "$RESULT"
 '''
         with tempfile.TemporaryDirectory() as root:
             path = Path(root, "probe.tcl")
             path.write_text(probe, encoding="utf-8")
             for locale in ("C", "C.UTF-8"):
                 for address, expected in (
-                    ("203.0.113.10", "先启用认证"),
+                    ("203.0.113.10", "安全加固流程"),
                     ("127.0.0.2", "配置更改成功。"),
                 ):
                     with self.subTest(locale=locale, result=expected):
