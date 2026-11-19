@@ -34,10 +34,8 @@ mod presets;
 mod routing;
 mod schema;
 mod socks5;
-use socks5::socks5_address;
-#[cfg(test)]
-use socks5::socks5_is_loopback;
 pub use socks5::Socks5Listen;
+use socks5::{socks5_address, socks5_is_loopback};
 mod state;
 mod transaction;
 mod validation;
@@ -1385,7 +1383,26 @@ fn apply_profile_change(
             profile.port = port;
             server.address = profile.listen_address()?;
         }
-        ProfileChange::ServerAddress(address) => profile.server_address = address,
+        ProfileChange::ServerAddress(address) => {
+            if let Credentials::Socks5 {
+                username: None,
+                password: None,
+                listen: Some(listen),
+                ..
+            } = &mut profile.credentials
+            {
+                if socks5_is_loopback(&listen.address) {
+                    let loopback = address
+                        .as_deref()
+                        .filter(|address| socks5_is_loopback(address))
+                        .context("无认证回环 SOCKS5 的客户端地址必须是回环 IP；请先启用认证再设置非回环地址")?;
+                    // v0.2.1 exports server_address without consulting listen.
+                    listen.address = loopback.to_owned();
+                    server.address = socks5_address(loopback, profile.port);
+                }
+            }
+            profile.server_address = address;
+        }
         ProfileChange::RegenerateCredentials => regenerate_profile_credentials(server, profile)?,
         ProfileChange::Password(password) => {
             if password.is_empty() || password.chars().any(char::is_control) {

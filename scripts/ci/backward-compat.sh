@@ -159,3 +159,70 @@ diff -u "$WORK/socks5-new/qr" "$WORK/socks5-old/qr"
 find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$WORK/hash-socks5-after"
 diff -u "$WORK/hash-socks5-before" "$WORK/hash-socks5-after"
 echo 'v0.2.1: anonymous SOCKS5 URL/QR/info preserve loopback address: PASS'
+
+# Exercise the same address-edit menu used by owners before reading with v0.2.1.
+# This node was appended last; include extension profiles in the menu count.
+socks5_index="$(jq '[.profiles[], .xhttp_profiles[]?.profile, .sudoku_profiles[]?.profile] |
+  length' /etc/shoes/ping-rust-state.json)"
+edit_anonymous_socks5_address() {
+  SOCKS5_EDIT_BINARY="$NEW" SOCKS5_EDIT_INDEX="$socks5_index" \
+    SOCKS5_EDIT_ADDRESS="$1" SOCKS5_EDIT_RESULT="$2" expect <<'TCL'
+set timeout 180
+log_user 0
+proc expect_or_fail {pattern} {
+    expect {
+        -re $pattern { return }
+        eof { puts stderr "SOCKS5 address edit ended before $pattern"; exit 1 }
+        timeout { puts stderr "SOCKS5 address edit timed out before $pattern"; exit 1 }
+    }
+}
+spawn $env(SOCKS5_EDIT_BINARY)
+expect_or_fail {请选择 \[0-10\]: }
+send -- "2\r"
+expect_or_fail {请选择配置:}
+expect_or_fail {请选择 \[0-[0-9]+\]: }
+send -- "$env(SOCKS5_EDIT_INDEX)\r"
+expect_or_fail {3\) 更改客户端公网地址}
+expect_or_fail {请选择 \[0-[0-9]+\]: }
+send -- "3\r"
+expect_or_fail {VPS 公网域名或 IP（默认：自动检测）（输入 0 返回）：}
+send -- "$env(SOCKS5_EDIT_ADDRESS)\r"
+expect_or_fail $env(SOCKS5_EDIT_RESULT)
+expect_or_fail {按回车返回主菜单}
+send -- "\r"
+expect_or_fail {请选择 \[0-10\]: }
+send -- "0\r"
+expect_or_fail {已退出}
+expect eof
+set result [wait]
+if {[lindex $result 2] != 0 || [lindex $result 3] != 0} {
+    puts stderr "SOCKS5 address edit menu failed: $result"
+    exit 1
+}
+TCL
+}
+edit_anonymous_socks5_address "$SERVER" '先启用认证'
+find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$WORK/hash-socks5-rejected"
+diff -u "$WORK/hash-socks5-after" "$WORK/hash-socks5-rejected"
+edit_anonymous_socks5_address 127.0.0.2 '配置更改成功。'
+python3 - <<'PY'
+import json
+import yaml
+with open('/etc/shoes/ping-rust-state.json') as source:
+    state = json.load(source)
+profile = next(p for p in state['profiles'] if p['name'] == 'compat-socks5-no-auth')
+assert profile['server_address'] == '127.0.0.2'
+assert profile['credentials']['Socks5']['listen']['address'] == '127.0.0.2'
+with open('/etc/shoes/config.yaml') as source:
+    servers = yaml.safe_load(source)
+assert any(s['address'] == '127.0.0.2:24435' for s in servers)
+PY
+ss -H -ltn 'sport = :24435' | grep -F '127.0.0.2:24435' >/dev/null
+find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$WORK/hash-socks5-edited-before"
+"$NEW" url compat-socks5-no-auth >"$WORK/socks5-new/edited-url"
+"$OLD" url compat-socks5-no-auth >"$WORK/socks5-old/edited-url"
+grep -Eq '^socks5://127\.0\.0\.2:24435#' "$WORK/socks5-old/edited-url"
+diff -u "$WORK/socks5-new/edited-url" "$WORK/socks5-old/edited-url"
+find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$WORK/hash-socks5-edited-after"
+diff -u "$WORK/hash-socks5-edited-before" "$WORK/hash-socks5-edited-after"
+echo 'v0.2.1: edited anonymous SOCKS5 URL matches loopback listener: PASS'

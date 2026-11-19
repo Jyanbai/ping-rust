@@ -52,6 +52,97 @@ async fn socks5_generation_persists_rollback_compatible_client_address() {
 }
 
 #[tokio::test]
+async fn socks5_anonymous_address_edit_rejects_non_loopback_without_changes() {
+    let directory = tempfile::tempdir().unwrap();
+    let result = anonymous(directory.path()).await;
+    let mut server = load_servers(&result.config_path).unwrap().remove(0);
+    let mut profile = result.profile;
+    let server_before = crate::yaml::to_string(&server).unwrap();
+    let profile_before = serde_json::to_value(&profile).unwrap();
+    let config_before = fs::read(&result.config_path).unwrap();
+    for address in [
+        Some("203.0.113.8"),
+        Some("2001:db8::8"),
+        Some("example.com"),
+        Some("0.0.0.0"),
+        Some("::"),
+        Some("localhost"),
+        None,
+    ] {
+        let error = apply_profile_change(
+            &mut server,
+            &mut profile,
+            ProfileChange::ServerAddress(address.map(str::to_owned)),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("先启用认证"));
+        assert_eq!(crate::yaml::to_string(&server).unwrap(), server_before);
+        assert_eq!(serde_json::to_value(&profile).unwrap(), profile_before);
+        assert_eq!(fs::read(&result.config_path).unwrap(), config_before);
+    }
+}
+
+#[tokio::test]
+async fn socks5_anonymous_address_edit_keeps_loopback_and_client_in_sync() {
+    let directory = tempfile::tempdir().unwrap();
+    let result = anonymous(directory.path()).await;
+    let mut servers = load_servers(&result.config_path).unwrap();
+    let mut state = ManagedState {
+        profiles: vec![result.profile],
+        ..Default::default()
+    };
+    for address in ["127.0.0.1", "127.0.0.2", "::1", "[::1]"] {
+        apply_profile_change(
+            &mut servers[0],
+            &mut state.profiles[0],
+            ProfileChange::ServerAddress(Some(address.to_owned())),
+        )
+        .unwrap();
+        assert_eq!(state.profiles[0].server_address.as_deref(), Some(address));
+        assert_eq!(state.profiles[0].socks5_loopback(), Some(address));
+        assert_eq!(servers[0].address, socks5_address(address, 443));
+        let documents = profile_documents(&servers, &state.profiles).unwrap();
+        let yaml = aggregate_profile_documents(&documents, &state.profiles).unwrap();
+        fs::write(&result.config_path, yaml).unwrap();
+        let state_path = directory.path().join("ping-rust-state.json");
+        save_state_to(&state_path, &state).unwrap();
+        state = load_state_from(&state_path).unwrap();
+        servers = load_servers(&result.config_path).unwrap();
+        ensure_servers_match_state(&servers, &state.profiles).unwrap();
+        let json: serde_json::Value =
+            serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+        assert_eq!(json["profiles"][0]["server_address"], address);
+        assert!(crate::client::stored_share_uri(&state.profiles[0], None).is_ok());
+    }
+}
+
+#[tokio::test]
+async fn socks5_authenticated_address_edit_preserves_listen() {
+    let directory = tempfile::tempdir().unwrap();
+    let result = anonymous(directory.path()).await;
+    let mut server = load_servers(&result.config_path).unwrap().remove(0);
+    let mut profile = result.profile;
+    apply_profile_change(
+        &mut server,
+        &mut profile,
+        ProfileChange::Socks5Authentication(true),
+    )
+    .unwrap();
+    let server_before = crate::yaml::to_string(&server).unwrap();
+    for address in [Some("203.0.113.8"), Some("::1"), None] {
+        apply_profile_change(
+            &mut server,
+            &mut profile,
+            ProfileChange::ServerAddress(address.map(str::to_owned)),
+        )
+        .unwrap();
+        assert_eq!(profile.server_address.as_deref(), address);
+        assert_eq!(crate::yaml::to_string(&server).unwrap(), server_before);
+        assert_eq!(profile.socks5_loopback(), Some("127.0.0.1"));
+    }
+}
+
+#[tokio::test]
 async fn socks5_loopback_survives_edit_rebuild_and_upgrade() {
     for server_address in ["203.0.113.8", "2001:db8::8"] {
         let directory = tempfile::tempdir().unwrap();
@@ -134,6 +225,18 @@ async fn socks5_legacy_public_migration_preserves_binding_and_warns() {
         assert!(!socks5::listen_migration_pending(&state_path).unwrap());
         assert_eq!(fs::read(&result.config_path).unwrap(), runtime_before);
         state = load_state_from(&state_path).unwrap();
+        for address in [Some("203.0.113.20"), Some("127.0.0.2"), None] {
+            apply_profile_change(
+                &mut servers[0],
+                &mut state.profiles[0],
+                ProfileChange::ServerAddress(address.map(str::to_owned)),
+            )
+            .unwrap();
+            assert_eq!(state.profiles[0].server_address.as_deref(), address);
+            assert_eq!(fs::read(&result.config_path).unwrap(), runtime_before);
+            assert_eq!(servers[0].address, socks5_address(host, 443));
+            ensure_servers_match_state(&servers, &state.profiles).unwrap();
+        }
         apply_profile_change(
             &mut servers[0],
             &mut state.profiles[0],
