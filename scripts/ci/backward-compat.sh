@@ -131,3 +131,31 @@ python3 "$(dirname "$0")/compare-compat-outputs.py" "$WORK/new" "$WORK/old"
 find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$WORK/hash-sudoku-after"
 diff -u "$WORK/hash-sudoku-before" "$WORK/hash-sudoku-after"
 echo 'v0.2.1: legacy info/exports unchanged with Sudoku and XHTTP extensions: PASS'
+
+# v0.2.1 ignores the SOCKS5 `listen` extension, so a newly generated anonymous
+# node must also persist its loopback address in the legacy client-address field.
+"$NEW" generate socks5 --port 24435 --name compat-socks5-no-auth --no-auth \
+  >"$WORK/socks5-no-auth-generate.txt" 2>&1
+jq -e '.profiles[] | select(.name == "compat-socks5-no-auth") |
+  .server_address == "127.0.0.1" and
+  .credentials.Socks5.listen.address == "127.0.0.1" and
+  .credentials.Socks5.username == null and .credentials.Socks5.password == null' \
+  /etc/shoes/ping-rust-state.json >/dev/null
+find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$WORK/hash-socks5-before"
+capture_anonymous_socks5() {
+  local bin="$1" out="$2"
+  mkdir -p "$out"
+  "$bin" url compat-socks5-no-auth >"$out/url"
+  "$bin" qr compat-socks5-no-auth >"$out/qr"
+  "$bin" info compat-socks5-no-auth >"$out/info"
+  grep -Eq '^socks5://127\.0\.0\.1:24435#' "$out/url"
+  grep -F '客户端地址：127.0.0.1' "$out/info" >/dev/null
+  grep -F -f "$out/url" "$out/info" >/dev/null
+}
+capture_anonymous_socks5 "$NEW" "$WORK/socks5-new"
+capture_anonymous_socks5 "$OLD" "$WORK/socks5-old"
+diff -u "$WORK/socks5-new/url" "$WORK/socks5-old/url"
+diff -u "$WORK/socks5-new/qr" "$WORK/socks5-old/qr"
+find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$WORK/hash-socks5-after"
+diff -u "$WORK/hash-socks5-before" "$WORK/hash-socks5-after"
+echo 'v0.2.1: anonymous SOCKS5 URL/QR/info preserve loopback address: PASS'

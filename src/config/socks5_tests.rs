@@ -7,6 +7,51 @@ async fn anonymous(directory: &Path) -> GenerationResult {
 }
 
 #[tokio::test]
+async fn socks5_generation_persists_rollback_compatible_client_address() {
+    for (server_address, loopback) in [
+        (Some("203.0.113.8"), "127.0.0.1"),
+        (None, "127.0.0.1"),
+        (Some("example.com"), "127.0.0.1"),
+        (Some("2001:db8::8"), "::1"),
+        (Some("[2001:db8::8]"), "::1"),
+    ] {
+        for no_auth in [true, false] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut request =
+                tests::request(Protocol::Socks5, directory.path().join("config.yaml"));
+            request.options.socks5_no_auth = no_auth;
+            request.server_address = server_address.map(str::to_owned);
+            let result = generate_inner(request, false).await.unwrap();
+            let expected = if no_auth {
+                Some(loopback)
+            } else {
+                server_address
+            };
+            let servers = load_servers(&result.config_path).unwrap();
+            assert_eq!(
+                servers[0].address,
+                socks5_address(if no_auth { loopback } else { "0.0.0.0" }, 443)
+            );
+            let state_path = directory.path().join("ping-rust-state.json");
+            save_state_to(
+                &state_path,
+                &ManagedState {
+                    profiles: vec![result.profile],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let json: serde_json::Value =
+                serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+            // v0.2.1 ignores `listen` and uses this field for URL, QR and info.
+            assert_eq!(json["profiles"][0]["server_address"].as_str(), expected);
+            let restored = load_state_from(&state_path).unwrap();
+            assert_eq!(restored.profiles[0].server_address.as_deref(), expected);
+        }
+    }
+}
+
+#[tokio::test]
 async fn socks5_loopback_survives_edit_rebuild_and_upgrade() {
     for server_address in ["203.0.113.8", "2001:db8::8"] {
         let directory = tempfile::tempdir().unwrap();

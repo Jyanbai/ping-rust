@@ -1071,7 +1071,7 @@ async fn generate_inner_with_lock(
         naive_certificate_validity,
     } = generated;
 
-    let profile = ManagedProfile {
+    let mut profile = ManagedProfile {
         h2mux: Default::default(),
         id: profile_id,
         name: profile_name,
@@ -1083,6 +1083,10 @@ async fn generate_inner_with_lock(
         self_signed_certificate: self_signed,
         naive_certificate_validity,
     };
+    // v0.2.1 ignores SOCKS5 `listen` and exports the saved client address.
+    if let Some(loopback) = profile.socks5_loopback() {
+        profile.server_address = Some(loopback.to_owned());
+    }
     let mut credential_cleanup = CredentialCleanup::new(
         self_signed,
         certificate_path.as_deref(),
