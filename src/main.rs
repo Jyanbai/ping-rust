@@ -16,6 +16,7 @@ mod service;
 mod shoes_compat;
 mod sni;
 mod sni_probe;
+mod socks5_secure;
 mod sudoku;
 mod utils;
 mod vless_encryption;
