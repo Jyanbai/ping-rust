@@ -400,6 +400,91 @@ async fn socks5_legacy_public_authentication_revokes_exemption_after_reload() {
 }
 
 #[tokio::test]
+async fn socks5_legacy_public_regeneration_revokes_exemption_after_reload() {
+    for host in ["0.0.0.0", "::", "[::]", "2001:db8::8", "203.0.113.8"] {
+        let directory = tempfile::tempdir().unwrap();
+        let result = anonymous(directory.path()).await;
+        let mut servers = load_servers(&result.config_path).unwrap();
+        servers[0].address = socks5_address(host, result.profile.port);
+        fs::write(
+            &result.config_path,
+            crate::yaml::to_string(&servers).unwrap(),
+        )
+        .unwrap();
+        let mut json = serde_json::to_value(ManagedState {
+            profiles: vec![result.profile],
+            ..Default::default()
+        })
+        .unwrap();
+        json["profiles"][0]["credentials"]["Socks5"]
+            .as_object_mut()
+            .unwrap()
+            .remove("listen");
+        let state_path = directory.path().join("ping-rust-state.json");
+        fs::write(&state_path, serde_json::to_vec(&json).unwrap()).unwrap();
+        let mut state = load_state_from(&state_path).unwrap();
+        assert!(state.profiles[0].socks5_risk_warning().is_some());
+        let migrated = serde_json::to_value(&state).unwrap();
+        assert_eq!(
+            migrated["profiles"][0]["credentials"]["Socks5"]["listen"]["legacy_public_address"],
+            servers[0].address.rsplit_once(':').unwrap().0
+        );
+        apply_profile_change(
+            &mut servers[0],
+            &mut state.profiles[0],
+            ProfileChange::RegenerateCredentials,
+        )
+        .unwrap();
+        assert_eq!(servers[0].address, socks5_address(host, 443));
+        let profiles_path = directory.path().join("profiles");
+        commit_managed_with_state_writer(
+            &result.config_path,
+            &state_path,
+            &profiles_path,
+            &servers,
+            &state,
+            save_state_to,
+        )
+        .unwrap();
+        state = load_state_from(&state_path).unwrap();
+        servers = load_servers(&result.config_path).unwrap();
+        ensure_servers_match_state(&servers, &state.profiles).unwrap();
+        assert!(matches!(
+            &state.profiles[0].credentials,
+            Credentials::Socks5 {
+                username: Some(_),
+                password: Some(_),
+                ..
+            }
+        ));
+        let server_before = crate::yaml::to_string(&servers).unwrap();
+        let state_before = serde_json::to_value(&state).unwrap();
+        let config_before = fs::read(&result.config_path).unwrap();
+        let saved_state_before = fs::read(&state_path).unwrap();
+        let profile_path = profiles_path.join(state.profiles[0].config_file_name());
+        let profile_before = fs::read(&profile_path).unwrap();
+        let error = apply_profile_change(
+            &mut servers[0],
+            &mut state.profiles[0],
+            ProfileChange::Socks5Authentication(false),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("回环"));
+        assert!(error.to_string().contains("保留用户名密码认证"));
+        assert_eq!(crate::yaml::to_string(&servers).unwrap(), server_before);
+        assert_eq!(serde_json::to_value(&state).unwrap(), state_before);
+        assert_eq!(fs::read(&result.config_path).unwrap(), config_before);
+        assert_eq!(fs::read(&state_path).unwrap(), saved_state_before);
+        assert_eq!(fs::read(&profile_path).unwrap(), profile_before);
+        assert!(
+            state_before["profiles"][0]["credentials"]["Socks5"]["listen"]
+                .get("legacy_public_address")
+                .is_none()
+        );
+    }
+}
+
+#[tokio::test]
 async fn socks5_profile_and_aggregate_reject_public_and_missing_listen() {
     let directory = tempfile::tempdir().unwrap();
     let result = anonymous(directory.path()).await;

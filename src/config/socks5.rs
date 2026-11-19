@@ -17,10 +17,6 @@ impl Socks5Listen {
             legacy_public_address: None,
         }
     }
-
-    pub(super) fn revoke_legacy_public_address(&mut self) {
-        self.legacy_public_address = None;
-    }
 }
 
 fn ip(address: &str) -> Option<IpAddr> {
@@ -42,6 +38,19 @@ pub(super) fn socks5_address(host: &str, port: u16) -> String {
 }
 
 impl ManagedProfile {
+    /// 配置变更统一撤销已认证节点的旧版例外，避免遗漏任何凭据写入路径。
+    pub(super) fn revoke_authenticated_socks5_legacy_exemption(&mut self) {
+        if let Credentials::Socks5 {
+            username: Some(_),
+            password: Some(_),
+            listen: Some(listen),
+            ..
+        } = &mut self.credentials
+        {
+            listen.legacy_public_address = None;
+        }
+    }
+
     pub(crate) fn socks5_loopback(&self) -> Option<&str> {
         match &self.credentials {
             Credentials::Socks5 {

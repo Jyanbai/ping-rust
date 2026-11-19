@@ -1850,7 +1850,6 @@ fn apply_profile_change(
                     Credentials::Socks5 {
                         username: state_username,
                         password: state_password,
-                        listen,
                         ..
                     },
                 ) => {
@@ -1863,9 +1862,6 @@ fn apply_profile_change(
                         *server_password = Some(password.clone());
                         *state_username = Some(username);
                         *state_password = Some(password);
-                        if let Some(listen) = listen {
-                            listen.revoke_legacy_public_address();
-                        }
                     } else {
                         *server_username = None;
                         *server_password = None;
@@ -1919,6 +1915,7 @@ fn apply_profile_change(
             *anytls_users_mut(server)? = users.clone();
         }
     }
+    profile.revoke_authenticated_socks5_legacy_exemption();
     profile.validate_socks5_listen()?;
     Ok(())
 }
