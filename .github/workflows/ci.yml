@@ -407,7 +407,12 @@ jobs:
   distro-build:
     name: ${{ matrix.name }}
     runs-on: ubuntu-24.04
-    container: ${{ matrix.image }}
+    container:
+      image: ${{ matrix.image }}
+      # rockylinux:9 镜像自 2026-11-13 起不再在镜像配置中设置 PATH；
+      # 显式设置，避免 GITHUB_PATH 追加后容器内找不到 bash。
+      env:
+        PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
     strategy:
       fail-fast: false
       matrix:
