@@ -165,8 +165,11 @@ echo 'v0.2.1: anonymous SOCKS5 URL/QR/info preserve loopback address: PASS'
 socks5_index="$(jq '[.profiles[], .xhttp_profiles[]?.profile, .sudoku_profiles[]?.profile] |
   length' /etc/shoes/ping-rust-state.json)"
 edit_anonymous_socks5_address() {
+  # Inline Expect reads stdin and environment values using the process locale.
+  # Debian's default C locale would misdecode the UTF-8 Chinese menu patterns.
   SOCKS5_EDIT_BINARY="$NEW" SOCKS5_EDIT_INDEX="$socks5_index" \
-    SOCKS5_EDIT_ADDRESS="$1" SOCKS5_EDIT_RESULT="$2" expect <<'TCL'
+    SOCKS5_EDIT_ADDRESS="$1" SOCKS5_EDIT_RESULT="$2" \
+    LC_ALL=C.UTF-8 LANG=C.UTF-8 expect <<'TCL'
 set timeout 180
 log_user 0
 proc expect_or_fail {pattern} {
