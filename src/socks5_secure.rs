@@ -154,15 +154,16 @@ async fn verify(profile: &ManagedProfile) -> Result<()> {
         bail!("shoes.service 未处于 active 状态");
     }
     let expected: SocketAddr = profile.listen_address()?.parse()?;
+    let main_pid = service::main_pid()?.context("shoes.service 的 MainPID 不可用")?;
     // 分别查询两个地址族，避免 ss 的 `*` 掩盖额外的 IPv6 公网监听。
-    let ipv4 = command("ss", &["-H".into(), "-ltn4".into()], None).await?;
-    let ipv6 = command("ss", &["-H".into(), "-ltn6".into()], None).await?;
+    let ipv4 = command("ss", &["-H".into(), "-ltnp4".into()], None).await?;
+    let ipv6 = command("ss", &["-H".into(), "-ltnp6".into()], None).await?;
     let output = format!(
         "{}\n{}",
         ipv4.replace("*:", "0.0.0.0:"),
         ipv6.replace("*:", "[::]:")
     );
-    check_listeners(&output, expected)?;
+    check_listeners(&output, expected, main_pid)?;
     let target = SocketAddr::new(
         if expected.ip().is_unspecified() {
             if expected.is_ipv4() {
@@ -181,9 +182,18 @@ async fn verify(profile: &ManagedProfile) -> Result<()> {
     Ok(())
 }
 
-fn check_listeners(output: &str, expected: SocketAddr) -> Result<()> {
+fn check_listeners(output: &str, expected: SocketAddr, main_pid: u32) -> Result<()> {
     let mut found = false;
+    let owner = format!(",pid={main_pid},");
     for line in output.lines() {
+        // 只校验 shoes 持有的 socket；其他进程可合法占用同端口的不同地址。
+        if !line
+            .split_whitespace()
+            .skip(5)
+            .any(|field| field.contains(&owner))
+        {
+            continue;
+        }
         let Some(local) = line.split_whitespace().nth(3) else {
             continue;
         };
@@ -204,7 +214,7 @@ fn check_listeners(output: &str, expected: SocketAddr) -> Result<()> {
         found = true;
     }
     if !found {
-        bail!("未找到预期监听 {expected}；请检查 ss -ltn 和 shoes 日志");
+        bail!("未找到 shoes 的预期监听 {expected}；请检查 ss -ltnp 和 shoes 日志");
     }
     Ok(())
 }

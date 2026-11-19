@@ -287,6 +287,10 @@ pub(super) fn iptables_port_allow(line: &str, port: u16) -> bool {
     // 自定义链可能同时供 INPUT/OUTPUT/FORWARD 使用；无法确认用途时保留。
     words.first().is_some_and(|word| word == "-A")
         && words.get(1).is_some_and(|word| word == "INPUT")
+        && !words.windows(2).any(|w| w == ["!", "-p"])
+        && words
+            .windows(2)
+            .any(|w| w[0] == "-p" && matches!(w[1].as_str(), "tcp" | "udp"))
         && !words.windows(2).any(|w| w == ["!", "--dport"])
         && words.windows(2).any(|w| w == ["-j", "ACCEPT"])
         && words
