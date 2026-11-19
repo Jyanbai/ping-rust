@@ -1385,8 +1385,6 @@ fn apply_profile_change(
         }
         ProfileChange::ServerAddress(address) => {
             if let Credentials::Socks5 {
-                username: None,
-                password: None,
                 listen: Some(listen),
                 ..
             } = &mut profile.credentials
@@ -1395,7 +1393,7 @@ fn apply_profile_change(
                     let loopback = address
                         .as_deref()
                         .filter(|address| socks5_is_loopback(address))
-                        .context("无认证回环 SOCKS5 的客户端地址必须是回环 IP；请先启用认证再设置非回环地址")?;
+                        .context("回环监听 SOCKS5 的客户端地址必须是回环 IP；改为对外监听需走后续的安全加固流程")?;
                     // v0.2.1 exports server_address without consulting listen.
                     listen.address = loopback.to_owned();
                     server.address = socks5_address(loopback, profile.port);

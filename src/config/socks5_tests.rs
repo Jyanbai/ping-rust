@@ -75,7 +75,7 @@ async fn socks5_anonymous_address_edit_rejects_non_loopback_without_changes() {
             ProfileChange::ServerAddress(address.map(str::to_owned)),
         )
         .unwrap_err();
-        assert!(error.to_string().contains("先启用认证"));
+        assert!(error.to_string().contains("安全加固流程"));
         assert_eq!(crate::yaml::to_string(&server).unwrap(), server_before);
         assert_eq!(serde_json::to_value(&profile).unwrap(), profile_before);
         assert_eq!(fs::read(&result.config_path).unwrap(), config_before);
@@ -119,15 +119,10 @@ async fn socks5_anonymous_address_edit_keeps_loopback_and_client_in_sync() {
 #[tokio::test]
 async fn socks5_authenticated_address_edit_preserves_listen() {
     let directory = tempfile::tempdir().unwrap();
-    let result = anonymous(directory.path()).await;
+    let request = tests::request(Protocol::Socks5, directory.path().join("config.yaml"));
+    let result = generate_inner(request, false).await.unwrap();
     let mut server = load_servers(&result.config_path).unwrap().remove(0);
     let mut profile = result.profile;
-    apply_profile_change(
-        &mut server,
-        &mut profile,
-        ProfileChange::Socks5Authentication(true),
-    )
-    .unwrap();
     let server_before = crate::yaml::to_string(&server).unwrap();
     for address in [Some("203.0.113.8"), Some("::1"), None] {
         apply_profile_change(
@@ -138,7 +133,57 @@ async fn socks5_authenticated_address_edit_preserves_listen() {
         .unwrap();
         assert_eq!(profile.server_address.as_deref(), address);
         assert_eq!(crate::yaml::to_string(&server).unwrap(), server_before);
-        assert_eq!(profile.socks5_loopback(), Some("127.0.0.1"));
+        assert_eq!(profile.listen_address().unwrap(), "0.0.0.0:443");
+    }
+}
+
+#[tokio::test]
+async fn socks5_loopback_address_edit_after_enabling_authentication() {
+    let directory = tempfile::tempdir().unwrap();
+    let result = anonymous(directory.path()).await;
+    let mut server = load_servers(&result.config_path).unwrap().remove(0);
+    let mut profile = result.profile;
+    apply_profile_change(
+        &mut server,
+        &mut profile,
+        ProfileChange::Socks5Authentication(true),
+    )
+    .unwrap();
+    let server_before = crate::yaml::to_string(&server).unwrap();
+    let profile_before = serde_json::to_value(&profile).unwrap();
+    let config_before = fs::read(&result.config_path).unwrap();
+    for address in [
+        Some("203.0.113.8"),
+        Some("2001:db8::8"),
+        Some("example.com"),
+        Some("0.0.0.0"),
+        Some("::"),
+        Some("localhost"),
+        None,
+    ] {
+        let error = apply_profile_change(
+            &mut server,
+            &mut profile,
+            ProfileChange::ServerAddress(address.map(str::to_owned)),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("安全加固流程"));
+        assert_eq!(crate::yaml::to_string(&server).unwrap(), server_before);
+        assert_eq!(serde_json::to_value(&profile).unwrap(), profile_before);
+        assert_eq!(fs::read(&result.config_path).unwrap(), config_before);
+    }
+    for address in ["127.0.0.2", "::1", "[::1]"] {
+        apply_profile_change(
+            &mut server,
+            &mut profile,
+            ProfileChange::ServerAddress(Some(address.to_owned())),
+        )
+        .unwrap();
+        assert_eq!(profile.server_address.as_deref(), Some(address));
+        assert_eq!(profile.socks5_loopback(), Some(address));
+        assert_eq!(server.address, socks5_address(address, 443));
+        ensure_servers_match_state(&[server.clone()], &[profile.clone()]).unwrap();
+        assert!(crate::client::stored_share_uri(&profile, None).is_ok());
     }
 }
 
