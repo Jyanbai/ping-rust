@@ -389,6 +389,8 @@ sudo prs add vless-xhttp-reality
 
 SOCKS5 支持 TCP CONNECT 与 UDP ASSOCIATE，默认启用用户名/密码认证。SOCKS5 本身不提供传输加密，更适合作为工具型代理、内网代理或链式出口。高级添加可关闭 UDP，或在明确警告后主动选择无认证模式。Snell v3 高级添加可选择 cipher、密码和 UDP-over-TCP 开关；选择 `aes-256-gcm` 或 `chacha20-ietf-poly1305` 时会显示 Mihomo 兼容性警告。
 
+旧的无认证公网 SOCKS5 节点可用 `sudo prs socks5 secure <节点> --auth` 生成随机用户名和密码（监听不变，客户端需更新凭据），或用 `--local` 收紧为回环监听（远端连接将中断），并关闭该端口的专用防火墙放行规则。支持 UFW、firewalld、iptables/ip6tables 和原生 nftables；共享端口范围及默认策略保持原样。`--dry-run` 只输出 profile 与运行配置的脱敏 diff，不写文件。交互终端可省略方式后选择；`--yes` 或无 TTY 必须显式指定 `--auth` / `--local`。已安全节点提示无需修复。实际执行复用受管配置事务，重启后检查服务、监听及认证；失败恢复配置、防火墙和服务并再次验证。安全设置会随节点保存，编辑端口或重建配置后仍保留。
+
 [VLESS-XHTTP-REALITY](docs/wiki/VLESS-XHTTP-REALITY.md) 使用 shoes 原生 XHTTP，放在 REALITY 目标内部，无需自己的域名或证书。只支持 v2rayN / Xray 客户端，通过分享链接或二维码导入；Mihomo、sing-box 和 NekoBox 导出明确拒绝。固定 `mode: auto`，REALITY 客户端默认走 stream-one，不支持 Vision。path 默认 `/` 加 16 位随机小写十六进制，可用 `--xhttp-path /my-path` 指定；“更改配置”支持端口、SNI 和 path，改 path 的确认默认 N。快速和高级添加均为 **4) VLESS-XHTTP-REALITY**，主菜单不变。公网监听建议按 [shoes v0.3.7 文档](https://github.com/cfal/shoes/blob/v0.3.7/docs/src/content/docs/zh-cn/protocols/xhttp.md) 显式配置 `limits`，生成器不默认开启。XHTTP 节点写入 state 的独立顶层扩展，v0.2.1 可忽略该扩展并读取原有节点的 info 和导出；旧版不支持管理 XHTTP，降级操作前请用新版删除 XHTTP 节点并备份配置。
 
 WebSocket 路径默认安全随机生成；需要固定路径时可使用完整命令：

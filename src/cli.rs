@@ -22,6 +22,77 @@ use crate::{
     service::{self, ServiceAction},
 };
 
+#[derive(Debug, Subcommand)]
+pub enum Socks5Command {
+    /// 加固旧节点：认证保留远端访问，回环监听中断远端连接
+    Secure(Socks5SecureArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct Socks5SecureArgs {
+    /// 节点名称或 UUID
+    profile: String,
+    /// 随机生成用户名和密码，监听不变；客户端需更新凭据
+    #[arg(long, conflicts_with = "local")]
+    auth: bool,
+    /// 收紧到回环监听；远端连接将中断
+    #[arg(long)]
+    local: bool,
+    /// 仅输出脱敏 diff，不写文件、不更改服务或防火墙
+    #[arg(long)]
+    dry_run: bool,
+    /// 非交互执行，必须明确指定 --auth 或 --local
+    #[arg(long)]
+    yes: bool,
+}
+
+impl Socks5SecureArgs {
+    fn mode(&self, tty: bool) -> Result<Option<config::socks5_secure::SecureMode>> {
+        use config::socks5_secure::SecureMode;
+        if self.auth {
+            return Ok(Some(SecureMode::Auth));
+        }
+        if self.local {
+            return Ok(Some(SecureMode::Local));
+        }
+        if self.yes || !tty {
+            bail!("非交互模式必须显式指定 --auth 或 --local");
+        }
+        Ok(None)
+    }
+
+    async fn run(self) -> Result<()> {
+        let state = config::load_state()?;
+        let profile = client::select_profile(&state.profiles, Some(&self.profile))?;
+        if profile.protocol() != Protocol::Socks5 {
+            bail!("只有 SOCKS5 节点支持 secure");
+        }
+        if profile.socks5_risk_warning().is_none() {
+            println!("节点 {} 已安全，无需修复", profile.name);
+            return Ok(());
+        }
+        let mode = match self.mode(io::stdin().is_terminal() && io::stdout().is_terminal())? {
+            Some(mode) => mode,
+            None => {
+                println!("1) 启用随机认证：监听不变，远端仍可连；客户端必须更新凭据。\n2) 仅回环监听：远端连接将中断，并关闭该端口的现存防火墙放行规则。");
+                match input::validated_text("选择加固方式（1/2）", None, false, |s| match s
+                {
+                    "1" => Ok(config::socks5_secure::SecureMode::Auth),
+                    "2" => Ok(config::socks5_secure::SecureMode::Local),
+                    _ => bail!("请输入 1 或 2"),
+                }) {
+                    Ok(mode) => mode,
+                    Err(error) if input::is_back(&error) || error.is::<input::MenuEof>() => {
+                        return Ok(())
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        };
+        crate::socks5_secure::run(profile.id, mode, self.dry_run).await
+    }
+}
+
 /// 构建时注入的 git commit；无 .git 的源码构建为 "unknown"。
 pub const GIT_COMMIT: &str = env!("PING_RUST_GIT_COMMIT");
 
@@ -50,6 +121,11 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// 修复旧的无认证公网 SOCKS5 节点
+    Socks5 {
+        #[command(subcommand)]
+        command: Socks5Command,
+    },
     /// 可选的 SNI 检测与推荐，只输出结果，不更改配置
     Sni {
         #[command(subcommand)]
@@ -338,6 +414,9 @@ pub enum PortKind {
 
 pub async fn run(cli: Cli) -> Result<()> {
     match cli.command.unwrap_or(Command::Menu) {
+        Command::Socks5 {
+            command: Socks5Command::Secure(args),
+        } => args.run().await,
         Command::Sni { command } => crate::sni::run(command).await,
         Command::Menu => menu::run().await,
         Command::Bootstrap => {
@@ -2036,6 +2115,49 @@ fn print_certificate_notice(result: &config::GenerationResult) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn socks5_secure_arguments_and_noninteractive_mode_are_explicit() {
+        for mode in ["--auth", "--local"] {
+            let cli = Cli::try_parse_from([
+                "prs",
+                "socks5",
+                "secure",
+                "old-node",
+                mode,
+                "--dry-run",
+                "--yes",
+            ])
+            .unwrap();
+            let Some(Command::Socks5 {
+                command: Socks5Command::Secure(args),
+            }) = cli.command
+            else {
+                panic!()
+            };
+            assert_eq!(args.profile, "old-node");
+            assert!(args.dry_run && args.yes);
+            assert!(args.mode(false).unwrap().is_some());
+        }
+        assert!(
+            Cli::try_parse_from(["prs", "socks5", "secure", "n", "--auth", "--local"]).is_err()
+        );
+        for yes in [true, false] {
+            let args = Socks5SecureArgs {
+                profile: "n".into(),
+                auth: false,
+                local: false,
+                dry_run: false,
+                yes,
+            };
+            assert!(args.mode(false).unwrap_err().to_string().contains("--auth"));
+            if yes {
+                assert!(args.mode(true).is_err());
+            } else {
+                assert!(args.mode(true).unwrap().is_none());
+            }
+        }
+    }
+
     #[test]
     fn xhttp_reality_cli_accepts_paths_and_rejects_invalid_paths() {
         for command in ["add", "generate"] {

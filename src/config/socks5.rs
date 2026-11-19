@@ -117,7 +117,7 @@ impl ManagedProfile {
             return None;
         }
         Some(format!(
-            "警告：旧节点 {}（端口 {}）为无认证非回环 SOCKS5，有开放代理风险；修复：运行 `sudo prs menu` → 2) 更改配置 → 选择该节点 → 更改认证模式 → 启用用户名 + 密码认证（输入 y）",
+            "警告：旧节点 {}（端口 {}）为无认证非回环 SOCKS5，有开放代理风险；修复：运行 `sudo prs menu` → 2) 更改配置 → 选择该节点 → 更改认证模式 → 启用用户名 + 密码认证（输入 y）；也可运行 `sudo prs socks5 secure <节点> --auth` 或 `--local`（回环监听将中断远端连接）",
             self.name, self.port
         ))
     }

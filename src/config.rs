@@ -34,6 +34,9 @@ mod presets;
 mod routing;
 mod schema;
 mod socks5;
+pub(crate) mod socks5_secure;
+#[cfg(test)]
+mod socks5_secure_tests;
 pub use socks5::Socks5Listen;
 use socks5::{socks5_address, socks5_is_loopback};
 mod state;
