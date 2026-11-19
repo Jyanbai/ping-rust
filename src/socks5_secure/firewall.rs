@@ -80,8 +80,7 @@ impl FirewallPlan {
                         };
                         for rule in rules {
                             let matches = if rich {
-                                rule.contains(&format!("port=\"{port}\""))
-                                    && rule.split_whitespace().any(|s| s == "accept")
+                                firewalld_rich_port_allow(rule, port)
                             } else {
                                 rule == format!("{port}/tcp") || rule == format!("{port}/udp")
                             };
@@ -128,7 +127,7 @@ impl FirewallPlan {
                     {
                         continue;
                     }
-                    if nft_port_allow(rule, port) {
+                    if nft_input_port_allow(rule, items, port) {
                         let family = rule["family"].as_str().context("nft rule 缺少 family")?;
                         let chain = rule["chain"].as_str().context("nft rule 缺少 chain")?;
                         let handle = rule["handle"].as_u64().context("nft rule 缺少 handle")?;
@@ -285,11 +284,35 @@ pub(super) fn ufw_rule_number(line: &str, port: u16) -> Option<u32> {
 
 pub(super) fn iptables_port_allow(line: &str, port: u16) -> bool {
     let words = shell_words(line);
-    !words.windows(2).any(|w| w == ["!", "--dport"])
+    // 自定义链可能同时供 INPUT/OUTPUT/FORWARD 使用；无法确认用途时保留。
+    words.first().is_some_and(|word| word == "-A")
+        && words.get(1).is_some_and(|word| word == "INPUT")
+        && !words.windows(2).any(|w| w == ["!", "--dport"])
         && words.windows(2).any(|w| w == ["-j", "ACCEPT"])
         && words
             .windows(2)
             .any(|w| w[0] == "--dport" && w[1] == port.to_string())
+}
+
+fn firewalld_rich_port_allow(rule: &str, port: u16) -> bool {
+    let words = shell_words(rule);
+    let target_port = format!("port={port}");
+    // 属性中的引号内容保留为一个参数，避免把日志 prefix 当成元素或动作。
+    words.first().is_some_and(|word| word == "rule")
+        && words.iter().any(|word| word == "accept")
+        && words.iter().enumerate().any(|(index, word)| {
+            if word != "port" {
+                return false;
+            }
+            let attributes = words[index + 1..]
+                .iter()
+                .take_while(|word| word.contains('='))
+                .collect::<Vec<_>>();
+            attributes.iter().any(|word| **word == target_port)
+                && attributes
+                    .iter()
+                    .any(|word| matches!(word.as_str(), "protocol=tcp" | "protocol=udp"))
+        })
 }
 
 // iptables -S 的引号仅用于分隔参数；绝不交给 shell 执行。
@@ -324,6 +347,24 @@ fn shell_words(line: &str) -> Vec<String> {
     words
 }
 
+fn nft_input_port_allow(rule: &serde_json::Value, items: &[serde_json::Value], port: u16) -> bool {
+    let (Some(family), Some(table), Some(name)) = (
+        rule["family"].as_str(),
+        rule["table"].as_str(),
+        rule["chain"].as_str(),
+    ) else {
+        return false;
+    };
+    // 不依赖链名猜测用途；只删除具有明确 input hook 的基础链中的规则。
+    items.iter().any(|item| {
+        let chain = &item["chain"];
+        chain["family"] == family
+            && chain["table"] == table
+            && chain["name"] == name
+            && chain["hook"] == "input"
+    }) && nft_port_allow(rule, port)
+}
+
 fn nft_port_allow(rule: &serde_json::Value, port: u16) -> bool {
     let Some(expressions) = rule["expr"].as_array() else {
         return false;
@@ -344,6 +385,93 @@ fn nft_port_allow(rule: &serde_json::Value, port: u16) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn socks5_secure_iptables_preserves_output_forward_and_unclassified_chains() {
+        for chain in ["OUTPUT", "FORWARD", "CUSTOM"] {
+            for protocol in ["tcp", "udp"] {
+                assert!(
+                    !iptables_port_allow(
+                        &format!("-A {chain} -p {protocol} --dport 443 -j ACCEPT"),
+                        443,
+                    ),
+                    "must preserve {chain} {protocol}"
+                );
+            }
+        }
+        assert!(iptables_port_allow(
+            "-A INPUT -p tcp --dport 443 -j ACCEPT",
+            443
+        ));
+    }
+
+    #[test]
+    fn socks5_secure_nft_preserves_non_input_hooks_and_unclassified_chains() {
+        let mut rule = serde_json::json!({
+            "family": "inet", "table": "filter", "chain": "incoming", "handle": 1,
+            "expr": [
+                {"match": {"op": "==", "left": {"payload": {"protocol": "tcp", "field": "dport"}}, "right": 443}},
+                {"accept": null}
+            ]
+        });
+        for hook in ["output", "forward", "prerouting", "postrouting", "ingress"] {
+            let items = vec![
+                serde_json::json!({"chain": {
+                    "family": "inet", "table": "filter", "name": "incoming", "hook": hook
+                }}),
+                serde_json::json!({"rule": rule}),
+            ];
+            assert!(
+                !nft_input_port_allow(&rule, &items, 443),
+                "must preserve {hook}"
+            );
+        }
+        assert!(!nft_input_port_allow(&rule, &[], 443));
+        let items = vec![
+            serde_json::json!({"chain": {
+                "family": "inet", "table": "filter", "name": "incoming", "hook": "input"
+            }}),
+            serde_json::json!({"rule": rule}),
+        ];
+        assert!(nft_input_port_allow(&rule, &items, 443));
+        // 同名链必须同时匹配地址族和表，不能借用另一条链的 input hook。
+        for field in ["family", "table", "chain"] {
+            let original = rule[field].clone();
+            rule[field] = "other".into();
+            assert!(
+                !nft_input_port_allow(&rule, &items, 443),
+                "must match {field}"
+            );
+            rule[field] = original;
+        }
+    }
+
+    #[test]
+    fn socks5_secure_firewalld_rich_rules_preserve_source_ports_and_other_actions() {
+        assert!(firewalld_rich_port_allow(
+            r#"rule family="ipv4" port port="1080" protocol="tcp" accept"#,
+            1080
+        ));
+        assert!(firewalld_rich_port_allow(
+            r#"rule family="ipv6" port protocol="udp" port="1080" log prefix="socks" accept"#,
+            1080
+        ));
+        for rule in [
+            r#"rule family="ipv4" source-port port="1080" protocol="tcp" accept"#,
+            r#"rule family="ipv6" source-port port="1080" protocol="udp" accept"#,
+            r#"rule port port="1081" protocol="tcp" accept"#,
+            r#"rule port port="1080-1081" protocol="tcp" accept"#,
+            r#"rule source-port port="1080" protocol="tcp" log prefix="port accept" accept"#,
+            r#"rule port port="1080" protocol="tcp" log prefix=" accept " drop"#,
+            r#"rule port port="1080" protocol="tcp" log prefix="accept" reject"#,
+            r#"rule port port="1080" protocol="tcp" audit"#,
+        ] {
+            assert!(
+                !firewalld_rich_port_allow(rule, 1080),
+                "must preserve {rule}"
+            );
+        }
+    }
 
     #[tokio::test]
     #[cfg(unix)]
