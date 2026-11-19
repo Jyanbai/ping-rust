@@ -2,7 +2,7 @@ use std::net::{IpAddr, SocketAddr};
 
 use super::*;
 
-/// SOCKS5 的监听策略随 profile 存储。旧版例外绑定原地址，不能用于其他地址。
+/// SOCKS5 的监听策略随 profile 存储。旧版例外绑定原地址，启用认证后撤销。
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Socks5Listen {
     pub address: String,
@@ -16,6 +16,10 @@ impl Socks5Listen {
             address: address.to_owned(),
             legacy_public_address: None,
         }
+    }
+
+    pub(super) fn revoke_legacy_public_address(&mut self) {
+        self.legacy_public_address = None;
     }
 }
 
@@ -68,7 +72,7 @@ impl ManagedProfile {
         if !socks5_is_loopback(&listen.address)
             && listen.legacy_public_address.as_deref() != Some(listen.address.as_str())
         {
-            bail!("无认证 SOCKS5 必须监听回环 IP；请保留用户名密码认证");
+            bail!("无认证 SOCKS5 必须监听回环 IP；请改用回环监听或保留用户名密码认证");
         }
         Ok(())
     }
