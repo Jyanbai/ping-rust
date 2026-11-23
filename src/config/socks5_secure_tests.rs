@@ -1,3 +1,4 @@
+use super::schema::TlsTarget;
 use super::socks5_secure::{SecureMode, SecurePlan};
 use super::*;
 
@@ -85,6 +86,104 @@ fn socks5_secure_dry_run_redacts_both_diffs_and_never_writes() {
         state
     );
     assert!(!directory.path().join("profiles").exists());
+}
+
+#[test]
+fn socks5_secure_rejects_safe_state_with_unsafe_aggregate() {
+    for mode in [SecureMode::Auth, SecureMode::Local] {
+        let directory = tempfile::tempdir().unwrap();
+        let profile = legacy(directory.path());
+        let config_path = directory.path().join("config.yaml");
+        let unsafe_config = fs::read(&config_path).unwrap();
+        let mut plan = SecurePlan::prepare(directory.path(), profile.id, mode)
+            .unwrap()
+            .unwrap();
+        plan.commit_files().unwrap();
+        fs::write(&config_path, &unsafe_config).unwrap();
+
+        assert!(SecurePlan::already_secure(directory.path(), profile.id).is_err());
+        assert!(SecurePlan::prepare(directory.path(), profile.id, mode).is_err());
+        assert_eq!(fs::read(&config_path).unwrap(), unsafe_config);
+    }
+}
+
+#[test]
+fn socks5_secure_dry_run_hides_other_listeners_chain_exits_and_tls_targets() {
+    let directory = tempfile::tempdir().unwrap();
+    let profile = legacy(directory.path());
+    let config_path = directory.path().join("config.yaml");
+    let state_path = directory.path().join("ping-rust-state.json");
+    let mut state = load_state_from(&state_path).unwrap();
+    let mut servers = load_servers(&config_path).unwrap();
+    let (mut reality, reality_profile) = tests::reality_server_and_profile(53459);
+    let ServerProtocol::Tls {
+        reality_targets,
+        tls_targets,
+        ..
+    } = &mut reality.protocol
+    else {
+        panic!("需要 TLS 节点");
+    };
+    let (_, mut target) = reality_targets.pop_first().unwrap();
+    target.dest = "backend.example.com:35443".into();
+    reality_targets.insert("sni.example.com".into(), target);
+    tls_targets.insert(
+        "tls.example.com".into(),
+        TlsTarget {
+            cert: "example.crt".into(),
+            key: "example.key".into(),
+            alpn_protocols: vec![],
+            vision: false,
+            protocol: InnerProtocol::Trojan {
+                password: "fixture-password".into(),
+            },
+        },
+    );
+    let mut request = tests::request(Protocol::Shadowsocks, config_path.clone());
+    request.port = 53460;
+    request.server_name = "shadow-sni.example.com".into();
+    request.options.shadowsocks_mode = ShadowsocksMode::ShadowTlsV3;
+    request.options.shadowtls_handshake = Some("handshake.example.com:36443".into());
+    let generated = presets::generate(&request, directory.path(), Uuid::new_v4()).unwrap();
+    let mut shadow = reality_profile.clone();
+    shadow.id = Uuid::new_v4();
+    shadow.port = request.port;
+    shadow.credentials = generated.credentials;
+    state.profiles.extend([reality_profile, shadow]);
+    servers.extend([reality, generated.server]);
+
+    let exit =
+        crate::chain_proxy::parse_share_uri("socks5://alice:secret@exit.example.com:39080#exit")
+            .unwrap();
+    let exit_id = exit.id;
+    state
+        .chain_proxy
+        .apply(ChainProxyChange::Add(exit))
+        .unwrap();
+    state
+        .chain_proxy
+        .apply(ChainProxyChange::Select(exit_id))
+        .unwrap();
+    state
+        .chain_proxy
+        .apply(ChainProxyChange::SetEnabled(true))
+        .unwrap();
+    apply_chain_proxy_rules(&mut servers, &state);
+    let config = crate::yaml::to_string(&servers).unwrap();
+    fs::write(&config_path, &config).unwrap();
+    save_state_to(&state_path, &state).unwrap();
+
+    let diff = SecurePlan::prepare(directory.path(), profile.id, SecureMode::Local)
+        .unwrap()
+        .unwrap()
+        .diff()
+        .unwrap();
+    assert!(diff.contains("0.0.0.0:443"));
+    assert!(diff.contains("127.0.0.1:443"));
+    for private in ["53459", "53460", "35443", "36443", "39080", "example.com"] {
+        assert!(config.contains(private));
+        assert!(!diff.contains(private));
+    }
 }
 
 #[test]
@@ -212,6 +311,10 @@ async fn socks5_secure_restart_and_late_failures_restore_config_firewall_and_ser
         }
     }
     impl Runtime for Fake {
+        async fn preflight(&mut self, _: &SecurePlan) -> Result<()> {
+            Ok(())
+        }
+
         async fn activate(&mut self) -> Result<()> {
             self.step("restart")
         }
@@ -249,7 +352,8 @@ async fn socks5_secure_restart_and_late_failures_restore_config_firewall_and_ser
             directory: directory.path().into(),
             original: config.clone(),
         };
-        let error = crate::socks5_secure::apply(&mut plan, &mut fake)
+        let interrupt = crate::socks5_secure::Interrupt::default();
+        let error = crate::socks5_secure::apply(&mut plan, &mut fake, &interrupt)
             .await
             .unwrap_err();
         assert!(error.to_string().contains("已恢复并再次验证"));
@@ -267,6 +371,162 @@ async fn socks5_secure_restart_and_late_failures_restore_config_firewall_and_ser
         );
         assert!(!directory.path().join("profiles").exists());
     }
+}
+
+struct InterruptedRuntime<'a> {
+    interrupt: &'a crate::socks5_secure::Interrupt,
+    directory: &'a Path,
+    has_ss: bool,
+    stop_at: &'static str,
+    events: Vec<&'static str>,
+}
+
+impl crate::socks5_secure::Runtime for InterruptedRuntime<'_> {
+    async fn preflight(&mut self, _: &SecurePlan) -> Result<()> {
+        assert!(!self.directory.join("profiles").exists());
+        crate::socks5_secure::require_tools(|tool| self.has_ss || tool != "ss")
+    }
+
+    async fn activate(&mut self) -> Result<()> {
+        self.record("activate");
+        Ok(())
+    }
+
+    async fn verify(&mut self, _: &ManagedProfile) -> Result<()> {
+        if self.events.contains(&"close-firewall") {
+            self.record("final-verify");
+        } else {
+            self.record("verify");
+        }
+        Ok(())
+    }
+
+    async fn close_firewall(&mut self) -> Result<()> {
+        self.record("close-firewall");
+        Ok(())
+    }
+
+    async fn restore_firewall(&mut self) -> Result<()> {
+        self.events.push("restore-firewall");
+        // 回滚途中再次收到 SIGINT 也不能触发全局直接退出。
+        assert!(self.interrupt.defer_signal());
+        Ok(())
+    }
+
+    async fn restore_service(&mut self, _: &ManagedProfile) -> Result<()> {
+        self.events.push("restore-service");
+        Ok(())
+    }
+}
+
+impl InterruptedRuntime<'_> {
+    fn record(&mut self, event: &'static str) {
+        self.events.push(event);
+        if self.stop_at == event {
+            assert!(self.directory.join("profiles").is_dir());
+            assert!(self.interrupt.defer_signal());
+        }
+    }
+}
+
+#[tokio::test]
+async fn socks5_secure_sigint_after_commit_rolls_back_before_exit() {
+    for (stop_at, expected) in [
+        (
+            "activate",
+            &["activate", "restore-firewall", "restore-service"][..],
+        ),
+        (
+            "verify",
+            &["activate", "verify", "restore-firewall", "restore-service"],
+        ),
+        (
+            "close-firewall",
+            &[
+                "activate",
+                "verify",
+                "close-firewall",
+                "restore-firewall",
+                "restore-service",
+            ],
+        ),
+        (
+            "final-verify",
+            &[
+                "activate",
+                "verify",
+                "close-firewall",
+                "final-verify",
+                "restore-firewall",
+                "restore-service",
+            ],
+        ),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let profile = legacy(directory.path());
+        let config = fs::read(directory.path().join("config.yaml")).unwrap();
+        let state = fs::read(directory.path().join("ping-rust-state.json")).unwrap();
+        let mut plan = SecurePlan::prepare(directory.path(), profile.id, SecureMode::Local)
+            .unwrap()
+            .unwrap();
+        let interrupt = crate::socks5_secure::Interrupt::default();
+        let mut runtime = InterruptedRuntime {
+            interrupt: &interrupt,
+            directory: directory.path(),
+            has_ss: true,
+            stop_at,
+            events: vec![],
+        };
+        let error = crate::socks5_secure::apply(&mut plan, &mut runtime, &interrupt)
+            .await
+            .unwrap_err();
+        assert!(crate::is_interrupted(&error));
+        assert!(error.to_string().contains("已恢复并再次验证"));
+        assert_eq!(runtime.events, expected);
+        assert_eq!(
+            fs::read(directory.path().join("config.yaml")).unwrap(),
+            config
+        );
+        assert_eq!(
+            fs::read(directory.path().join("ping-rust-state.json")).unwrap(),
+            state
+        );
+        assert!(!directory.path().join("profiles").exists());
+        assert!(!interrupt.defer_signal());
+    }
+}
+
+#[tokio::test]
+async fn socks5_secure_missing_ss_leaves_files_and_service_untouched() {
+    let directory = tempfile::tempdir().unwrap();
+    let profile = legacy(directory.path());
+    let config = fs::read(directory.path().join("config.yaml")).unwrap();
+    let state = fs::read(directory.path().join("ping-rust-state.json")).unwrap();
+    let mut plan = SecurePlan::prepare(directory.path(), profile.id, SecureMode::Local)
+        .unwrap()
+        .unwrap();
+    let interrupt = crate::socks5_secure::Interrupt::default();
+    let mut runtime = InterruptedRuntime {
+        interrupt: &interrupt,
+        directory: directory.path(),
+        has_ss: false,
+        stop_at: "",
+        events: vec![],
+    };
+    let error = crate::socks5_secure::apply(&mut plan, &mut runtime, &interrupt)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("ss"));
+    assert!(runtime.events.is_empty());
+    assert_eq!(
+        fs::read(directory.path().join("config.yaml")).unwrap(),
+        config
+    );
+    assert_eq!(
+        fs::read(directory.path().join("ping-rust-state.json")).unwrap(),
+        state
+    );
+    assert!(!directory.path().join("profiles").exists());
 }
 
 #[tokio::test]

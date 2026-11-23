@@ -62,19 +62,26 @@ impl Socks5SecureArgs {
     }
 
     async fn run(self) -> Result<()> {
-        let state = config::load_state()?;
+        let state = config::load_state().map_err(|_| {
+            anyhow::anyhow!("无法读取 SOCKS5 管理状态，请检查 ping-rust-state.json 和 config.yaml")
+        })?;
         let profile = client::select_profile(&state.profiles, Some(&self.profile))?;
         if profile.protocol() != Protocol::Socks5 {
             bail!("只有 SOCKS5 节点支持 secure");
         }
-        if profile.socks5_risk_warning().is_none() {
+        if profile.socks5_risk_warning().is_none()
+            && config::socks5_secure::SecurePlan::already_secure(
+                Path::new(crate::utils::CONFIG_DIR),
+                profile.id,
+            )?
+        {
             println!("节点 {} 已安全，无需修复", profile.name);
             return Ok(());
         }
         let mode = match self.mode(io::stdin().is_terminal() && io::stdout().is_terminal())? {
             Some(mode) => mode,
             None => {
-                println!("1) 启用随机认证：监听不变，远端仍可连；客户端必须更新凭据。\n2) 仅回环监听：远端连接将中断，并关闭该端口的现存防火墙放行规则。");
+                println!("1) 启用随机认证：监听不变，远端仍可连；客户端必须更新凭据。\n2) 仅回环监听：远端连接将中断，并移除匹配的专用防火墙放行规则。");
                 match input::validated_text("选择加固方式（1/2）", None, false, |s| match s
                 {
                     "1" => Ok(config::socks5_secure::SecureMode::Auth),
@@ -117,6 +124,17 @@ pub fn is_version_request<I: IntoIterator<Item = String>>(args: I) -> bool {
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
+}
+
+impl Cli {
+    pub(crate) fn is_socks5_secure_dry_run(&self) -> bool {
+        matches!(
+            &self.command,
+            Some(Command::Socks5 {
+                command: Socks5Command::Secure(args)
+            }) if args.dry_run
+        )
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -2128,6 +2146,7 @@ mod tests {
                 "--yes",
             ])
             .unwrap();
+            assert!(cli.is_socks5_secure_dry_run());
             let Some(Command::Socks5 {
                 command: Socks5Command::Secure(args),
             }) = cli.command

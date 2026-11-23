@@ -19,25 +19,43 @@ pub(crate) struct SecurePlan {
 }
 
 impl SecurePlan {
-    pub(crate) fn prepare(directory: &Path, id: Uuid, mode: SecureMode) -> Result<Option<Self>> {
-        let mut state = load_state_from(&directory.join("ping-rust-state.json"))?;
+    fn load_checked(
+        directory: &Path,
+        id: Uuid,
+    ) -> Result<(ManagedState, Vec<ServerConfig>, usize)> {
+        let state = load_state_from(&directory.join("ping-rust-state.json")).map_err(|_| {
+            anyhow::anyhow!("无法读取 SOCKS5 管理状态，请检查 ping-rust-state.json 和 config.yaml")
+        })?;
         let index = state
             .profiles
             .iter()
             .position(|p| p.id == id)
             .context("未找到 SOCKS5 节点")?;
-        let original = state.profiles[index].clone();
-        if original.protocol() != Protocol::Socks5 {
+        if state.profiles[index].protocol() != Protocol::Socks5 {
             bail!("只有 SOCKS5 节点支持 secure");
         }
+        let servers = load_servers(&directory.join("config.yaml"))
+            .map_err(|_| anyhow::anyhow!("无法读取 SOCKS5 的聚合配置，请检查 config.yaml"))?;
+        ensure_servers_match_state(&servers, &state.profiles).map_err(|_| {
+            anyhow::anyhow!("聚合配置与管理状态不一致，请检查 config.yaml 和 ping-rust-state.json")
+        })?;
+        Ok((state, servers, index))
+    }
+
+    pub(crate) fn already_secure(directory: &Path, id: Uuid) -> Result<bool> {
+        let (state, _, index) = Self::load_checked(directory, id)?;
+        Ok(state.profiles[index].socks5_risk_warning().is_none())
+    }
+
+    pub(crate) fn prepare(directory: &Path, id: Uuid, mode: SecureMode) -> Result<Option<Self>> {
+        let (mut state, mut servers, index) = Self::load_checked(directory, id)?;
+        let original = state.profiles[index].clone();
         if original.socks5_risk_warning().is_none() {
             return Ok(None);
         }
-        let mut servers = load_servers(&directory.join("config.yaml"))?;
-        ensure_servers_match_state(&servers, &state.profiles)?;
         ensure_chain_proxy_matches_state(&servers, &state)?;
-        let before_yaml = redacted_yaml(&servers)?;
-        let before_profile = redacted_yaml(&servers[index])?;
+        let before_yaml = redacted_aggregate(&servers, index)?;
+        let before_profile = crate::yaml::to_string(&redacted_profile(&servers[index])?)?;
         match mode {
             SecureMode::Auth => apply_profile_change(
                 &mut servers[index],
@@ -89,12 +107,12 @@ impl SecurePlan {
             (
                 format!("profiles/{} (profile)", self.profile.config_file_name()),
                 &self.before_profile,
-                redacted_yaml(&self.servers[index])?,
+                crate::yaml::to_string(&redacted_profile(&self.servers[index])?)?,
             ),
             (
                 "config.yaml".to_owned(),
                 &self.before_yaml,
-                redacted_yaml(&self.servers)?,
+                redacted_aggregate(&self.servers, index)?,
             ),
         ] {
             output.push_str(&format!("--- {name}\n+++ {name}\n"));
@@ -109,6 +127,9 @@ impl SecurePlan {
     }
 
     pub(crate) async fn validate(&self) -> Result<()> {
+        if !utils::command_exists(utils::SHOES_BIN) {
+            bail!("未找到可执行的 shoes，请先安装 shoes 后重试");
+        }
         let yaml = crate::yaml::to_string(&self.servers)?;
         validate_yaml(&yaml)?;
         validate_candidate_with_shoes(&yaml, &self.directory).await
@@ -149,27 +170,34 @@ impl SecurePlan {
     }
 }
 
-// 聚合配置可能含其他协议的密钥；仅保留监听地址和协议类型，其余字符串全部脱敏。
-fn redacted_yaml(value: &impl Serialize) -> Result<String> {
-    fn redact(value: &mut serde_json::Value, key: &str) {
-        match value {
-            serde_json::Value::Object(map) => {
-                for (key, value) in map {
-                    redact(value, key);
-                }
-            }
-            serde_json::Value::Array(values) => {
-                for value in values {
-                    redact(value, key);
-                }
-            }
-            serde_json::Value::String(text) if !matches!(key, "address" | "type") => {
-                *text = "[REDACTED]".into()
-            }
-            _ => {}
-        }
+fn redacted_profile(server: &ServerConfig) -> Result<serde_json::Value> {
+    let ServerProtocol::Socks {
+        username,
+        password,
+        udp_enabled,
+    } = &server.protocol
+    else {
+        bail!("预览目标不是 SOCKS5 配置");
+    };
+    // 只展示此命令涉及的字段。规则与其他节点可在值或映射键中携带地址和凭据。
+    let mut profile = serde_json::json!({
+        "address": server.address,
+        "protocol": { "type": "socks", "udp_enabled": udp_enabled }
+    });
+    if username.is_some() {
+        profile["protocol"]["username"] = "[REDACTED]".into();
     }
-    let mut value = serde_json::to_value(value)?;
-    redact(&mut value, "");
-    Ok(crate::yaml::to_string(&value)?)
+    if password.is_some() {
+        profile["protocol"]["password"] = "[REDACTED]".into();
+    }
+    if !server.rules.is_empty() {
+        profile["rules"] = "[REDACTED]".into();
+    }
+    Ok(profile)
+}
+
+fn redacted_aggregate(servers: &[ServerConfig], index: usize) -> Result<String> {
+    let mut preview = vec![serde_json::Value::from("[REDACTED]"); servers.len()];
+    preview[index] = redacted_profile(&servers[index])?;
+    crate::yaml::to_string(&preview)
 }

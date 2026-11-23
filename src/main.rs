@@ -31,10 +31,54 @@ mod shoes_e2e_tests;
 
 use anyhow::Result;
 use clap::Parser;
-use std::future::Future;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    listen_for_interrupts().await?;
+    if cli::is_version_request(std::env::args()) {
+        let (stdout, stderr) = cli::version_output();
+        println!("{stdout}");
+        eprintln!("{stderr}");
+        return Ok(());
+    }
+    let cli = cli::Cli::parse();
+    if !cli.is_socks5_secure_dry_run() && std::path::Path::new(utils::STATE_FILE).exists() {
+        if let Ok(state) = config::load_state() {
+            for profile in &state.profiles {
+                if let Some(warning) = profile.socks5_risk_warning() {
+                    eprintln!("{warning}");
+                }
+            }
+        }
+    }
+    let securing_socks5 = matches!(&cli.command, Some(cli::Command::Socks5 { .. }));
+    let result = cli::run(cli).await;
+    if let Some(error) = result.as_ref().err().filter(|error| is_interrupted(error)) {
+        if securing_socks5 {
+            eprintln!("{error:#}");
+        }
+        restore_cursor_and_exit();
+    }
+    result
+}
+
+#[cfg(unix)]
+async fn listen_for_interrupts() -> Result<()> {
+    use tokio::signal::unix::{signal, SignalKind};
+
+    let mut signals = signal(SignalKind::interrupt())?;
+    tokio::spawn(async move {
+        while signals.recv().await.is_some() {
+            handle_interrupt();
+        }
+    });
+    Ok(())
+}
+
+#[cfg(not(unix))]
+async fn listen_for_interrupts() -> Result<()> {
+    use std::future::Future;
+
     let interrupt = tokio::signal::ctrl_c();
     tokio::pin!(interrupt);
     // Poll once before entering blocking terminal prompts to install the handler.
@@ -47,29 +91,16 @@ async fn main() -> Result<()> {
     .await?;
     tokio::spawn(async {
         if tokio::signal::ctrl_c().await.is_ok() {
-            restore_cursor_and_exit();
+            handle_interrupt();
         }
     });
-    if cli::is_version_request(std::env::args()) {
-        let (stdout, stderr) = cli::version_output();
-        println!("{stdout}");
-        eprintln!("{stderr}");
-        return Ok(());
-    }
-    if std::path::Path::new(utils::STATE_FILE).exists() {
-        if let Ok(state) = config::load_state() {
-            for profile in &state.profiles {
-                if let Some(warning) = profile.socks5_risk_warning() {
-                    eprintln!("{warning}");
-                }
-            }
-        }
-    }
-    let result = cli::run(cli::Cli::parse()).await;
-    if result.as_ref().is_err_and(is_interrupted) {
+    Ok(())
+}
+
+fn handle_interrupt() {
+    if !socks5_secure::INTERRUPT.defer_signal() {
         restore_cursor_and_exit();
     }
-    result
 }
 
 fn is_interrupted(error: &anyhow::Error) -> bool {
