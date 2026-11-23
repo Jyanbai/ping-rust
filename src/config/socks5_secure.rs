@@ -1,4 +1,6 @@
 //! SOCKS5 加固的只读计划与现有受管文件事务。
+use std::net::SocketAddr;
+
 use super::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -146,27 +148,71 @@ impl SecurePlan {
             generated_certificate: None,
             generated_certificate_key: None,
         };
+        let original_state = if socks5::listen_migration_pending(&state)? {
+            // 在替换聚合配置前保存旧监听，避免无锁读者把临时回环监听迁移进旧状态。
+            let mut original_state = self.state.clone();
+            let profile = original_state
+                .profiles
+                .iter_mut()
+                .find(|profile| profile.id == self.original.id)
+                .context("未找到 SOCKS5 节点")?;
+            *profile = self.original.clone();
+            Some(original_state)
+        } else {
+            None
+        };
         commit::commit_managed_with_state_writer(
             &config,
             &state,
             &profiles,
             &self.servers,
             &self.state,
-            save_state_to,
+            |path, _| match original_state {
+                Some(original_state) => save_state_to(path, &original_state),
+                None => Ok(()),
+            },
         )?;
         self.rollback = Some(rollback);
         Ok(())
     }
 
+    pub(crate) fn publish_state(&mut self) -> Result<()> {
+        save_state_to(&self.directory.join("ping-rust-state.json"), &self.state)
+            .context("保存已验证的 SOCKS5 状态失败")?;
+        self.rollback = None;
+        Ok(())
+    }
+
     pub(crate) fn rollback(&mut self) -> Result<()> {
-        self.rollback
+        let rollback = self
+            .rollback
             .take()
-            .context("没有已提交的 SOCKS5 加固事务")?
-            .restore_to(
-                &self.directory.join("config.yaml"),
-                &self.directory.join("ping-rust-state.json"),
-                &self.directory.join("profiles"),
-            )
+            .context("没有已提交的 SOCKS5 加固事务")?;
+        let mut failures = Vec::new();
+        // 先还原聚合配置，再恢复可能缺少显式 listen 的旧状态。
+        match transaction::restore_snapshot(
+            &self.directory.join("config.yaml"),
+            rollback.config.as_deref(),
+            0o600,
+        ) {
+            Ok(()) => {
+                if let Err(error) = transaction::restore_snapshot(
+                    &self.directory.join("ping-rust-state.json"),
+                    rollback.state.as_deref(),
+                    0o600,
+                ) {
+                    failures.push(format!("状态={error:#}"));
+                }
+            }
+            Err(error) => failures.push(format!("聚合配置={error:#}")),
+        }
+        if let Err(error) = rollback.profiles.restore(&self.directory.join("profiles")) {
+            failures.push(format!("节点目录={error:#}"));
+        }
+        if !failures.is_empty() {
+            bail!("恢复受管配置失败：{}", failures.join("；"));
+        }
+        Ok(())
     }
 }
 
@@ -180,8 +226,14 @@ fn redacted_profile(server: &ServerConfig) -> Result<serde_json::Value> {
         bail!("预览目标不是 SOCKS5 配置");
     };
     // 只展示此命令涉及的字段。规则与其他节点可在值或映射键中携带地址和凭据。
+    let listen: SocketAddr = server.address.parse().context("SOCKS5 监听地址无效")?;
+    let address = if listen.ip().is_unspecified() || listen.ip().is_loopback() {
+        server.address.clone()
+    } else {
+        format!("[REDACTED]:{}", listen.port())
+    };
     let mut profile = serde_json::json!({
-        "address": server.address,
+        "address": address,
         "protocol": { "type": "socks", "udp_enabled": udp_enabled }
     });
     if username.is_some() {

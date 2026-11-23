@@ -7,12 +7,16 @@ fn legacy(directory: &Path) -> ManagedProfile {
 }
 
 fn legacy_at(directory: &Path, port: u16) -> ManagedProfile {
+    legacy_bound_to(directory, port, "0.0.0.0")
+}
+
+fn legacy_bound_to(directory: &Path, port: u16, host: &str) -> ManagedProfile {
     let mut request = tests::request(Protocol::Socks5, directory.join("config.yaml"));
     request.options.socks5_no_auth = true;
     request.port = port;
     let generated = presets::generate(&request, directory, Uuid::nil()).unwrap();
     let mut server = generated.server;
-    server.address = format!("0.0.0.0:{port}");
+    server.address = format!("{host}:{port}");
     let mut profile = ManagedProfile {
         id: Uuid::nil(),
         name: "legacy-socks".into(),
@@ -46,6 +50,29 @@ fn legacy_at(directory: &Path, port: u16) -> ManagedProfile {
     )
     .unwrap();
     profile
+}
+
+#[test]
+fn socks5_secure_preview_hides_original_public_ipv4_and_ipv6() {
+    for (host, loopback) in [("203.0.113.8", "127.0.0.1"), ("[2001:db8::8]", "[::1]")] {
+        let directory = tempfile::tempdir().unwrap();
+        let profile = legacy_bound_to(directory.path(), 443, host);
+        for mode in [SecureMode::Auth, SecureMode::Local] {
+            let diff = SecurePlan::prepare(directory.path(), profile.id, mode)
+                .unwrap()
+                .unwrap()
+                .diff()
+                .unwrap();
+            let (profile_diff, aggregate_diff) = diff.split_once("--- config.yaml").unwrap();
+            for section in [profile_diff, aggregate_diff] {
+                assert!(!section.contains(host.trim_matches(['[', ']'])));
+                assert!(section.contains("[REDACTED]:443"));
+                if mode == SecureMode::Local {
+                    assert!(section.contains(&format!("{loopback}:443")));
+                }
+            }
+        }
+    }
 }
 
 #[test]
@@ -120,12 +147,60 @@ fn socks5_secure_rejects_safe_state_with_unsafe_aggregate() {
             .unwrap()
             .unwrap();
         plan.commit_files().unwrap();
+        plan.publish_state().unwrap();
         fs::write(&config_path, &unsafe_config).unwrap();
 
         assert!(SecurePlan::already_secure(directory.path(), profile.id).is_err());
         assert!(SecurePlan::prepare(directory.path(), profile.id, mode).is_err());
         assert_eq!(fs::read(&config_path).unwrap(), unsafe_config);
     }
+}
+
+#[tokio::test]
+async fn socks5_secure_already_safe_still_requires_noninteractive_mode() {
+    use crate::cli::{Cli, Command, Socks5Command};
+    use clap::Parser;
+
+    let directory = tempfile::tempdir().unwrap();
+    let profile = legacy(directory.path());
+    let mut plan = SecurePlan::prepare(directory.path(), profile.id, SecureMode::Local)
+        .unwrap()
+        .unwrap();
+    plan.commit_files().unwrap();
+    plan.publish_state().unwrap();
+
+    let lock = directory.path().join("ping-rust.lock");
+    for (tty, dry_run, option, success) in [
+        (true, false, Some("--yes"), false),
+        (false, false, None, false),
+        (false, true, None, false),
+        (false, true, Some("--local"), true),
+        (true, true, None, true),
+    ] {
+        let cli = Cli::try_parse_from(
+            ["prs", "socks5", "secure", &profile.name]
+                .into_iter()
+                .chain(dry_run.then_some("--dry-run"))
+                .chain(option),
+        )
+        .unwrap();
+        let Some(Command::Socks5 {
+            command: Socks5Command::Secure(args),
+        }) = cli.command
+        else {
+            panic!("需要 SOCKS5 secure 命令");
+        };
+        let result = args.run_in(directory.path(), &lock, tty).await;
+        if success {
+            result.unwrap();
+        } else {
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("--auth 或 --local"));
+        }
+    }
+    assert!(!lock.exists());
 }
 
 #[test]
@@ -216,6 +291,7 @@ fn socks5_secure_persists_safety_across_port_edit_and_rebuild() {
             .unwrap()
             .unwrap();
         plan.commit_files().unwrap();
+        plan.publish_state().unwrap();
         let path = directory.path().join("ping-rust-state.json");
         let mut state = load_state_from(&path).unwrap();
         let mut servers = load_servers(&directory.path().join("config.yaml")).unwrap();
@@ -394,12 +470,117 @@ async fn socks5_secure_restart_and_late_failures_restore_config_firewall_and_ser
     }
 }
 
+#[tokio::test]
+async fn socks5_secure_publishes_safety_only_after_runtime_verification() {
+    struct Observer<'a> {
+        directory: &'a Path,
+        id: Uuid,
+        fail_final_verification: bool,
+        verifications: usize,
+        restored: bool,
+    }
+
+    impl Observer<'_> {
+        fn assert_unpublished(&self) {
+            let bytes = fs::read(self.directory.join("ping-rust-state.json")).unwrap();
+            let disk_state: ManagedState = serde_json::from_slice(&bytes).unwrap();
+            let Credentials::Socks5 { username, .. } = &disk_state.profiles[0].credentials else {
+                panic!("需要 SOCKS5 节点");
+            };
+            assert!(username.is_none());
+            // 无锁读者从旧版状态和聚合配置推断，仍不能报告节点安全。
+            assert!(!matches!(
+                SecurePlan::already_secure(self.directory, self.id),
+                Ok(true)
+            ));
+        }
+    }
+
+    impl crate::socks5_secure::Runtime for Observer<'_> {
+        async fn preflight(&mut self, _: &SecurePlan) -> Result<()> {
+            Ok(())
+        }
+
+        async fn activate(&mut self) -> Result<()> {
+            self.assert_unpublished();
+            Ok(())
+        }
+
+        async fn verify(&mut self, _: &ManagedProfile) -> Result<()> {
+            self.assert_unpublished();
+            self.verifications += 1;
+            if self.verifications == 2 && self.fail_final_verification {
+                bail!("模拟最终验证失败");
+            }
+            Ok(())
+        }
+
+        async fn close_firewall(&mut self) -> Result<()> {
+            self.assert_unpublished();
+            Ok(())
+        }
+
+        async fn restore_firewall(&mut self) -> Result<()> {
+            self.assert_unpublished();
+            Ok(())
+        }
+
+        async fn restore_service(&mut self, _: &ManagedProfile) -> Result<()> {
+            self.assert_unpublished();
+            self.restored = true;
+            Ok(())
+        }
+    }
+
+    for mode in [SecureMode::Auth, SecureMode::Local] {
+        for fail_final_verification in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let id = legacy(directory.path()).id;
+            let mut plan = SecurePlan::prepare(directory.path(), id, mode)
+                .unwrap()
+                .unwrap();
+            let state_path = directory.path().join("ping-rust-state.json");
+            let original = fs::read(&state_path).unwrap();
+            let mut runtime = Observer {
+                directory: directory.path(),
+                id,
+                fail_final_verification,
+                verifications: 0,
+                restored: false,
+            };
+            let lock_path = directory.path().join("ping-rust.lock");
+            let lock = utils::exclusive_lock(&lock_path).unwrap();
+            let reader_directory = directory.path().to_owned();
+            let reader = std::thread::spawn(move || {
+                utils::read_with_existing_lock(&lock_path, || {
+                    SecurePlan::already_secure(&reader_directory, id)
+                })
+            });
+            let interrupt = crate::socks5_secure::Interrupt::default();
+            let result = crate::socks5_secure::apply(&mut plan, &mut runtime, &interrupt).await;
+            drop(lock);
+            assert_eq!(runtime.verifications, 2);
+            assert_eq!(runtime.restored, fail_final_verification);
+            assert_eq!(result.is_err(), fail_final_verification);
+            assert_eq!(reader.join().unwrap().unwrap(), !fail_final_verification);
+            assert_eq!(
+                SecurePlan::already_secure(directory.path(), id).unwrap(),
+                !fail_final_verification
+            );
+            if fail_final_verification {
+                assert_eq!(fs::read(&state_path).unwrap(), original);
+            }
+        }
+    }
+}
+
 struct InterruptedRuntime<'a> {
     interrupt: &'a crate::socks5_secure::Interrupt,
     directory: &'a Path,
     has_ss: bool,
     stop_at: &'static str,
     events: Vec<&'static str>,
+    service_active: bool,
 }
 
 impl crate::socks5_secure::Runtime for InterruptedRuntime<'_> {
@@ -435,6 +616,9 @@ impl crate::socks5_secure::Runtime for InterruptedRuntime<'_> {
     }
 
     async fn restore_service(&mut self, _: &ManagedProfile) -> Result<()> {
+        self.service_active = false;
+        assert!(self.interrupt.defer_signal());
+        self.service_active = true;
         self.events.push("restore-service");
         Ok(())
     }
@@ -497,6 +681,7 @@ async fn socks5_secure_sigint_after_commit_rolls_back_before_exit() {
             has_ss: true,
             stop_at,
             events: vec![],
+            service_active: true,
         };
         let error = crate::socks5_secure::apply(&mut plan, &mut runtime, &interrupt)
             .await
@@ -504,6 +689,7 @@ async fn socks5_secure_sigint_after_commit_rolls_back_before_exit() {
         assert!(crate::is_interrupted(&error));
         assert!(error.to_string().contains("已恢复并再次验证"));
         assert_eq!(runtime.events, expected);
+        assert!(runtime.service_active);
         assert_eq!(
             fs::read(directory.path().join("config.yaml")).unwrap(),
             config
@@ -533,6 +719,7 @@ async fn socks5_secure_missing_ss_leaves_files_and_service_untouched() {
         has_ss: false,
         stop_at: "",
         events: vec![],
+        service_active: true,
     };
     let error = crate::socks5_secure::apply(&mut plan, &mut runtime, &interrupt)
         .await

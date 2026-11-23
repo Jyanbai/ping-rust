@@ -18,6 +18,19 @@ pub const SHOES_PROVENANCE_FILE: &str = "/var/lib/ping-rust/shoes-install.json";
 pub const LOCK_FILE: &str = "/run/lock/ping-rust.lock";
 pub const SERVICE_FILE: &str = "/etc/systemd/system/shoes.service";
 
+pub(crate) fn isolated_command(program: &str) -> Command {
+    let command = Command::new(program);
+    #[cfg(unix)]
+    let command = {
+        use std::os::unix::process::CommandExt;
+        // 由父进程决定何时取消，终端的 SIGINT 不直接中断正在补偿的命令。
+        let mut command = command;
+        command.process_group(0);
+        command
+    };
+    command
+}
+
 pub fn remove_command_aliases() -> Result<usize> {
     let executable = env::current_exe().context("无法确定 ping-rust 当前路径")?;
     let Some(parent) = executable.parent() else {
@@ -178,6 +191,26 @@ impl Drop for ExclusiveLock {
     fn drop(&mut self) {
         let _ = self.0.unlock();
     }
+}
+
+pub(crate) fn read_with_existing_lock<T>(path: &Path, read: impl Fn() -> Result<T>) -> Result<T> {
+    let lock_if_exists = || match File::open(path) {
+        Ok(file) => {
+            FileExt::lock_shared(&file).with_context(|| format!("锁定 {} 失败", path.display()))?;
+            Ok(Some(file))
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("打开锁文件 {} 失败", path.display())),
+    };
+    if let Some(_lock) = lock_if_exists()? {
+        return read();
+    }
+    let result = read();
+    // 首次加固可能在无锁读取期间创建锁文件。加锁后重新读取这一份快照。
+    if let Some(_lock) = lock_if_exists()? {
+        return read();
+    }
+    result
 }
 
 pub fn atomic_write(destination: &Path, contents: &[u8], mode: u32) -> Result<()> {

@@ -2726,7 +2726,7 @@ pub fn load_state() -> Result<ManagedState> {
     load_state_from(Path::new(utils::STATE_FILE))
 }
 
-fn load_state_from(path: &Path) -> Result<ManagedState> {
+pub(crate) fn load_state_from(path: &Path) -> Result<ManagedState> {
     let json = fs::read_to_string(path)
         .with_context(|| format!("读取管理状态 {} 失败", path.display()))?;
     let mut state: ManagedState = serde_json::from_str(&json).context("管理状态 JSON 已损坏")?;

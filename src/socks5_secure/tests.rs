@@ -1,5 +1,27 @@
 use super::*;
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn socks5_secure_rollback_commands_are_outside_the_foreground_signal_group() {
+    let output = command(
+        "sh",
+        &[
+            "-c".into(),
+            "ps -o pgid= -p \"$$\"; printf '%s\\n' \"$$\"".into(),
+        ],
+        None,
+    )
+    .await
+    .unwrap();
+    let ids: Vec<u32> = output
+        .split_whitespace()
+        .map(|id| id.parse().unwrap())
+        .collect();
+    assert_eq!(ids.len(), 2);
+    // PGID 等于子进程自己的 PID，终端发给父进程组的 SIGINT 不会中断恢复命令。
+    assert_eq!(ids[0], ids[1]);
+}
+
 #[test]
 fn socks5_secure_listener_verification_ignores_other_processes_on_same_port() {
     for address in ["203.0.113.8:1080", "127.0.0.1:1080", "[::1]:1080"] {

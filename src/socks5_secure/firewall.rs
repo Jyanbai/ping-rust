@@ -38,10 +38,23 @@ pub(super) struct FirewallPlan {
 }
 
 enum Rule {
-    Ufw { text: String, listener: SocketAddr },
-    Rich { base: Vec<String>, text: String },
-    Iptables { program: &'static str, text: String },
-    Nft { spec: Value, chain_handle: u64 },
+    Ufw {
+        text: String,
+        listener: SocketAddr,
+    },
+    Rich {
+        base: Vec<String>,
+        text: String,
+    },
+    Iptables {
+        program: &'static str,
+        text: String,
+    },
+    Nft {
+        spec: Value,
+        chain_handle: u64,
+        may_use_netfilter_persistent: bool,
+    },
 }
 
 // 只记录已发起删除的规则。原顺序用于定位恢复点，不用于恢复整条链。
@@ -128,28 +141,30 @@ impl FirewallPlan {
                 }
             }
         }
-        // 管理器自己的规则由其接口持久化；仍检查原生规则，避免漏掉并行配置。
-        if backend.available("nft") {
-            let mut xtables_families = Vec::new();
-            for (program, family) in [("iptables", "ip"), ("ip6tables", "ip6")] {
-                if backend.available(program)
-                    && backend
-                        .execute(program, &["--version".into()], None)
-                        .await?
-                        .contains("nf_tables")
-                {
-                    xtables_families.push(family);
-                }
-            }
+        let (program, family) = if listener.is_ipv4() {
+            ("iptables", "ip")
+        } else {
+            ("ip6tables", "ip6")
+        };
+        let has_iptables = backend.available(program);
+        let iptables_nft = has_iptables
+            && backend
+                .execute(program, &["--version".into()], None)
+                .await?
+                .contains("(nf_tables)");
+        let has_nft = backend.available("nft");
+        if iptables_nft && !has_nft {
+            bail!("{program} 使用 nf_tables，请安装 nftables 后重试");
+        }
+        // nft 同时处理兼容规则和同一张表里的原生规则，按 handle 只删除一次。
+        // UFW 和 firewalld 仍通过各自接口修改持久配置。
+        if has_nft {
             let items = nft_list(backend, json!({"ruleset": null})).await?;
             for item in &items {
                 let rule = &item["rule"];
                 let table = rule["table"].as_str().unwrap_or_default();
-                // ufw/firewalld 和 iptables-nft 的表交给各自工具处理。
                 if (managed_firewalld && table == "firewalld")
                     || (managed_ufw && table.starts_with("ufw"))
-                    || (xtables_families.contains(&rule["family"].as_str().unwrap_or_default())
-                        && matches!(table, "filter" | "nat" | "mangle" | "raw" | "security"))
                 {
                     continue;
                 }
@@ -164,16 +179,14 @@ impl FirewallPlan {
                     plan.rules.push(Rule::Nft {
                         spec: rule.clone(),
                         chain_handle,
+                        may_use_netfilter_persistent: iptables_nft
+                            && rule["family"] == family
+                            && matches!(table, "filter" | "nat" | "mangle" | "raw" | "security"),
                     });
                 }
             }
         }
-        let program = if listener.is_ipv4() {
-            "iptables"
-        } else {
-            "ip6tables"
-        };
-        if backend.available(program) {
+        if has_iptables && !iptables_nft {
             for rule in iptables_input(backend, program).await?.lines() {
                 if iptables_delete_args(rule, listener).is_some() {
                     plan.rules.push(Rule::Iptables {
@@ -242,9 +255,13 @@ impl FirewallPlan {
                     persistent += 1;
                 }
                 Rule::Rich { base, .. } if base[0] == "--permanent" => persistent += 1,
-                Rule::Nft { .. } => {
+                Rule::Nft {
+                    may_use_netfilter_persistent,
+                    ..
+                } => {
                     runtime += 1;
                     nft = true;
+                    iptables |= *may_use_netfilter_persistent;
                 }
                 Rule::Iptables { .. } => {
                     runtime += 1;
@@ -307,7 +324,9 @@ impl Rule {
                 .filter(|line| line.starts_with("-A INPUT "))
                 .map(LiveRule::from)
                 .collect()),
-            Rule::Nft { spec, chain_handle } => {
+            Rule::Nft {
+                spec, chain_handle, ..
+            } => {
                 let items = nft_list(
                     backend,
                     json!({"chain": {
@@ -395,7 +414,7 @@ impl Rule {
         if current_count >= original_count {
             return Ok(());
         }
-        let position = restore_position(attempt, &current);
+        let position = restore_position(attempt, &current, matches!(self, Rule::Iptables { .. }));
         match self {
             Rule::Ufw { listener, .. } => {
                 let mut args = vec![];
@@ -449,9 +468,10 @@ impl Rule {
     }
 }
 
-fn restore_position(attempt: &Attempt, current: &[LiveRule]) -> usize {
+fn restore_position(attempt: &Attempt, current: &[LiveRule], use_occurrence: bool) -> usize {
     // 优先找原后继，其次找原前驱。根据现行顺序插入，保留并发新增规则的位置。
-    let locate = |anchor: &LiveRule| {
+    let locate = |anchor_index: usize| {
+        let anchor = &attempt.before[anchor_index];
         if let Some(handle) = anchor.handle {
             if let Some(index) = current
                 .iter()
@@ -460,29 +480,35 @@ fn restore_position(attempt: &Attempt, current: &[LiveRule]) -> usize {
                 return Some(index);
             }
         }
-        // 相同规则可能出现多次，不能把另一处的同名规则当作定位点。
-        if attempt
+        let original_count = attempt
             .before
             .iter()
             .filter(|rule| rule.text == anchor.text)
-            .count()
-            != 1
-        {
+            .count();
+        // iptables 没有 handle；同名规则数量未变时用第几次出现定位。
+        if !use_occurrence && original_count != 1 {
             return None;
         }
         let mut matches = current
             .iter()
             .enumerate()
-            .filter(|(_, rule)| rule.text == anchor.text);
-        let (index, _) = matches.next()?;
-        matches.next().is_none().then_some(index)
+            .filter(|(_, rule)| rule.text == anchor.text)
+            .map(|(index, _)| index);
+        if matches.clone().count() != original_count {
+            return None;
+        }
+        let occurrence = attempt.before[..anchor_index]
+            .iter()
+            .filter(|rule| rule.text == anchor.text)
+            .count();
+        matches.nth(occurrence)
     };
-    for anchor in &attempt.before[attempt.position + 1..] {
+    for anchor in attempt.position + 1..attempt.before.len() {
         if let Some(index) = locate(anchor) {
             return index;
         }
     }
-    for anchor in attempt.before[..attempt.position].iter().rev() {
+    for anchor in (0..attempt.position).rev() {
         if let Some(index) = locate(anchor) {
             return index + 1;
         }
@@ -825,6 +851,7 @@ fn nft_port_allow(rule: &serde_json::Value, listener: SocketAddr) -> bool {
     let ip = listener.ip();
     let ip_family = if ip.is_ipv4() { "ip" } else { "ip6" };
     let nfproto = if ip.is_ipv4() { "ipv4" } else { "ipv6" };
+    let header_protocol = if ip.is_ipv4() { "protocol" } else { "nexthdr" };
     let mut family_scoped = rule["family"] != "inet";
     let (mut dport, mut accept) = (false, false);
     let mut destination = ip.is_unspecified();
@@ -844,6 +871,12 @@ fn nft_port_allow(rule: &serde_json::Value, listener: SocketAddr) -> bool {
         let value = &condition["right"];
         if condition["left"]["meta"]["key"] == "nfproto" && value == nfproto {
             family_scoped = true;
+            continue;
+        }
+        if (condition["left"]["meta"]["key"] == "l4proto"
+            || (payload["protocol"] == ip_family && payload["field"] == header_protocol))
+            && (value == "tcp" || value.as_u64() == Some(6))
+        {
             continue;
         }
         match (payload["protocol"].as_str(), payload["field"].as_str()) {
@@ -1160,6 +1193,9 @@ mod tests {
         ) -> Result<String> {
             assert_eq!(program, "iptables");
             assert!(input.is_none());
+            if args == ["--version"] {
+                return Ok("iptables v1.8.9 (legacy)".into());
+            }
             if args == ["-w", "-S", "INPUT"] {
                 return Ok(self.rules.join("\n"));
             }
@@ -1173,7 +1209,9 @@ mod tests {
                         bail!("模拟删除失败");
                     }
                     assert_eq!(args[2], "INPUT");
-                    self.rules.remove(0);
+                    let rule = format!("-A INPUT {}", args[3..].join(" "));
+                    let position = self.rules.iter().position(|live| live == &rule).unwrap();
+                    self.rules.remove(position);
                 }
                 "-I" => {
                     assert_eq!(args[2], "INPUT");
@@ -1209,13 +1247,41 @@ mod tests {
         assert!(plan.attempted.is_empty());
     }
 
+    #[tokio::test]
+    async fn socks5_secure_iptables_rollback_preserves_position_before_repeated_drop() {
+        let remaining = [
+            "-A INPUT -j DROP",
+            "-A INPUT -j DROP",
+            "-A INPUT -p udp --dport 53 -j ACCEPT",
+        ];
+        for position in [0, 1] {
+            let mut rules = remaining.to_vec();
+            rules.insert(position, "-A INPUT -p tcp --dport 1080 -j ACCEPT");
+            let mut backend = FakeIptables {
+                rules: rules.iter().map(|rule| (*rule).to_owned()).collect(),
+                deletions: 0,
+            };
+            let mut plan =
+                FirewallPlan::capture_with("0.0.0.0:1080".parse().unwrap(), &mut backend)
+                    .await
+                    .unwrap();
+            plan.close_with(&mut backend).await.unwrap();
+            assert_eq!(backend.rules, remaining);
+            plan.restore_with(&mut backend).await.unwrap();
+            assert_eq!(backend.rules, rules);
+        }
+    }
+
     struct FakeNft {
         rules: Vec<serde_json::Value>,
+        iptables_nft: bool,
+        chain: &'static str,
+        next_handle: u64,
     }
 
     impl FirewallExecutor for FakeNft {
         fn available(&self, program: &str) -> bool {
-            program == "nft"
+            program == "nft" || (self.iptables_nft && program == "iptables")
         }
 
         async fn execute(
@@ -1225,6 +1291,26 @@ mod tests {
             input: Option<&[u8]>,
         ) -> Result<String> {
             use serde_json::json;
+            if program == "iptables" {
+                assert!(self.iptables_nft);
+                match args {
+                    [version] if version == "--version" => {
+                        return Ok("iptables v1.8.9 (nf_tables)".into());
+                    }
+                    [wait, list, chain] if wait == "-w" && list == "-S" && chain == "INPUT" => {
+                        return Ok(if self.rules.iter().any(|rule| rule["handle"] == 2) {
+                            "-A INPUT -p tcp -m tcp --dport 1080 -j ACCEPT".into()
+                        } else {
+                            String::new()
+                        });
+                    }
+                    [_, delete, ..] if delete == "-D" => {
+                        self.rules.retain(|rule| rule["handle"] != 2);
+                        return Ok(String::new());
+                    }
+                    _ => panic!("意外 iptables 操作 {args:?}"),
+                }
+            }
             assert_eq!(program, "nft");
             assert_eq!(args, ["-j", "-s", "-f", "-"]);
             let document: serde_json::Value = serde_json::from_slice(input.unwrap())?;
@@ -1233,20 +1319,33 @@ mod tests {
             let command = &operations[0];
             if command.get("list").is_some() {
                 let mut items = vec![json!({"chain": {
-                    "family": "ip", "table": "filter", "name": "input", "hook": "input",
+                    "family": "ip", "table": "filter", "name": self.chain, "hook": "input",
                     "handle": 1
                 }})];
                 items.extend(self.rules.iter().map(|rule| json!({"rule": rule})));
                 return Ok(json!({"nftables": items}).to_string());
             }
             if let Some(rule) = command.get("delete").and_then(|delete| delete.get("rule")) {
-                assert_eq!(rule["handle"], 2);
-                self.rules.remove(0);
+                if !self.iptables_nft {
+                    assert_eq!(rule["handle"], 2);
+                }
+                let position = self
+                    .rules
+                    .iter()
+                    .position(|live| live["handle"] == rule["handle"]);
+                self.rules.remove(position.unwrap());
             } else {
                 let mut rule = command["insert"]["rule"].clone();
-                assert_eq!(rule["handle"], 3);
-                rule["handle"] = 5.into();
-                self.rules.insert(1, rule);
+                if !self.iptables_nft {
+                    assert_eq!(rule["handle"], 3);
+                }
+                let position = self
+                    .rules
+                    .iter()
+                    .position(|live| live["handle"] == rule["handle"]);
+                rule["handle"] = self.next_handle.into();
+                self.next_handle += 1;
+                self.rules.insert(position.unwrap(), rule);
             }
             Ok(String::new())
         }
@@ -1267,6 +1366,9 @@ mod tests {
         });
         let mut backend = FakeNft {
             rules: vec![original.clone(), drop.clone()],
+            iptables_nft: false,
+            chain: "input",
+            next_handle: 5,
         };
         let mut plan = FirewallPlan::capture_with("0.0.0.0:1080".parse().unwrap(), &mut backend)
             .await
@@ -1282,6 +1384,47 @@ mod tests {
         let mut restored = original;
         restored["handle"] = 5.into();
         assert_eq!(backend.rules, [concurrent, restored, drop]);
+    }
+
+    #[tokio::test]
+    async fn socks5_secure_iptables_nft_rolls_back_compat_and_native_rules_in_same_table() {
+        let native = json!({
+            "family": "ip", "table": "filter", "chain": "INPUT", "handle": 3,
+            "expr": [
+                {"match": {"op": "==", "left": {"payload": {"protocol": "tcp", "field": "dport"}}, "right": 1080}},
+                {"accept": null}
+            ]
+        });
+        let mut compat = native.clone();
+        compat["handle"] = 2.into();
+        compat["expr"].as_array_mut().unwrap().insert(
+            0,
+            json!({"match": {"op": "==", "left": {"meta": {"key": "l4proto"}}, "right": "tcp"}}),
+        );
+        compat["expr"]
+            .as_array_mut()
+            .unwrap()
+            .insert(2, json!({"counter": null}));
+        let drop = json!({
+            "family": "ip", "table": "filter", "chain": "INPUT", "handle": 4,
+            "expr": [{"drop": null}]
+        });
+        let mut backend = FakeNft {
+            rules: vec![compat.clone(), native.clone(), drop.clone()],
+            iptables_nft: true,
+            chain: "INPUT",
+            next_handle: 5,
+        };
+        let mut plan = FirewallPlan::capture_with("0.0.0.0:1080".parse().unwrap(), &mut backend)
+            .await
+            .unwrap();
+        plan.close_with(&mut backend).await.unwrap();
+        assert_eq!(backend.rules.as_slice(), std::slice::from_ref(&drop));
+        plan.restore_with(&mut backend).await.unwrap();
+        compat["handle"] = 6.into();
+        let mut native = native;
+        native["handle"] = 5.into();
+        assert_eq!(backend.rules, [compat, native, drop]);
     }
 
     #[test]

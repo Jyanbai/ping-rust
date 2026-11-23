@@ -66,11 +66,12 @@ impl InterruptGuard<'_> {
         Ok(())
     }
 
-    fn finish(&self) -> Result<()> {
+    fn finish(&self, publish_state: impl FnOnce() -> Result<()>) -> Result<()> {
         let mut phase = self.interrupt.phase.lock().unwrap();
         if *phase == InterruptPhase::Interrupted {
             return Err(interrupted());
         }
+        publish_state()?;
         *phase = InterruptPhase::Idle;
         Ok(())
     }
@@ -90,22 +91,11 @@ fn interrupted() -> anyhow::Error {
     .into()
 }
 
-pub(crate) async fn run(id: Uuid, mode: SecureMode, dry_run: bool) -> Result<()> {
-    // dry-run 不创建锁文件，也不运行 shoes、systemd 或防火墙命令。
-    let _lock = if dry_run {
-        None
-    } else {
-        utils::require_linux_root()?;
-        Some(utils::exclusive_lock(Path::new(utils::LOCK_FILE))?)
-    };
-    let Some(mut plan) = SecurePlan::prepare(Path::new(utils::CONFIG_DIR), id, mode)? else {
+pub(crate) async fn run(directory: &Path, id: Uuid, mode: SecureMode) -> Result<()> {
+    let Some(mut plan) = SecurePlan::prepare(directory, id, mode)? else {
         println!("节点已安全，无需修复");
         return Ok(());
     };
-    if dry_run {
-        print!("{}", plan.diff()?);
-        return Ok(());
-    }
     let mut runtime = SystemRuntime {
         mode,
         snapshot: None,
@@ -167,7 +157,7 @@ pub(crate) async fn apply(
             .verify(&plan.profile)
             .await
             .context("防火墙变更后验证失败")?;
-        interrupt.finish()
+        interrupt.finish(|| plan.publish_state())
     }
     .await;
     if let Err(error) = change {
@@ -388,7 +378,7 @@ async fn command(program: &str, args: &[String], input: Option<&[u8]>) -> Result
         file.write_all(input)?;
         file.seek(SeekFrom::Start(0))?;
     }
-    let child = Command::new(program)
+    let child = Command::from(utils::isolated_command(program))
         .args(args)
         .env("LC_ALL", "C")
         .stdin(file.map(Stdio::from).unwrap_or_else(Stdio::null))

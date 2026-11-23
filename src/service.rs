@@ -373,7 +373,7 @@ pub fn main_pid() -> Result<Option<u32>> {
 }
 
 fn systemctl_show_value(property: &str) -> Result<String> {
-    let output = Command::new("systemctl")
+    let output = utils::isolated_command("systemctl")
         .args([
             "show",
             &format!("--property={property}"),
@@ -447,7 +447,7 @@ pub fn restore_snapshot(snapshot: ServiceSnapshot) -> Result<()> {
     ensure_systemctl()?;
     let path = Path::new(utils::SERVICE_FILE);
     if path.exists() {
-        let _ = Command::new("systemctl")
+        let _ = utils::isolated_command("systemctl")
             .args(["disable", "--now", SERVICE_NAME])
             .status();
     }
@@ -462,7 +462,7 @@ pub fn restore_snapshot(snapshot: ServiceSnapshot) -> Result<()> {
         if snapshot.was_enabled {
             systemctl(&["enable", SERVICE_NAME])?;
         } else {
-            let _ = Command::new("systemctl")
+            let _ = utils::isolated_command("systemctl")
                 .args(["disable", SERVICE_NAME])
                 .status();
         }
@@ -472,7 +472,7 @@ pub fn restore_snapshot(snapshot: ServiceSnapshot) -> Result<()> {
                 thread::sleep(Duration::from_millis(750))
             })?;
         } else {
-            let _ = Command::new("systemctl")
+            let _ = utils::isolated_command("systemctl")
                 .args(["stop", SERVICE_NAME])
                 .status();
         }
@@ -546,7 +546,7 @@ pub fn is_active() -> Result<bool> {
 }
 
 fn systemctl_is_active() -> Result<bool> {
-    Ok(Command::new("systemctl")
+    Ok(utils::isolated_command("systemctl")
         .args(["is-active", "--quiet", SERVICE_NAME])
         .status()
         .context("无法查询 systemd 服务状态")?
@@ -554,7 +554,7 @@ fn systemctl_is_active() -> Result<bool> {
 }
 
 fn systemctl_is_failed() -> Result<bool> {
-    Ok(Command::new("systemctl")
+    Ok(utils::isolated_command("systemctl")
         .args(["is-failed", "--quiet", SERVICE_NAME])
         .status()
         .context("无法查询 systemd 服务失败状态")?
@@ -562,7 +562,7 @@ fn systemctl_is_failed() -> Result<bool> {
 }
 
 fn systemctl_is_enabled() -> Result<bool> {
-    Ok(Command::new("systemctl")
+    Ok(utils::isolated_command("systemctl")
         .args(["is-enabled", "--quiet", SERVICE_NAME])
         .status()
         .context("无法查询 systemd 服务启用状态")?
@@ -570,7 +570,7 @@ fn systemctl_is_enabled() -> Result<bool> {
 }
 
 fn systemctl(args: &[&str]) -> Result<()> {
-    let status = Command::new("systemctl")
+    let status = utils::isolated_command("systemctl")
         .args(args)
         .status()
         .with_context(|| format!("无法执行 systemctl {}", args.join(" ")))?;
