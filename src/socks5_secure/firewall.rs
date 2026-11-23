@@ -309,16 +309,16 @@ pub(super) fn iptables_delete_args(line: &str, listener: SocketAddr) -> Option<V
     if append != "-A" || chain != "INPUT" {
         return None;
     }
-    let options = options.chunks_exact(2);
-    if !options.remainder().is_empty() {
+    let (options, remainder) = options.as_chunks::<2>();
+    if !remainder.is_empty() {
         return None;
     }
     let ip = listener.ip();
     let port = listener.port().to_string();
     let (mut tcp, mut dport, mut accept) = (false, false, false);
     let mut destination = ip.is_unspecified();
-    for option in options {
-        match (option[0].as_str(), option[1].as_str()) {
+    for [name, value] in options {
+        match (name.as_str(), value.as_str()) {
             ("-p", "tcp") => tcp = true,
             ("-m", "tcp") => {}
             ("--dport", value) if value == port => dport = true,

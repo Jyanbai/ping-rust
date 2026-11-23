@@ -108,6 +108,7 @@ fn socks5_secure_firewall_matches_only_dedicated_port_allow_rules() {
         "-A INPUT -p tcp --dport 1080 -j DROP",
         "-A INPUT -j ACCEPT",
         "-A INPUT -p tcp ! --dport 1080 -j ACCEPT",
+        "-A INPUT -p tcp --dport 1080 -j ACCEPT -m",
     ] {
         assert!(
             firewall::iptables_delete_args(rule, listener).is_none(),
