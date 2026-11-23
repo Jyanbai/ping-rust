@@ -199,5 +199,5 @@ fn redacted_profile(server: &ServerConfig) -> Result<serde_json::Value> {
 fn redacted_aggregate(servers: &[ServerConfig], index: usize) -> Result<String> {
     let mut preview = vec![serde_json::Value::from("[REDACTED]"); servers.len()];
     preview[index] = redacted_profile(&servers[index])?;
-    crate::yaml::to_string(&preview)
+    Ok(crate::yaml::to_string(&preview)?)
 }

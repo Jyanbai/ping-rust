@@ -89,6 +89,27 @@ fn socks5_secure_dry_run_redacts_both_diffs_and_never_writes() {
 }
 
 #[test]
+fn socks5_secure_aggregate_preview_serializes_redacted_authentication() {
+    let directory = tempfile::tempdir().unwrap();
+    let profile = legacy(directory.path());
+    let plan = SecurePlan::prepare(directory.path(), profile.id, SecureMode::Auth)
+        .unwrap()
+        .unwrap();
+    let diff = plan.diff().unwrap();
+    let (_, aggregate_diff) = diff.split_once("+++ config.yaml\n").unwrap();
+    let added_yaml = aggregate_diff
+        .lines()
+        .filter_map(|line| line.strip_prefix('+'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let preview: Vec<serde_json::Value> = crate::yaml::from_str(&added_yaml).unwrap();
+
+    assert_eq!(preview.len(), 1);
+    assert_eq!(preview[0]["protocol"]["username"], "[REDACTED]");
+    assert_eq!(preview[0]["protocol"]["password"], "[REDACTED]");
+}
+
+#[test]
 fn socks5_secure_rejects_safe_state_with_unsafe_aggregate() {
     for mode in [SecureMode::Auth, SecureMode::Local] {
         let directory = tempfile::tempdir().unwrap();
