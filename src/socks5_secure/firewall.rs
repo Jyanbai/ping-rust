@@ -1,6 +1,6 @@
-//! 只移除该端口的专用放行规则；不触碰共享范围、默认策略或其他端口。
+//! 按原监听地址和 TCP 端口清理专用放行规则。
 use super::*;
-use std::{fs, path::PathBuf};
+use std::{fs, net::IpAddr, path::PathBuf};
 
 #[derive(Default)]
 pub(super) struct FirewallPlan {
@@ -8,13 +8,13 @@ pub(super) struct FirewallPlan {
     restores: Vec<(String, Vec<String>, Option<Vec<u8>>)>,
     files: Vec<(PathBuf, Vec<u8>)>,
     touched: bool,
-    port: Option<u16>,
+    listener: Option<SocketAddr>,
 }
 
 impl FirewallPlan {
-    pub(super) async fn capture(port: u16) -> Result<Self> {
+    pub(super) async fn capture(listener: SocketAddr) -> Result<Self> {
         let mut plan = Self {
-            port: Some(port),
+            listener: Some(listener),
             ..Self::default()
         };
         let mut managed_ufw = false;
@@ -31,7 +31,7 @@ impl FirewallPlan {
                 }
                 let mut numbers = status
                     .lines()
-                    .filter_map(|line| ufw_rule_number(line, port))
+                    .filter_map(|line| ufw_rule_number(line, listener))
                     .collect::<Vec<_>>();
                 numbers.sort_unstable();
                 numbers.dedup();
@@ -47,6 +47,7 @@ impl FirewallPlan {
         }
         if utils::command_exists("firewall-cmd") && service_running("firewalld.service").await? {
             managed_firewalld = true;
+            let tcp_port = format!("{}/tcp", listener.port());
             for permanent in [false, true] {
                 let prefix = if permanent {
                     vec!["--permanent".to_owned()]
@@ -61,6 +62,16 @@ impl FirewallPlan {
                 {
                     let mut base = prefix.clone();
                     base.push(format!("--zone={zone}"));
+                    let mut sources = base.clone();
+                    sources.push("--list-sources".into());
+                    // 来源绑定也会限制区域内的普通端口规则。
+                    if !command("firewall-cmd", &sources, None)
+                        .await?
+                        .trim()
+                        .is_empty()
+                    {
+                        continue;
+                    }
                     for (list, remove, add, rich) in [
                         ("--list-ports", "--remove-port=", "--add-port=", false),
                         (
@@ -80,9 +91,9 @@ impl FirewallPlan {
                         };
                         for rule in rules {
                             let matches = if rich {
-                                firewalld_rich_port_allow(rule, port)
+                                firewalld_rich_port_allow(rule, listener)
                             } else {
-                                rule == format!("{port}/tcp") || rule == format!("{port}/udp")
+                                listener.ip().is_unspecified() && rule == tcp_port
                             };
                             if matches {
                                 let mut remove_args = base.clone();
@@ -127,7 +138,7 @@ impl FirewallPlan {
                     {
                         continue;
                     }
-                    if nft_input_port_allow(rule, items, port) {
+                    if nft_input_port_allow(rule, items, listener) {
                         let family = rule["family"].as_str().context("nft rule 缺少 family")?;
                         let chain = rule["chain"].as_str().context("nft rule 缺少 chain")?;
                         let handle = rule["handle"].as_u64().context("nft rule 缺少 handle")?;
@@ -171,42 +182,23 @@ impl FirewallPlan {
                 }
             }
         }
-        for (program, save, restore) in [
-            ("iptables", "iptables-save", "iptables-restore"),
-            ("ip6tables", "ip6tables-save", "ip6tables-restore"),
-        ] {
-            if !utils::command_exists(program) {
-                continue;
-            }
+        let (program, save, restore) = if listener.is_ipv4() {
+            ("iptables", "iptables-save", "iptables-restore")
+        } else {
+            ("ip6tables", "ip6tables-save", "ip6tables-restore")
+        };
+        if utils::command_exists(program) {
             let rules = command(program, &["-S".into()], None).await?;
-            let mut positions = std::collections::BTreeMap::<String, usize>::new();
-            let mut deletes = Vec::new();
-            for line in rules.lines() {
-                let mut words = line.split_whitespace();
-                if words.next() != Some("-A") {
-                    continue;
-                }
-                let chain = words.next().context("iptables 规则缺少 chain")?.to_owned();
-                let position = positions.entry(chain.clone()).or_default();
-                *position += 1;
-                // 管理器已记录自身规则的恢复方法，不能重复移除。
-                if (managed_ufw && chain.starts_with("ufw-"))
-                    || (managed_firewalld && chain.starts_with("IN_"))
-                {
-                    continue;
-                }
-                if iptables_port_allow(line, port) {
-                    deletes.push((
-                        program.into(),
-                        vec!["-D".into(), chain, position.to_string()],
-                    ));
-                }
-            }
+            let deletes = rules
+                .lines()
+                .filter_map(|line| iptables_delete_args(line, listener))
+                .map(|args| (program.into(), args))
+                .collect::<Vec<_>>();
             if !deletes.is_empty() {
                 let snapshot = command(save, &[], None).await?;
                 plan.restores
                     .insert(0, (restore.into(), vec![], Some(snapshot.into_bytes())));
-                plan.removals.extend(deletes.into_iter().rev());
+                plan.removals.extend(deletes);
             }
         }
         Ok(plan)
@@ -214,13 +206,23 @@ impl FirewallPlan {
 
     pub(super) async fn close(&mut self) -> Result<()> {
         for (program, args) in &self.removals {
+            if let Some(listener) = self.listener.filter(|_| program == "ufw") {
+                // UFW 通过编号删除。服务重启期间若规则顺序变化，先确认该编号仍然匹配。
+                let status = command("ufw", &["status".into(), "numbered".into()], None).await?;
+                if !status.lines().any(|line| {
+                    ufw_rule_number(line, listener)
+                        .is_some_and(|number| number.to_string() == args[2])
+                }) {
+                    bail!("UFW 规则编号已变化，请检查后重试");
+                }
+            }
             // 超时也可能已执行了删除，必须从调用前就标记需恢复。
             self.touched = true;
             command(program, args, None).await?;
         }
-        if let Some(port) = self.port {
-            if !Self::capture(port).await?.removals.is_empty() {
-                bail!("防火墙仍有该端口的放行规则，请检查并重试");
+        if let Some(listener) = self.listener {
+            if !Self::capture(listener).await?.removals.is_empty() {
+                bail!("防火墙仍有匹配原监听地址和 TCP 端口的放行规则，请检查并重试");
             }
         }
         Ok(())
@@ -266,57 +268,146 @@ async fn service_running(unit: &str) -> Result<bool> {
         == "active")
 }
 
-pub(super) fn ufw_rule_number(line: &str, port: u16) -> Option<u32> {
-    let (number, rule) = line.strip_prefix('[')?.split_once(']')?;
-    let (destination, _) = rule.split_once("ALLOW IN")?;
-    if !destination.split_whitespace().any(|word| {
-        [
-            port.to_string(),
-            format!("{port}/tcp"),
-            format!("{port}/udp"),
-        ]
-        .contains(&word.to_owned())
-    }) {
+pub(super) fn ufw_rule_number(line: &str, listener: SocketAddr) -> Option<u32> {
+    let (number, rule) = line.trim_start().strip_prefix('[')?.split_once(']')?;
+    let (destination, source) = rule.split_once("ALLOW IN")?;
+    let ip = listener.ip();
+    let destination = destination.trim();
+    let source = source.trim();
+    if !ip.is_ipv6() && (destination.ends_with(" (v6)") || source.ends_with(" (v6)")) {
+        return None;
+    }
+    let destination = destination.strip_suffix(" (v6)").unwrap_or(destination);
+    let tcp_port = format!("{}/tcp", listener.port());
+    let mut fields = destination.split_whitespace();
+    let matches = match (fields.next(), fields.next(), fields.next()) {
+        (Some(port), None, None) => port == tcp_port && ip.is_unspecified(),
+        (Some(address), Some(port), None) => {
+            port == tcp_port && matches_destination(address_scope(address), ip)
+        }
+        _ => false,
+    };
+    // 受管节点没有来源范围，保留显式限制来源的规则。
+    let anywhere = if ip.is_ipv6() {
+        "Anywhere (v6)"
+    } else {
+        "Anywhere"
+    };
+    let source_address = source.strip_suffix(" (v6)").unwrap_or(source);
+    if !matches || (source != anywhere && !unrestricted(address_scope(source_address), ip)) {
         return None;
     }
     number.trim().parse().ok()
 }
 
-pub(super) fn iptables_port_allow(line: &str, port: u16) -> bool {
-    let words = shell_words(line);
-    // 自定义链可能同时供 INPUT/OUTPUT/FORWARD 使用；无法确认用途时保留。
-    words.first().is_some_and(|word| word == "-A")
-        && words.get(1).is_some_and(|word| word == "INPUT")
-        && !words.windows(2).any(|w| w == ["!", "-p"])
-        && words
-            .windows(2)
-            .any(|w| w[0] == "-p" && matches!(w[1].as_str(), "tcp" | "udp"))
-        && !words.windows(2).any(|w| w == ["!", "--dport"])
-        && words.windows(2).any(|w| w == ["-j", "ACCEPT"])
-        && words
-            .windows(2)
-            .any(|w| w[0] == "--dport" && w[1] == port.to_string())
+pub(super) fn iptables_delete_args(line: &str, listener: SocketAddr) -> Option<Vec<String>> {
+    let mut words = shell_words(line);
+    let [append, chain, options @ ..] = words.as_slice() else {
+        return None;
+    };
+    // 自定义链可能同时供 INPUT/OUTPUT/FORWARD 使用。
+    if append != "-A" || chain != "INPUT" {
+        return None;
+    }
+    let options = options.chunks_exact(2);
+    if !options.remainder().is_empty() {
+        return None;
+    }
+    let ip = listener.ip();
+    let port = listener.port().to_string();
+    let (mut tcp, mut dport, mut accept) = (false, false, false);
+    let mut destination = ip.is_unspecified();
+    for option in options {
+        match (option[0].as_str(), option[1].as_str()) {
+            ("-p", "tcp") => tcp = true,
+            ("-m", "tcp") => {}
+            ("--dport", value) if value == port => dport = true,
+            ("-j", "ACCEPT") => accept = true,
+            ("-s", value) if unrestricted(address_scope(value), ip) => {}
+            ("-d", value) if matches_destination(address_scope(value), ip) => destination = true,
+            _ => return None,
+        }
+    }
+    if !(tcp && dport && accept && destination) {
+        return None;
+    }
+    // 用完整规则删除，避免规则顺序变化后按编号删错。
+    words[0] = "-D".into();
+    Some(words)
 }
 
-fn firewalld_rich_port_allow(rule: &str, port: u16) -> bool {
+fn firewalld_rich_port_allow(rule: &str, listener: SocketAddr) -> bool {
     let words = shell_words(rule);
-    let target_port = format!("port={port}");
-    // 属性中的引号内容保留为一个参数，避免把日志 prefix 当成元素或动作。
-    words.first().is_some_and(|word| word == "rule")
-        && words.iter().any(|word| word == "accept")
-        && words.iter().enumerate().any(|(index, word)| {
-            if word != "port" {
-                return false;
+    let [rule, elements @ .., action] = words.as_slice() else {
+        return false;
+    };
+    if rule != "rule" || action != "accept" {
+        return false;
+    }
+    let ip = listener.ip();
+    let family = if ip.is_ipv4() {
+        "family=ipv4"
+    } else {
+        "family=ipv6"
+    };
+    let port = format!("port={}", listener.port());
+    let mut dport = false;
+    let mut destination = ip.is_unspecified();
+    let mut elements = elements;
+    while !elements.is_empty() {
+        elements = match elements {
+            [attribute, rest @ ..] if attribute == family => rest,
+            [element, address, rest @ ..] if element == "source" || element == "destination" => {
+                let scope = address.strip_prefix("address=").and_then(address_scope);
+                if element == "source" && unrestricted(scope, ip) {
+                    rest
+                } else if element == "destination" && matches_destination(scope, ip) {
+                    destination = true;
+                    rest
+                } else {
+                    return false;
+                }
             }
-            let attributes = words[index + 1..]
-                .iter()
-                .take_while(|word| word.contains('='))
-                .collect::<Vec<_>>();
-            attributes.iter().any(|word| **word == target_port)
-                && attributes
-                    .iter()
-                    .any(|word| matches!(word.as_str(), "protocol=tcp" | "protocol=udp"))
-        })
+            [element, first, second, rest @ ..]
+                if element == "port"
+                    && ((first == &port && second == "protocol=tcp")
+                        || (first == "protocol=tcp" && second == &port)) =>
+            {
+                dport = true;
+                rest
+            }
+            _ => return false,
+        };
+    }
+    dport && destination
+}
+
+fn address_scope(address: &str) -> Option<(IpAddr, u8)> {
+    if let Some((ip, prefix)) = address.split_once('/') {
+        return Some((ip.parse().ok()?, prefix.parse().ok()?));
+    }
+    let ip: IpAddr = address.parse().ok()?;
+    Some((ip, host_prefix(ip)))
+}
+
+fn host_prefix(ip: IpAddr) -> u8 {
+    if ip.is_ipv4() {
+        32
+    } else {
+        128
+    }
+}
+
+fn unrestricted(scope: Option<(IpAddr, u8)>, listener: IpAddr) -> bool {
+    scope.is_some_and(|(ip, prefix)| prefix == 0 && ip.is_ipv4() == listener.is_ipv4())
+}
+
+fn matches_destination(scope: Option<(IpAddr, u8)>, listener: IpAddr) -> bool {
+    if listener.is_unspecified() {
+        unrestricted(scope, listener)
+    } else {
+        scope == Some((listener, host_prefix(listener)))
+    }
 }
 
 // iptables -S 的引号仅用于分隔参数；绝不交给 shell 执行。
@@ -351,7 +442,11 @@ fn shell_words(line: &str) -> Vec<String> {
     words
 }
 
-fn nft_input_port_allow(rule: &serde_json::Value, items: &[serde_json::Value], port: u16) -> bool {
+fn nft_input_port_allow(
+    rule: &serde_json::Value,
+    items: &[serde_json::Value],
+    listener: SocketAddr,
+) -> bool {
     let (Some(family), Some(table), Some(name)) = (
         rule["family"].as_str(),
         rule["table"].as_str(),
@@ -359,6 +454,10 @@ fn nft_input_port_allow(rule: &serde_json::Value, items: &[serde_json::Value], p
     ) else {
         return false;
     };
+    let ip_family = if listener.is_ipv4() { "ip" } else { "ip6" };
+    if family != "inet" && family != ip_family {
+        return false;
+    }
     // 不依赖链名猜测用途；只删除具有明确 input hook 的基础链中的规则。
     items.iter().any(|item| {
         let chain = &item["chain"];
@@ -366,24 +465,59 @@ fn nft_input_port_allow(rule: &serde_json::Value, items: &[serde_json::Value], p
             && chain["table"] == table
             && chain["name"] == name
             && chain["hook"] == "input"
-    }) && nft_port_allow(rule, port)
+    }) && nft_port_allow(rule, listener)
 }
 
-fn nft_port_allow(rule: &serde_json::Value, port: u16) -> bool {
+fn nft_port_allow(rule: &serde_json::Value, listener: SocketAddr) -> bool {
+    if rule.get("comment").is_some() {
+        return false;
+    }
     let Some(expressions) = rule["expr"].as_array() else {
         return false;
     };
-    expressions.iter().any(|e| e.get("accept").is_some())
-        && expressions.iter().any(|e| {
-            let m = &e["match"];
-            m["op"] == "=="
-                && m["right"].as_u64() == Some(u64::from(port))
-                && m["left"]["payload"]["field"] == "dport"
-                && matches!(
-                    m["left"]["payload"]["protocol"].as_str(),
-                    Some("tcp" | "udp")
-                )
-        })
+    let ip = listener.ip();
+    let ip_family = if ip.is_ipv4() { "ip" } else { "ip6" };
+    let (mut dport, mut accept) = (false, false);
+    let mut destination = ip.is_unspecified();
+    for expr in expressions {
+        if expr.get("accept").is_some() {
+            accept = true;
+            continue;
+        }
+        if expr.get("counter").is_some() {
+            continue;
+        }
+        let condition = &expr["match"];
+        if condition["op"] != "==" {
+            return false;
+        }
+        let payload = &condition["left"]["payload"];
+        let value = &condition["right"];
+        match (payload["protocol"].as_str(), payload["field"].as_str()) {
+            (Some("tcp"), Some("dport")) if value.as_u64() == Some(u64::from(listener.port())) => {
+                dport = true;
+            }
+            (Some(protocol), Some("saddr"))
+                if protocol == ip_family && unrestricted(nft_address_scope(value), ip) => {}
+            (Some(protocol), Some("daddr"))
+                if protocol == ip_family && matches_destination(nft_address_scope(value), ip) =>
+            {
+                destination = true;
+            }
+            _ => return false,
+        }
+    }
+    dport && accept && destination
+}
+
+fn nft_address_scope(value: &serde_json::Value) -> Option<(IpAddr, u8)> {
+    if let Some(address) = value.as_str() {
+        return address_scope(address);
+    }
+    let prefix = &value["prefix"];
+    let ip = prefix["addr"].as_str()?.parse().ok()?;
+    let length = prefix["len"].as_u64()?.try_into().ok()?;
+    Some((ip, length))
 }
 
 #[cfg(test)]
@@ -392,25 +526,25 @@ mod tests {
 
     #[test]
     fn socks5_secure_iptables_preserves_output_forward_and_unclassified_chains() {
+        let listener = "0.0.0.0:443".parse().unwrap();
         for chain in ["OUTPUT", "FORWARD", "CUSTOM"] {
             for protocol in ["tcp", "udp"] {
                 assert!(
-                    !iptables_port_allow(
+                    iptables_delete_args(
                         &format!("-A {chain} -p {protocol} --dport 443 -j ACCEPT"),
-                        443,
-                    ),
+                        listener,
+                    )
+                    .is_none(),
                     "must preserve {chain} {protocol}"
                 );
             }
         }
-        assert!(iptables_port_allow(
-            "-A INPUT -p tcp --dport 443 -j ACCEPT",
-            443
-        ));
+        assert!(iptables_delete_args("-A INPUT -p tcp --dport 443 -j ACCEPT", listener).is_some());
     }
 
     #[test]
     fn socks5_secure_nft_preserves_non_input_hooks_and_unclassified_chains() {
+        let listener = "0.0.0.0:443".parse().unwrap();
         let mut rule = serde_json::json!({
             "family": "inet", "table": "filter", "chain": "incoming", "handle": 1,
             "expr": [
@@ -426,24 +560,24 @@ mod tests {
                 serde_json::json!({"rule": rule}),
             ];
             assert!(
-                !nft_input_port_allow(&rule, &items, 443),
+                !nft_input_port_allow(&rule, &items, listener),
                 "must preserve {hook}"
             );
         }
-        assert!(!nft_input_port_allow(&rule, &[], 443));
+        assert!(!nft_input_port_allow(&rule, &[], listener));
         let items = vec![
             serde_json::json!({"chain": {
                 "family": "inet", "table": "filter", "name": "incoming", "hook": "input"
             }}),
             serde_json::json!({"rule": rule}),
         ];
-        assert!(nft_input_port_allow(&rule, &items, 443));
+        assert!(nft_input_port_allow(&rule, &items, listener));
         // 同名链必须同时匹配地址族和表，不能借用另一条链的 input hook。
         for field in ["family", "table", "chain"] {
             let original = rule[field].clone();
             rule[field] = "other".into();
             assert!(
-                !nft_input_port_allow(&rule, &items, 443),
+                !nft_input_port_allow(&rule, &items, listener),
                 "must match {field}"
             );
             rule[field] = original;
@@ -452,15 +586,16 @@ mod tests {
 
     #[test]
     fn socks5_secure_firewalld_rich_rules_preserve_source_ports_and_other_actions() {
+        let listener = "0.0.0.0:1080".parse().unwrap();
         assert!(firewalld_rich_port_allow(
             r#"rule family="ipv4" port port="1080" protocol="tcp" accept"#,
-            1080
-        ));
-        assert!(firewalld_rich_port_allow(
-            r#"rule family="ipv6" port protocol="udp" port="1080" log prefix="socks" accept"#,
-            1080
+            listener
         ));
         for rule in [
+            r#"rule family="ipv6" port protocol="udp" port="1080" log prefix="socks" accept"#,
+            r#"rule family="ipv4" port protocol="udp" port="1080" accept"#,
+            r#"rule family="ipv6" port port="1080" protocol="tcp" accept"#,
+            r#"rule family="ipv4" source address="192.0.2.0/24" port port="1080" protocol="tcp" accept"#,
             r#"rule family="ipv4" source-port port="1080" protocol="tcp" accept"#,
             r#"rule family="ipv6" source-port port="1080" protocol="udp" accept"#,
             r#"rule port port="1081" protocol="tcp" accept"#,
@@ -471,10 +606,19 @@ mod tests {
             r#"rule port port="1080" protocol="tcp" audit"#,
         ] {
             assert!(
-                !firewalld_rich_port_allow(rule, 1080),
+                !firewalld_rich_port_allow(rule, listener),
                 "must preserve {rule}"
             );
         }
+        let listener = "[2001:db8::8]:1080".parse().unwrap();
+        assert!(firewalld_rich_port_allow(
+            r#"rule family="ipv6" destination address="2001:db8::8/128" port protocol="tcp" port="1080" accept"#,
+            listener
+        ));
+        assert!(!firewalld_rich_port_allow(
+            r#"rule family="ipv6" destination address="2001:db8::/64" port protocol="tcp" port="1080" accept"#,
+            listener
+        ));
     }
 
     #[tokio::test]
@@ -516,17 +660,38 @@ mod tests {
 
     #[test]
     fn socks5_secure_nft_rules_match_exact_port_and_accept_only() {
+        let listener = "0.0.0.0:1080".parse().unwrap();
         let rule = serde_json::json!({"expr": [
             {"match": {"op": "==", "left": {"payload": {"protocol": "tcp", "field": "dport"}}, "right": 1080}},
             {"accept": null}
         ]});
-        assert!(nft_port_allow(&rule, 1080));
-        assert!(!nft_port_allow(&rule, 1081));
+        assert!(nft_port_allow(&rule, listener));
+        assert!(!nft_port_allow(&rule, "0.0.0.0:1081".parse().unwrap()));
         let mut shared = rule.clone();
         shared["expr"][0]["match"]["right"] = serde_json::json!({"set": [1080, 1081]});
-        assert!(!nft_port_allow(&shared, 1080));
-        let mut drop = rule;
+        assert!(!nft_port_allow(&shared, listener));
+        let mut drop = rule.clone();
         drop["expr"][1] = serde_json::json!({"drop": null});
-        assert!(!nft_port_allow(&drop, 1080));
+        assert!(!nft_port_allow(&drop, listener));
+        let mut udp = rule.clone();
+        udp["expr"][0]["match"]["left"]["payload"]["protocol"] = "udp".into();
+        assert!(!nft_port_allow(&udp, listener));
+
+        let listener = "203.0.113.8:1080".parse().unwrap();
+        assert!(!nft_port_allow(&rule, listener));
+        let mut scoped = rule;
+        let expressions = scoped["expr"].as_array_mut().unwrap();
+        expressions.insert(0, serde_json::json!({
+            "match": {"op": "==", "left": {"payload": {"protocol": "ip", "field": "daddr"}}, "right": "203.0.113.8"}
+        }));
+        assert!(nft_port_allow(&scoped, listener));
+        scoped["expr"].as_array_mut().unwrap().insert(
+            0,
+            serde_json::json!({
+                "match": {"op": "==", "left": {"payload": {"protocol": "ip", "field": "saddr"}},
+                          "right": {"prefix": {"addr": "192.0.2.0", "len": 24}}}
+            }),
+        );
+        assert!(!nft_port_allow(&scoped, listener));
     }
 }

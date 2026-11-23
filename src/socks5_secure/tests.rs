@@ -29,10 +29,11 @@ fn socks5_secure_listener_verification_requires_shoes_ownership() {
 
 #[test]
 fn socks5_secure_firewall_preserves_non_tcp_udp_protocols() {
+    let listener = "0.0.0.0:1080".parse().unwrap();
     for protocol in ["sctp", "dccp"] {
         let rule = format!("-A INPUT -p {protocol} -m {protocol} --dport 1080 -j ACCEPT");
         assert!(
-            !firewall::iptables_port_allow(&rule, 1080),
+            firewall::iptables_delete_args(&rule, listener).is_none(),
             "must preserve {protocol} rule"
         );
     }
@@ -42,10 +43,28 @@ fn socks5_secure_firewall_preserves_non_tcp_udp_protocols() {
         "-A INPUT -p sctp --dport 1080 -m comment --comment \"-p tcp\" -j ACCEPT",
     ] {
         assert!(
-            !firewall::iptables_port_allow(rule, 1080),
+            firewall::iptables_delete_args(rule, listener).is_none(),
             "must preserve {rule}"
         );
     }
+}
+
+#[test]
+fn socks5_secure_local_preserves_other_rules_on_the_same_port() {
+    let listener = "203.0.113.8:1080".parse().unwrap();
+    let rules = [
+        "-A INPUT -d 203.0.113.8/32 -p tcp -m tcp --dport 1080 -j ACCEPT",
+        "-A INPUT -d 203.0.113.8/32 -p udp -m udp --dport 1080 -j ACCEPT",
+        "-A INPUT -d 203.0.113.9/32 -p tcp -m tcp --dport 1080 -j ACCEPT",
+        "-A INPUT -p tcp -m tcp --dport 1080 -j ACCEPT",
+        "-A INPUT -s 192.0.2.0/24 -d 203.0.113.8/32 -p tcp --dport 1080 -j ACCEPT",
+        "-A INPUT -d 203.0.113.8/32 -p tcp --dport 1080 -m comment --comment other-service -j ACCEPT",
+    ];
+    let remaining = rules
+        .into_iter()
+        .filter(|rule| firewall::iptables_delete_args(rule, listener).is_none())
+        .collect::<Vec<_>>();
+    assert_eq!(remaining, rules[1..]);
 }
 
 #[test]
@@ -77,50 +96,62 @@ fn socks5_secure_listener_verification_rejects_extra_public_binds() {
 
 #[test]
 fn socks5_secure_firewall_matches_only_dedicated_port_allow_rules() {
-    assert!(firewall::iptables_port_allow(
-        "-A INPUT -p tcp -m tcp --dport 1080 -j ACCEPT",
-        1080
-    ));
-    assert!(firewall::iptables_port_allow(
-        "-A INPUT -p udp --dport 1080 -j ACCEPT",
-        1080
-    ));
-    assert!(!firewall::iptables_port_allow(
-        "-A INPUT -p tcp --dport 10801 -j ACCEPT",
-        1080
-    ));
-    assert!(!firewall::iptables_port_allow(
-        "-A INPUT -p tcp --dport 1080 -j DROP",
-        1080
-    ));
-    assert!(!firewall::iptables_port_allow("-A INPUT -j ACCEPT", 1080));
-    assert!(!firewall::iptables_port_allow(
-        "-A INPUT -p tcp ! --dport 1080 -j ACCEPT",
-        1080
-    ));
+    let listener = "0.0.0.0:1080".parse().unwrap();
     assert_eq!(
-        firewall::ufw_rule_number("[ 3] 1080/tcp (v6) ALLOW IN Anywhere (v6)", 1080),
+        firewall::iptables_delete_args("-A INPUT -p tcp -m tcp --dport 1080 -j ACCEPT", listener)
+            .unwrap(),
+        ["-D", "INPUT", "-p", "tcp", "-m", "tcp", "--dport", "1080", "-j", "ACCEPT"]
+    );
+    for rule in [
+        "-A INPUT -p udp --dport 1080 -j ACCEPT",
+        "-A INPUT -p tcp --dport 10801 -j ACCEPT",
+        "-A INPUT -p tcp --dport 1080 -j DROP",
+        "-A INPUT -j ACCEPT",
+        "-A INPUT -p tcp ! --dport 1080 -j ACCEPT",
+    ] {
+        assert!(
+            firewall::iptables_delete_args(rule, listener).is_none(),
+            "must preserve {rule}"
+        );
+    }
+    let listener = "[::]:1080".parse().unwrap();
+    assert_eq!(
+        firewall::ufw_rule_number("[ 3] 1080/tcp (v6) ALLOW IN Anywhere (v6)", listener),
         Some(3)
     );
-    assert_eq!(
-        firewall::ufw_rule_number("[ 4] 10801/tcp ALLOW IN Anywhere", 1080),
-        None
-    );
+    for line in [
+        "[ 4] 10801/tcp ALLOW IN Anywhere",
+        "[ 4] 1080/tcp ALLOW IN Anywhere",
+        "[ 4] 1080/udp (v6) ALLOW IN Anywhere (v6)",
+        "[ 4] 1080 (v6) ALLOW IN Anywhere (v6)",
+    ] {
+        assert_eq!(firewall::ufw_rule_number(line, listener), None, "{line}");
+    }
 }
 
 #[test]
 fn socks5_secure_firewall_does_not_parse_comment_text_as_rule_options() {
-    assert!(!firewall::iptables_port_allow(
-        "-A INPUT -m comment --comment \"example --dport 1080 -j ACCEPT text\" -j DROP",
-        1080
-    ));
-    assert!(!firewall::iptables_port_allow("-A INPUT -p tcp --dport 10801 -m comment --comment \"example --dport 1080 text\" -j ACCEPT", 1080));
+    let listener = "0.0.0.0:1080".parse().unwrap();
+    for rule in [
+        r#"-A INPUT -m comment --comment "example --dport 1080 -j ACCEPT text" -j DROP"#,
+        r#"-A INPUT -p tcp --dport 10801 -m comment --comment "example --dport 1080 text" -j ACCEPT"#,
+    ] {
+        assert!(
+            firewall::iptables_delete_args(rule, listener).is_none(),
+            "must preserve {rule}"
+        );
+    }
+    let listener = "203.0.113.8:1080".parse().unwrap();
     assert_eq!(
-        firewall::ufw_rule_number("[ 8] 203.0.113.8 1080/tcp ALLOW IN Anywhere", 1080),
+        firewall::ufw_rule_number("[ 8] 203.0.113.8 1080/tcp ALLOW IN Anywhere", listener),
         Some(8)
     );
-    assert_eq!(
-        firewall::ufw_rule_number("[ 9] 1080/tcp ALLOW OUT Anywhere", 1080),
-        None
-    );
+    for line in [
+        "[ 9] 1080/tcp ALLOW OUT Anywhere",
+        "[ 9] 203.0.113.9 1080/tcp ALLOW IN Anywhere",
+        "[ 9] 203.0.113.8 1080/tcp ALLOW IN 192.0.2.0/24",
+        "[ 9] 203.0.113.8 1080/tcp ALLOW IN Anywhere # other service",
+    ] {
+        assert_eq!(firewall::ufw_rule_number(line, listener), None, "{line}");
+    }
 }

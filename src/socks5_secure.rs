@@ -41,7 +41,8 @@ pub(crate) async fn run(id: Uuid, mode: SecureMode, dry_run: bool) -> Result<()>
     let snapshot = service::capture_snapshot()?;
     let was_active = snapshot.was_active();
     let firewall = if mode == SecureMode::Local {
-        firewall::FirewallPlan::capture(plan.profile.port).await?
+        let listener = plan.original.listen_address()?.parse()?;
+        firewall::FirewallPlan::capture(listener).await?
     } else {
         firewall::FirewallPlan::default()
     };
