@@ -7,7 +7,11 @@ async fn socks5_secure_rollback_commands_are_outside_the_foreground_signal_group
         "sh",
         &[
             "-c".into(),
-            "ps -o pgid= -p \"$$\"; printf '%s\\n' \"$$\"".into(),
+            concat!(
+                "read -r stat < \"/proc/$$/stat\" || exit 1; ",
+                "set -- ${stat##*) }; printf '%s\\n' \"$3\" \"$$\"",
+            )
+            .into(),
         ],
         None,
     )
@@ -18,7 +22,7 @@ async fn socks5_secure_rollback_commands_are_outside_the_foreground_signal_group
         .map(|id| id.parse().unwrap())
         .collect();
     assert_eq!(ids.len(), 2);
-    // PGID 等于子进程自己的 PID，终端发给父进程组的 SIGINT 不会中断恢复命令。
+    // /proc 的 comm 后依次是 state、ppid、pgrp。PGID 应等于子进程 PID。
     assert_eq!(ids[0], ids[1]);
 }
 

@@ -1,5 +1,6 @@
 use std::{
     io::{self, IsTerminal},
+    ops::AsyncFnOnce,
     path::{Path, PathBuf},
 };
 
@@ -72,10 +73,28 @@ impl Socks5SecureArgs {
     }
 
     pub(crate) async fn run_in(self, directory: &Path, lock_path: &Path, tty: bool) -> Result<()> {
+        self.run_in_with_verifier(
+            directory,
+            lock_path,
+            tty,
+            utils::require_linux_root,
+            crate::socks5_secure::verify,
+        )
+        .await
+    }
+
+    pub(crate) async fn run_in_with_verifier(
+        self,
+        directory: &Path,
+        lock_path: &Path,
+        tty: bool,
+        require_root: impl FnOnce() -> Result<()>,
+        verify: impl AsyncFnOnce(&config::ManagedProfile) -> Result<()>,
+    ) -> Result<()> {
         use config::socks5_secure::SecurePlan;
 
         let mode = self.mode(tty)?;
-        let (id, name, already_secure) = utils::read_with_existing_lock(lock_path, || {
+        let (id, already_secure) = utils::read_with_existing_lock(lock_path, || {
             let state =
                 config::load_state_from(&directory.join("ping-rust-state.json")).map_err(|_| {
                     anyhow::anyhow!(
@@ -88,14 +107,16 @@ impl Socks5SecureArgs {
             }
             let already_secure = profile.socks5_risk_warning().is_none()
                 && SecurePlan::already_secure(directory, profile.id)?;
-            Ok((profile.id, profile.name.clone(), already_secure))
+            Ok((profile.id, already_secure))
         })?;
-        if already_secure {
-            println!("节点 {name} 已安全，无需修复");
+        const SECURE_PREVIEW: &str = "磁盘配置已加固，运行态尚未验证\n";
+        if already_secure && self.dry_run {
+            print!("{SECURE_PREVIEW}");
             return Ok(());
         }
         let mode = match mode {
-            Some(mode) => mode,
+            Some(_) => mode,
+            None if already_secure => None,
             None => {
                 println!("1) 启用随机认证：监听不变，远端仍可连；客户端必须更新凭据。\n2) 仅回环监听：远端连接将中断，并移除匹配的专用防火墙放行规则。");
                 match input::validated_text("选择加固方式（1/2）", None, false, |s| match s
@@ -104,7 +125,7 @@ impl Socks5SecureArgs {
                     "2" => Ok(config::socks5_secure::SecureMode::Local),
                     _ => bail!("请输入 1 或 2"),
                 }) {
-                    Ok(mode) => mode,
+                    Ok(mode) => Some(mode),
                     Err(error) if input::is_back(&error) || error.is::<input::MenuEof>() => {
                         return Ok(())
                     }
@@ -113,20 +134,21 @@ impl Socks5SecureArgs {
             }
         };
         if self.dry_run {
+            let mode = mode.context("请明确指定 --auth 或 --local")?;
             let output =
                 utils::read_with_existing_lock(lock_path, || {
                     match SecurePlan::prepare(directory, id, mode)? {
                         Some(plan) => plan.diff(),
-                        None => Ok("节点已安全，无需修复\n".into()),
+                        None => Ok(SECURE_PREVIEW.into()),
                     }
                 })?;
             print!("{output}");
             return Ok(());
         }
 
-        utils::require_linux_root()?;
+        require_root()?;
         let _lock = utils::exclusive_lock(lock_path)?;
-        crate::socks5_secure::run(directory, id, mode).await
+        crate::socks5_secure::run(directory, id, mode, verify).await
     }
 }
 

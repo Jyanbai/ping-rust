@@ -31,6 +31,7 @@ mod shoes_e2e_tests;
 
 use anyhow::Result;
 use clap::Parser;
+use socks5_secure::ShutdownSignal;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -42,6 +43,11 @@ async fn main() -> Result<()> {
         return Ok(());
     }
     let cli = cli::Cli::parse();
+    let securing_socks5 = matches!(&cli.command, Some(cli::Command::Socks5 { .. }));
+    #[cfg(unix)]
+    if securing_socks5 {
+        listen_for_termination()?;
+    }
     if !cli.is_socks5_secure_dry_run() && std::path::Path::new(utils::STATE_FILE).exists() {
         if let Ok(state) = config::load_state() {
             for profile in &state.profiles {
@@ -51,13 +57,12 @@ async fn main() -> Result<()> {
             }
         }
     }
-    let securing_socks5 = matches!(&cli.command, Some(cli::Command::Socks5 { .. }));
     let result = cli::run(cli).await;
     if let Some(error) = result.as_ref().err().filter(|error| is_interrupted(error)) {
         if securing_socks5 {
             eprintln!("{error:#}");
         }
-        restore_cursor_and_exit();
+        exit_after_signal(interrupted_exit_code(error));
     }
     result
 }
@@ -66,10 +71,23 @@ async fn main() -> Result<()> {
 async fn listen_for_interrupts() -> Result<()> {
     use tokio::signal::unix::{signal, SignalKind};
 
-    let mut signals = signal(SignalKind::interrupt())?;
+    let mut interrupts = signal(SignalKind::interrupt())?;
     tokio::spawn(async move {
-        while signals.recv().await.is_some() {
-            handle_interrupt();
+        while interrupts.recv().await.is_some() {
+            handle_interrupt(ShutdownSignal::Interrupt);
+        }
+    });
+    Ok(())
+}
+
+#[cfg(unix)]
+fn listen_for_termination() -> Result<()> {
+    use tokio::signal::unix::{signal, SignalKind};
+
+    let mut terminations = signal(SignalKind::terminate())?;
+    tokio::spawn(async move {
+        while terminations.recv().await.is_some() {
+            handle_interrupt(ShutdownSignal::Terminate);
         }
     });
     Ok(())
@@ -91,15 +109,15 @@ async fn listen_for_interrupts() -> Result<()> {
     .await?;
     tokio::spawn(async {
         if tokio::signal::ctrl_c().await.is_ok() {
-            handle_interrupt();
+            handle_interrupt(ShutdownSignal::Interrupt);
         }
     });
     Ok(())
 }
 
-fn handle_interrupt() {
-    if !socks5_secure::INTERRUPT.defer_signal() {
-        restore_cursor_and_exit();
+fn handle_interrupt(signal: ShutdownSignal) {
+    if !socks5_secure::INTERRUPT.defer_signal(signal) {
+        exit_after_signal(signal.exit_code());
     }
 }
 
@@ -111,10 +129,28 @@ fn is_interrupted(error: &anyhow::Error) -> bool {
     })
 }
 
+fn interrupted_exit_code(error: &anyhow::Error) -> i32 {
+    error
+        .chain()
+        .find_map(|cause| {
+            cause
+                .downcast_ref::<std::io::Error>()?
+                .get_ref()?
+                .downcast_ref::<ShutdownSignal>()
+        })
+        .copied()
+        .unwrap_or(ShutdownSignal::Interrupt)
+        .exit_code()
+}
+
 fn restore_cursor_and_exit() -> ! {
+    exit_after_signal(ShutdownSignal::Interrupt.exit_code())
+}
+
+fn exit_after_signal(code: i32) -> ! {
     sni::cleanup_on_interrupt();
     let _ = restore_cursor(&mut std::io::stdout());
-    std::process::exit(130)
+    std::process::exit(code)
 }
 
 fn restore_cursor(output: &mut impl std::io::Write) -> std::io::Result<()> {

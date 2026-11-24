@@ -236,18 +236,31 @@ fn verify_active_stable(
 pub fn capture_snapshot() -> Result<ServiceSnapshot> {
     utils::require_linux_root()?;
     ensure_systemctl()?;
-    let path = Path::new(utils::SERVICE_FILE);
+    capture_snapshot_with(
+        Path::new(utils::SERVICE_FILE),
+        systemctl_is_active,
+        systemctl_is_enabled,
+        main_pid,
+    )
+}
+
+fn capture_snapshot_with(
+    path: &Path,
+    is_active: impl FnOnce() -> Result<bool>,
+    is_enabled: impl FnOnce() -> Result<bool>,
+    main_pid: impl FnOnce() -> Result<Option<u32>>,
+) -> Result<ServiceSnapshot> {
     let unit_contents = match fs::read(path) {
         Ok(contents) => Some(contents),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(error).context("读取现有 systemd unit 失败"),
     };
-    let unit_exists = unit_contents.is_some();
-    let was_active = unit_exists && systemctl_is_active()?;
+    // systemd 可以从其他搜索路径加载同名 unit。
+    let was_active = is_active()?;
     Ok(ServiceSnapshot {
         unit_contents,
         was_active,
-        was_enabled: unit_exists && systemctl_is_enabled()?,
+        was_enabled: is_enabled()?,
         main_pid: was_active.then(main_pid).transpose()?.flatten(),
     })
 }
@@ -445,39 +458,62 @@ fn parse_proc_net_ports(table: &str, socket_inodes: &BTreeSet<u64>, tcp: bool) -
 pub fn restore_snapshot(snapshot: ServiceSnapshot) -> Result<()> {
     utils::require_linux_root()?;
     ensure_systemctl()?;
-    let path = Path::new(utils::SERVICE_FILE);
+    restore_snapshot_with(
+        snapshot,
+        Path::new(utils::SERVICE_FILE),
+        systemctl,
+        systemctl_is_active,
+        systemctl_is_enabled,
+        || thread::sleep(Duration::from_millis(750)),
+    )
+}
+
+fn restore_snapshot_with(
+    snapshot: ServiceSnapshot,
+    path: &Path,
+    mut run: impl FnMut(&[&str]) -> Result<()>,
+    mut is_active: impl FnMut() -> Result<bool>,
+    is_enabled: impl FnOnce() -> Result<bool>,
+    pause: impl FnMut(),
+) -> Result<()> {
     if path.exists() {
-        let _ = utils::isolated_command("systemctl")
-            .args(["disable", "--now", SERVICE_NAME])
-            .status();
+        let _ = run(&["disable", "--now", SERVICE_NAME]);
     }
     if let Some(contents) = snapshot.unit_contents {
         utils::atomic_write(path, &contents, 0o644)?;
     } else if path.exists() {
         fs::remove_file(path).context("删除回滚 systemd unit 失败")?;
     }
-    systemctl(&["daemon-reload"])?;
+    run(&["daemon-reload"])?;
 
-    if path.exists() {
-        if snapshot.was_enabled {
-            systemctl(&["enable", SERVICE_NAME])?;
-        } else {
-            let _ = utils::isolated_command("systemctl")
-                .args(["disable", SERVICE_NAME])
-                .status();
+    let enablement = is_enabled().and_then(|enabled| {
+        if enabled != snapshot.was_enabled {
+            let action = if snapshot.was_enabled {
+                "enable"
+            } else {
+                "disable"
+            };
+            run(&[action, SERVICE_NAME])?;
         }
-        if snapshot.was_active {
-            systemctl_after_reset(START_COMMAND)?;
-            verify_active_stable(systemctl_is_active, || {
-                thread::sleep(Duration::from_millis(750))
-            })?;
+        Ok(())
+    });
+    let active = is_active()?;
+    if snapshot.was_active {
+        let _ = run(RESET_FAILED_COMMAND);
+        // 当前进程可能仍在使用加固后的配置，需重启以加载已恢复的文件。
+        run(if active {
+            RESTART_COMMAND
         } else {
-            let _ = utils::isolated_command("systemctl")
-                .args(["stop", SERVICE_NAME])
-                .status();
+            START_COMMAND
+        })?;
+        verify_active_stable(is_active, pause)?;
+    } else if active {
+        run(&["stop", SERVICE_NAME])?;
+        if is_active()? {
+            bail!("回滚后 shoes.service 仍处于 active 状态");
         }
     }
-    Ok(())
+    enablement
 }
 
 fn activation_commands(was_active: bool, was_failed: bool) -> Vec<&'static [&'static str]> {
@@ -590,6 +626,78 @@ fn ensure_systemctl() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn socks5_secure_restores_active_vendor_unit_with_or_without_temporary_override() {
+        use std::cell::{Cell, RefCell};
+
+        for override_created in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("shoes.service");
+            let snapshot =
+                capture_snapshot_with(&path, || Ok(true), || Ok(true), || Ok(Some(42))).unwrap();
+            assert!(snapshot.unit_contents.is_none());
+            assert!(snapshot.was_active());
+            assert!(snapshot.was_enabled);
+            assert_eq!(snapshot.main_pid, Some(42));
+            if override_created {
+                fs::write(&path, b"temporary override").unwrap();
+            }
+
+            let active = Cell::new(true);
+            let enabled = Cell::new(true);
+            let active_probes = Cell::new(0);
+            let pauses = Cell::new(0);
+            let commands = RefCell::new(Vec::new());
+            restore_snapshot_with(
+                snapshot,
+                &path,
+                |args| {
+                    commands
+                        .borrow_mut()
+                        .push(args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>());
+                    match args {
+                        ["disable", "--now", SERVICE_NAME] => {
+                            assert!(path.exists());
+                            active.set(false);
+                            enabled.set(false);
+                        }
+                        ["daemon-reload"] => assert!(!path.exists()),
+                        ["enable", SERVICE_NAME] => enabled.set(true),
+                        ["reset-failed", SERVICE_NAME] => {}
+                        ["start" | "restart", SERVICE_NAME] => {
+                            assert!(!path.exists());
+                            active.set(true);
+                        }
+                        _ => panic!("意外 systemctl 操作 {args:?}"),
+                    }
+                    Ok(())
+                },
+                || {
+                    active_probes.set(active_probes.get() + 1);
+                    Ok(active.get())
+                },
+                || Ok(enabled.get()),
+                || pauses.set(pauses.get() + 1),
+            )
+            .unwrap();
+
+            let commands = commands.into_inner();
+            if override_created {
+                assert_eq!(commands[0], ["disable", "--now", SERVICE_NAME]);
+                assert_eq!(commands[1], ["daemon-reload"]);
+                assert_eq!(commands.last().unwrap().as_slice(), START_COMMAND);
+            } else {
+                assert_eq!(commands[0], ["daemon-reload"]);
+                assert_eq!(commands.last().unwrap().as_slice(), RESTART_COMMAND);
+            }
+            assert!(active.get());
+            assert!(enabled.get());
+            assert_eq!(active_probes.get(), 3);
+            assert_eq!(pauses.get(), 1);
+            assert!(!path.exists());
+        }
+    }
 
     #[cfg(unix)]
     #[test]

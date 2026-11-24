@@ -1,5 +1,7 @@
 //! 加固命令：持锁提交、激活、探测以及配置/防火墙/服务的补偿事务。
-use std::{io, net::SocketAddr, path::Path, process::Stdio, sync::Mutex, time::Duration};
+use std::{
+    io, net::SocketAddr, ops::AsyncFnOnce, path::Path, process::Stdio, sync::Mutex, time::Duration,
+};
 
 use anyhow::{bail, Context, Result};
 use tokio::{
@@ -31,26 +33,85 @@ enum InterruptPhase {
     #[default]
     Idle,
     Applying,
-    Interrupted,
+    Interrupted(ShutdownSignal),
+    ExitRequested(ShutdownSignal),
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ShutdownSignal {
+    Interrupt,
+    #[cfg(unix)]
+    Terminate,
+}
+
+impl ShutdownSignal {
+    pub(crate) fn exit_code(self) -> i32 {
+        match self {
+            Self::Interrupt => 130,
+            #[cfg(unix)]
+            Self::Terminate => 143,
+        }
+    }
+}
+
+impl std::fmt::Display for ShutdownSignal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            Self::Interrupt => "SIGINT",
+            #[cfg(unix)]
+            Self::Terminate => "SIGTERM",
+        };
+        write!(f, "收到 {name}，已取消 SOCKS5 加固")
+    }
+}
+
+impl std::error::Error for ShutdownSignal {}
 
 pub(crate) static INTERRUPT: Interrupt = Interrupt {
     phase: Mutex::new(InterruptPhase::Idle),
 };
 
 impl Interrupt {
-    pub(crate) fn defer_signal(&self) -> bool {
+    pub(crate) fn defer_signal(&self, signal: ShutdownSignal) -> bool {
         let mut phase = self.phase.lock().unwrap();
-        if *phase == InterruptPhase::Idle {
-            return false;
+        match *phase {
+            InterruptPhase::Idle => {
+                // 退出动作在锁外执行，先禁止另一个线程开始写盘。
+                *phase = InterruptPhase::ExitRequested(signal);
+                false
+            }
+            InterruptPhase::Applying => {
+                *phase = InterruptPhase::Interrupted(signal);
+                true
+            }
+            InterruptPhase::Interrupted(_) => true,
+            InterruptPhase::ExitRequested(_) => false,
         }
-        *phase = InterruptPhase::Interrupted;
-        true
     }
 
-    fn begin(&self) -> InterruptGuard<'_> {
-        *self.phase.lock().unwrap() = InterruptPhase::Applying;
-        InterruptGuard { interrupt: self }
+    pub(crate) fn pending_signal(&self) -> Option<ShutdownSignal> {
+        self.phase.lock().unwrap().pending_signal()
+    }
+
+    fn begin(&self) -> Result<InterruptGuard<'_>> {
+        let mut phase = self.phase.lock().unwrap();
+        if let Some(signal) = phase.pending_signal() {
+            return Err(interrupted(signal));
+        }
+        if *phase == InterruptPhase::Applying {
+            bail!("SOCKS5 加固事务已在执行");
+        }
+        *phase = InterruptPhase::Applying;
+        Ok(InterruptGuard { interrupt: self })
+    }
+}
+
+impl InterruptPhase {
+    fn pending_signal(&self) -> Option<ShutdownSignal> {
+        match *self {
+            Self::Interrupted(signal) | Self::ExitRequested(signal) => Some(signal),
+            Self::Applying | Self::Idle => None,
+        }
     }
 }
 
@@ -60,16 +121,16 @@ struct InterruptGuard<'a> {
 
 impl InterruptGuard<'_> {
     fn check(&self) -> Result<()> {
-        if *self.interrupt.phase.lock().unwrap() == InterruptPhase::Interrupted {
-            return Err(interrupted());
+        if let Some(signal) = self.interrupt.pending_signal() {
+            return Err(interrupted(signal));
         }
         Ok(())
     }
 
     fn finish(&self, publish_state: impl FnOnce() -> Result<()>) -> Result<()> {
         let mut phase = self.interrupt.phase.lock().unwrap();
-        if *phase == InterruptPhase::Interrupted {
-            return Err(interrupted());
+        if let Some(signal) = phase.pending_signal() {
+            return Err(interrupted(signal));
         }
         publish_state()?;
         *phase = InterruptPhase::Idle;
@@ -79,23 +140,36 @@ impl InterruptGuard<'_> {
 
 impl Drop for InterruptGuard<'_> {
     fn drop(&mut self) {
-        *self.interrupt.phase.lock().unwrap() = InterruptPhase::Idle;
+        let mut phase = self.interrupt.phase.lock().unwrap();
+        if matches!(
+            *phase,
+            InterruptPhase::Applying | InterruptPhase::Interrupted(_)
+        ) {
+            *phase = InterruptPhase::Idle;
+        }
     }
 }
 
-fn interrupted() -> anyhow::Error {
-    io::Error::new(
-        io::ErrorKind::Interrupted,
-        "收到 SIGINT，已取消 SOCKS5 加固",
-    )
-    .into()
+fn interrupted(signal: ShutdownSignal) -> anyhow::Error {
+    io::Error::new(io::ErrorKind::Interrupted, signal).into()
 }
 
-pub(crate) async fn run(directory: &Path, id: Uuid, mode: SecureMode) -> Result<()> {
-    let Some(mut plan) = SecurePlan::prepare(directory, id, mode)? else {
-        println!("节点已安全，无需修复");
+pub(crate) async fn run(
+    directory: &Path,
+    id: Uuid,
+    mode: Option<SecureMode>,
+    verify_runtime: impl AsyncFnOnce(&ManagedProfile) -> Result<()>,
+) -> Result<()> {
+    if let Some(profile) = SecurePlan::secure_profile(directory, id)? {
+        verify_runtime(&profile)
+            .await
+            .context("磁盘配置已加固，运行态验证失败，请检查 shoes.service、监听及认证后重试")?;
+        println!("节点 {} 已安全，无需修复", profile.name);
         return Ok(());
-    };
+    }
+    let mode = mode.context("节点配置已变化，请明确指定 --auth 或 --local 后重试")?;
+    let mut plan =
+        SecurePlan::prepare(directory, id, mode)?.context("节点配置已变化，请重试以验证运行态")?;
     let mut runtime = SystemRuntime {
         mode,
         snapshot: None,
@@ -135,7 +209,7 @@ pub(crate) async fn apply(
 ) -> Result<()> {
     runtime.preflight(plan).await?;
     // 等待正在运行的外部操作结束，再根据实际状态补偿。
-    let interrupt = interrupt.begin();
+    let interrupt = interrupt.begin()?;
     plan.commit_files()?;
     let mut activation_attempted = false;
     let change = async {
@@ -174,8 +248,10 @@ pub(crate) async fn apply(
                 failures.push(format!("服务及原监听验证={error:#}"));
             }
         }
-        let error = if interrupt.check().is_err() && !crate::is_interrupted(&error) {
-            interrupted().context(format!("{error:#}"))
+        let error = if crate::is_interrupted(&error) {
+            error
+        } else if let Err(signal) = interrupt.check() {
+            signal.context(format!("{error:#}"))
         } else {
             error
         };
@@ -261,7 +337,7 @@ async fn listener_output() -> Result<String> {
     ))
 }
 
-async fn verify(profile: &ManagedProfile) -> Result<()> {
+pub(crate) async fn verify(profile: &ManagedProfile) -> Result<()> {
     if !service::is_active()? {
         bail!("shoes.service 未处于 active 状态");
     }
@@ -287,7 +363,7 @@ async fn verify(profile: &ManagedProfile) -> Result<()> {
     Ok(())
 }
 
-fn check_listeners(output: &str, expected: SocketAddr, main_pid: u32) -> Result<()> {
+pub(crate) fn check_listeners(output: &str, expected: SocketAddr, main_pid: u32) -> Result<()> {
     let mut found = false;
     let owner = format!(",pid={main_pid},");
     for line in output.lines() {

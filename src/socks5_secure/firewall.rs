@@ -207,6 +207,8 @@ impl FirewallPlan {
         for (index, rule) in self.rules.iter().enumerate() {
             let before = rule.current(backend).await?;
             if let Some(position) = rule.position(&before) {
+                let count = matching_rule_count(&before, &before[position].text);
+                rule.verify_ufw_kernel(backend, count).await?;
                 // 超时或失败也可能已经改动了规则，回滚时先重新查询。
                 self.attempted.push(Attempt {
                     rule: index,
@@ -214,6 +216,7 @@ impl FirewallPlan {
                     position,
                 });
                 rule.delete(backend).await?;
+                rule.verify_ufw_kernel(backend, count - 1).await?;
             }
         }
         if let Some(listener) = self.listener {
@@ -405,14 +408,10 @@ impl Rule {
     async fn restore(&self, backend: &mut impl FirewallExecutor, attempt: &Attempt) -> Result<()> {
         let current = self.current(backend).await?;
         let text = &attempt.before[attempt.position].text;
-        let original_count = attempt
-            .before
-            .iter()
-            .filter(|rule| &rule.text == text)
-            .count();
-        let current_count = current.iter().filter(|rule| &rule.text == text).count();
+        let original_count = matching_rule_count(&attempt.before, text);
+        let current_count = matching_rule_count(&current, text);
         if current_count >= original_count {
-            return Ok(());
+            return self.verify_ufw_kernel(backend, original_count).await;
         }
         let position = restore_position(attempt, &current, matches!(self, Rule::Iptables { .. }));
         match self {
@@ -425,9 +424,15 @@ impl Rule {
                     args.extend(["insert".into(), (position + 1).to_string()]);
                 }
                 args.extend(ufw_allow_args(*listener));
-                backend.execute("ufw", &args, None).await?;
+                let result = backend.execute("ufw", &args, None).await;
+                self.verify_ufw_kernel(backend, original_count).await?;
+                result?;
             }
             Rule::Rich { base, text } => {
+                // --list-rich-rules 无法区分限时和无限时的运行时规则。
+                if base.first().is_none_or(|arg| arg != "--permanent") {
+                    bail!("firewalld 无法查询运行时 rich rule 的剩余超时。已保留移除状态，请核对原规则和到期时间后按需恢复");
+                }
                 let mut args = base.clone();
                 args.push(format!("--add-rich-rule={text}"));
                 backend.execute("firewall-cmd", &args, None).await?;
@@ -454,18 +459,43 @@ impl Rule {
                 }
             }
         }
-        if self
-            .current(backend)
-            .await?
-            .iter()
-            .filter(|rule| &rule.text == text)
-            .count()
-            <= current_count
-        {
+        if matching_rule_count(&self.current(backend).await?, text) <= current_count {
             bail!("原放行规则未恢复，请检查防火墙");
         }
         Ok(())
     }
+
+    async fn verify_ufw_kernel(
+        &self,
+        backend: &mut impl FirewallExecutor,
+        expected: usize,
+    ) -> Result<()> {
+        let Rule::Ufw { listener, .. } = self else {
+            return Ok(());
+        };
+        let (program, chain) = if listener.is_ipv4() {
+            ("iptables", "ufw-user-input")
+        } else {
+            ("ip6tables", "ufw6-user-input")
+        };
+        // ufw status numbered 使用持久配置列出用户规则，可能先于内核更新。
+        let output = backend
+            .execute(program, &["-w".into(), "-S".into(), chain.into()], None)
+            .await
+            .with_context(|| format!("无法查询 UFW 内核规则，请检查 {program} -S {chain}"))?;
+        let count = output
+            .lines()
+            .filter(|line| iptables_delete_args_in_chain(line, *listener, chain).is_some())
+            .count();
+        if count != expected {
+            bail!("UFW 内核规则数量为 {count}，预期为 {expected}，请检查 {program} -S {chain} 和 ufw status numbered");
+        }
+        Ok(())
+    }
+}
+
+fn matching_rule_count(rules: &[LiveRule], text: &str) -> usize {
+    rules.iter().filter(|rule| rule.text == text).count()
 }
 
 fn restore_position(attempt: &Attempt, current: &[LiveRule], use_occurrence: bool) -> usize {
@@ -672,12 +702,20 @@ pub(super) fn ufw_rule_number(line: &str, listener: SocketAddr) -> Option<u32> {
 }
 
 pub(super) fn iptables_delete_args(line: &str, listener: SocketAddr) -> Option<Vec<String>> {
+    // 自定义链可能同时供 INPUT/OUTPUT/FORWARD 使用。
+    iptables_delete_args_in_chain(line, listener, "INPUT")
+}
+
+fn iptables_delete_args_in_chain(
+    line: &str,
+    listener: SocketAddr,
+    expected_chain: &str,
+) -> Option<Vec<String>> {
     let mut words = shell_words(line);
     let [append, chain, options @ ..] = words.as_slice() else {
         return None;
     };
-    // 自定义链可能同时供 INPUT/OUTPUT/FORWARD 使用。
-    if append != "-A" || chain != "INPUT" {
+    if append != "-A" || chain != expected_chain {
         return None;
     }
     let (options, remainder) = options.as_chunks::<2>();
@@ -945,48 +983,61 @@ mod tests {
         }
     }
 
+    const SHARED: &str = r#"rule port port="1080" protocol="tcp" accept"#;
+    const SCOPED: &str = r#"rule family="ipv4" port port="1080" protocol="tcp" accept"#;
+
+    struct FakeFirewalld {
+        rules: [Vec<&'static str>; 2],
+        runtime_timeout: Option<u32>,
+    }
+
+    impl FirewallExecutor for FakeFirewalld {
+        fn available(&self, program: &str) -> bool {
+            program == "firewall-cmd"
+        }
+
+        async fn execute(
+            &mut self,
+            program: &str,
+            args: &[String],
+            input: Option<&[u8]>,
+        ) -> Result<String> {
+            assert!(input.is_none());
+            if program == "systemctl" {
+                return Ok("active".into());
+            }
+            assert_eq!(program, "firewall-cmd");
+            let permanent = if args[0] == "--permanent" { 1 } else { 0 };
+            let option = args.last().unwrap();
+            match option.as_str() {
+                "--get-zones" => Ok("public".into()),
+                "--list-sources" => Ok(String::new()),
+                "--list-ports" => Ok("1080/tcp".into()),
+                "--list-rich-rules" => Ok(self.rules[permanent].join("\n")),
+                _ if option.strip_prefix("--add-rich-rule=") == Some(SCOPED) => {
+                    self.rules[permanent].push(SCOPED);
+                    if permanent == 0 {
+                        self.runtime_timeout = None;
+                    }
+                    Ok(String::new())
+                }
+                _ => {
+                    assert_eq!(option, &format!("--remove-rich-rule={SCOPED}"));
+                    assert_eq!(self.rules[permanent].pop(), Some(SCOPED));
+                    if permanent == 0 {
+                        self.runtime_timeout = None;
+                    }
+                    Ok(String::new())
+                }
+            }
+        }
+    }
+
     #[tokio::test]
     async fn socks5_secure_firewalld_keeps_shared_runtime_and_permanent_rules() {
-        const SHARED: &str = r#"rule port port="1080" protocol="tcp" accept"#;
-        const SCOPED: &str = r#"rule family="ipv4" port port="1080" protocol="tcp" accept"#;
-        struct FakeFirewalld {
-            rules: [Vec<&'static str>; 2],
-        }
-
-        impl FirewallExecutor for FakeFirewalld {
-            fn available(&self, program: &str) -> bool {
-                program == "firewall-cmd"
-            }
-
-            async fn execute(
-                &mut self,
-                program: &str,
-                args: &[String],
-                input: Option<&[u8]>,
-            ) -> Result<String> {
-                assert!(input.is_none());
-                if program == "systemctl" {
-                    return Ok("active".into());
-                }
-                assert_eq!(program, "firewall-cmd");
-                let permanent = if args[0] == "--permanent" { 1 } else { 0 };
-                let option = args.last().unwrap();
-                match option.as_str() {
-                    "--get-zones" => Ok("public".into()),
-                    "--list-sources" => Ok(String::new()),
-                    "--list-ports" => Ok("1080/tcp".into()),
-                    "--list-rich-rules" => Ok(self.rules[permanent].join("\n")),
-                    _ => {
-                        assert_eq!(option, &format!("--remove-rich-rule={SCOPED}"));
-                        assert_eq!(self.rules[permanent].pop(), Some(SCOPED));
-                        Ok(String::new())
-                    }
-                }
-            }
-        }
-
         let mut backend = FakeFirewalld {
             rules: [vec![SHARED, SCOPED], vec![SHARED, SCOPED]],
+            runtime_timeout: None,
         };
         let mut plan = FirewallPlan::capture_with("0.0.0.0:1080".parse().unwrap(), &mut backend)
             .await
@@ -996,6 +1047,25 @@ mod tests {
         let report = plan.closure_report();
         assert!(report.contains("已移除 1 条运行时"));
         assert!(report.contains("已移除 1 条持久"));
+    }
+
+    #[tokio::test]
+    async fn socks5_secure_firewalld_rollback_does_not_make_timed_rule_indefinite() {
+        let mut backend = FakeFirewalld {
+            rules: [vec![SHARED, SCOPED], vec![SHARED, SCOPED]],
+            runtime_timeout: Some(60),
+        };
+        let mut plan = FirewallPlan::capture_with("0.0.0.0:1080".parse().unwrap(), &mut backend)
+            .await
+            .unwrap();
+        assert_eq!(backend.runtime_timeout, Some(60));
+        plan.close_with(&mut backend).await.unwrap();
+        assert_eq!(backend.rules, [vec![SHARED], vec![SHARED]]);
+
+        let rollback = plan.restore_with(&mut backend).await;
+        assert_eq!(backend.rules, [vec![SHARED], vec![SHARED, SCOPED]]);
+        let error = rollback.unwrap_err();
+        assert!(format!("{error:#}").contains("剩余超时"));
     }
 
     #[test]
@@ -1109,70 +1179,135 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
-    async fn socks5_secure_ufw_partial_failure_restores_only_the_removed_family() {
-        const IPV4: &str = "1080/tcp ALLOW IN Anywhere";
-        const IPV6: &str = "1080/tcp (v6) ALLOW IN Anywhere (v6)";
-        const OTHER: &str = "22/tcp ALLOW IN Anywhere";
-        struct FakeUfw(Vec<&'static str>);
+    const IPV4: &str = "1080/tcp ALLOW IN Anywhere";
+    const IPV6: &str = "1080/tcp (v6) ALLOW IN Anywhere (v6)";
+    const OTHER: &str = "22/tcp ALLOW IN Anywhere";
 
-        impl FirewallExecutor for FakeUfw {
-            fn available(&self, program: &str) -> bool {
-                program == "ufw"
-            }
+    struct FakeUfw {
+        disk: Vec<&'static str>,
+        ipv6: bool,
+        kernel_has_rule: bool,
+        apply_to_kernel: bool,
+        keep_disk_on_delete_failure: bool,
+    }
 
-            async fn execute(
-                &mut self,
-                program: &str,
-                args: &[String],
-                input: Option<&[u8]>,
-            ) -> Result<String> {
-                assert_eq!(program, "ufw");
-                assert!(input.is_none());
-                let spec = [
-                    "allow",
-                    "proto",
-                    "tcp",
-                    "from",
-                    "0.0.0.0/0",
-                    "to",
-                    "0.0.0.0/0",
-                    "port",
-                    "1080",
-                ];
-                match args[0].as_str() {
-                    "status" => {
-                        let mut status = String::from("Status: active\n");
-                        for (index, rule) in self.0.iter().enumerate() {
-                            status.push_str(&format!("[{}] {rule}\n", index + 1));
-                        }
-                        Ok(status)
-                    }
-                    "--force" => {
-                        assert_eq!(args[1], "delete");
-                        assert_eq!(args[2..], spec);
-                        assert_eq!(self.0.remove(0), IPV4);
-                        self.0.insert(0, OTHER);
-                        bail!("模拟 UFW 删除后失败");
-                    }
-                    "allow" => {
-                        assert_eq!(args, spec);
-                        self.0.insert(1, IPV4);
-                        Ok(String::new())
-                    }
-                    _ => panic!("意外操作 {args:?}"),
-                }
-            }
+    impl FirewallExecutor for FakeUfw {
+        fn available(&self, program: &str) -> bool {
+            program == "ufw" || program == if self.ipv6 { "ip6tables" } else { "iptables" }
         }
 
-        let mut backend = FakeUfw(vec![IPV4, IPV6]);
+        async fn execute(
+            &mut self,
+            program: &str,
+            args: &[String],
+            input: Option<&[u8]>,
+        ) -> Result<String> {
+            assert!(input.is_none());
+            if self.available(program) && program != "ufw" {
+                let kernel_chain = if self.ipv6 {
+                    "ufw6-user-input"
+                } else {
+                    "ufw-user-input"
+                };
+                return match args {
+                    [version] if version == "--version" => Ok("iptables v1.8.9 (legacy)".into()),
+                    [_, _, chain] if chain == "INPUT" => Ok("-P INPUT ACCEPT".into()),
+                    [_, _, chain] if chain == kernel_chain => {
+                        assert_eq!(args, ["-w", "-S", kernel_chain]);
+                        let mut rules = format!("-N {kernel_chain}\n");
+                        if self.kernel_has_rule {
+                            rules.push_str(&format!(
+                                "-A {kernel_chain} -p tcp -m tcp --dport 1080 -j ACCEPT\n"
+                            ));
+                        }
+                        Ok(rules)
+                    }
+                    _ => panic!("意外 iptables 操作 {args:?}"),
+                };
+            }
+            assert_eq!(program, "ufw");
+            let (scope, rule) = if self.ipv6 {
+                ("::/0", IPV6)
+            } else {
+                ("0.0.0.0/0", IPV4)
+            };
+            let spec = [
+                "allow", "proto", "tcp", "from", scope, "to", scope, "port", "1080",
+            ];
+            match args[0].as_str() {
+                "status" => {
+                    let mut status = String::from("Status: active\n");
+                    for (index, rule) in self.disk.iter().enumerate() {
+                        status.push_str(&format!("[{}] {rule}\n", index + 1));
+                    }
+                    Ok(status)
+                }
+                "--force" => {
+                    assert_eq!(args[1], "delete");
+                    assert_eq!(args[2..], spec);
+                    self.kernel_has_rule = false;
+                    if !self.keep_disk_on_delete_failure {
+                        assert_eq!(self.disk.remove(usize::from(self.ipv6)), rule);
+                    }
+                    self.disk.insert(0, OTHER);
+                    bail!("模拟 UFW 删除后失败");
+                }
+                "allow" => {
+                    assert!(!self.keep_disk_on_delete_failure);
+                    assert_eq!(args, spec);
+                    self.disk.insert(1 + usize::from(self.ipv6), rule);
+                    if !self.apply_to_kernel {
+                        bail!("模拟 UFW 写入持久规则后追加内核规则失败");
+                    }
+                    self.kernel_has_rule = true;
+                    Ok(String::new())
+                }
+                _ => panic!("意外操作 {args:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn socks5_secure_ufw_partial_failure_restores_only_the_removed_family() {
+        let mut backend = FakeUfw {
+            disk: vec![IPV4, IPV6],
+            ipv6: false,
+            kernel_has_rule: true,
+            apply_to_kernel: true,
+            keep_disk_on_delete_failure: false,
+        };
         let mut plan = FirewallPlan::capture_with("0.0.0.0:1080".parse().unwrap(), &mut backend)
             .await
             .unwrap();
         assert!(plan.close_with(&mut backend).await.is_err());
-        assert_eq!(backend.0, [OTHER, IPV6]);
+        assert_eq!(backend.disk, [OTHER, IPV6]);
+        assert!(!backend.kernel_has_rule);
         plan.restore_with(&mut backend).await.unwrap();
-        assert_eq!(backend.0, [OTHER, IPV4, IPV6]);
+        assert_eq!(backend.disk, [OTHER, IPV4, IPV6]);
+        assert!(backend.kernel_has_rule);
+    }
+
+    #[tokio::test]
+    async fn socks5_secure_ufw_rollback_rejects_rules_present_only_on_disk() {
+        for (address, ipv6) in [("0.0.0.0:1080", false), ("[::]:1080", true)] {
+            for keep_disk_on_delete_failure in [false, true] {
+                let mut backend = FakeUfw {
+                    disk: vec![IPV4, IPV6],
+                    ipv6,
+                    kernel_has_rule: true,
+                    apply_to_kernel: false,
+                    keep_disk_on_delete_failure,
+                };
+                let mut plan = FirewallPlan::capture_with(address.parse().unwrap(), &mut backend)
+                    .await
+                    .unwrap();
+                assert!(plan.close_with(&mut backend).await.is_err());
+                let rollback = plan.restore_with(&mut backend).await;
+                assert_eq!(backend.disk, [OTHER, IPV4, IPV6]);
+                assert!(!backend.kernel_has_rule);
+                assert!(format!("{:#}", rollback.unwrap_err()).contains("UFW 内核规则"));
+            }
+        }
     }
 
     struct FakeIptables {

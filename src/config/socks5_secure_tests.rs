@@ -203,6 +203,59 @@ async fn socks5_secure_already_safe_still_requires_noninteractive_mode() {
     assert!(!lock.exists());
 }
 
+#[tokio::test]
+async fn socks5_secure_checks_running_listener_when_legacy_disk_config_is_local() {
+    use crate::cli::{Cli, Command, Socks5Command};
+    use clap::Parser;
+
+    let directory = tempfile::tempdir().unwrap();
+    let profile = legacy_bound_to(directory.path(), 1080, "127.0.0.1");
+    let state_path = directory.path().join("ping-rust-state.json");
+    let config_path = directory.path().join("config.yaml");
+    let original_state = fs::read(&state_path).unwrap();
+    let original_config = fs::read(&config_path).unwrap();
+    let state: serde_json::Value = serde_json::from_slice(&original_state).unwrap();
+    assert!(state["profiles"][0]["credentials"]["Socks5"]
+        .get("listen")
+        .is_none());
+
+    for (running, safe) in [("0.0.0.0:1080", false), ("127.0.0.1:1080", true)] {
+        let cli =
+            Cli::try_parse_from(["prs", "socks5", "secure", &profile.name, "--local"]).unwrap();
+        let Some(Command::Socks5 {
+            command: Socks5Command::Secure(args),
+        }) = cli.command
+        else {
+            panic!("需要 SOCKS5 secure 命令");
+        };
+        let verified = std::cell::Cell::new(false);
+        let result = args
+            .run_in_with_verifier(
+                directory.path(),
+                &directory.path().join("ping-rust.lock"),
+                false,
+                || Ok(()),
+                async |profile: &ManagedProfile| {
+                    verified.set(true);
+                    let expected = profile.listen_address()?.parse()?;
+                    assert_eq!(expected, "127.0.0.1:1080".parse::<std::net::SocketAddr>()?);
+                    let sockets =
+                        format!("LISTEN 0 128 {running} *:* users:((\"shoes\",pid=42,fd=7))");
+                    crate::socks5_secure::check_listeners(&sockets, expected, 42)
+                },
+            )
+            .await;
+        assert!(verified.get());
+        assert_eq!(result.is_ok(), safe);
+        if let Err(error) = result {
+            assert!(format!("{error:#}").contains("实际监听地址不符合预期"));
+        }
+        assert_eq!(fs::read(&state_path).unwrap(), original_state);
+        assert_eq!(fs::read(&config_path).unwrap(), original_config);
+        assert!(!directory.path().join("profiles").exists());
+    }
+}
+
 #[test]
 fn socks5_secure_dry_run_hides_other_listeners_chain_exits_and_tls_targets() {
     let directory = tempfile::tempdir().unwrap();
@@ -590,6 +643,29 @@ impl crate::socks5_secure::Runtime for InterruptedRuntime<'_> {
     }
 
     async fn activate(&mut self) -> Result<()> {
+        #[cfg(unix)]
+        if self.stop_at == "sigterm" {
+            self.events.push("activate");
+            assert!(self.directory.join("profiles").is_dir());
+            let status = std::process::Command::new("sh")
+                .args([
+                    "-c",
+                    "kill -TERM \"$1\"",
+                    "sh",
+                    &std::process::id().to_string(),
+                ])
+                .status()?;
+            assert!(status.success());
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while self.interrupt.pending_signal().is_none() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "等待 SIGTERM 处理超时"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            return Ok(());
+        }
         self.record("activate");
         Ok(())
     }
@@ -611,13 +687,17 @@ impl crate::socks5_secure::Runtime for InterruptedRuntime<'_> {
     async fn restore_firewall(&mut self) -> Result<()> {
         self.events.push("restore-firewall");
         // 回滚途中再次收到 SIGINT 也不能触发全局直接退出。
-        assert!(self.interrupt.defer_signal());
+        assert!(self
+            .interrupt
+            .defer_signal(crate::socks5_secure::ShutdownSignal::Interrupt));
         Ok(())
     }
 
     async fn restore_service(&mut self, _: &ManagedProfile) -> Result<()> {
         self.service_active = false;
-        assert!(self.interrupt.defer_signal());
+        assert!(self
+            .interrupt
+            .defer_signal(crate::socks5_secure::ShutdownSignal::Interrupt));
         self.service_active = true;
         self.events.push("restore-service");
         Ok(())
@@ -629,7 +709,9 @@ impl InterruptedRuntime<'_> {
         self.events.push(event);
         if self.stop_at == event {
             assert!(self.directory.join("profiles").is_dir());
-            assert!(self.interrupt.defer_signal());
+            assert!(self
+                .interrupt
+                .defer_signal(crate::socks5_secure::ShutdownSignal::Interrupt));
         }
     }
 }
@@ -699,8 +781,102 @@ async fn socks5_secure_sigint_after_commit_rolls_back_before_exit() {
             state
         );
         assert!(!directory.path().join("profiles").exists());
-        assert!(!interrupt.defer_signal());
+        assert!(!interrupt.defer_signal(crate::socks5_secure::ShutdownSignal::Interrupt));
     }
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn socks5_secure_sigterm_during_restart_rolls_back_before_exit() {
+    const CHILD: &str = "PING_RUST_TEST_SOCKS5_SIGTERM_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "config::socks5_secure_tests::socks5_secure_sigterm_during_restart_rolls_back_before_exit",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "子进程退出：{}\n{}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+        return;
+    }
+
+    crate::listen_for_interrupts().await.unwrap();
+    crate::listen_for_termination().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let id = legacy(directory.path()).id;
+    let config_path = directory.path().join("config.yaml");
+    let state_path = directory.path().join("ping-rust-state.json");
+    let config = fs::read(&config_path).unwrap();
+    let state = fs::read(&state_path).unwrap();
+    let mut plan = SecurePlan::prepare(directory.path(), id, SecureMode::Local)
+        .unwrap()
+        .unwrap();
+    let interrupt = &crate::socks5_secure::INTERRUPT;
+    let mut runtime = InterruptedRuntime {
+        interrupt,
+        directory: directory.path(),
+        has_ss: true,
+        stop_at: "sigterm",
+        events: vec![],
+        service_active: true,
+    };
+    let error = crate::socks5_secure::apply(&mut plan, &mut runtime, interrupt)
+        .await
+        .unwrap_err();
+    assert!(crate::is_interrupted(&error));
+    assert_eq!(crate::interrupted_exit_code(&error), 143);
+    assert!(format!("{error:#}").contains("SIGTERM"));
+    assert_eq!(
+        runtime.events,
+        ["activate", "restore-firewall", "restore-service"]
+    );
+    assert!(runtime.service_active);
+    assert_eq!(fs::read(&config_path).unwrap(), config);
+    assert_eq!(fs::read(&state_path).unwrap(), state);
+    assert!(!directory.path().join("profiles").exists());
+}
+
+#[tokio::test]
+async fn socks5_secure_signal_observing_idle_prevents_transaction_from_writing() {
+    use crate::socks5_secure::{Interrupt, ShutdownSignal};
+
+    let directory = tempfile::tempdir().unwrap();
+    let id = legacy(directory.path()).id;
+    let config_path = directory.path().join("config.yaml");
+    let state_path = directory.path().join("ping-rust-state.json");
+    let config = fs::read(&config_path).unwrap();
+    let state = fs::read(&state_path).unwrap();
+    let mut plan = SecurePlan::prepare(directory.path(), id, SecureMode::Local)
+        .unwrap()
+        .unwrap();
+    let interrupt = Interrupt::default();
+    let mut runtime = InterruptedRuntime {
+        interrupt: &interrupt,
+        directory: directory.path(),
+        has_ss: true,
+        stop_at: "",
+        events: vec![],
+        service_active: true,
+    };
+    // 模拟信号线程决定退出后，主线程在退出动作之前尝试进入事务。
+    assert!(!interrupt.defer_signal(ShutdownSignal::Interrupt));
+    let error = crate::socks5_secure::apply(&mut plan, &mut runtime, &interrupt)
+        .await
+        .unwrap_err();
+    assert!(crate::is_interrupted(&error));
+    assert!(runtime.events.is_empty());
+    assert_eq!(fs::read(&config_path).unwrap(), config);
+    assert_eq!(fs::read(&state_path).unwrap(), state);
+    assert!(!directory.path().join("profiles").exists());
 }
 
 #[tokio::test]

@@ -45,8 +45,13 @@ impl SecurePlan {
     }
 
     pub(crate) fn already_secure(directory: &Path, id: Uuid) -> Result<bool> {
+        Ok(Self::secure_profile(directory, id)?.is_some())
+    }
+
+    pub(crate) fn secure_profile(directory: &Path, id: Uuid) -> Result<Option<ManagedProfile>> {
         let (state, _, index) = Self::load_checked(directory, id)?;
-        Ok(state.profiles[index].socks5_risk_warning().is_none())
+        let profile = state.profiles.into_iter().nth(index).unwrap();
+        Ok(profile.socks5_risk_warning().is_none().then_some(profile))
     }
 
     pub(crate) fn prepare(directory: &Path, id: Uuid, mode: SecureMode) -> Result<Option<Self>> {
