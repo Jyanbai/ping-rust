@@ -1,4 +1,4 @@
-use std::{io, time::Duration};
+use std::{io, path::Path, time::Duration};
 
 use anyhow::{bail, Context, Result};
 use colored::Colorize;
@@ -17,6 +17,7 @@ use crate::{
     installer::{self, InstallMethod},
     operations,
     service::{self, ServiceAction},
+    utils,
 };
 
 mod chain;
@@ -484,10 +485,8 @@ pub async fn run() -> Result<()> {
                     control
                 }
             }
+            Err(error) if crate::is_interrupted(&error) => return Err(error),
             Err(error) => {
-                if crate::is_interrupted(&error) {
-                    crate::restore_cursor_and_exit();
-                }
                 let control = control_after_error(&error);
                 if control == MenuControl::Continue && !input::is_back(&error) {
                     eprintln!("{}", format!("错误：{error:#}").red());
@@ -1452,17 +1451,50 @@ async fn delete_chain_node() -> Result<()> {
 }
 
 fn export_menu() -> Result<()> {
-    let state = config::load_state()?;
+    export_menu_with(
+        Path::new(utils::STATE_FILE),
+        Path::new(utils::LOCK_FILE),
+        select_profile,
+        export_menu_options,
+        |output| println!("{output}"),
+    )
+}
+
+pub(crate) fn export_menu_with(
+    state_path: &Path,
+    lock_path: &Path,
+    select: impl FnOnce(&[config::ManagedProfile]) -> Result<Option<usize>>,
+    options: impl FnOnce() -> Result<Option<(ClientFormat, String)>>,
+    emit: impl FnOnce(&str),
+) -> Result<()> {
+    let load_state = || config::load_state_from(state_path);
+    let state = utils::read_with_existing_lock(lock_path, load_state)?;
     if state.profiles.is_empty() {
-        println!("没有可导出的配置。");
+        emit("没有可导出的配置。");
         return Ok(());
     }
-    let Some(selected) = select_profile(&state.profiles)? else {
+    let Some(selected) = select(&state.profiles)? else {
         return Ok(());
     };
+    let id = state.profiles[selected].id;
+    let Some((format, server)) = options()? else {
+        return Ok(());
+    };
+    utils::read_with_existing_lock_then(lock_path, load_state, |state| {
+        let profile = state
+            .profiles
+            .iter()
+            .find(|profile| profile.id == id)
+            .context("所选配置已删除，请重新选择要导出的配置")?;
+        emit(&export_menu_output(profile, format, &server)?);
+        Ok(())
+    })
+}
+
+fn export_menu_options() -> Result<Option<(ClientFormat, String)>> {
     let formats = ["Clash Meta", "sing-box", "Nekobox 分享链接"];
     let Some(format_index) = select_numbered("客户端格式", &formats)? else {
-        return Ok(());
+        return Ok(None);
     };
     let format = match format_index {
         0 => ClientFormat::ClashMeta,
@@ -1472,11 +1504,7 @@ fn export_menu() -> Result<()> {
     let server = input::checked_text("VPS 公网域名或 IP", None, false, |value| {
         client::normalize_server_address(value).map(|_| ())
     })?;
-    println!(
-        "{}",
-        export_menu_output(&state.profiles[selected], format, &server)?
-    );
-    Ok(())
+    Ok(Some((format, server)))
 }
 
 /// 菜单导出的完整输出：内容之后附上与 CLI 导出相同的能力说明（如 NekoBox 丢失 H2MUX 偏好）。

@@ -751,6 +751,73 @@ fn socks5_secure_url_qr_and_file_export_wait_for_publish_or_rollback() {
     }
 }
 
+#[test]
+fn socks5_secure_tools_menu_exports_the_state_after_input() {
+    use crate::client::ClientFormat;
+    use std::{sync::mpsc, thread, time::Duration};
+
+    for (format, wait_for_writer) in [
+        (ClientFormat::ClashMeta, false),
+        (ClientFormat::SingBox, true),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let id = legacy(directory.path()).id;
+        let state_path = directory.path().join("ping-rust-state.json");
+        let lock_path = directory.path().join("ping-rust.lock");
+        let (selected, selection_ready) = mpsc::channel();
+        let (answer, input_ready) = mpsc::channel();
+        let (finished, result) = mpsc::channel();
+        let reader = {
+            let (state_path, lock_path) = (state_path.clone(), lock_path.clone());
+            thread::spawn(move || {
+                let output = crate::menu::export_menu_with(
+                    &state_path,
+                    &lock_path,
+                    |profiles| {
+                        assert_eq!(profiles[0].id, id);
+                        assert!(profiles[0].socks5_loopback().is_none());
+                        Ok(Some(0))
+                    },
+                    || {
+                        selected.send(()).unwrap();
+                        input_ready.recv_timeout(Duration::from_secs(5)).unwrap();
+                        Ok(Some((format, "example.com".to_owned())))
+                    },
+                    |_| panic!("加固后不能输出公网配置"),
+                );
+                finished.send(output).unwrap();
+            })
+        };
+        selection_ready
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        let lock = utils::exclusive_lock(&lock_path).unwrap();
+        let mut plan = SecurePlan::prepare(directory.path(), id, SecureMode::Local)
+            .unwrap()
+            .unwrap();
+        plan.commit_files().unwrap();
+        if wait_for_writer {
+            answer.send(()).unwrap();
+            assert!(matches!(
+                result.recv_timeout(Duration::from_millis(100)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ));
+        }
+        plan.publish_state().unwrap();
+        drop(lock);
+        if !wait_for_writer {
+            answer.send(()).unwrap();
+        }
+
+        let error = result
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("仅监听本机"));
+        reader.join().unwrap();
+    }
+}
+
 struct InterruptedRuntime<'a> {
     interrupt: &'a crate::socks5_secure::Interrupt,
     directory: &'a Path,
@@ -788,9 +855,15 @@ impl crate::socks5_secure::Runtime for InterruptedRuntime<'_> {
                 );
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
-            return Ok(());
+            std::future::pending::<()>().await;
         }
         self.record("activate");
+        if self.stop_at == "hung-activate" {
+            assert!(self
+                .interrupt
+                .defer_signal(crate::socks5_secure::ShutdownSignal::Interrupt));
+            std::future::pending::<()>().await;
+        }
         Ok(())
     }
 
@@ -909,6 +982,46 @@ async fn socks5_secure_sigint_after_commit_rolls_back_before_exit() {
     }
 }
 
+#[tokio::test]
+async fn socks5_secure_sigint_interrupts_a_restart_that_never_finishes() {
+    let directory = tempfile::tempdir().unwrap();
+    let id = legacy(directory.path()).id;
+    let config_path = directory.path().join("config.yaml");
+    let state_path = directory.path().join("ping-rust-state.json");
+    let config = fs::read(&config_path).unwrap();
+    let state = fs::read(&state_path).unwrap();
+    let mut plan = SecurePlan::prepare(directory.path(), id, SecureMode::Local)
+        .unwrap()
+        .unwrap();
+    let interrupt = crate::socks5_secure::Interrupt::default();
+    let mut runtime = InterruptedRuntime {
+        interrupt: &interrupt,
+        directory: directory.path(),
+        has_ss: true,
+        stop_at: "hung-activate",
+        events: vec![],
+        service_active: true,
+    };
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        crate::socks5_secure::apply(&mut plan, &mut runtime, &interrupt),
+    )
+    .await
+    .expect("重启一直未返回时仍须完成取消与回滚")
+    .unwrap_err();
+    assert_eq!(crate::interrupted_exit_code(&error), 130);
+    assert!(format!("{error:#}").contains("SIGINT"));
+    assert!(error.to_string().contains("已恢复并再次验证"));
+    assert_eq!(
+        runtime.events,
+        ["activate", "restore-firewall", "restore-service"]
+    );
+    assert!(runtime.service_active);
+    assert_eq!(fs::read(&config_path).unwrap(), config);
+    assert_eq!(fs::read(&state_path).unwrap(), state);
+    assert!(!directory.path().join("profiles").exists());
+}
+
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn socks5_secure_sigterm_during_restart_rolls_back_before_exit() {
@@ -953,9 +1066,13 @@ async fn socks5_secure_sigterm_during_restart_rolls_back_before_exit() {
         events: vec![],
         service_active: true,
     };
-    let error = crate::socks5_secure::apply(&mut plan, &mut runtime, interrupt)
-        .await
-        .unwrap_err();
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        crate::socks5_secure::apply(&mut plan, &mut runtime, interrupt),
+    )
+    .await
+    .expect("SIGTERM 必须中断一直未返回的重启并回滚")
+    .unwrap_err();
     assert!(crate::is_interrupted(&error));
     assert_eq!(crate::interrupted_exit_code(&error), 143);
     assert!(format!("{error:#}").contains("SIGTERM"));

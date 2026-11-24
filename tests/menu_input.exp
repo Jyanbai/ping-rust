@@ -352,6 +352,13 @@ send_choice 2
 expect_or_fail {新配置名称（默认：[^\r\n]+，输入 0 返回）：} "rename Ctrl+C"
 send -- "\003"
 expect_or_fail {\x1b\[\?25h\r?\n} "cursor restoration"
-expect eof
+expect {
+    -re {按回车返回主菜单|请选择 \[0-10\]: } {
+        puts stderr "Ctrl+C returned to menu instead of exiting"
+        exit 1
+    }
+    eof {}
+    timeout { puts stderr "menu did not exit after Ctrl+C"; exit 1 }
+}
 set result [wait]
 if {[lindex $result 2] != 0 || [lindex $result 3] != 130} { exit 1 }

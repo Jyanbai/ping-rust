@@ -10,6 +10,8 @@ const RESET_FAILED_COMMAND: &[&str] = &["reset-failed", SERVICE_NAME];
 const ENABLE_NOW_COMMAND: &[&str] = &["enable", "--now", SERVICE_NAME];
 const START_COMMAND: &[&str] = &["start", SERVICE_NAME];
 const RESTART_COMMAND: &[&str] = &["restart", SERVICE_NAME];
+const SECURE_JOB_TIMEOUT: Duration = Duration::from_secs(120);
+const SECURE_QUERY_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub struct ServiceSnapshot {
     unit_contents: Option<Vec<u8>>,
@@ -634,11 +636,7 @@ impl Systemctl {
     }
 
     pub(crate) fn main_pid(self) -> Result<Option<u32>> {
-        let value = self.show_value("MainPID")?;
-        let pid = value
-            .parse::<u32>()
-            .with_context(|| format!("systemd 返回了无效 MainPID：{value}"))?;
-        Ok((pid != 0).then_some(pid))
+        parse_main_pid(&self.show_value("MainPID")?)
     }
 
     fn after_reset(self, command: &[&str]) -> Result<()> {
@@ -657,6 +655,89 @@ impl Systemctl {
             || thread::sleep(Duration::from_millis(750)),
         )
     }
+
+    pub(crate) async fn restart_secure_transaction(self, rollback: bool) -> Result<()> {
+        utils::require_linux_root()?;
+        ensure_systemctl()?;
+        if rollback {
+            // 取消 systemctl 客户端并不会撤销已提交给 systemd 的任务。先替换待完成的
+            // restart，确保恢复的配置由新的进程加载。
+            self.timed(
+                &["stop", "--job-mode=replace", SERVICE_NAME],
+                SECURE_JOB_TIMEOUT,
+            )
+            .await?;
+        }
+        if matches!(
+            self.timed_show("ActiveState").await?.as_str(),
+            "active" | "failed"
+        ) {
+            self.timed(RESET_FAILED_COMMAND, SECURE_QUERY_TIMEOUT)
+                .await?;
+        }
+        self.timed(RESTART_COMMAND, SECURE_JOB_TIMEOUT).await?;
+        if !self.secure_is_active().await? {
+            bail!("systemd 命令已返回成功，但 shoes.service 未处于 active 状态");
+        }
+        tokio::time::sleep(Duration::from_millis(750)).await;
+        if !self.secure_is_active().await? {
+            bail!("shoes.service 启动后未保持 active，可能已立即退出或进入自动重启");
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn secure_is_active(self) -> Result<bool> {
+        Ok(self.timed_show("ActiveState").await? == "active")
+    }
+
+    pub(crate) async fn secure_main_pid(self) -> Result<Option<u32>> {
+        parse_main_pid(&self.timed_show("MainPID").await?)
+    }
+
+    async fn timed_show(self, property: &str) -> Result<String> {
+        self.timed(
+            &[
+                "show",
+                &format!("--property={property}"),
+                "--value",
+                SERVICE_NAME,
+            ],
+            SECURE_QUERY_TIMEOUT,
+        )
+        .await
+    }
+
+    async fn timed(self, args: &[&str], timeout: Duration) -> Result<String> {
+        wait_for_systemctl(self.command("systemctl"), args, timeout).await
+    }
+}
+
+fn parse_main_pid(value: &str) -> Result<Option<u32>> {
+    let pid = value
+        .parse::<u32>()
+        .with_context(|| format!("systemd 返回了无效 MainPID：{value}"))?;
+    Ok((pid != 0).then_some(pid))
+}
+
+async fn wait_for_systemctl(command: Command, args: &[&str], timeout: Duration) -> Result<String> {
+    let child = tokio::process::Command::from(command)
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .with_context(|| format!("无法执行 systemctl {}", args.join(" ")))?;
+    let output = tokio::time::timeout(timeout, child.wait_with_output())
+        .await
+        .with_context(|| format!("systemctl {} 执行超时", args.join(" ")))?
+        .with_context(|| format!("无法等待 systemctl {}", args.join(" ")))?;
+    if !output.status.success() {
+        bail!(
+            "systemctl {} 失败（退出码：{}）",
+            args.join(" "),
+            output.status
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
 fn ensure_systemctl() -> Result<()> {
@@ -669,6 +750,20 @@ fn ensure_systemctl() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn socks5_secure_systemctl_wait_is_bounded() {
+        let mut command = utils::isolated_command("sh");
+        command.args(["-c", "exec sleep 60"]);
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            wait_for_systemctl(command, RESTART_COMMAND, Duration::from_millis(100)),
+        )
+        .await
+        .expect("systemctl 超时不能阻塞异步任务");
+        assert!(format!("{:#}", result.unwrap_err()).contains("restart shoes.service 执行超时"));
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

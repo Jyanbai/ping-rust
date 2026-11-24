@@ -73,6 +73,7 @@ struct Attempt {
     ufw_kernel_before: Vec<LiveRule>,
 }
 
+#[derive(PartialEq, Eq)]
 struct LiveRule {
     text: String,
     handle: Option<u64>,
@@ -441,26 +442,31 @@ impl Rule {
         let original_count = matching_rule_count(&attempt.before, text);
         let current_count = matching_rule_count(&current, text);
         if current_count >= original_count {
+            if !matches!(self, Rule::Rich { .. }) && !contains_rule_order(&attempt.before, &current)
+            {
+                bail!("原放行规则的相对顺序已变化，请检查防火墙");
+            }
             return Ok(());
         }
-        let position = restore_position(attempt, &current, matches!(self, Rule::Iptables { .. }));
-        match self {
-            Rule::Ufw { .. } => unreachable!(),
-            Rule::Rich { base, text } => {
-                let mut args = base.clone();
-                args.push(format!("--add-rich-rule={text}"));
-                backend.execute("firewall-cmd", &args, None).await?;
+        if let Rule::Rich { base, text } = self {
+            let mut args = base.clone();
+            args.push(format!("--add-rich-rule={text}"));
+            backend.execute("firewall-cmd", &args, None).await?;
+            if matching_rule_count(&self.current(backend).await?, text) <= current_count {
+                bail!("原放行规则未恢复，请检查防火墙");
             }
+            return Ok(());
+        }
+        let position = checked_restore_position(
+            &attempt.before,
+            attempt.position,
+            &current,
+            matches!(self, Rule::Iptables { .. }),
+        )?;
+        match self {
+            Rule::Ufw { .. } | Rule::Rich { .. } => unreachable!(),
             Rule::Iptables { program, text } => {
-                let words = shell_words(text);
-                let mut args = vec![
-                    "-w".into(),
-                    "-I".into(),
-                    "INPUT".into(),
-                    (position + 1).to_string(),
-                ];
-                args.extend_from_slice(&words[2..]);
-                backend.execute(program, &args, None).await?;
+                insert_iptables(backend, program, text, position, current.len()).await?;
             }
             Rule::Nft { spec, .. } => {
                 let mut rule = spec.clone();
@@ -473,10 +479,7 @@ impl Rule {
                 }
             }
         }
-        if matching_rule_count(&self.current(backend).await?, text) <= current_count {
-            bail!("原放行规则未恢复，请检查防火墙");
-        }
-        Ok(())
+        verify_insert_order(&current, &self.current(backend).await?, position, text)
     }
 
     async fn restore_ufw(
@@ -489,19 +492,9 @@ impl Rule {
         let result = if self.position(&current).is_some() {
             Ok(())
         } else {
-            let position = if attempt.before.len() == 1 {
-                // 原来没有同地址族的相邻规则，保留并发加入的规则优先级。
-                current.len()
-            } else {
-                restore_position(attempt, &current, true)
-            };
-            let restored = current[..position]
-                .iter()
-                .chain(std::iter::once(&attempt.before[attempt.position]))
-                .chain(&current[position..]);
-            if !contains_rule_order(&attempt.before, restored) {
-                bail!("无法按原顺序恢复 UFW 持久规则，请检查 ufw status numbered");
-            }
+            let position =
+                checked_restore_position(&attempt.before, attempt.position, &current, true)
+                    .context("无法恢复 UFW 持久规则，请检查 ufw status numbered")?;
             let mut args = vec![];
             if position < current.len() {
                 // insert 使用每个内部 tuple 的位置，IPv6 还要加上 IPv4 tuple 总数。
@@ -515,11 +508,40 @@ impl Rule {
             args.extend(ufw_allow_args(listener));
             backend.execute("ufw", &args, None).await.map(|_| ())
         };
-        let kernel = self.verify_ufw_kernel(backend, 1).await?;
-        result?;
         let persistent = self.current(backend).await?;
+        if self.position(&persistent).is_none() {
+            result?;
+            bail!("UFW 持久规则未恢复，请检查 ufw status numbered");
+        }
         if !contains_rule_order(&attempt.before, &persistent) {
             bail!("UFW 持久规则未恢复原相对顺序，请检查 ufw status numbered");
+        }
+
+        let (program, chain) = ufw_kernel_chain(listener);
+        let mut kernel = ufw_kernel_rules(backend, program, chain).await?;
+        match ufw_kernel_count(&kernel, listener, chain) {
+            0 => {
+                // ufw 可能先写盘后修改内核。只补回原内核规则，避免重载整个防火墙。
+                let before = &attempt.ufw_kernel_before;
+                let original = before
+                    .iter()
+                    .position(|rule| {
+                        iptables_delete_args_in_chain(&rule.text, listener, chain).is_some()
+                    })
+                    .context("缺少原 UFW 内核规则，请检查 ufw show raw")?;
+                let position = checked_restore_position(before, original, &kernel, true)
+                    .context("无法恢复 UFW 内核规则")?;
+                let text = &before[original].text;
+                insert_iptables(backend, program, text, position, kernel.len()).await?;
+                let restored = self.verify_ufw_kernel(backend, 1).await?;
+                verify_insert_order(&kernel, &restored, position, text)?;
+                if !contains_rule_order(&attempt.before, &self.current(backend).await?) {
+                    bail!("补回内核规则时 UFW 持久规则已变化，请检查 ufw status numbered");
+                }
+                kernel = restored;
+            }
+            1 => {}
+            count => bail!("UFW 内核规则数量为 {count}，预期为 1，请检查 ufw show raw"),
         }
         if !contains_rule_order(&attempt.ufw_kernel_before, &kernel) {
             bail!("UFW 内核规则未恢复原相对顺序，请检查 ufw show raw");
@@ -535,30 +557,65 @@ impl Rule {
         let Rule::Ufw { listener, .. } = self else {
             return Ok(Vec::new());
         };
-        let (program, chain) = if listener.is_ipv4() {
-            ("iptables", "ufw-user-input")
-        } else {
-            ("ip6tables", "ufw6-user-input")
-        };
-        // ufw status numbered 使用持久配置列出用户规则，可能先于内核更新。
-        let output = backend
-            .execute(program, &["-w".into(), "-S".into(), chain.into()], None)
-            .await
-            .with_context(|| format!("无法查询 UFW 内核规则，请检查 {program} -S {chain}"))?;
-        let rules = output
-            .lines()
-            .filter(|line| line.starts_with("-A "))
-            .map(LiveRule::from)
-            .collect::<Vec<_>>();
-        let count = rules
-            .iter()
-            .filter(|rule| iptables_delete_args_in_chain(&rule.text, *listener, chain).is_some())
-            .count();
+        let (program, chain) = ufw_kernel_chain(*listener);
+        let rules = ufw_kernel_rules(backend, program, chain).await?;
+        let count = ufw_kernel_count(&rules, *listener, chain);
         if count != expected {
             bail!("UFW 内核规则数量为 {count}，预期为 {expected}，请检查 {program} -S {chain} 和 ufw status numbered");
         }
         Ok(rules)
     }
+}
+
+fn ufw_kernel_chain(listener: SocketAddr) -> (&'static str, &'static str) {
+    if listener.is_ipv4() {
+        ("iptables", "ufw-user-input")
+    } else {
+        ("ip6tables", "ufw6-user-input")
+    }
+}
+
+async fn ufw_kernel_rules(
+    backend: &mut impl FirewallExecutor,
+    program: &str,
+    chain: &str,
+) -> Result<Vec<LiveRule>> {
+    // ufw status numbered 使用持久配置列出用户规则，可能先于内核更新。
+    let output = backend
+        .execute(program, &["-w".into(), "-S".into(), chain.into()], None)
+        .await
+        .with_context(|| format!("无法查询 UFW 内核规则，请检查 {program} -S {chain}"))?;
+    Ok(output
+        .lines()
+        .filter(|line| line.starts_with("-A "))
+        .map(LiveRule::from)
+        .collect())
+}
+
+fn ufw_kernel_count(rules: &[LiveRule], listener: SocketAddr, chain: &str) -> usize {
+    rules
+        .iter()
+        .filter(|rule| iptables_delete_args_in_chain(&rule.text, listener, chain).is_some())
+        .count()
+}
+
+async fn insert_iptables(
+    backend: &mut impl FirewallExecutor,
+    program: &str,
+    text: &str,
+    position: usize,
+    current_len: usize,
+) -> Result<()> {
+    let words = shell_words(text);
+    let mut args = vec!["-w".into()];
+    if position == current_len {
+        args.extend(words);
+    } else {
+        args.extend(["-I".into(), words[1].clone(), (position + 1).to_string()]);
+        args.extend_from_slice(&words[2..]);
+    }
+    backend.execute(program, &args, None).await?;
+    Ok(())
 }
 
 fn matching_rule_count(rules: &[LiveRule], text: &str) -> usize {
@@ -575,10 +632,48 @@ fn contains_rule_order<'a>(
         .all(|rule| current.any(|other| other.text == rule.text))
 }
 
-fn restore_position(attempt: &Attempt, current: &[LiveRule], use_occurrence: bool) -> usize {
-    // 优先找原后继，其次找原前驱。根据现行顺序插入，保留并发新增规则的位置。
+fn verify_insert_order(
+    before: &[LiveRule],
+    after: &[LiveRule],
+    position: usize,
+    text: &str,
+) -> Result<()> {
+    if after.len() != before.len() + 1
+        || after[position].text != text
+        || after[..position] != before[..position]
+        || after[position + 1..] != before[position..]
+    {
+        bail!("无法确认恢复的放行规则与现有规则的相对顺序，请检查防火墙");
+    }
+    Ok(())
+}
+
+fn checked_restore_position(
+    before: &[LiveRule],
+    original: usize,
+    current: &[LiveRule],
+    use_occurrence: bool,
+) -> Result<usize> {
+    let position = restore_position(before, original, current, use_occurrence);
+    let restored = current[..position]
+        .iter()
+        .chain(std::iter::once(&before[original]))
+        .chain(&current[position..]);
+    if !contains_rule_order(before, restored) {
+        bail!("无法确定原放行规则的恢复顺序，请检查防火墙");
+    }
+    Ok(position)
+}
+
+fn restore_position(
+    before: &[LiveRule],
+    original: usize,
+    current: &[LiveRule],
+    use_occurrence: bool,
+) -> usize {
+    // 优先找原后继。没有可用的后继时追加，随后检查能否保留原相对顺序。
     let locate = |anchor_index: usize| {
-        let anchor = &attempt.before[anchor_index];
+        let anchor = &before[anchor_index];
         if let Some(handle) = anchor.handle {
             if let Some(index) = current
                 .iter()
@@ -587,11 +682,7 @@ fn restore_position(attempt: &Attempt, current: &[LiveRule], use_occurrence: boo
                 return Some(index);
             }
         }
-        let original_count = attempt
-            .before
-            .iter()
-            .filter(|rule| rule.text == anchor.text)
-            .count();
+        let original_count = matching_rule_count(before, &anchor.text);
         // iptables 没有 handle；同名规则数量未变时用第几次出现定位。
         if !use_occurrence && original_count != 1 {
             return None;
@@ -604,23 +695,16 @@ fn restore_position(attempt: &Attempt, current: &[LiveRule], use_occurrence: boo
         if matches.clone().count() != original_count {
             return None;
         }
-        let occurrence = attempt.before[..anchor_index]
-            .iter()
-            .filter(|rule| rule.text == anchor.text)
-            .count();
+        let occurrence = matching_rule_count(&before[..anchor_index], &anchor.text);
         matches.nth(occurrence)
     };
-    for anchor in attempt.position + 1..attempt.before.len() {
+    for anchor in original + 1..before.len() {
         if let Some(index) = locate(anchor) {
             return index;
         }
     }
-    for anchor in (0..attempt.position).rev() {
-        if let Some(index) = locate(anchor) {
-            return index + 1;
-        }
-    }
-    attempt.position.min(current.len())
+    // 让并发加入的拒绝规则保有优先级。
+    current.len()
 }
 
 async fn ufw_status(backend: &mut impl FirewallExecutor) -> Result<String> {
@@ -1410,6 +1494,17 @@ mod tests {
                         }
                         Ok(rules)
                     }
+                    [wait, append, chain, rule @ ..] if append == "-A" => {
+                        assert_eq!(wait, "-w");
+                        assert_eq!(chain, kernel_chain);
+                        assert_eq!(
+                            rule,
+                            ["-p", "tcp", "-m", "tcp", "--dport", "1080", "-j", "ACCEPT"]
+                        );
+                        assert!(!self.kernel_has_rule);
+                        self.kernel_has_rule = true;
+                        Ok(String::new())
+                    }
                     _ => panic!("意外 iptables 操作 {args:?}"),
                 };
             }
@@ -1502,7 +1597,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn socks5_secure_ufw_rollback_rejects_rules_present_only_on_disk() {
+    async fn socks5_secure_ufw_rollback_reinstates_kernel_rule_present_only_on_disk() {
         for (address, ipv6) in [("0.0.0.0:1080", false), ("[::]:1080", true)] {
             for keep_disk_on_delete_failure in [false, true] {
                 let mut backend = FakeUfw {
@@ -1517,10 +1612,10 @@ mod tests {
                     .await
                     .unwrap();
                 assert!(plan.close_with(&mut backend).await.is_err());
-                let rollback = plan.restore_with(&mut backend).await;
-                assert_eq!(backend.disk, [OTHER, IPV4, IPV6]);
                 assert!(!backend.kernel_has_rule);
-                assert!(format!("{:#}", rollback.unwrap_err()).contains("UFW 内核规则"));
+                plan.restore_with(&mut backend).await.unwrap();
+                assert_eq!(backend.disk, [OTHER, IPV4, IPV6]);
+                assert!(backend.kernel_has_rule);
             }
         }
     }
@@ -1626,6 +1721,10 @@ mod tests {
                     self.rules
                         .insert(position - 1, format!("-A INPUT {}", args[4..].join(" ")));
                 }
+                "-A" => {
+                    assert_eq!(args[2], "INPUT");
+                    self.rules.push(format!("-A INPUT {}", args[3..].join(" ")));
+                }
                 _ => panic!("意外操作 {args:?}"),
             }
             Ok(String::new())
@@ -1677,6 +1776,52 @@ mod tests {
             plan.restore_with(&mut backend).await.unwrap();
             assert_eq!(backend.rules, rules);
         }
+    }
+
+    #[tokio::test]
+    async fn socks5_secure_iptables_rollback_appends_after_new_same_port_drop() {
+        let accept = "-A INPUT -p tcp --dport 1080 -j ACCEPT";
+        let drop = "-A INPUT -p tcp --dport 1080 -j DROP";
+        let mut backend = FakeIptables {
+            rules: vec![accept.into()],
+            deletions: 0,
+        };
+        let mut plan = FirewallPlan::capture_with("0.0.0.0:1080".parse().unwrap(), &mut backend)
+            .await
+            .unwrap();
+        plan.close_with(&mut backend).await.unwrap();
+        backend.rules.push(drop.into());
+        plan.restore_with(&mut backend).await.unwrap();
+        assert_eq!(backend.rules, [drop, accept]);
+    }
+
+    #[tokio::test]
+    async fn socks5_secure_iptables_rollback_reports_a_missing_anchor() {
+        let mut backend = FakeIptables {
+            rules: vec![
+                "-A INPUT -p tcp --dport 1080 -j ACCEPT".into(),
+                "-A INPUT -p tcp --dport 22 -j ACCEPT".into(),
+            ],
+            deletions: 0,
+        };
+        let mut plan = FirewallPlan::capture_with("0.0.0.0:1080".parse().unwrap(), &mut backend)
+            .await
+            .unwrap();
+        plan.close_with(&mut backend).await.unwrap();
+        let drop = "-A INPUT -p tcp --dport 1080 -j REJECT";
+        backend.rules = vec![drop.into()];
+        let error = plan.restore_with(&mut backend).await.unwrap_err();
+        assert!(format!("{error:#}").contains("顺序"));
+        assert_eq!(backend.rules, [drop]);
+    }
+
+    #[test]
+    fn socks5_secure_rule_rollback_verifies_order_against_concurrent_rules() {
+        let drop = LiveRule::from("-A INPUT -p tcp --dport 1080 -j DROP");
+        let accept = "-A INPUT -p tcp --dport 1080 -j ACCEPT";
+        let wrong_order = [LiveRule::from(accept), LiveRule::from(drop.text.as_str())];
+        let error = verify_insert_order(&[drop], &wrong_order, 1, accept).unwrap_err();
+        assert!(format!("{error:#}").contains("相对顺序"));
     }
 
     struct FakeNft {
@@ -1741,6 +1886,12 @@ mod tests {
                     .iter()
                     .position(|live| live["handle"] == rule["handle"]);
                 self.rules.remove(position.unwrap());
+            } else if let Some(rule) = command.get("add").and_then(|add| add.get("rule")) {
+                assert!(rule.get("handle").is_none());
+                let mut rule = rule.clone();
+                rule["handle"] = self.next_handle.into();
+                self.next_handle += 1;
+                self.rules.push(rule);
             } else {
                 let mut rule = command["insert"]["rule"].clone();
                 if !self.iptables_nft {
@@ -1791,6 +1942,35 @@ mod tests {
         let mut restored = original;
         restored["handle"] = 5.into();
         assert_eq!(backend.rules, [concurrent, restored, drop]);
+    }
+
+    #[tokio::test]
+    async fn socks5_secure_nft_rollback_appends_after_new_same_port_reject() {
+        let original = json!({
+            "family": "ip", "table": "filter", "chain": "input", "handle": 2,
+            "expr": [
+                {"match": {"op": "==", "left": {"payload": {"protocol": "tcp", "field": "dport"}}, "right": 1080}},
+                {"accept": null}
+            ]
+        });
+        let mut backend = FakeNft {
+            rules: vec![original.clone()],
+            iptables_nft: false,
+            chain: "input",
+            next_handle: 4,
+        };
+        let mut plan = FirewallPlan::capture_with("0.0.0.0:1080".parse().unwrap(), &mut backend)
+            .await
+            .unwrap();
+        plan.close_with(&mut backend).await.unwrap();
+        let mut reject = original.clone();
+        reject["handle"] = 3.into();
+        reject["expr"][1] = json!({"reject": null});
+        backend.rules.push(reject.clone());
+        plan.restore_with(&mut backend).await.unwrap();
+        let mut restored = original;
+        restored["handle"] = 4.into();
+        assert_eq!(backend.rules, [reject, restored]);
     }
 
     #[tokio::test]

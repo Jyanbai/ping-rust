@@ -128,6 +128,15 @@ impl InterruptGuard<'_> {
         Ok(())
     }
 
+    async fn cancelled(&self) -> anyhow::Error {
+        loop {
+            if let Err(error) = self.check() {
+                return error;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
     fn finish(&self, publish_state: impl FnOnce() -> Result<()>) -> Result<()> {
         let mut phase = self.interrupt.phase.lock().unwrap();
         if let Some(signal) = phase.pending_signal() {
@@ -211,14 +220,18 @@ pub(crate) async fn apply(
     interrupt: &Interrupt,
 ) -> Result<()> {
     runtime.preflight(plan).await?;
-    // 等待正在运行的外部操作结束，再根据实际状态补偿。
+    // 防火墙修改结束后再根据实际状态补偿，服务等待可主动取消。
     let interrupt = interrupt.begin()?;
     plan.commit_files()?;
     let mut activation_attempted = false;
     let change = async {
         interrupt.check()?;
         activation_attempted = true;
-        runtime.activate().await.context("重启 shoes 失败")?;
+        tokio::select! {
+            biased;
+            error = interrupt.cancelled() => return Err(error),
+            result = runtime.activate() => result.context("重启 shoes 失败")?,
+        }
         interrupt.check()?;
         runtime
             .verify(&plan.profile)
@@ -289,7 +302,9 @@ impl Runtime for SystemRuntime {
     }
 
     async fn activate(&mut self) -> Result<()> {
-        Systemctl::SecureTransaction.restart_and_verify()
+        Systemctl::SecureTransaction
+            .restart_secure_transaction(false)
+            .await
     }
     async fn verify(&mut self, profile: &ManagedProfile) -> Result<()> {
         verify_with_systemctl(profile, Systemctl::SecureTransaction).await
@@ -302,7 +317,9 @@ impl Runtime for SystemRuntime {
     }
     async fn restore_service(&mut self, original: &ManagedProfile) -> Result<()> {
         // 加固只重启现有 unit。恢复配置后重启同一个 unit 即可，无需重建或启用。
-        self.activate().await?;
+        Systemctl::SecureTransaction
+            .restart_secure_transaction(true)
+            .await?;
         self.verify(original).await
     }
 }
@@ -332,12 +349,13 @@ pub(crate) async fn verify(profile: &ManagedProfile) -> Result<()> {
 }
 
 async fn verify_with_systemctl(profile: &ManagedProfile, systemctl: Systemctl) -> Result<()> {
-    if !systemctl.is_active()? {
+    if !systemctl.secure_is_active().await? {
         bail!("shoes.service 未处于 active 状态");
     }
     let expected: SocketAddr = profile.listen_address()?.parse()?;
     let main_pid = systemctl
-        .main_pid()?
+        .secure_main_pid()
+        .await?
         .context("shoes.service 的 MainPID 不可用")?;
     let output = listener_output().await?;
     check_listeners(&output, expected, main_pid)?;

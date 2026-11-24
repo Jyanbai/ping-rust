@@ -143,10 +143,6 @@ fn interrupted_exit_code(error: &anyhow::Error) -> i32 {
         .exit_code()
 }
 
-fn restore_cursor_and_exit() -> ! {
-    exit_after_signal(ShutdownSignal::Interrupt.exit_code())
-}
-
 fn exit_after_signal(code: i32) -> ! {
     sni::cleanup_on_interrupt();
     let _ = restore_cursor(&mut std::io::stdout());
