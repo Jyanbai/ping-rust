@@ -23,19 +23,18 @@ pub enum ClientFormat {
 }
 
 pub fn export(
+    profiles: &[ManagedProfile],
     profile_id: Option<Uuid>,
     format: ClientFormat,
     server: &str,
     output: Option<&Path>,
 ) -> Result<String> {
-    let state = config::load_state()?;
     let profile = match profile_id {
-        Some(id) => state
-            .profiles
+        Some(id) => profiles
             .iter()
             .find(|profile| profile.id == id)
             .with_context(|| format!("未找到配置 {id}"))?,
-        None if state.profiles.len() == 1 => &state.profiles[0],
+        None if profiles.len() == 1 => &profiles[0],
         None => bail!("存在多个配置，请用 --profile <UUID> 指定导出对象"),
     };
     let content = render(profile, format, server)?;

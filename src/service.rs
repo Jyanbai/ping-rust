@@ -210,13 +210,7 @@ pub fn activate_and_verify() -> Result<()> {
 }
 
 pub fn restart_and_verify() -> Result<()> {
-    utils::require_linux_root()?;
-    ensure_systemctl()?;
-    systemctl_after_reset(RESTART_COMMAND)?;
-    verify_active_stable(systemctl_is_active, || {
-        thread::sleep(Duration::from_millis(750))
-    })?;
-    Ok(())
+    Systemctl::Foreground.restart_and_verify()
 }
 
 fn verify_active_stable(
@@ -378,30 +372,11 @@ fn reload_observation(
 }
 
 pub fn main_pid() -> Result<Option<u32>> {
-    let value = systemctl_show_value("MainPID")?;
-    let pid = value
-        .parse::<u32>()
-        .with_context(|| format!("systemd 返回了无效 MainPID：{value}"))?;
-    Ok((pid != 0).then_some(pid))
+    Systemctl::Foreground.main_pid()
 }
 
 fn systemctl_show_value(property: &str) -> Result<String> {
-    let output = utils::isolated_command("systemctl")
-        .args([
-            "show",
-            &format!("--property={property}"),
-            "--value",
-            SERVICE_NAME,
-        ])
-        .output()
-        .with_context(|| format!("无法查询 shoes.service {property}"))?;
-    if !output.status.success() {
-        bail!(
-            "查询 shoes.service {property} 失败（退出码：{}）",
-            output.status
-        );
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    Systemctl::Foreground.show_value(property)
 }
 
 fn listening_ports(pid: u32) -> Result<BTreeSet<u16>> {
@@ -543,10 +518,7 @@ pub fn execute(action: ServiceAction) -> Result<()> {
 }
 
 fn systemctl_after_reset(command: &[&str]) -> Result<()> {
-    if systemctl_is_active()? || systemctl_is_failed()? {
-        systemctl(RESET_FAILED_COMMAND)?;
-    }
-    systemctl(command)
+    Systemctl::Foreground.after_reset(command)
 }
 
 pub fn logs(lines: usize) -> Result<()> {
@@ -582,38 +554,109 @@ pub fn is_active() -> Result<bool> {
 }
 
 fn systemctl_is_active() -> Result<bool> {
-    Ok(utils::isolated_command("systemctl")
-        .args(["is-active", "--quiet", SERVICE_NAME])
-        .status()
-        .context("无法查询 systemd 服务状态")?
-        .success())
+    Systemctl::Foreground.is_active()
 }
 
 fn systemctl_is_failed() -> Result<bool> {
-    Ok(utils::isolated_command("systemctl")
-        .args(["is-failed", "--quiet", SERVICE_NAME])
-        .status()
-        .context("无法查询 systemd 服务失败状态")?
-        .success())
+    Systemctl::Foreground.is_failed()
 }
 
 fn systemctl_is_enabled() -> Result<bool> {
-    Ok(utils::isolated_command("systemctl")
-        .args(["is-enabled", "--quiet", SERVICE_NAME])
-        .status()
-        .context("无法查询 systemd 服务启用状态")?
-        .success())
+    Systemctl::Foreground.query("is-enabled", "无法查询 systemd 服务启用状态")
 }
 
 fn systemctl(args: &[&str]) -> Result<()> {
-    let status = utils::isolated_command("systemctl")
-        .args(args)
-        .status()
-        .with_context(|| format!("无法执行 systemctl {}", args.join(" ")))?;
-    if !status.success() {
-        bail!("systemctl {} 失败（退出码：{status}）", args.join(" "));
+    Systemctl::Foreground.run(args)
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum Systemctl {
+    Foreground,
+    SecureTransaction,
+}
+
+impl Systemctl {
+    fn command(self, program: &str) -> Command {
+        match self {
+            Self::Foreground => Command::new(program),
+            Self::SecureTransaction => utils::isolated_command(program),
+        }
     }
-    Ok(())
+
+    fn run(self, args: &[&str]) -> Result<()> {
+        let status = self
+            .command("systemctl")
+            .args(args)
+            .status()
+            .with_context(|| format!("无法执行 systemctl {}", args.join(" ")))?;
+        if !status.success() {
+            bail!("systemctl {} 失败（退出码：{status}）", args.join(" "));
+        }
+        Ok(())
+    }
+
+    fn query(self, action: &str, message: &str) -> Result<bool> {
+        Ok(self
+            .command("systemctl")
+            .args([action, "--quiet", SERVICE_NAME])
+            .status()
+            .with_context(|| message.to_owned())?
+            .success())
+    }
+
+    pub(crate) fn is_active(self) -> Result<bool> {
+        self.query("is-active", "无法查询 systemd 服务状态")
+    }
+
+    fn is_failed(self) -> Result<bool> {
+        self.query("is-failed", "无法查询 systemd 服务失败状态")
+    }
+
+    fn show_value(self, property: &str) -> Result<String> {
+        let output = self
+            .command("systemctl")
+            .args([
+                "show",
+                &format!("--property={property}"),
+                "--value",
+                SERVICE_NAME,
+            ])
+            .stdout(std::process::Stdio::piped())
+            .output()
+            .with_context(|| format!("无法查询 shoes.service {property}"))?;
+        if !output.status.success() {
+            bail!(
+                "查询 shoes.service {property} 失败（退出码：{}）",
+                output.status
+            );
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    }
+
+    pub(crate) fn main_pid(self) -> Result<Option<u32>> {
+        let value = self.show_value("MainPID")?;
+        let pid = value
+            .parse::<u32>()
+            .with_context(|| format!("systemd 返回了无效 MainPID：{value}"))?;
+        Ok((pid != 0).then_some(pid))
+    }
+
+    fn after_reset(self, command: &[&str]) -> Result<()> {
+        if self.is_active()? || self.is_failed()? {
+            self.run(RESET_FAILED_COMMAND)?;
+        }
+        self.run(command)
+    }
+
+    pub(crate) fn restart_and_verify(self) -> Result<()> {
+        utils::require_linux_root()?;
+        ensure_systemctl()?;
+        self.after_reset(RESTART_COMMAND)?;
+        verify_active_stable(
+            || self.is_active(),
+            || thread::sleep(Duration::from_millis(750)),
+        )
+    }
 }
 
 fn ensure_systemctl() -> Result<()> {
@@ -626,6 +669,33 @@ fn ensure_systemctl() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn systemctl_status_uses_foreground_group_and_rollback_detaches_stdio() {
+        let script = concat!(
+            "read -r stat < \"/proc/$$/stat\" || exit 1; ",
+            "set -- \"${stat##*) }\" \"$1\"; mode=$2; set -- $1; ",
+            "if [ \"$mode\" = foreground ]; then ",
+            "  [ \"$3\" != \"$$\" ] || exit 2; ",
+            "else ",
+            "  [ \"$3\" = \"$$\" ] || exit 3; ",
+            "  for fd in 0 1 2; do ",
+            "    [ \"$(readlink /proc/$$/fd/$fd)\" = /dev/null ] || exit 4; ",
+            "  done; ",
+            "fi",
+        );
+        for (systemctl, mode) in [
+            (Systemctl::Foreground, "foreground"),
+            (Systemctl::SecureTransaction, "rollback"),
+        ] {
+            let status = systemctl
+                .command("sh")
+                .args(["-c", script, "sh", mode])
+                .status();
+            assert!(status.unwrap().success(), "{mode}");
+        }
+    }
 
     #[test]
     fn socks5_secure_restores_active_vendor_unit_with_or_without_temporary_override() {

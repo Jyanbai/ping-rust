@@ -3,7 +3,7 @@ use std::{
     fs::File,
     io::{self, Write},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
 };
 
 use anyhow::{bail, Context, Result};
@@ -19,15 +19,18 @@ pub const LOCK_FILE: &str = "/run/lock/ping-rust.lock";
 pub const SERVICE_FILE: &str = "/etc/systemd/system/shoes.service";
 
 pub(crate) fn isolated_command(program: &str) -> Command {
-    let command = Command::new(program);
+    let mut command = Command::new(program);
     #[cfg(unix)]
-    let command = {
+    {
         use std::os::unix::process::CommandExt;
         // 由父进程决定何时取消，终端的 SIGINT 不直接中断正在补偿的命令。
-        let mut command = command;
         command.process_group(0);
-        command
-    };
+    }
+    // 独立进程组不能继承终端 I/O，启用 tostop 时写终端会被 SIGTTOU 挂起。
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     command
 }
 
@@ -194,6 +197,14 @@ impl Drop for ExclusiveLock {
 }
 
 pub(crate) fn read_with_existing_lock<T>(path: &Path, read: impl Fn() -> Result<T>) -> Result<T> {
+    read_with_existing_lock_then(path, read, Ok)
+}
+
+pub(crate) fn read_with_existing_lock_then<T, U>(
+    path: &Path,
+    read: impl Fn() -> Result<T>,
+    use_snapshot: impl FnOnce(T) -> Result<U>,
+) -> Result<U> {
     let lock_if_exists = || match File::open(path) {
         Ok(file) => {
             FileExt::lock_shared(&file).with_context(|| format!("锁定 {} 失败", path.display()))?;
@@ -203,14 +214,14 @@ pub(crate) fn read_with_existing_lock<T>(path: &Path, read: impl Fn() -> Result<
         Err(error) => Err(error).with_context(|| format!("打开锁文件 {} 失败", path.display())),
     };
     if let Some(_lock) = lock_if_exists()? {
-        return read();
+        return use_snapshot(read()?);
     }
     let result = read();
     // 首次加固可能在无锁读取期间创建锁文件。加锁后重新读取这一份快照。
     if let Some(_lock) = lock_if_exists()? {
-        return read();
+        return use_snapshot(read()?);
     }
-    result
+    use_snapshot(result?)
 }
 
 pub fn atomic_write(destination: &Path, contents: &[u8], mode: u32) -> Result<()> {

@@ -148,7 +148,7 @@ impl Socks5SecureArgs {
 
         require_root()?;
         let _lock = utils::exclusive_lock(lock_path)?;
-        crate::socks5_secure::run(directory, id, mode, verify).await
+        crate::socks5_secure::run(directory, id, mode, service::is_active, verify).await
     }
 }
 
@@ -483,6 +483,19 @@ pub enum PortKind {
 }
 
 pub async fn run(cli: Cli) -> Result<()> {
+    run_with_export_paths(
+        cli,
+        Path::new(utils::STATE_FILE),
+        Path::new(utils::LOCK_FILE),
+    )
+    .await
+}
+
+pub(crate) async fn run_with_export_paths(
+    cli: Cli,
+    state_path: &Path,
+    lock_path: &Path,
+) -> Result<()> {
     match cli.command.unwrap_or(Command::Menu) {
         Command::Socks5 {
             command: Socks5Command::Secure(args),
@@ -721,11 +734,31 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Url {
             profile,
             server_address,
-        } => print_saved_url(profile.as_deref(), server_address.as_deref()),
+        } => utils::read_with_existing_lock_then(
+            lock_path,
+            || config::load_state_from(state_path),
+            |state| {
+                print_saved_url(
+                    &state.profiles,
+                    profile.as_deref(),
+                    server_address.as_deref(),
+                )
+            },
+        ),
         Command::Qr {
             profile,
             server_address,
-        } => print_saved_qr(profile.as_deref(), server_address.as_deref()),
+        } => utils::read_with_existing_lock_then(
+            lock_path,
+            || config::load_state_from(state_path),
+            |state| {
+                print_saved_qr(
+                    &state.profiles,
+                    profile.as_deref(),
+                    server_address.as_deref(),
+                )
+            },
+        ),
         Command::Delete { profile, yes } => {
             if !yes {
                 anyhow::bail!("删除配置需要显式添加 --yes；也可使用交互菜单确认");
@@ -739,15 +772,20 @@ pub async fn run(cli: Cli) -> Result<()> {
             profile,
             server,
             output,
-        } => {
-            let content = client::export(profile, format, &server, output.as_deref())?;
-            if let Some(path) = output {
-                println!("客户端配置已写入：{}", path.display());
-            } else {
-                println!("{content}");
-            }
-            Ok(())
-        }
+        } => utils::read_with_existing_lock_then(
+            lock_path,
+            || config::load_state_from(state_path),
+            |state| {
+                let content =
+                    client::export(&state.profiles, profile, format, &server, output.as_deref())?;
+                if let Some(path) = output {
+                    println!("客户端配置已写入：{}", path.display());
+                } else {
+                    println!("{content}");
+                }
+                Ok(())
+            },
+        ),
         Command::CheckPort { port, kind } => {
             let (tcp, udp) = match kind {
                 PortKind::Tcp => (true, false),
@@ -1859,9 +1897,12 @@ pub async fn show_info(selector: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn print_saved_url(selector: Option<&str>, server_address: Option<&str>) -> Result<()> {
-    let state = config::load_state()?;
-    let profile = client::select_profile(&state.profiles, selector)?;
+fn print_saved_url(
+    profiles: &[config::ManagedProfile],
+    selector: Option<&str>,
+    server_address: Option<&str>,
+) -> Result<()> {
+    let profile = client::select_profile(profiles, selector)?;
     println!("{}", client::stored_share_uri(profile, server_address)?);
     if profile.h2mux.enabled {
         eprintln!("提示：标准 URI 不包含 H2MUX 客户端偏好；此链接仍可用于普通连接。");
@@ -1869,9 +1910,12 @@ fn print_saved_url(selector: Option<&str>, server_address: Option<&str>) -> Resu
     Ok(())
 }
 
-fn print_saved_qr(selector: Option<&str>, server_address: Option<&str>) -> Result<()> {
-    let state = config::load_state()?;
-    let profile = client::select_profile(&state.profiles, selector)?;
+fn print_saved_qr(
+    profiles: &[config::ManagedProfile],
+    selector: Option<&str>,
+    server_address: Option<&str>,
+) -> Result<()> {
+    let profile = client::select_profile(profiles, selector)?;
     let uri = client::stored_share_uri(profile, server_address)?;
     let (output, error) = terminal_qr_or_url_text(&uri);
     println!("{output}");

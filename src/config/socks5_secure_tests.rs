@@ -441,6 +441,41 @@ fn socks5_secure_activation_failure_restores_exact_files() {
 }
 
 #[tokio::test]
+async fn socks5_secure_refuses_inactive_disabled_custom_unit() {
+    for mode in [SecureMode::Auth, SecureMode::Local] {
+        let directory = tempfile::tempdir().unwrap();
+        let profile = legacy(directory.path());
+        let unit = directory.path().join("shoes.service");
+        let custom = b"[Service]\nUser=proxy\nExecStart=/opt/shoes /etc/shoes/config.yaml\n";
+        fs::write(&unit, custom).unwrap();
+        let unit_enablement = directory
+            .path()
+            .join("multi-user.target.wants/shoes.service");
+        let config = directory.path().join("config.yaml");
+        let state = directory.path().join("ping-rust-state.json");
+        let original = [fs::read(&config).unwrap(), fs::read(&state).unwrap()];
+        let error = crate::socks5_secure::run(
+            directory.path(),
+            profile.id,
+            Some(mode),
+            || Ok(false),
+            async |_| panic!("停止的服务不应进入运行态验证"),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(format!("{error:#}").contains("未处于 active"));
+        assert_eq!(fs::read(&unit).unwrap(), custom);
+        assert!(!unit_enablement.exists());
+        assert!(!directory.path().join("profiles").exists());
+        assert_eq!(
+            [fs::read(config).unwrap(), fs::read(state).unwrap()],
+            original
+        );
+    }
+}
+
+#[tokio::test]
 async fn socks5_secure_restart_and_late_failures_restore_config_firewall_and_service() {
     use crate::socks5_secure::Runtime;
     struct Fake {
@@ -624,6 +659,95 @@ async fn socks5_secure_publishes_safety_only_after_runtime_verification() {
                 assert_eq!(fs::read(&state_path).unwrap(), original);
             }
         }
+    }
+}
+
+#[test]
+fn socks5_secure_url_qr_and_file_export_wait_for_publish_or_rollback() {
+    use clap::Parser;
+    use std::{sync::mpsc, thread, time::Duration};
+
+    for rollback in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let profile = legacy(directory.path());
+        let state_path = directory.path().join("ping-rust-state.json");
+        let lock_path = directory.path().join("ping-rust.lock");
+        let output_path = directory.path().join("client.json");
+        let id = profile.id.to_string();
+        let mut plan = SecurePlan::prepare(directory.path(), profile.id, SecureMode::Local)
+            .unwrap()
+            .unwrap();
+        let lock = utils::exclusive_lock(&lock_path).unwrap();
+        plan.commit_files().unwrap();
+        assert_eq!(
+            load_servers(&directory.path().join("config.yaml")).unwrap()[0].address,
+            "127.0.0.1:443"
+        );
+
+        let mut readers = Vec::new();
+        for command in ["url", "qr", "export"] {
+            let args = if command == "export" {
+                vec![
+                    "prs",
+                    command,
+                    "sing-box",
+                    "--profile",
+                    &id,
+                    "--server",
+                    "example.com",
+                    "--output",
+                    output_path.to_str().unwrap(),
+                ]
+            } else {
+                vec!["prs", command, &id, "--server-address", "example.com"]
+            };
+            let cli = crate::cli::Cli::try_parse_from(args).unwrap();
+            let (ready, started) = mpsc::channel();
+            let (finished, result) = mpsc::channel();
+            let (state_path, lock_path) = (state_path.clone(), lock_path.clone());
+            let reader = thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .build()
+                    .unwrap();
+                ready.send(()).unwrap();
+                let outcome = runtime.block_on(crate::cli::run_with_export_paths(
+                    cli,
+                    &state_path,
+                    &lock_path,
+                ));
+                finished.send(outcome).unwrap();
+            });
+            started.recv_timeout(Duration::from_secs(5)).unwrap();
+            readers.push((command, reader, result));
+        }
+
+        for (command, _, result) in &readers {
+            assert!(
+                matches!(
+                    result.recv_timeout(Duration::from_millis(100)),
+                    Err(mpsc::RecvTimeoutError::Timeout)
+                ),
+                "{command} 导出必须等待加固写锁释放"
+            );
+        }
+        assert!(!output_path.exists());
+        if rollback {
+            plan.rollback().unwrap();
+        } else {
+            plan.publish_state().unwrap();
+        }
+        drop(lock);
+
+        for (command, reader, result) in readers {
+            let result = result.recv_timeout(Duration::from_secs(5)).unwrap();
+            reader.join().unwrap();
+            if rollback {
+                assert!(result.is_ok(), "{command} 回滚后应可恢复公网导出");
+            } else {
+                assert!(format!("{:#}", result.unwrap_err()).contains("仅监听本机"));
+            }
+        }
+        assert_eq!(output_path.exists(), rollback);
     }
 }
 

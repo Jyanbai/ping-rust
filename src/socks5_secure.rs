@@ -16,7 +16,8 @@ use crate::{
         socks5_secure::{SecureMode, SecurePlan},
         Credentials, ManagedProfile,
     },
-    service, utils,
+    service::Systemctl,
+    utils,
 };
 
 mod firewall;
@@ -158,6 +159,7 @@ pub(crate) async fn run(
     directory: &Path,
     id: Uuid,
     mode: Option<SecureMode>,
+    is_active: impl FnOnce() -> Result<bool>,
     verify_runtime: impl AsyncFnOnce(&ManagedProfile) -> Result<()>,
 ) -> Result<()> {
     if let Some(profile) = SecurePlan::secure_profile(directory, id)? {
@@ -170,10 +172,11 @@ pub(crate) async fn run(
     let mode = mode.context("节点配置已变化，请明确指定 --auth 或 --local 后重试")?;
     let mut plan =
         SecurePlan::prepare(directory, id, mode)?.context("节点配置已变化，请重试以验证运行态")?;
+    if !is_active()? {
+        bail!("shoes.service 未处于 active 状态，无法验证加固后的监听和认证。请按现有 unit 启动服务后重试");
+    }
     let mut runtime = SystemRuntime {
         mode,
-        snapshot: None,
-        was_active: false,
         firewall: firewall::FirewallPlan::default(),
     };
     apply(&mut plan, &mut runtime, &INTERRUPT).await?;
@@ -271,8 +274,6 @@ pub(crate) async fn apply(
 
 struct SystemRuntime {
     mode: SecureMode,
-    snapshot: Option<service::ServiceSnapshot>,
-    was_active: bool,
     firewall: firewall::FirewallPlan,
 }
 
@@ -280,9 +281,6 @@ impl Runtime for SystemRuntime {
     async fn preflight(&mut self, plan: &SecurePlan) -> Result<()> {
         require_tools(utils::command_exists)?;
         listener_output().await?;
-        let snapshot = service::capture_snapshot()?;
-        self.was_active = snapshot.was_active();
-        self.snapshot = Some(snapshot);
         if self.mode == SecureMode::Local {
             let listener = plan.original.listen_address()?.parse()?;
             self.firewall = firewall::FirewallPlan::capture(listener).await?;
@@ -291,14 +289,10 @@ impl Runtime for SystemRuntime {
     }
 
     async fn activate(&mut self) -> Result<()> {
-        if self.was_active {
-            service::restart_and_verify()
-        } else {
-            service::activate_and_verify()
-        }
+        Systemctl::SecureTransaction.restart_and_verify()
     }
     async fn verify(&mut self, profile: &ManagedProfile) -> Result<()> {
-        verify(profile).await
+        verify_with_systemctl(profile, Systemctl::SecureTransaction).await
     }
     async fn close_firewall(&mut self) -> Result<()> {
         self.firewall.close().await
@@ -307,13 +301,9 @@ impl Runtime for SystemRuntime {
         self.firewall.restore().await
     }
     async fn restore_service(&mut self, original: &ManagedProfile) -> Result<()> {
-        service::restore_snapshot(self.snapshot.take().context("服务快照已消费")?)?;
-        if self.was_active {
-            verify(original).await?;
-        } else if service::is_active()? {
-            bail!("回滚后服务仍处于 active，未恢复原停止状态");
-        }
-        Ok(())
+        // 加固只重启现有 unit。恢复配置后重启同一个 unit 即可，无需重建或启用。
+        self.activate().await?;
+        self.verify(original).await
     }
 }
 
@@ -338,11 +328,17 @@ async fn listener_output() -> Result<String> {
 }
 
 pub(crate) async fn verify(profile: &ManagedProfile) -> Result<()> {
-    if !service::is_active()? {
+    verify_with_systemctl(profile, Systemctl::Foreground).await
+}
+
+async fn verify_with_systemctl(profile: &ManagedProfile, systemctl: Systemctl) -> Result<()> {
+    if !systemctl.is_active()? {
         bail!("shoes.service 未处于 active 状态");
     }
     let expected: SocketAddr = profile.listen_address()?.parse()?;
-    let main_pid = service::main_pid()?.context("shoes.service 的 MainPID 不可用")?;
+    let main_pid = systemctl
+        .main_pid()?
+        .context("shoes.service 的 MainPID 不可用")?;
     let output = listener_output().await?;
     check_listeners(&output, expected, main_pid)?;
     let target = SocketAddr::new(
