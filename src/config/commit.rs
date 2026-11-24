@@ -37,6 +37,26 @@ pub(super) fn commit_managed_with_state_writer<F>(
 where
     F: FnOnce(&Path, &ManagedState) -> Result<()>,
 {
+    commit_managed_with_writers(
+        config_path,
+        state_path,
+        profiles_path,
+        servers,
+        state,
+        write_state,
+        |path, contents| utils::atomic_write(path, contents, 0o600),
+    )
+}
+
+pub(super) fn commit_managed_with_writers(
+    config_path: &Path,
+    state_path: &Path,
+    profiles_path: &Path,
+    servers: &[ServerConfig],
+    state: &ManagedState,
+    write_state: impl FnOnce(&Path, &ManagedState) -> Result<()>,
+    write_config: impl Fn(&Path, &[u8]) -> Result<()>,
+) -> Result<()> {
     let _timer = performance::stage("config_commit");
     let old_config = read_optional(config_path)?;
     let old_state = read_optional(state_path)?;
@@ -48,13 +68,16 @@ where
         write_profile_documents(profiles_path, &documents)?;
         write_state(state_path, state)?;
         if !runtime_unchanged {
-            utils::atomic_write(config_path, aggregate_yaml.as_bytes(), 0o600)?;
+            write_config(config_path, aggregate_yaml.as_bytes())?;
         }
         Ok::<(), anyhow::Error>(())
     })();
     if let Err(error) = commit {
         let state_rollback = restore_snapshot(state_path, old_state.as_deref(), 0o600);
-        let config_rollback = restore_snapshot(config_path, old_config.as_deref(), 0o600);
+        let config_rollback = match old_config {
+            Some(bytes) => write_config(config_path, &bytes),
+            None => restore_snapshot(config_path, None, 0o600),
+        };
         let profiles_rollback = old_profiles.restore(profiles_path);
         let mut rollback_failures = Vec::new();
         if let Err(error) = state_rollback {

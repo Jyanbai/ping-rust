@@ -43,6 +43,8 @@ pub(crate) enum ShutdownSignal {
     Interrupt,
     #[cfg(unix)]
     Terminate,
+    #[cfg(unix)]
+    Hangup,
 }
 
 impl ShutdownSignal {
@@ -51,6 +53,8 @@ impl ShutdownSignal {
             Self::Interrupt => 130,
             #[cfg(unix)]
             Self::Terminate => 143,
+            #[cfg(unix)]
+            Self::Hangup => 129,
         }
     }
 }
@@ -61,6 +65,8 @@ impl std::fmt::Display for ShutdownSignal {
             Self::Interrupt => "SIGINT",
             #[cfg(unix)]
             Self::Terminate => "SIGTERM",
+            #[cfg(unix)]
+            Self::Hangup => "SIGHUP",
         };
         write!(f, "收到 {name}，已取消 SOCKS5 加固")
     }

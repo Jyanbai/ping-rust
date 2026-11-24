@@ -441,6 +441,30 @@ fn socks5_secure_activation_failure_restores_exact_files() {
     assert_eq!(fs::read(&profile_path).unwrap(), original_profile);
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn socks5_secure_preserves_aggregate_owner_group_and_mode_through_rollback() {
+    use std::os::unix::fs::MetadataExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let profile = legacy(directory.path());
+    let config = directory.path().join("config.yaml");
+    utils::set_mode(&config, 0o640).unwrap();
+    let metadata = || {
+        let file = fs::metadata(&config).unwrap();
+        (file.uid(), file.gid(), file.mode() & 0o7777)
+    };
+    let original = metadata();
+    let mut plan = SecurePlan::prepare(directory.path(), profile.id, SecureMode::Auth)
+        .unwrap()
+        .unwrap();
+    plan.commit_files().unwrap();
+    assert_eq!(metadata(), original);
+    plan.rollback_files().unwrap();
+    assert_eq!(metadata(), original);
+    plan.finish_pending().unwrap();
+}
+
 #[tokio::test]
 async fn socks5_secure_refuses_inactive_disabled_custom_unit() {
     for mode in [SecureMode::Auth, SecureMode::Local] {

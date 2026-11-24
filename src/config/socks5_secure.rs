@@ -1,5 +1,5 @@
 //! SOCKS5 加固的只读计划与现有受管文件事务。
-use std::{net::SocketAddr, time::Duration};
+use std::{io::Read, net::SocketAddr, time::Duration};
 
 use fs2::FileExt;
 
@@ -100,8 +100,55 @@ pub(crate) struct SecurePlan {
     pub(crate) profile: ManagedProfile,
     before_yaml: String,
     before_profile: String,
-    rollback: Option<ManagedRollback>,
+    rollback: Option<SecureRollback>,
     pending: Option<fs::File>,
+}
+
+struct SecureRollback {
+    config: Vec<u8>,
+    config_metadata: fs::Metadata,
+    state: Option<Vec<u8>>,
+    profiles: ProfileDirectorySnapshot,
+}
+
+impl SecureRollback {
+    fn write_config(&self, path: &Path, contents: &[u8]) -> Result<()> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{fchown, MetadataExt};
+            utils::atomic_write_with(path, contents, |file| {
+                let owner = &self.config_metadata;
+                let temporary = file.metadata()?;
+                if (temporary.uid(), temporary.gid()) != (owner.uid(), owner.gid()) {
+                    fchown(file, Some(owner.uid()), Some(owner.gid()))?;
+                }
+                file.set_permissions(owner.permissions())
+            })
+        }
+        #[cfg(not(unix))]
+        utils::atomic_write(path, contents, 0o600)
+    }
+
+    fn config_restored(&self, path: &Path) -> bool {
+        let Ok(metadata) = fs::metadata(path) else {
+            return false;
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if (metadata.uid(), metadata.gid(), metadata.mode())
+                != (
+                    self.config_metadata.uid(),
+                    self.config_metadata.gid(),
+                    self.config_metadata.mode(),
+                )
+            {
+                return false;
+            }
+        }
+        metadata.permissions() == self.config_metadata.permissions()
+            && fs::read(path).is_ok_and(|bytes| bytes == self.config)
+    }
 }
 
 impl SecurePlan {
@@ -240,12 +287,16 @@ impl SecurePlan {
         let config = self.directory.join("config.yaml");
         let state = self.directory.join("ping-rust-state.json");
         let profiles = self.directory.join("profiles");
-        let rollback = ManagedRollback {
-            config: read_optional(&config)?,
+        let mut original = fs::File::open(&config).context("无法读取原聚合配置")?;
+        let mut original_config = Vec::new();
+        original
+            .read_to_end(&mut original_config)
+            .context("无法读取原聚合配置")?;
+        let rollback = SecureRollback {
+            config: original_config,
+            config_metadata: original.metadata().context("无法读取原聚合配置权限")?,
             state: read_optional(&state)?,
             profiles: ProfileDirectorySnapshot::capture(&profiles)?,
-            generated_certificate: None,
-            generated_certificate_key: None,
         };
         let original_state = if socks5::listen_migration_pending(&state)? {
             // 在替换聚合配置前保存旧监听，避免无锁读者把临时回环监听迁移进旧状态。
@@ -277,7 +328,7 @@ impl SecurePlan {
                 .map_err(|error| error.error)
                 .context("无法保存 SOCKS5 加固事务状态")?,
         );
-        let commit = commit::commit_managed_with_state_writer(
+        let commit = commit::commit_managed_with_writers(
             &config,
             &state,
             &profiles,
@@ -287,10 +338,11 @@ impl SecurePlan {
                 Some(original_state) => save_state_to(path, &original_state),
                 None => Ok(()),
             },
+            |path, contents| rollback.write_config(path, contents),
         );
         if let Err(error) = commit {
             // 提交函数已尝试回滚。确认原文件都在，再允许后续读写。
-            let restored = read_optional(&config).is_ok_and(|bytes| bytes == rollback.config)
+            let restored = rollback.config_restored(&config)
                 && read_optional(&state).is_ok_and(|bytes| bytes == rollback.state)
                 && ProfileDirectorySnapshot::capture(&profiles).is_ok_and(|snapshot| {
                     snapshot.existed == rollback.profiles.existed
@@ -331,11 +383,7 @@ impl SecurePlan {
             .context("没有已提交的 SOCKS5 加固事务")?;
         let mut failures = Vec::new();
         // 先还原聚合配置，再恢复可能缺少显式 listen 的旧状态。
-        match transaction::restore_snapshot(
-            &self.directory.join("config.yaml"),
-            rollback.config.as_deref(),
-            0o600,
-        ) {
+        match rollback.write_config(&self.directory.join("config.yaml"), &rollback.config) {
             Ok(()) => {
                 if let Err(error) = transaction::restore_snapshot(
                     &self.directory.join("ping-rust-state.json"),

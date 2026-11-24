@@ -585,32 +585,50 @@ async fn shoes_service_hook() -> Option<bool> {
         return Some(descends_from(process, control_pid));
     }
 
-    // 兼容控制进程用阻塞的 systemctl start 启动另一个 oneshot 的钩子。
-    let control = std::path::PathBuf::from(format!("/proc/{control_pid}"));
+    // 同步 systemctl 可以是控制进程本身，也可以由 ExecStartPre 脚本派生。
     let systemctl_path = utils::command_path("systemctl")?;
-    if !same_executable(&control.join("exe"), &systemctl_path).ok()? {
+    if !fs::read_dir("/proc")
+        .ok()?
+        .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse::<u32>().ok())
+        .any(|pid| waits_for_unit(pid, &systemctl_path, unit) && descends_from(pid, control_pid))
+    {
         return Some(false);
     }
-    let command_line = fs::read(control.join("cmdline")).ok()?;
-    let mut args = command_line.split(|byte| *byte == 0);
-    args.next()?;
-    if !args.eq([b"start".as_slice(), unit.as_bytes(), b"".as_slice()]) {
-        return Some(false);
-    }
-    let target_cgroup = systemctl
+    // 用目标 unit 的进程核对读者归属。systemd 报告的 cgroup 路径可能相对于容器根。
+    let target = systemctl
         .timed(
-            &["show", "--property=ControlGroup", "--value", "--", unit],
+            &[
+                "show",
+                "--property=MainPID",
+                "--property=ControlPID",
+                "--",
+                unit,
+            ],
             SECURE_QUERY_TIMEOUT,
         )
         .await
         .ok()?;
-    Some(
-        !target_cgroup.is_empty()
-            && (cgroup == target_cgroup
-                || cgroup
-                    .strip_prefix(target_cgroup.as_str())
-                    .is_some_and(|suffix| suffix.starts_with('/'))),
-    )
+    Some(target.lines().any(|line| {
+        line.split_once('=')
+            .filter(|(name, _)| matches!(*name, "MainPID" | "ControlPID"))
+            .and_then(|(_, value)| value.parse::<u32>().ok())
+            .is_some_and(|pid| pid > 1 && descends_from(process, pid))
+    }))
+}
+
+#[cfg(target_os = "linux")]
+fn waits_for_unit(pid: u32, executable: &Path, unit: &str) -> bool {
+    let process = Path::new("/proc").join(pid.to_string());
+    if !same_executable(&process.join("exe"), executable).unwrap_or(false) {
+        return false;
+    }
+    fs::read(process.join("cmdline")).is_ok_and(|command_line| {
+        command_line.split(|byte| *byte == 0).skip(1).eq([
+            b"start".as_slice(),
+            unit.as_bytes(),
+            b"".as_slice(),
+        ])
+    })
 }
 
 #[cfg(target_os = "linux")]

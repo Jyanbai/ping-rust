@@ -468,6 +468,13 @@ else
 fi
 echo ok >>"$2/start-pre-runs"
 SH
+  cat >"$scenario/start-oneshot" <<'SH'
+#!/bin/sh
+set -eu
+"$1" start "$2"
+# Keep the shell as ControlPID while systemctl waits.
+echo ok >>"$3/oneshot-wrapper-runs"
+SH
   cat >"$scenario/reader" <<'SH'
 #!/bin/sh
 set -eu
@@ -492,7 +499,7 @@ touch "$2/timer-started"
 touch "$2/timer-finished"
 SH
   chmod 0755 "$scenario/systemctl" "$scenario/exec-stop" "$scenario/exec-start-pre"
-  chmod 0755 "$scenario/reader" "$scenario/timer-export"
+  chmod 0755 "$scenario/reader" "$scenario/timer-export" "$scenario/start-oneshot"
   env PATH="$scenario:$PATH" systemctl probe
   cat >"$reader" <<EOF
 [Service]
@@ -503,7 +510,8 @@ EOF
   cat >"$exporter" <<EOF
 [Service]
 Type=oneshot
-TimeoutStartSec=60s
+# The export waits for the write lock across both bounded rollback jobs.
+TimeoutStartSec=5min
 ExecStart=$scenario/timer-export $NEW $scenario $legacy_socks5_id
 EOF
   cat >"$timer" <<'EOF'
@@ -526,7 +534,7 @@ TimeoutStartSec=10s
 TimeoutStopSec=150s
 ReadWritePaths=$scenario
 ExecStartPre=$scenario/exec-start-pre $NEW $scenario
-ExecStartPre=+$systemctl_bin start ${reader##*/}
+ExecStartPre=+$scenario/start-oneshot $systemctl_bin ${reader##*/} $scenario
 ExecStop=$scenario/exec-stop $scenario
 EOF
   "$systemctl_bin" daemon-reload
@@ -540,9 +548,10 @@ EOF
     echo 'Expected SOCKS5 activation to fail' >&2
     exit 1
   fi
-  test -f "$scenario/activation-failed"
+  test -f "$scenario/activation-failed" || { echo 'SOCKS5 rollback did not reach the injected activation failure' >&2; exit 1; }
   test "$(grep -c '^ok$' "$scenario/start-pre-runs")" -eq 2
   test "$(grep -c '^ok$' "$scenario/oneshot-runs")" -eq 2
+  test "$(grep -c '^ok$' "$scenario/oneshot-wrapper-runs")" -eq 2
   test "$(cat "$scenario/start-pre-auth")" = $'candidate\noriginal'
   test "$(cat "$scenario/oneshot-auth")" = $'candidate\noriginal'
   jq -e '[.outbounds[] | select(.type == "socks")] | length == 1 and
@@ -552,7 +561,7 @@ EOF
     [[ -f "$scenario/timer-finished" ]] && break
     sleep 0.1
   done
-  test -f "$scenario/timer-finished"
+  test -f "$scenario/timer-finished" || { echo 'SOCKS5 timer export did not finish after rollback' >&2; exit 1; }
   cmp -s "$scenario/timer-export.json" "$scenario/oneshot-export.json"
   test -f "$scenario/stop-entered"
   for _ in {1..50}; do
@@ -621,6 +630,105 @@ SH
   diff -u "$scenario/before" "$scenario/after"
 )
 echo 'SOCKS5 rollback: an inactive unit with StartLimitBurst=1 restarts after firewall failure: PASS'
+
+# Confirm a non-root shoes can start with the candidate and again after a
+# post-commit SIGHUP. The wrapper exposes the transition without logging credentials.
+(
+  systemctl_bin="$(command -v systemctl)"
+  scenario="$(mktemp -d /usr/local/lib/socks5-hangup.XXXXXX)"
+  config=/etc/shoes/config.yaml
+  dropin=/etc/systemd/system/shoes.service.d/90-compat-socks5-hangup.conf
+  original_directory_mode="$(stat -c %a /etc/shoes)"
+  cp -p "$config" "$scenario/original-config"
+  trap 'rm -f "$dropin"; chown --reference="$scenario/original-config" "$config"; chmod "$original_directory_mode" /etc/shoes; "$systemctl_bin" daemon-reload; "$systemctl_bin" restart shoes.service; rm -rf "$scenario"' EXIT
+  mkdir -p "${dropin%/*}"
+  chmod 0711 /etc/shoes
+  chown nobody:nogroup "$config"
+  cat >"$dropin" <<'EOF'
+[Service]
+User=nobody
+Group=nogroup
+EOF
+  cat >"$scenario/systemctl" <<'SH'
+#!/bin/sh
+set -eu
+if [ "$1" = restart ] && [ ! -e "$SOCKS5_HANGUP/candidate-active" ]; then
+  "$SOCKS5_SYSTEMCTL" "$@"
+  for _ in $(seq 1 50); do
+    ss -H -ltn 'sport = :24436' | grep -Fq '0.0.0.0:24436' && break
+    sleep 0.1
+  done
+  ss -H -ltn 'sport = :24436' | grep -Fq '0.0.0.0:24436'
+  "$SOCKS5_SYSTEMCTL" is-active --quiet shoes.service
+  touch "$SOCKS5_HANGUP/candidate-active"
+  exec sleep 30
+fi
+exec "$SOCKS5_SYSTEMCTL" "$@"
+SH
+  chmod 0755 "$scenario/systemctl"
+  "$systemctl_bin" daemon-reload
+  "$systemctl_bin" restart shoes.service
+  before_pid="$("$systemctl_bin" show --property=MainPID --value shoes.service)"
+  test "$(stat -c %a:%U:%G "$config")" = '600:nobody:nogroup'
+  find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/before"
+  python3 - "$NEW" "$scenario" "$systemctl_bin" <<'PY'
+import json
+import os
+import pathlib
+import signal
+import subprocess
+import sys
+import time
+
+binary, root, systemctl = sys.argv[1:]
+scenario = pathlib.Path(root)
+directory = pathlib.Path('/etc/shoes')
+config = directory / 'config.yaml'
+state = directory / 'ping-rust-state.json'
+pending = directory / '.ping-rust-socks5-secure.pending'
+original_state = state.read_bytes()
+original_config = config.read_bytes()
+original_stat = config.stat()
+proc = subprocess.Popen(
+    [binary, 'socks5', 'secure', 'compat-socks5-legacy', '--auth', '--yes'],
+    env={**os.environ, 'PATH': f'{scenario}:{os.environ["PATH"]}',
+         'SOCKS5_HANGUP': root, 'SOCKS5_SYSTEMCTL': systemctl},
+    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+)
+try:
+    marker = scenario / 'candidate-active'
+    deadline = time.monotonic() + 20
+    while not marker.exists() and proc.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert marker.exists(), 'non-root shoes did not start with the SOCKS5 candidate'
+    assert pending.is_file() and config.read_bytes() != original_config
+    assert (config.stat().st_uid, config.stat().st_gid, config.stat().st_mode) == (
+        original_stat.st_uid, original_stat.st_gid, original_stat.st_mode
+    )
+    # Legacy listen metadata may be backfilled, but authentication is unpublished.
+    legacy = next(p for p in json.loads(state.read_bytes())['profiles']
+                  if p['name'] == 'compat-socks5-legacy')
+    assert legacy['credentials']['Socks5'].get('username') is None
+    proc.send_signal(signal.SIGHUP)
+    _, stderr = proc.communicate(timeout=30)
+    assert proc.returncode == 129, (proc.returncode, stderr.decode())
+    assert '收到 SIGHUP' in stderr.decode()
+    assert '原配置、防火墙及服务已恢复并再次验证' in stderr.decode()
+    assert not pending.exists() and state.read_bytes() == original_state
+    assert config.read_bytes() == original_config
+finally:
+    if proc.poll() is None:
+        proc.kill()
+        proc.wait()
+PY
+  "$systemctl_bin" is-active --quiet shoes.service
+  test "$("$systemctl_bin" show --property=MainPID --value shoes.service)" != "$before_pid"
+  ss -H -ltn 'sport = :24436' | grep -F '0.0.0.0:24436' >/dev/null
+  test "$(stat -c %a:%U:%G "$config")" = '600:nobody:nogroup'
+  find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/after"
+  diff -u "$scenario/before" "$scenario/after"
+)
+echo 'SOCKS5 rollback: post-commit SIGHUP restores configuration and the non-root service: PASS'
 
 (
   scenario="$(mktemp -d /usr/local/lib/socks5-start-export.XXXXXX)"

@@ -46,7 +46,10 @@ async fn main() -> Result<()> {
     let securing_socks5 = matches!(&cli.command, Some(cli::Command::Socks5 { .. }));
     #[cfg(unix)]
     if securing_socks5 {
-        listen_for_termination()?;
+        use tokio::signal::unix::SignalKind;
+
+        listen_for_signal(SignalKind::terminate(), ShutdownSignal::Terminate)?;
+        listen_for_signal(SignalKind::hangup(), ShutdownSignal::Hangup)?;
     }
     if !cli.is_socks5_secure_dry_run() && std::path::Path::new(utils::STATE_FILE).exists() {
         if let Ok(state) = config::load_state() {
@@ -60,7 +63,9 @@ async fn main() -> Result<()> {
     let result = cli::run(cli).await;
     if let Some(error) = result.as_ref().err().filter(|error| is_interrupted(error)) {
         if securing_socks5 {
-            eprintln!("{error:#}");
+            use std::io::Write;
+
+            let _ = writeln!(std::io::stderr(), "{error:#}");
         }
         exit_after_signal(interrupted_exit_code(error));
     }
@@ -69,25 +74,21 @@ async fn main() -> Result<()> {
 
 #[cfg(unix)]
 async fn listen_for_interrupts() -> Result<()> {
-    use tokio::signal::unix::{signal, SignalKind};
-
-    let mut interrupts = signal(SignalKind::interrupt())?;
-    tokio::spawn(async move {
-        while interrupts.recv().await.is_some() {
-            handle_interrupt(ShutdownSignal::Interrupt);
-        }
-    });
-    Ok(())
+    listen_for_signal(
+        tokio::signal::unix::SignalKind::interrupt(),
+        ShutdownSignal::Interrupt,
+    )
 }
 
 #[cfg(unix)]
-fn listen_for_termination() -> Result<()> {
-    use tokio::signal::unix::{signal, SignalKind};
-
-    let mut terminations = signal(SignalKind::terminate())?;
+fn listen_for_signal(
+    kind: tokio::signal::unix::SignalKind,
+    shutdown: ShutdownSignal,
+) -> Result<()> {
+    let mut signals = tokio::signal::unix::signal(kind)?;
     tokio::spawn(async move {
-        while terminations.recv().await.is_some() {
-            handle_interrupt(ShutdownSignal::Terminate);
+        while signals.recv().await.is_some() {
+            handle_interrupt(shutdown);
         }
     });
     Ok(())

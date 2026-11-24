@@ -257,6 +257,23 @@ pub(crate) fn read_with_existing_lock_or_service_hook<T, U>(
 }
 
 pub fn atomic_write(destination: &Path, contents: &[u8], mode: u32) -> Result<()> {
+    atomic_write_with(destination, contents, |file| {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(fs::Permissions::from_mode(mode))?;
+        }
+        #[cfg(not(unix))]
+        let _ = (file, mode);
+        Ok(())
+    })
+}
+
+pub(crate) fn atomic_write_with(
+    destination: &Path,
+    contents: &[u8],
+    prepare: impl FnOnce(&File) -> io::Result<()>,
+) -> Result<()> {
     let parent = destination.parent().context("目标路径没有父目录")?;
     let parent = if parent.as_os_str().is_empty() {
         Path::new(".")
@@ -267,8 +284,8 @@ pub fn atomic_write(destination: &Path, contents: &[u8], mode: u32) -> Result<()
     let mut temp = tempfile::NamedTempFile::new_in(parent)
         .with_context(|| format!("无法在 {} 创建临时文件", parent.display()))?;
     temp.write_all(contents).context("写入临时文件失败")?;
+    prepare(temp.as_file()).context("设置临时文件权限或所有者失败")?;
     temp.as_file().sync_all().context("同步临时文件失败")?;
-    set_mode(temp.path(), mode)?;
     persist_replace(temp, destination)
 }
 
