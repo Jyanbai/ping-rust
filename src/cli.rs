@@ -1592,7 +1592,7 @@ pub(crate) fn profile_details_text(
     lines.join("\n")
 }
 
-fn profile_details_with_qr_text(
+pub(crate) fn profile_details_with_qr_text(
     profile: &config::ManagedProfile,
     share_uri: Option<&str>,
 ) -> Result<String> {

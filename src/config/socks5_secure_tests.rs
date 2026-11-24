@@ -752,6 +752,72 @@ fn socks5_secure_url_qr_and_file_export_wait_for_publish_or_rollback() {
 }
 
 #[test]
+fn socks5_secure_view_menu_renders_selected_uuid_after_hardening() {
+    for mode in [SecureMode::Auth, SecureMode::Local] {
+        let directory = tempfile::tempdir().unwrap();
+        let id = legacy(directory.path()).id;
+        let state_path = directory.path().join("ping-rust-state.json");
+        let lock_path = directory.path().join("ping-rust.lock");
+        let mut state = load_state_from(&state_path).unwrap();
+        let mut other = state.profiles[0].clone();
+        other.id = Uuid::new_v4();
+        other.name = "other-socks".into();
+        other.port = 444;
+        let config_path = directory.path().join("config.yaml");
+        let mut servers = load_servers(&config_path).unwrap();
+        let mut other_server = servers[0].clone();
+        other_server.address = other.listen_address().unwrap();
+        servers.push(other_server);
+        fs::write(&config_path, crate::yaml::to_string(&servers).unwrap()).unwrap();
+        state.profiles.push(other);
+        save_state_to(&state_path, &state).unwrap();
+
+        let rendered = crate::menu::view_config_with(
+            &state_path,
+            &lock_path,
+            |profiles| {
+                assert_eq!(profiles.len(), 2);
+                assert_eq!(profiles[0].id, id);
+                assert!(profiles[0].socks5_risk_warning().is_some());
+                let lock = utils::exclusive_lock(&lock_path)?;
+                let mut plan = SecurePlan::prepare(directory.path(), id, mode)?.unwrap();
+                plan.commit_files()?;
+                plan.publish_state()?;
+                let mut updated = load_state_from(&state_path)?;
+                updated.profiles.swap(0, 1);
+                let mut servers = load_servers(&config_path)?;
+                servers.swap(0, 1);
+                fs::write(&config_path, crate::yaml::to_string(&servers)?)?;
+                save_state_to(&state_path, &updated)?;
+                drop(lock);
+                Ok(Some(0))
+            },
+            |profile, uri, warning| {
+                assert_eq!(profile.id, id);
+                assert!(warning.is_none());
+                let uri = uri.unwrap();
+                match mode {
+                    SecureMode::Auth => {
+                        assert!(uri.contains("@203.0.113.8:443"));
+                        assert!(!uri.contains("socks5://203.0.113.8:443"));
+                    }
+                    SecureMode::Local => {
+                        assert!(uri.starts_with("socks5://127.0.0.1:443"));
+                        assert!(!uri.contains("203.0.113.8"));
+                    }
+                }
+                let text = crate::cli::profile_details_with_qr_text(profile, Some(uri))?;
+                assert!(text.contains(uri));
+                assert!(text.contains("二维码 (QR)"));
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(rendered);
+    }
+}
+
+#[test]
 fn socks5_secure_tools_menu_exports_the_state_after_input() {
     use crate::client::ClientFormat;
     use std::{sync::mpsc, thread, time::Duration};

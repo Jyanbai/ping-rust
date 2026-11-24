@@ -268,3 +268,90 @@ diff -u "$WORK/socks5-new/auth-edited-url" "$WORK/socks5-old/auth-edited-url"
 find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$WORK/hash-socks5-auth-edited-after"
 diff -u "$WORK/hash-socks5-auth-edited-before" "$WORK/hash-socks5-auth-edited-after"
 echo 'v0.2.1: edited authenticated SOCKS5 URL matches loopback listener: PASS'
+
+# Reproduce a legacy wildcard listener without touching the checked-in fixtures.
+"$NEW" generate socks5 --port 24436 --name compat-socks5-legacy --no-auth \
+  >"$WORK/socks5-legacy-generate.txt" 2>&1
+python3 - <<'PY'
+import json
+import pathlib
+import yaml
+
+directory = pathlib.Path('/etc/shoes')
+state_path = directory / 'ping-rust-state.json'
+state = json.loads(state_path.read_text())
+profile = next(p for p in state['profiles'] if p['name'] == 'compat-socks5-legacy')
+del profile['credentials']['Socks5']['listen']
+state_path.write_text(json.dumps(state))
+
+for path in [directory / 'config.yaml', directory / 'profiles/SOCKS5-24436.yaml']:
+    document = yaml.safe_load(path.read_text())
+    servers = document if isinstance(document, list) else [document]
+    server = next(s for s in servers if s['address'] == '127.0.0.1:24436')
+    server['address'] = '0.0.0.0:24436'
+    path.write_text(yaml.safe_dump(document))
+PY
+systemctl restart shoes.service
+# Exercise an actual systemd stop whose client exits before ExecStop finishes.
+(
+  systemctl_bin="$(command -v systemctl)"
+  scenario="$(mktemp -d /run/socks5-rollback.XXXXXX)"
+  dropin=/etc/systemd/system/shoes.service.d
+  mkdir -p "$dropin"
+  trap 'rm -f "$dropin/90-compat-socks5-rollback.conf"; "$systemctl_bin" daemon-reload; rm -rf "$scenario"' EXIT
+  cat >"$scenario/systemctl" <<'SH'
+#!/bin/sh
+case "$1" in
+  restart)
+    # Start the candidate, then report a client error to trigger rollback.
+    if [ ! -e "$SOCKS5_ROLLBACK/activation-failed" ]; then
+      "$SOCKS5_SYSTEMCTL" "$@" || exit $?
+      touch "$SOCKS5_ROLLBACK/activation-failed"
+      exit 1
+    fi
+    ;;
+  stop)
+    echo "$$" >"$SOCKS5_ROLLBACK/stop-client"
+    ;;
+esac
+exec "$SOCKS5_SYSTEMCTL" "$@"
+SH
+  cat >"$scenario/exec-stop" <<'SH'
+#!/bin/sh
+[ -s "$1/stop-client" ] || exit 0
+read -r client <"$1/stop-client"
+touch "$1/stop-entered"
+while kill -0 "$client" 2>/dev/null; do sleep 0.1; done
+touch "$1/stop-after-client"
+SH
+  chmod 0755 "$scenario/systemctl" "$scenario/exec-stop"
+  cat >"$dropin/90-compat-socks5-rollback.conf" <<EOF
+[Service]
+TimeoutStopSec=150s
+ReadWritePaths=$scenario
+ExecStop=$scenario/exec-stop $scenario
+EOF
+  "$systemctl_bin" daemon-reload
+  before_pid="$("$systemctl_bin" show --property=MainPID --value shoes.service)"
+  find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/before"
+  if PATH="$scenario:$PATH" SOCKS5_ROLLBACK="$scenario" SOCKS5_SYSTEMCTL="$systemctl_bin" \
+    "$NEW" socks5 secure compat-socks5-legacy --auth --yes >"$WORK/socks5-stop-rollback.txt" 2>&1; then
+    echo 'Expected SOCKS5 activation to fail' >&2
+    exit 1
+  fi
+  test -f "$scenario/activation-failed"
+  test -f "$scenario/stop-entered"
+  for _ in {1..50}; do
+    [[ -f "$scenario/stop-after-client" ]] && break
+    sleep 0.1
+  done
+  test -f "$scenario/stop-after-client"
+  "$systemctl_bin" is-active --quiet shoes.service
+  after_pid="$("$systemctl_bin" show --property=MainPID --value shoes.service)"
+  test "$after_pid" != "$before_pid"
+  grep -Fq '原配置、防火墙及服务已恢复并再次验证' "$WORK/socks5-stop-rollback.txt"
+  ss -H -ltn 'sport = :24436' | grep -F '0.0.0.0:24436' >/dev/null
+  find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/after"
+  diff -u "$scenario/before" "$scenario/after"
+)
+echo 'SOCKS5 rollback: systemd finishes stop after its client exits and runs the restored config: PASS'

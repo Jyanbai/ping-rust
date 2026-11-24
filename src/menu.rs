@@ -1147,23 +1147,62 @@ async fn change_profile_menu(profile: &config::ManagedProfile) -> Result<()> {
 }
 
 fn view_config_menu() -> Result<MenuControl> {
-    let state = config::load_state()?;
+    let shown = view_config_with(
+        Path::new(utils::STATE_FILE),
+        Path::new(utils::LOCK_FILE),
+        select_profile,
+        |profile, uri, warning| {
+            input::clear_screen()?;
+            print_menu_profile_details_with_uri(profile, uri, warning);
+            Ok(())
+        },
+    )?;
+    Ok(if shown {
+        control_after_success(3)
+    } else {
+        MenuControl::Continue
+    })
+}
+
+pub(crate) fn view_config_with(
+    state_path: &Path,
+    lock_path: &Path,
+    select: impl FnOnce(&[config::ManagedProfile]) -> Result<Option<usize>>,
+    render: impl FnOnce(&config::ManagedProfile, Option<&str>, Option<&str>) -> Result<()>,
+) -> Result<bool> {
+    let load_state = || config::load_state_from(state_path);
+    let state = utils::read_with_existing_lock(lock_path, load_state)?;
     if state.profiles.is_empty() {
         println!("没有配置。");
-        return Ok(MenuControl::Continue);
+        return Ok(false);
     }
-    let Some(selected) = select_profile(&state.profiles)? else {
-        return Ok(MenuControl::Continue);
+    let Some(selected) = select(&state.profiles)? else {
+        return Ok(false);
     };
-    let profile = &state.profiles[selected];
-    input::clear_screen()?;
-    print_menu_profile_details(profile);
-    Ok(control_after_success(3))
+    let id = state.profiles[selected].id;
+    utils::read_with_existing_lock_then(lock_path, load_state, |state| {
+        let profile = state
+            .profiles
+            .iter()
+            .find(|profile| profile.id == id)
+            .context("所选配置已删除，请重新选择要查看的配置")?;
+        let (uri, warning) = share_uri_for_view(profile);
+        render(profile, uri.as_deref(), warning.as_deref())?;
+        Ok(true)
+    })
 }
 
 fn print_menu_profile_details(profile: &config::ManagedProfile) {
     let (share_uri, share_warning) = share_uri_for_view(profile);
-    cli::print_profile_details_with_qr(profile, share_uri.as_deref());
+    print_menu_profile_details_with_uri(profile, share_uri.as_deref(), share_warning.as_deref());
+}
+
+fn print_menu_profile_details_with_uri(
+    profile: &config::ManagedProfile,
+    share_uri: Option<&str>,
+    share_warning: Option<&str>,
+) {
+    cli::print_profile_details_with_qr(profile, share_uri);
     if let Some(warning) = share_warning {
         println!("未生成标准分享链接：{warning}");
     }

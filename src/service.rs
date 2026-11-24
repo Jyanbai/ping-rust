@@ -659,23 +659,37 @@ impl Systemctl {
     pub(crate) async fn restart_secure_transaction(self, rollback: bool) -> Result<()> {
         utils::require_linux_root()?;
         ensure_systemctl()?;
-        if rollback {
+        let stop_error = if rollback {
             // 取消 systemctl 客户端并不会撤销已提交给 systemd 的任务。先替换待完成的
             // restart，确保恢复的配置由新的进程加载。
             self.timed(
                 &["stop", "--job-mode=replace", SERVICE_NAME],
                 SECURE_JOB_TIMEOUT,
             )
-            .await?;
+            .await
+            .err()
+        } else {
+            None
+        };
+        if let Some(error) = stop_error {
+            // stop 可能已经由 systemd 接管。立即提交替代作业，避免查询状态失败
+            // 或等待旧作业结束时，把恢复后的服务留在停机状态。
+            self.timed(
+                &["restart", "--job-mode=replace", SERVICE_NAME],
+                SECURE_JOB_TIMEOUT,
+            )
+            .await
+            .with_context(|| format!("等待回滚停止失败：{error:#}；提交恢复重启失败"))?;
+        } else {
+            if matches!(
+                self.timed_show("ActiveState").await?.as_str(),
+                "active" | "failed"
+            ) {
+                self.timed(RESET_FAILED_COMMAND, SECURE_QUERY_TIMEOUT)
+                    .await?;
+            }
+            self.timed(RESTART_COMMAND, SECURE_JOB_TIMEOUT).await?;
         }
-        if matches!(
-            self.timed_show("ActiveState").await?.as_str(),
-            "active" | "failed"
-        ) {
-            self.timed(RESET_FAILED_COMMAND, SECURE_QUERY_TIMEOUT)
-                .await?;
-        }
-        self.timed(RESTART_COMMAND, SECURE_JOB_TIMEOUT).await?;
         if !self.secure_is_active().await? {
             bail!("systemd 命令已返回成功，但 shoes.service 未处于 active 状态");
         }
