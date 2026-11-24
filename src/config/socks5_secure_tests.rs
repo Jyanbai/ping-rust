@@ -496,7 +496,11 @@ async fn socks5_secure_restart_and_late_failures_restore_config_firewall_and_ser
         }
     }
     impl Runtime for Fake {
-        async fn preflight(&mut self, _: &SecurePlan) -> Result<()> {
+        async fn preflight(
+            &mut self,
+            _: &SecurePlan,
+            _: &crate::socks5_secure::InterruptGuard<'_>,
+        ) -> Result<()> {
             Ok(())
         }
 
@@ -585,7 +589,11 @@ async fn socks5_secure_publishes_safety_only_after_runtime_verification() {
     }
 
     impl crate::socks5_secure::Runtime for Observer<'_> {
-        async fn preflight(&mut self, _: &SecurePlan) -> Result<()> {
+        async fn preflight(
+            &mut self,
+            _: &SecurePlan,
+            _: &crate::socks5_secure::InterruptGuard<'_>,
+        ) -> Result<()> {
             Ok(())
         }
 
@@ -663,29 +671,37 @@ async fn socks5_secure_publishes_safety_only_after_runtime_verification() {
 }
 
 #[test]
-fn socks5_secure_url_qr_and_file_export_wait_for_publish_or_rollback() {
+fn socks5_secure_info_url_qr_and_file_export_wait_for_publish_or_rollback() {
     use clap::Parser;
     use std::{sync::mpsc, thread, time::Duration};
 
-    for rollback in [false, true] {
+    for (mode, rollback) in [
+        (SecureMode::Local, false),
+        (SecureMode::Local, true),
+        (SecureMode::Auth, false),
+    ] {
         let directory = tempfile::tempdir().unwrap();
         let profile = legacy(directory.path());
         let state_path = directory.path().join("ping-rust-state.json");
         let lock_path = directory.path().join("ping-rust.lock");
         let output_path = directory.path().join("client.json");
         let id = profile.id.to_string();
-        let mut plan = SecurePlan::prepare(directory.path(), profile.id, SecureMode::Local)
+        let mut plan = SecurePlan::prepare(directory.path(), profile.id, mode)
             .unwrap()
             .unwrap();
         let lock = utils::exclusive_lock(&lock_path).unwrap();
         plan.commit_files().unwrap();
         assert_eq!(
             load_servers(&directory.path().join("config.yaml")).unwrap()[0].address,
-            "127.0.0.1:443"
+            if mode == SecureMode::Local {
+                "127.0.0.1:443"
+            } else {
+                "0.0.0.0:443"
+            }
         );
 
         let mut readers = Vec::new();
-        for command in ["url", "qr", "export"] {
+        for command in ["url", "qr", "export", "info"] {
             let args = if command == "export" {
                 vec![
                     "prs",
@@ -698,6 +714,8 @@ fn socks5_secure_url_qr_and_file_export_wait_for_publish_or_rollback() {
                     "--output",
                     output_path.to_str().unwrap(),
                 ]
+            } else if command == "info" {
+                vec!["prs", command, &id]
             } else {
                 vec!["prs", command, &id, "--server-address", "example.com"]
             };
@@ -738,16 +756,17 @@ fn socks5_secure_url_qr_and_file_export_wait_for_publish_or_rollback() {
         }
         drop(lock);
 
+        let public_export = rollback || mode == SecureMode::Auth;
         for (command, reader, result) in readers {
             let result = result.recv_timeout(Duration::from_secs(5)).unwrap();
             reader.join().unwrap();
-            if rollback {
-                assert!(result.is_ok(), "{command} 回滚后应可恢复公网导出");
+            if public_export || command == "info" {
+                assert!(result.is_ok(), "{command} 应读取事务完成后的状态");
             } else {
                 assert!(format!("{:#}", result.unwrap_err()).contains("仅监听本机"));
             }
         }
-        assert_eq!(output_path.exists(), rollback);
+        assert_eq!(output_path.exists(), public_export);
     }
 }
 
@@ -894,7 +913,11 @@ struct InterruptedRuntime<'a> {
 }
 
 impl crate::socks5_secure::Runtime for InterruptedRuntime<'_> {
-    async fn preflight(&mut self, _: &SecurePlan) -> Result<()> {
+    async fn preflight(
+        &mut self,
+        _: &SecurePlan,
+        _: &crate::socks5_secure::InterruptGuard<'_>,
+    ) -> Result<()> {
         assert!(!self.directory.join("profiles").exists());
         crate::socks5_secure::require_tools(|tool| self.has_ss || tool != "ss")
     }

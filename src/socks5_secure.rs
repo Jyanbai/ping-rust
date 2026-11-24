@@ -116,7 +116,7 @@ impl InterruptPhase {
     }
 }
 
-struct InterruptGuard<'a> {
+pub(crate) struct InterruptGuard<'a> {
     interrupt: &'a Interrupt,
 }
 
@@ -128,7 +128,7 @@ impl InterruptGuard<'_> {
         Ok(())
     }
 
-    async fn cancelled(&self) -> anyhow::Error {
+    pub(crate) async fn cancelled(&self) -> anyhow::Error {
         loop {
             if let Err(error) = self.check() {
                 return error;
@@ -206,7 +206,7 @@ pub(crate) async fn run(
 }
 
 pub(crate) trait Runtime {
-    async fn preflight(&mut self, plan: &SecurePlan) -> Result<()>;
+    async fn preflight(&mut self, plan: &SecurePlan, interrupt: &InterruptGuard<'_>) -> Result<()>;
     async fn activate(&mut self) -> Result<()>;
     async fn verify(&mut self, profile: &ManagedProfile) -> Result<()>;
     async fn close_firewall(&mut self) -> Result<()>;
@@ -219,9 +219,10 @@ pub(crate) async fn apply(
     runtime: &mut impl Runtime,
     interrupt: &Interrupt,
 ) -> Result<()> {
-    runtime.preflight(plan).await?;
     // 防火墙修改结束后再根据实际状态补偿，服务等待可主动取消。
     let interrupt = interrupt.begin()?;
+    runtime.preflight(plan, &interrupt).await?;
+    interrupt.check()?;
     plan.commit_files()?;
     let mut activation_attempted = false;
     let change = async {
@@ -291,14 +292,15 @@ struct SystemRuntime {
 }
 
 impl Runtime for SystemRuntime {
-    async fn preflight(&mut self, plan: &SecurePlan) -> Result<()> {
+    async fn preflight(&mut self, plan: &SecurePlan, interrupt: &InterruptGuard<'_>) -> Result<()> {
         require_tools(utils::command_exists)?;
         listener_output().await?;
         if self.mode == SecureMode::Local {
             let listener = plan.original.listen_address()?.parse()?;
             self.firewall = firewall::FirewallPlan::capture(listener).await?;
         }
-        plan.validate().await
+        interrupt.check()?;
+        plan.validate(interrupt).await
     }
 
     async fn activate(&mut self) -> Result<()> {

@@ -730,7 +730,7 @@ pub(crate) async fn run_with_export_paths(
             regenerate_test_certificate(id).await
         }
         Command::Logs { lines } => service::logs(lines),
-        Command::Info { profile } => show_info(profile.as_deref()).await,
+        Command::Info { profile } => show_info(profile.as_deref(), state_path, lock_path).await,
         Command::Url {
             profile,
             server_address,
@@ -1802,7 +1802,7 @@ pub(crate) async fn regenerate_test_certificate(id: Uuid) -> Result<()> {
     Ok(())
 }
 
-pub async fn show_info(selector: Option<&str>) -> Result<()> {
+async fn show_info(selector: Option<&str>, state_path: &Path, lock_path: &Path) -> Result<()> {
     let version = installer::installed_version()
         .await
         .unwrap_or_else(|_| "未安装".to_owned());
@@ -1811,10 +1811,20 @@ pub async fn show_info(selector: Option<&str>) -> Result<()> {
     println!("二进制：{}", crate::utils::SHOES_BIN);
     println!("配置：{}", crate::utils::CONFIG_FILE);
     println!("服务：{}", if active { "运行中" } else { "未运行" });
-    if !std::path::Path::new(crate::utils::STATE_FILE).exists() {
-        println!("管理状态：未创建");
-    } else {
-        let state = config::load_state()?;
+    utils::read_with_existing_lock_then(
+        lock_path,
+        || {
+            state_path
+                .exists()
+                .then(|| config::load_state_from(state_path))
+                .transpose()
+        },
+        |state| print_info_profiles(selector, state),
+    )
+}
+
+fn print_info_profiles(selector: Option<&str>, state: Option<config::ManagedState>) -> Result<()> {
+    if let Some(state) = state {
         if state.profiles.is_empty() {
             println!("配置：无");
         } else {
@@ -1893,6 +1903,8 @@ pub async fn show_info(selector: Option<&str>) -> Result<()> {
                 }
             }
         }
+    } else {
+        println!("管理状态：未创建");
     }
     Ok(())
 }

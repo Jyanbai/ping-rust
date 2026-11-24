@@ -292,16 +292,90 @@ for path in [directory / 'config.yaml', directory / 'profiles/SOCKS5-24436.yaml'
     path.write_text(yaml.safe_dump(document))
 PY
 systemctl restart shoes.service
+# Signal only the CLI once a substitute shoes is validating the private candidate.
+(
+  shoes=/usr/local/bin/shoes
+  scenario="$(mktemp -d /usr/local/lib/socks5-preflight.XXXXXX)"
+  mv "$shoes" "$scenario/shoes"
+  trap 'mv -f "$scenario/shoes" "$shoes"; rm -rf "$scenario"' EXIT
+  cat >"$shoes" <<'PY'
+#!/usr/bin/python3
+import json
+import os
+import pathlib
+import sys
+import time
+import yaml
+
+marker = pathlib.Path(os.environ['SOCKS5_PREFLIGHT'])
+candidate = pathlib.Path(sys.argv[2])
+assert sys.argv[1] == '--dry-run'
+assert candidate.stat().st_mode & 0o777 == 0o600
+servers = yaml.safe_load(candidate.read_text())
+protocol = next(s['protocol'] for s in servers if s['address'] == '0.0.0.0:24436')
+assert protocol['type'] == 'socks' and protocol['username'] and protocol['password']
+marker.with_suffix('.tmp').write_text(json.dumps([os.getpid(), str(candidate)]))
+marker.with_suffix('.tmp').replace(marker)
+time.sleep(30)
+marker.with_suffix('.finished').touch()
+PY
+  chmod 0755 "$shoes"
+  python3 - "$NEW" "$scenario" <<'PY'
+import json
+import os
+import pathlib
+import signal
+import subprocess
+import sys
+import time
+
+for sig in (signal.SIGINT, signal.SIGTERM):
+    marker = pathlib.Path(sys.argv[2]) / sig.name
+    proc = subprocess.Popen(
+        [sys.argv[1], 'socks5', 'secure', 'compat-socks5-legacy', '--auth', '--yes'],
+        env={**os.environ, 'SOCKS5_PREFLIGHT': str(marker)},
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    child = None
+    try:
+        deadline = time.monotonic() + 10
+        while not marker.exists() and proc.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert marker.exists(), 'shoes did not receive a credential-bearing candidate'
+        child, candidate = json.loads(marker.read_text())
+        proc.send_signal(sig)
+        assert proc.wait(timeout=5) == 128 + sig
+        assert not pathlib.Path(candidate).exists(), 'candidate survived cancellation'
+        assert not pathlib.Path(f'/proc/{child}').exists(), 'dry-run survived cancellation'
+        assert not marker.with_suffix('.finished').exists(), 'dry-run finished after cancellation'
+        child = None
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        if child is not None:
+            try:
+                os.kill(child, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+PY
+)
+echo 'SOCKS5 preflight: SIGINT and SIGTERM remove the candidate and stop dry-run: PASS'
+
 # Exercise an actual systemd stop whose client exits before ExecStop finishes.
 (
   systemctl_bin="$(command -v systemctl)"
-  scenario="$(mktemp -d /run/socks5-rollback.XXXXXX)"
+  # /run can be mounted noexec, and shoes.service has its own /tmp.
+  scenario="$(mktemp -d /usr/local/lib/socks5-rollback.XXXXXX)"
   dropin=/etc/systemd/system/shoes.service.d
   mkdir -p "$dropin"
   trap 'rm -f "$dropin/90-compat-socks5-rollback.conf"; "$systemctl_bin" daemon-reload; rm -rf "$scenario"' EXIT
   cat >"$scenario/systemctl" <<'SH'
 #!/bin/sh
 case "$1" in
+  probe)
+    exit 0
+    ;;
   restart)
     # Start the candidate, then report a client error to trigger rollback.
     if [ ! -e "$SOCKS5_ROLLBACK/activation-failed" ]; then
@@ -325,6 +399,7 @@ while kill -0 "$client" 2>/dev/null; do sleep 0.1; done
 touch "$1/stop-after-client"
 SH
   chmod 0755 "$scenario/systemctl" "$scenario/exec-stop"
+  env PATH="$scenario:$PATH" systemctl probe
   cat >"$dropin/90-compat-socks5-rollback.conf" <<EOF
 [Service]
 TimeoutStopSec=150s

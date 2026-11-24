@@ -1,17 +1,55 @@
 //! 按原监听地址和 TCP 端口清理专用放行规则。
 use super::*;
 use serde_json::{json, Value};
-use std::net::IpAddr;
+use std::{net::IpAddr, ops::Range};
 
 trait FirewallExecutor {
     fn available(&self, program: &str) -> bool;
     fn ufw_rules_file(&self, v6: bool) -> Result<String> {
-        let path = if v6 {
-            "/etc/ufw/user6.rules"
-        } else {
-            "/etc/ufw/user.rules"
-        };
-        std::fs::read_to_string(path).with_context(|| format!("无法读取 UFW 内部规则 {path}"))
+        let path = ufw_rules_path(v6);
+        std::fs::read_to_string(path)
+            .with_context(|| format!("无法读取 UFW 内部规则 {}", path.display()))
+    }
+    fn replace_ufw_rules_file(&mut self, v6: bool, before: &str, after: &str) -> Result<()> {
+        use std::io::Write;
+
+        let path = ufw_rules_path(v6);
+        let metadata = std::fs::symlink_metadata(path)
+            .with_context(|| format!("无法读取 UFW 持久规则 {} 的元数据", path.display()))?;
+        if !metadata.is_file() {
+            bail!("UFW 持久规则 {} 不是普通文件，请检查防火墙", path.display());
+        }
+        let mut candidate =
+            tempfile::NamedTempFile::new_in("/etc/ufw").context("无法创建 UFW 持久规则候选文件")?;
+        candidate
+            .write_all(after.as_bytes())
+            .context("无法写入 UFW 持久规则候选文件")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{fchown, MetadataExt};
+            fchown(
+                candidate.as_file(),
+                Some(metadata.uid()),
+                Some(metadata.gid()),
+            )
+            .context("无法保留 UFW 持久规则的所有者和组")?;
+        }
+        candidate
+            .as_file()
+            .set_permissions(metadata.permissions())
+            .context("无法保留 UFW 持久规则权限")?;
+        candidate
+            .as_file()
+            .sync_all()
+            .context("无法同步 UFW 持久规则候选文件")?;
+        if self.ufw_rules_file(v6)? != before {
+            bail!("UFW 持久规则已并发修改，请检查后重试");
+        }
+        candidate
+            .persist(path)
+            .map_err(|error| error.error)
+            .with_context(|| format!("无法更新 UFW 持久规则 {}", path.display()))?;
+        Ok(())
     }
     async fn execute(
         &mut self,
@@ -70,7 +108,14 @@ struct Attempt {
     rule: usize,
     before: Vec<LiveRule>,
     position: usize,
-    ufw_kernel_before: Vec<LiveRule>,
+    ufw: Option<UfwAttempt>,
+}
+
+struct UfwAttempt {
+    file: UfwFile,
+    entry: Range<usize>,
+    kernel: Vec<LiveRule>,
+    kernel_position: usize,
 }
 
 #[derive(PartialEq, Eq)]
@@ -125,38 +170,22 @@ impl FirewallPlan {
             false
         };
         if managed_firewalld {
-            for prefix in [vec![], vec!["--permanent".to_owned()]] {
-                let mut zones_args = prefix.clone();
-                zones_args.push("--get-zones".into());
-                for zone in backend
-                    .execute("firewall-cmd", &zones_args, None)
-                    .await?
-                    .split_whitespace()
-                {
-                    let mut base = prefix.clone();
-                    base.push(format!("--zone={zone}"));
-                    let mut sources = base.clone();
-                    sources.push("--list-sources".into());
-                    if !backend
-                        .execute("firewall-cmd", &sources, None)
-                        .await?
-                        .trim()
-                        .is_empty()
-                    {
-                        continue;
-                    }
-                    // 普通端口放行作用于双栈，只查询能明确限定地址族的 rich rule。
-                    let mut args = base.clone();
-                    args.push("--list-rich-rules".into());
-                    let output = backend.execute("firewall-cmd", &args, None).await?;
-                    let rules = firewalld_rules(&output, listener, &base);
-                    // firewalld 不公开运行时规则的剩余超时；持久规则也不能证明它没有超时。
-                    if prefix.is_empty() && !rules.is_empty() {
-                        bail!("firewalld 区域 {zone} 有匹配 TCP 端口 {} 的运行时 rich rule，无法查询其剩余超时并安全回滚。请先检查并手动处理该规则后重试", listener.port());
-                    }
-                    plan.rules.extend(rules);
+            let permanent = capture_firewalld(backend, listener, &["--permanent".into()]).await?;
+            let runtime = capture_firewalld(backend, listener, &[]).await?;
+            for rule in &runtime {
+                let Rule::Rich { base, text } = rule else {
+                    unreachable!()
+                };
+                let permanent_base = permanent_rich_base(base);
+                if !permanent.iter().any(|rule| {
+                    matches!(rule, Rule::Rich { base, text: persisted } if base == &permanent_base && persisted == text)
+                }) {
+                    bail!("firewalld 区域 {} 有匹配 TCP 端口 {} 的纯运行时 rich rule，无法查询其剩余超时并安全回滚。请先检查并手动处理该规则后重试", base[0], listener.port());
                 }
             }
+            // 先删运行规则，回滚时先恢复持久规则，避免重新激活已失去持久配置的规则。
+            plan.rules.extend(runtime);
+            plan.rules.extend(permanent);
         }
         let (program, family) = if listener.is_ipv4() {
             ("iptables", "ip")
@@ -174,7 +203,7 @@ impl FirewallPlan {
             bail!("{program} 使用 nf_tables，请安装 nftables 后重试");
         }
         // nft 同时处理兼容规则和同一张表里的原生规则，按 handle 只删除一次。
-        // UFW 和 firewalld 仍通过各自接口修改持久配置。
+        // UFW 和 firewalld 分别处理其受管规则。
         if has_nft {
             let items = nft_list(backend, json!({"ruleset": null})).await?;
             for item in &items {
@@ -224,17 +253,20 @@ impl FirewallPlan {
         for (index, rule) in self.rules.iter().enumerate() {
             let before = rule.current(backend).await?;
             if let Some(position) = rule.position(&before) {
-                let count = matching_rule_count(&before, &before[position].text);
-                let ufw_kernel_before = rule.verify_ufw_kernel(backend, count).await?;
+                let ufw = match rule {
+                    Rule::Ufw { listener, .. } => {
+                        Some(UfwAttempt::capture(backend, *listener, &before, position).await?)
+                    }
+                    _ => None,
+                };
                 // 超时或失败也可能已经改动了规则，回滚时先重新查询。
                 self.attempted.push(Attempt {
                     rule: index,
                     before,
                     position,
-                    ufw_kernel_before,
+                    ufw,
                 });
-                rule.delete(backend).await?;
-                rule.verify_ufw_kernel(backend, count - 1).await?;
+                rule.delete(backend, self.attempted.last().unwrap()).await?;
             }
         }
         if let Some(listener) = self.listener {
@@ -275,7 +307,13 @@ impl FirewallPlan {
                     runtime += 1;
                     persistent += 1;
                 }
-                Rule::Rich { .. } => persistent += 1,
+                Rule::Rich { base, .. } => {
+                    if rich_is_permanent(base) {
+                        persistent += 1;
+                    } else {
+                        runtime += 1;
+                    }
+                }
                 Rule::Nft {
                     may_use_netfilter_persistent,
                     ..
@@ -325,7 +363,7 @@ impl Rule {
                     }
                     displayed += usize::from(entry == text.as_str());
                 }
-                let live = ufw_tuples(backend, listener.is_ipv6())?;
+                let live = UfwFile::load(backend, listener.is_ipv6())?.rules;
                 let count = live
                     .iter()
                     .filter(|entry| ufw_tuple_allow(&entry.text, *listener))
@@ -335,17 +373,12 @@ impl Rule {
                 }
                 Ok(live)
             }
-            Rule::Rich { base, .. } => {
-                let mut args = base.clone();
-                args.push("--list-rich-rules".into());
-                Ok(backend
-                    .execute("firewall-cmd", &args, None)
-                    .await?
-                    .lines()
-                    .map(str::trim)
-                    .map(LiveRule::from)
-                    .collect())
-            }
+            Rule::Rich { base, .. } => Ok(list_rich_rules(backend, base)
+                .await?
+                .lines()
+                .map(str::trim)
+                .map(LiveRule::from)
+                .collect()),
             Rule::Iptables { program, .. } => Ok(iptables_input(backend, program)
                 .await?
                 .lines()
@@ -401,14 +434,14 @@ impl Rule {
         }
     }
 
-    async fn delete(&self, backend: &mut impl FirewallExecutor) -> Result<()> {
+    async fn delete(&self, backend: &mut impl FirewallExecutor, attempt: &Attempt) -> Result<()> {
         match self {
             Rule::Ufw { listener, .. } => {
-                let mut args = vec!["--force".into(), "delete".into()];
-                args.extend(ufw_allow_args(*listener));
-                backend.execute("ufw", &args, None).await?;
+                let ufw = attempt.ufw.as_ref().context("缺少 UFW 规则快照")?;
+                ufw.delete(backend, *listener).await?;
             }
             Rule::Rich { base, text } => {
+                verify_rich_backing(backend, base, text).await?;
                 let mut args = base.clone();
                 args.push(format!("--remove-rich-rule={text}"));
                 backend.execute("firewall-cmd", &args, None).await?;
@@ -436,7 +469,9 @@ impl Rule {
     async fn restore(&self, backend: &mut impl FirewallExecutor, attempt: &Attempt) -> Result<()> {
         let current = self.current(backend).await?;
         if let Rule::Ufw { listener, .. } = self {
-            return self.restore_ufw(backend, attempt, current, *listener).await;
+            return self
+                .restore_ufw(backend, attempt, &current, *listener)
+                .await;
         }
         let text = &attempt.before[attempt.position].text;
         let original_count = matching_rule_count(&attempt.before, text);
@@ -446,9 +481,17 @@ impl Rule {
             {
                 bail!("原放行规则的相对顺序已变化，请检查防火墙");
             }
+            if current
+                .iter()
+                .position(|rule| rule.text == *text)
+                .is_some_and(|position| position < after_new_denials(&attempt.before, &current))
+            {
+                bail!("原放行规则会覆盖新增拒绝规则，无法确认恢复顺序，请检查防火墙");
+            }
             return Ok(());
         }
         if let Rule::Rich { base, text } = self {
+            verify_rich_backing(backend, base, text).await?;
             let mut args = base.clone();
             args.push(format!("--add-rich-rule={text}"));
             backend.execute("firewall-cmd", &args, None).await?;
@@ -457,7 +500,7 @@ impl Rule {
             }
             return Ok(());
         }
-        let position = checked_restore_position(
+        let position = checked_firewall_restore_position(
             &attempt.before,
             attempt.position,
             &current,
@@ -486,34 +529,34 @@ impl Rule {
         &self,
         backend: &mut impl FirewallExecutor,
         attempt: &Attempt,
-        current: Vec<LiveRule>,
+        current: &[LiveRule],
         listener: SocketAddr,
     ) -> Result<()> {
-        let result = if self.position(&current).is_some() {
-            Ok(())
-        } else {
+        let original = attempt.ufw.as_ref().context("缺少 UFW 规则快照")?;
+        if self.position(current).is_none() {
             let position =
-                checked_restore_position(&attempt.before, attempt.position, &current, true)
+                checked_firewall_restore_position(&attempt.before, attempt.position, current, true)
                     .context("无法恢复 UFW 持久规则，请检查 ufw status numbered")?;
-            let mut args = vec![];
-            if position < current.len() {
-                // insert 使用每个内部 tuple 的位置，IPv6 还要加上 IPv4 tuple 总数。
-                let offset = if listener.is_ipv6() {
-                    ufw_tuples(backend, false)?.len()
-                } else {
-                    0
-                };
-                args.extend(["insert".into(), (offset + position + 1).to_string()]);
+            let file = UfwFile::load(backend, listener.is_ipv6())?;
+            if file.rules.as_slice() != current {
+                bail!("UFW 持久规则已并发修改，请检查后重试");
             }
-            args.extend(ufw_allow_args(listener));
-            backend.execute("ufw", &args, None).await.map(|_| ())
-        };
-        let persistent = self.current(backend).await?;
-        if self.position(&persistent).is_none() {
-            result?;
-            bail!("UFW 持久规则未恢复，请检查 ufw status numbered");
+            let mut restored = file.contents.clone();
+            let offset = if file.contents == original.file_without_allow() {
+                original.entry.start
+            } else {
+                file.offsets[position]
+            };
+            restored.insert_str(offset, &original.file.contents[original.entry.clone()]);
+            backend.replace_ufw_rules_file(listener.is_ipv6(), &file.contents, &restored)?;
         }
-        if !contains_rule_order(&attempt.before, &persistent) {
+        let persistent = self.current(backend).await?;
+        let position = self
+            .position(&persistent)
+            .context("UFW 持久规则未恢复，请检查 ufw status numbered")?;
+        if !contains_rule_order(&attempt.before, &persistent)
+            || position < after_new_denials(&attempt.before, &persistent)
+        {
             bail!("UFW 持久规则未恢复原相对顺序，请检查 ufw status numbered");
         }
 
@@ -521,19 +564,18 @@ impl Rule {
         let mut kernel = ufw_kernel_rules(backend, program, chain).await?;
         match ufw_kernel_count(&kernel, listener, chain) {
             0 => {
-                // ufw 可能先写盘后修改内核。只补回原内核规则，避免重载整个防火墙。
-                let before = &attempt.ufw_kernel_before;
-                let original = before
-                    .iter()
-                    .position(|rule| {
-                        iptables_delete_args_in_chain(&rule.text, listener, chain).is_some()
-                    })
-                    .context("缺少原 UFW 内核规则，请检查 ufw show raw")?;
-                let position = checked_restore_position(before, original, &kernel, true)
-                    .context("无法恢复 UFW 内核规则")?;
-                let text = &before[original].text;
+                // 单独补回目标规则，避免重载整个防火墙。
+                let before = &original.kernel;
+                let position = checked_firewall_restore_position(
+                    before,
+                    original.kernel_position,
+                    &kernel,
+                    true,
+                )
+                .context("无法恢复 UFW 内核规则")?;
+                let text = &before[original.kernel_position].text;
                 insert_iptables(backend, program, text, position, kernel.len()).await?;
-                let restored = self.verify_ufw_kernel(backend, 1).await?;
+                let restored = ufw_kernel_rules(backend, program, chain).await?;
                 verify_insert_order(&kernel, &restored, position, text)?;
                 if !contains_rule_order(&attempt.before, &self.current(backend).await?) {
                     bail!("补回内核规则时 UFW 持久规则已变化，请检查 ufw status numbered");
@@ -543,27 +585,78 @@ impl Rule {
             1 => {}
             count => bail!("UFW 内核规则数量为 {count}，预期为 1，请检查 ufw show raw"),
         }
-        if !contains_rule_order(&attempt.ufw_kernel_before, &kernel) {
+        if !contains_rule_order(&original.kernel, &kernel)
+            || kernel
+                .iter()
+                .position(|rule| {
+                    iptables_delete_args_in_chain(&rule.text, listener, chain).is_some()
+                })
+                .is_some_and(|position| position < after_new_denials(&original.kernel, &kernel))
+        {
             bail!("UFW 内核规则未恢复原相对顺序，请检查 ufw show raw");
         }
         Ok(())
     }
+}
 
-    async fn verify_ufw_kernel(
+impl UfwAttempt {
+    async fn capture(
+        backend: &mut impl FirewallExecutor,
+        listener: SocketAddr,
+        before: &[LiveRule],
+        position: usize,
+    ) -> Result<Self> {
+        let file = UfwFile::load(backend, listener.is_ipv6())?;
+        if file.rules != before {
+            bail!("UFW 持久规则已并发修改，请检查后重试");
+        }
+        let (program, chain) = ufw_kernel_chain(listener);
+        let entry = file.allow_entry(position, listener, chain)?;
+        let kernel = ufw_kernel_rules(backend, program, chain).await?;
+        if ufw_kernel_count(&kernel, listener, chain) != 1 {
+            bail!("UFW 内核规则与持久规则无法一一对应，请检查 {program} -S {chain}");
+        }
+        let kernel_position = kernel
+            .iter()
+            .position(|rule| iptables_delete_args_in_chain(&rule.text, listener, chain).is_some())
+            .unwrap();
+        Ok(Self {
+            file,
+            entry,
+            kernel,
+            kernel_position,
+        })
+    }
+
+    async fn delete(
         &self,
         backend: &mut impl FirewallExecutor,
-        expected: usize,
-    ) -> Result<Vec<LiveRule>> {
-        let Rule::Ufw { listener, .. } = self else {
-            return Ok(Vec::new());
-        };
-        let (program, chain) = ufw_kernel_chain(*listener);
-        let rules = ufw_kernel_rules(backend, program, chain).await?;
-        let count = ufw_kernel_count(&rules, *listener, chain);
-        if count != expected {
-            bail!("UFW 内核规则数量为 {count}，预期为 {expected}，请检查 {program} -S {chain} 和 ufw status numbered");
+        listener: SocketAddr,
+    ) -> Result<()> {
+        // ufw delete 会重载两族用户链。只编辑目标 tuple 及对应内核规则，保留运行时规则。
+        let (program, chain) = ufw_kernel_chain(listener);
+        let mut args = vec!["-w".into()];
+        args.extend(
+            iptables_delete_args_in_chain(&self.kernel[self.kernel_position].text, listener, chain)
+                .context("无法解析待删除的 UFW 内核规则")?,
+        );
+        backend.execute(program, &args, None).await?;
+        backend.replace_ufw_rules_file(
+            listener.is_ipv6(),
+            &self.file.contents,
+            &self.file_without_allow(),
+        )?;
+        let live = ufw_kernel_rules(backend, program, chain).await?;
+        if ufw_kernel_count(&live, listener, chain) != 0 {
+            bail!("UFW 运行时放行规则未移除，请检查 {program} -S {chain}");
         }
-        Ok(rules)
+        Ok(())
+    }
+
+    fn file_without_allow(&self) -> String {
+        let mut updated = self.file.contents.clone();
+        updated.replace_range(self.entry.clone(), "");
+        updated
     }
 }
 
@@ -648,13 +741,62 @@ fn verify_insert_order(
     Ok(())
 }
 
-fn checked_restore_position(
+fn checked_firewall_restore_position(
     before: &[LiveRule],
     original: usize,
     current: &[LiveRule],
     use_occurrence: bool,
 ) -> Result<usize> {
-    let position = restore_position(before, original, current, use_occurrence);
+    let position = restore_position(before, original, current, use_occurrence)
+        .max(after_new_denials(before, current));
+    verify_restore_position(before, original, current, position)
+}
+
+fn after_new_denials(before: &[LiveRule], current: &[LiveRule]) -> usize {
+    let mut seen = std::collections::HashMap::new();
+    let mut position = 0;
+    for (index, rule) in current.iter().enumerate() {
+        let count = seen.entry(&rule.text).or_insert(0);
+        *count += 1;
+        let is_new = if rule.handle.is_some() {
+            !before.contains(rule)
+        } else {
+            *count > matching_rule_count(before, &rule.text)
+        };
+        if is_new && rule_denies(rule) {
+            position = index + 1;
+        }
+    }
+    position
+}
+
+fn rule_denies(rule: &LiveRule) -> bool {
+    if rule.handle.is_some() {
+        return serde_json::from_str::<Value>(&rule.text).is_ok_and(|spec| {
+            spec["expr"].as_array().is_some_and(|expr| {
+                expr.iter()
+                    .any(|part| part.get("drop").is_some() || part.get("reject").is_some())
+            })
+        });
+    }
+    if matches!(
+        rule.text.split_whitespace().next(),
+        Some("deny" | "reject" | "deny_log" | "deny_log-all" | "reject_log" | "reject_log-all")
+    ) {
+        return true;
+    }
+    shell_words(&rule.text).windows(2).any(|words| {
+        matches!(words[0].as_str(), "-j" | "--jump")
+            && matches!(words[1].as_str(), "DROP" | "REJECT")
+    })
+}
+
+fn verify_restore_position(
+    before: &[LiveRule],
+    original: usize,
+    current: &[LiveRule],
+    position: usize,
+) -> Result<usize> {
     let restored = current[..position]
         .iter()
         .chain(std::iter::once(&before[original]))
@@ -713,29 +855,72 @@ async fn ufw_status(backend: &mut impl FirewallExecutor) -> Result<String> {
         .await
 }
 
-fn ufw_tuples(backend: &impl FirewallExecutor, v6: bool) -> Result<Vec<LiveRule>> {
-    backend
-        .ufw_rules_file(v6)?
-        .lines()
-        .filter_map(|line| line.strip_prefix("### tuple ###"))
-        .map(|tuple| {
-            let mut fields = tuple.split_whitespace().collect::<Vec<_>>();
-            let has_comment = fields
-                .last()
-                .is_some_and(|field| field.starts_with("comment="));
-            let field_count = fields.len() - usize::from(has_comment);
-            match field_count {
-                // 兼容 UFW 早期省略方向字段的 tuple，UFW 重新写入时会补上 in。
-                6 | 8 => fields.insert(field_count, "in"),
-                7 | 9 => {}
-                _ => bail!("无法解析 UFW 内部规则，请检查 user.rules 和 user6.rules"),
+fn ufw_rules_path(v6: bool) -> &'static Path {
+    Path::new(if v6 {
+        "/etc/ufw/user6.rules"
+    } else {
+        "/etc/ufw/user.rules"
+    })
+}
+
+struct UfwFile {
+    contents: String,
+    rules: Vec<LiveRule>,
+    offsets: Vec<usize>,
+}
+
+impl UfwFile {
+    fn load(backend: &impl FirewallExecutor, v6: bool) -> Result<Self> {
+        let contents = backend.ufw_rules_file(v6)?;
+        let mut rules = Vec::new();
+        let mut offsets = Vec::new();
+        let mut offset = 0;
+        for line in contents.split_inclusive('\n') {
+            if line.trim_end() == "### END RULES ###" {
+                offsets.push(offset);
+                return Ok(Self {
+                    contents,
+                    rules,
+                    offsets,
+                });
             }
-            Ok(LiveRule {
-                text: fields.join(" "),
-                handle: None,
-            })
-        })
-        .collect()
+            if let Some(tuple) = line.strip_prefix("### tuple ###") {
+                let mut fields = tuple.split_whitespace().collect::<Vec<_>>();
+                let has_comment = fields
+                    .last()
+                    .is_some_and(|field| field.starts_with("comment="));
+                let field_count = fields.len() - usize::from(has_comment);
+                match field_count {
+                    // 兼容早期 UFW 文件中省略的方向字段。
+                    6 | 8 => fields.insert(field_count, "in"),
+                    7 | 9 => {}
+                    _ => bail!("无法解析 UFW 内部规则，请检查 user.rules 和 user6.rules"),
+                }
+                rules.push(LiveRule::from(fields.join(" ").as_str()));
+                offsets.push(offset);
+            }
+            offset += line.len();
+        }
+        bail!("UFW 持久配置缺少规则区结束标记，请检查 user.rules 和 user6.rules")
+    }
+
+    fn allow_entry(
+        &self,
+        position: usize,
+        listener: SocketAddr,
+        chain: &str,
+    ) -> Result<Range<usize>> {
+        let start = self.offsets[position];
+        let mut lines = self.contents[start..self.offsets[position + 1]].split_inclusive('\n');
+        let tuple = lines.next().context("缺少 UFW tuple")?;
+        let rule = lines.next().context("UFW tuple 缺少对应规则")?;
+        if iptables_delete_args_in_chain(rule.trim_end(), listener, chain).is_none()
+            || lines.any(|line| !line.trim().is_empty())
+        {
+            bail!("UFW tuple 与专用放行规则无法一一对应，请检查 user.rules 和 user6.rules");
+        }
+        Ok(start..start + tuple.len() + rule.len())
+    }
 }
 
 fn ufw_tuple_allow(tuple: &str, listener: SocketAddr) -> bool {
@@ -771,31 +956,6 @@ fn ufw_is_v6(text: &str) -> bool {
         || text
             .split_whitespace()
             .any(|field| address_scope(field).is_some_and(|(ip, _)| ip.is_ipv6()))
-}
-
-fn ufw_allow_args(listener: SocketAddr) -> Vec<String> {
-    // UFW interprets the literal `any` as both families. Explicit /0 fixes the family.
-    let source = if listener.is_ipv4() {
-        "0.0.0.0/0"
-    } else {
-        "::/0"
-    };
-    let destination = if listener.ip().is_unspecified() {
-        source.to_owned()
-    } else {
-        listener.ip().to_string()
-    };
-    vec![
-        "allow".into(),
-        "proto".into(),
-        "tcp".into(),
-        "from".into(),
-        source.into(),
-        "to".into(),
-        destination,
-        "port".into(),
-        listener.port().to_string(),
-    ]
 }
 
 async fn iptables_input(backend: &mut impl FirewallExecutor, program: &str) -> Result<String> {
@@ -852,6 +1012,66 @@ async fn service_running(backend: &mut impl FirewallExecutor, unit: &str) -> Res
         .await?
         .trim()
         == "active")
+}
+
+async fn capture_firewalld(
+    backend: &mut impl FirewallExecutor,
+    listener: SocketAddr,
+    prefix: &[String],
+) -> Result<Vec<Rule>> {
+    let mut zones_args = prefix.to_vec();
+    zones_args.push("--get-zones".into());
+    let zones = backend.execute("firewall-cmd", &zones_args, None).await?;
+    let mut rules = Vec::new();
+    for zone in zones.split_whitespace() {
+        let mut base = prefix.to_vec();
+        base.push(format!("--zone={zone}"));
+        let mut sources = base.clone();
+        sources.push("--list-sources".into());
+        if backend
+            .execute("firewall-cmd", &sources, None)
+            .await?
+            .trim()
+            .is_empty()
+        {
+            // 普通端口放行作用于双栈，只清理能明确限定地址族的 rich rule。
+            let output = list_rich_rules(backend, &base).await?;
+            rules.extend(firewalld_rules(&output, listener, &base));
+        }
+    }
+    Ok(rules)
+}
+
+async fn list_rich_rules(backend: &mut impl FirewallExecutor, base: &[String]) -> Result<String> {
+    let mut args = base.to_vec();
+    args.push("--list-rich-rules".into());
+    backend.execute("firewall-cmd", &args, None).await
+}
+
+fn permanent_rich_base(base: &[String]) -> Vec<String> {
+    std::iter::once("--permanent".to_owned())
+        .chain(base.iter().cloned())
+        .collect()
+}
+
+fn rich_is_permanent(base: &[String]) -> bool {
+    base.first().is_some_and(|arg| arg == "--permanent")
+}
+
+async fn verify_rich_backing(
+    backend: &mut impl FirewallExecutor,
+    base: &[String],
+    text: &str,
+) -> Result<()> {
+    if rich_is_permanent(base) {
+        return Ok(());
+    }
+    // firewalld 的查询接口没有运行时定时器。只允许按同一区域的同一持久规则补偿。
+    let persistent = list_rich_rules(backend, &permanent_rich_base(base)).await?;
+    if !persistent.lines().any(|rule| rule.trim() == text) {
+        bail!("firewalld 运行时 rich rule 已无对应持久规则，无法安全修改，请检查防火墙");
+    }
+    Ok(())
 }
 
 fn firewalld_rules(output: &str, listener: SocketAddr, base: &[String]) -> Vec<Rule> {
@@ -1108,10 +1328,11 @@ fn nft_port_allow(rule: &serde_json::Value, listener: SocketAddr) -> bool {
             family_scoped = true;
             continue;
         }
-        if (condition["left"]["meta"]["key"] == "l4proto"
-            || (payload["protocol"] == ip_family && payload["field"] == header_protocol))
+        let ip_header = payload["protocol"] == ip_family && payload["field"] == header_protocol;
+        if (condition["left"]["meta"]["key"] == "l4proto" || ip_header)
             && (value == "tcp" || value.as_u64() == Some(6))
         {
+            family_scoped |= ip_header;
             continue;
         }
         match (payload["protocol"].as_str(), payload["field"].as_str()) {
@@ -1250,15 +1471,9 @@ mod tests {
 
     #[tokio::test]
     async fn socks5_secure_firewalld_preflight_keeps_original_runtime_rule() {
-        for (runtime_timeout, in_permanent) in [(None, false), (Some(60), true)] {
-            let rules = [
-                vec![SHARED, SCOPED],
-                if in_permanent {
-                    vec![SHARED, SCOPED]
-                } else {
-                    vec![SHARED]
-                },
-            ];
+        // firewalld 只返回规则文本。没有持久副本的普通及限时规则都不能补偿。
+        for runtime_timeout in [None, Some(60)] {
+            let rules = [vec![SHARED, SCOPED], vec![SHARED]];
             let mut backend = FakeFirewalld {
                 rules: rules.clone(),
                 runtime_timeout,
@@ -1269,6 +1484,40 @@ mod tests {
             assert_eq!(backend.rules, rules);
             assert_eq!(backend.runtime_timeout, runtime_timeout);
         }
+    }
+
+    #[tokio::test]
+    async fn socks5_secure_firewalld_cleans_and_restores_reloaded_rich_rule() {
+        let original = [vec![SHARED, SCOPED], vec![SHARED, SCOPED]];
+        let mut backend = FakeFirewalld {
+            rules: original.clone(),
+            runtime_timeout: None,
+        };
+        let mut plan = FirewallPlan::capture_with("0.0.0.0:1080".parse().unwrap(), &mut backend)
+            .await
+            .unwrap();
+        plan.close_with(&mut backend).await.unwrap();
+        assert_eq!(backend.rules, [vec![SHARED], vec![SHARED]]);
+        assert!(plan.closure_report().contains("已移除 1 条运行时"));
+        plan.restore_with(&mut backend).await.unwrap();
+        assert_eq!(backend.rules, original);
+        assert_eq!(backend.runtime_timeout, None);
+    }
+
+    #[tokio::test]
+    async fn socks5_secure_firewalld_keeps_runtime_rule_when_permanent_backing_disappears() {
+        let mut backend = FakeFirewalld {
+            rules: [vec![SHARED, SCOPED], vec![SHARED, SCOPED]],
+            runtime_timeout: Some(60),
+        };
+        let mut plan = FirewallPlan::capture_with("0.0.0.0:1080".parse().unwrap(), &mut backend)
+            .await
+            .unwrap();
+        backend.rules[1].pop();
+        let error = plan.close_with(&mut backend).await.unwrap_err();
+        assert!(format!("{error:#}").contains("无对应持久规则"));
+        assert_eq!(backend.rules, [vec![SHARED, SCOPED], vec![SHARED]]);
+        assert_eq!(backend.runtime_timeout, Some(60));
     }
 
     #[test]
@@ -1415,9 +1664,10 @@ mod tests {
         disk: Vec<&'static str>,
         ipv6: bool,
         kernel_has_rule: bool,
-        apply_to_kernel: bool,
         keep_disk_on_delete_failure: bool,
         kernel_reorders_on_insert: bool,
+        other_family_runtime_rule: bool,
+        delete_succeeds: bool,
     }
 
     impl FirewallExecutor for FakeUfw {
@@ -1444,9 +1694,61 @@ mod tests {
                 };
                 for tuple in tuples {
                     file.push_str(&format!("### tuple ### {tuple}\n"));
+                    if *rule == IPV4 || *rule == IPV6 {
+                        let chain = if v6 {
+                            "ufw6-user-input"
+                        } else {
+                            "ufw-user-input"
+                        };
+                        file.push_str(&format!("-A {chain} -p tcp --dport 1080 -j ACCEPT\n"));
+                    }
                 }
             }
+            file.push_str("### END RULES ###\nCOMMIT\n");
             Ok(file)
+        }
+
+        fn replace_ufw_rules_file(&mut self, v6: bool, before: &str, after: &str) -> Result<()> {
+            assert_eq!(v6, self.ipv6);
+            assert_eq!(before, self.ufw_rules_file(v6)?);
+            let allow = if v6 { IPV6 } else { IPV4 };
+            if let Some(index) = self.disk.iter().position(|entry| *entry == allow) {
+                assert!(!after.contains("-p tcp --dport 1080 -j ACCEPT"));
+                if !self.keep_disk_on_delete_failure {
+                    self.disk.remove(index);
+                }
+                if !self.delete_succeeds {
+                    self.disk.insert(0, OTHER);
+                    bail!("模拟 UFW 持久规则写入失败");
+                }
+            } else {
+                let restored = after
+                    .lines()
+                    .filter(|line| line.starts_with("### tuple ###"));
+                let position = restored
+                    .enumerate()
+                    .find(|(_, line)| line.starts_with("### tuple ### allow tcp 1080 "))
+                    .unwrap()
+                    .0;
+                let mut offset = 0;
+                let mut index = 0;
+                while index < self.disk.len() && offset < position {
+                    let rule = self.disk[index];
+                    if ufw_is_v6(rule) == v6 {
+                        offset += if rule == APP { 2 } else { 1 };
+                    }
+                    index += 1;
+                }
+                assert_eq!(offset, position);
+                if v6 {
+                    while index < self.disk.len() && !ufw_is_v6(self.disk[index]) {
+                        index += 1;
+                    }
+                }
+                self.disk.insert(index, allow);
+                assert_eq!(after, self.ufw_rules_file(v6)?);
+            }
+            Ok(())
         }
 
         async fn execute(
@@ -1456,6 +1758,16 @@ mod tests {
             input: Option<&[u8]>,
         ) -> Result<String> {
             assert!(input.is_none());
+            if program == "ip6tables" && args == ["-w", "-S", "ufw6-user-input"] && !self.ipv6 {
+                let mut output = String::from("-N ufw6-user-input\n");
+                if self.other_family_runtime_rule {
+                    output.push_str("-A ufw6-user-input -p tcp -m tcp --dport 1080 -j DROP\n");
+                }
+                if self.disk.contains(&IPV6) {
+                    output.push_str("-A ufw6-user-input -p tcp -m tcp --dport 1080 -j ACCEPT\n");
+                }
+                return Ok(output);
+            }
             if self.available(program) && program != "ufw" {
                 let kernel_chain = if self.ipv6 {
                     "ufw6-user-input"
@@ -1494,15 +1806,18 @@ mod tests {
                         }
                         Ok(rules)
                     }
-                    [wait, append, chain, rule @ ..] if append == "-A" => {
+                    [wait, action, chain, rest @ ..]
+                        if matches!(action.as_str(), "-D" | "-A" | "-I") =>
+                    {
                         assert_eq!(wait, "-w");
                         assert_eq!(chain, kernel_chain);
+                        let rule = if action == "-I" { &rest[1..] } else { rest };
                         assert_eq!(
                             rule,
                             ["-p", "tcp", "-m", "tcp", "--dport", "1080", "-j", "ACCEPT"]
                         );
-                        assert!(!self.kernel_has_rule);
-                        self.kernel_has_rule = true;
+                        assert_eq!(self.kernel_has_rule, action == "-D");
+                        self.kernel_has_rule = action != "-D";
                         Ok(String::new())
                     }
                     _ => panic!("意外 iptables 操作 {args:?}"),
@@ -1529,50 +1844,56 @@ mod tests {
                     assert_eq!(args[1], "delete");
                     assert_eq!(args[2..], spec);
                     self.kernel_has_rule = false;
+                    self.other_family_runtime_rule = false;
                     if !self.keep_disk_on_delete_failure {
                         let index = self.disk.iter().position(|entry| *entry == rule).unwrap();
                         assert_eq!(self.disk.remove(index), rule);
                     }
+                    if self.delete_succeeds {
+                        return Ok(String::new());
+                    }
                     self.disk.insert(0, OTHER);
                     bail!("模拟 UFW 删除后失败");
-                }
-                "allow" | "insert" => {
-                    assert!(!self.keep_disk_on_delete_failure);
-                    let family_end = if self.ipv6 {
-                        self.disk.len()
-                    } else {
-                        self.disk
-                            .iter()
-                            .position(|entry| ufw_is_v6(entry))
-                            .unwrap_or(self.disk.len())
-                    };
-                    let position = if args[0] == "insert" {
-                        assert_eq!(args[2..], spec);
-                        let requested = args[1].parse::<usize>().unwrap();
-                        let mut internal = 1;
-                        self.disk
-                            .iter()
-                            .position(|entry| {
-                                // UFW 将落进应用分组的插入点推进到分组末尾。
-                                let hit = internal >= requested;
-                                internal += if *entry == APP { 2 } else { 1 };
-                                hit
-                            })
-                            .unwrap_or(family_end)
-                    } else {
-                        assert_eq!(args, spec);
-                        family_end
-                    };
-                    self.disk.insert(position, rule);
-                    if !self.apply_to_kernel {
-                        bail!("模拟 UFW 写入持久规则后追加内核规则失败");
-                    }
-                    self.kernel_has_rule = true;
-                    Ok(String::new())
                 }
                 _ => panic!("意外操作 {args:?}"),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn socks5_secure_ufw_preserves_runtime_ipv6_deny_during_ipv4_close_and_rollback() {
+        let mut backend = FakeUfw {
+            disk: vec![IPV4, IPV6],
+            ipv6: false,
+            kernel_has_rule: true,
+            keep_disk_on_delete_failure: false,
+            kernel_reorders_on_insert: false,
+            other_family_runtime_rule: true,
+            delete_succeeds: true,
+        };
+        let mut plan = FirewallPlan::capture_with("0.0.0.0:1080".parse().unwrap(), &mut backend)
+            .await
+            .unwrap();
+        let before = ufw_kernel_rules(&mut backend, "ip6tables", "ufw6-user-input")
+            .await
+            .unwrap();
+        assert_eq!(before.len(), 2);
+        assert!(before[0].text.ends_with("-j DROP"));
+        assert!(before[1].text.ends_with("-j ACCEPT"));
+        plan.close_with(&mut backend).await.unwrap();
+        let after_close = ufw_kernel_rules(&mut backend, "ip6tables", "ufw6-user-input")
+            .await
+            .unwrap();
+        assert!(after_close == before);
+        assert!(!backend.kernel_has_rule);
+        assert_eq!(backend.disk, [IPV6]);
+        plan.restore_with(&mut backend).await.unwrap();
+        let after_restore = ufw_kernel_rules(&mut backend, "ip6tables", "ufw6-user-input")
+            .await
+            .unwrap();
+        assert!(after_restore == before);
+        assert!(backend.kernel_has_rule);
+        assert_eq!(backend.disk, [IPV4, IPV6]);
     }
 
     #[tokio::test]
@@ -1581,9 +1902,10 @@ mod tests {
             disk: vec![IPV4, IPV6],
             ipv6: false,
             kernel_has_rule: true,
-            apply_to_kernel: true,
             keep_disk_on_delete_failure: false,
             kernel_reorders_on_insert: false,
+            other_family_runtime_rule: false,
+            delete_succeeds: false,
         };
         let mut plan = FirewallPlan::capture_with("0.0.0.0:1080".parse().unwrap(), &mut backend)
             .await
@@ -1604,9 +1926,10 @@ mod tests {
                     disk: vec![IPV4, IPV6],
                     ipv6,
                     kernel_has_rule: true,
-                    apply_to_kernel: false,
                     keep_disk_on_delete_failure,
                     kernel_reorders_on_insert: false,
+                    other_family_runtime_rule: false,
+                    delete_succeeds: false,
                 };
                 let mut plan = FirewallPlan::capture_with(address.parse().unwrap(), &mut backend)
                     .await
@@ -1630,9 +1953,10 @@ mod tests {
                 disk: vec![APP, deny, allow, tail],
                 ipv6,
                 kernel_has_rule: true,
-                apply_to_kernel: true,
                 keep_disk_on_delete_failure: false,
                 kernel_reorders_on_insert: false,
+                other_family_runtime_rule: false,
+                delete_succeeds: false,
             };
             let mut plan = FirewallPlan::capture_with(listener.parse().unwrap(), &mut backend)
                 .await
@@ -1652,9 +1976,10 @@ mod tests {
                 disk: vec![APP, DENY, IPV4, IPV6],
                 ipv6: false,
                 kernel_has_rule: true,
-                apply_to_kernel: true,
                 keep_disk_on_delete_failure: false,
                 kernel_reorders_on_insert: false,
+                other_family_runtime_rule: false,
+                delete_succeeds: false,
             };
             let mut plan =
                 FirewallPlan::capture_with("0.0.0.0:1080".parse().unwrap(), &mut backend)
@@ -1815,6 +2140,25 @@ mod tests {
         assert_eq!(backend.rules, [drop]);
     }
 
+    #[tokio::test]
+    async fn socks5_secure_iptables_keeps_new_reject_after_original_successor() {
+        let allow = "-A INPUT -p tcp --dport 1080 -j ACCEPT";
+        let ssh = "-A INPUT -p tcp --dport 22 -j ACCEPT";
+        let reject = "-A INPUT -p tcp --dport 1080 -j REJECT";
+        let mut backend = FakeIptables {
+            rules: vec![allow.into(), ssh.into()],
+            deletions: 0,
+        };
+        let mut plan = FirewallPlan::capture_with("0.0.0.0:1080".parse().unwrap(), &mut backend)
+            .await
+            .unwrap();
+        plan.close_with(&mut backend).await.unwrap();
+        backend.rules.push(reject.into());
+        let error = plan.restore_with(&mut backend).await.unwrap_err();
+        assert!(format!("{error:#}").contains("顺序"));
+        assert_eq!(backend.rules, [ssh, reject]);
+    }
+
     #[test]
     fn socks5_secure_rule_rollback_verifies_order_against_concurrent_rules() {
         let drop = LiveRule::from("-A INPUT -p tcp --dport 1080 -j DROP");
@@ -1829,6 +2173,45 @@ mod tests {
         iptables_nft: bool,
         chain: &'static str,
         next_handle: u64,
+    }
+
+    #[tokio::test]
+    async fn socks5_secure_nft_cleans_ipv6_header_rule_in_inet_chain() {
+        let rule = json!({
+            "family": "inet", "table": "filter", "chain": "input", "handle": 2,
+            "expr": [
+                {"match": {"op": "==", "left": {"payload": {"protocol": "ip6", "field": "nexthdr"}}, "right": 6}},
+                {"match": {"op": "==", "left": {"payload": {"protocol": "tcp", "field": "dport"}}, "right": 1080}},
+                {"accept": null}
+            ]
+        });
+        let mut backend = FakeNft {
+            rules: vec![rule.clone()],
+            iptables_nft: false,
+            chain: "input",
+            next_handle: 4,
+        };
+        let mut ipv4 = FirewallPlan::capture_with("0.0.0.0:1080".parse().unwrap(), &mut backend)
+            .await
+            .unwrap();
+        ipv4.close_with(&mut backend).await.unwrap();
+        assert_eq!(backend.rules.as_slice(), std::slice::from_ref(&rule));
+
+        let listener = "[::]:1080".parse().unwrap();
+        let mut ipv6 = FirewallPlan::capture_with(listener, &mut backend)
+            .await
+            .unwrap();
+        let mut concurrent = rule;
+        concurrent["handle"] = 3.into();
+        backend.rules.push(concurrent.clone());
+        assert!(ipv6.close_with(&mut backend).await.is_err());
+        assert_eq!(backend.rules, [concurrent]);
+
+        let mut ipv6 = FirewallPlan::capture_with(listener, &mut backend)
+            .await
+            .unwrap();
+        ipv6.close_with(&mut backend).await.unwrap();
+        assert!(backend.rules.is_empty());
     }
 
     impl FirewallExecutor for FakeNft {
@@ -1871,7 +2254,8 @@ mod tests {
             let command = &operations[0];
             if command.get("list").is_some() {
                 let mut items = vec![json!({"chain": {
-                    "family": "ip", "table": "filter", "name": self.chain, "hook": "input", "type": "filter",
+                    "family": self.rules.first().map_or("ip", |rule| rule["family"].as_str().unwrap()),
+                    "table": "filter", "name": self.chain, "hook": "input", "type": "filter",
                     "handle": 1
                 }})];
                 items.extend(self.rules.iter().map(|rule| json!({"rule": rule})));
@@ -1879,7 +2263,7 @@ mod tests {
             }
             if let Some(rule) = command.get("delete").and_then(|delete| delete.get("rule")) {
                 if !self.iptables_nft {
-                    assert_eq!(rule["handle"], 2);
+                    assert_eq!(rule["handle"], self.rules[0]["handle"]);
                 }
                 let position = self
                     .rules

@@ -2,6 +2,7 @@
 use std::collections::BTreeMap;
 use std::{
     fs,
+    future::Future,
     io::Write,
     path::{Path, PathBuf},
     str::FromStr,
@@ -3238,8 +3239,24 @@ fn validate_yaml(yaml: &str) -> Result<()> {
 }
 
 async fn validate_candidate_with_shoes(yaml: &str, directory: &Path) -> Result<()> {
-    match validate_candidate_with_binary(yaml, directory, Path::new(utils::SHOES_BIN)).await {
+    validate_candidate_with_shoes_until(yaml, directory, std::future::pending()).await
+}
+
+async fn validate_candidate_with_shoes_until(
+    yaml: &str,
+    directory: &Path,
+    cancelled: impl Future<Output = anyhow::Error>,
+) -> Result<()> {
+    match validate_candidate_with_binary_until(
+        yaml,
+        directory,
+        Path::new(utils::SHOES_BIN),
+        cancelled,
+    )
+    .await
+    {
         Ok(()) => Ok(()),
+        Err(error) if crate::is_interrupted(&error) => Err(error),
         Err(error) if yaml.contains("domain_pattern:") => {
             bail!(
                 "请先升级 shoes 到 {} 后再修改配置：{error:#}",
@@ -3251,6 +3268,15 @@ async fn validate_candidate_with_shoes(yaml: &str, directory: &Path) -> Result<(
 }
 
 async fn validate_candidate_with_binary(yaml: &str, directory: &Path, binary: &Path) -> Result<()> {
+    validate_candidate_with_binary_until(yaml, directory, binary, std::future::pending()).await
+}
+
+async fn validate_candidate_with_binary_until(
+    yaml: &str,
+    directory: &Path,
+    binary: &Path,
+    cancelled: impl Future<Output = anyhow::Error>,
+) -> Result<()> {
     fs::create_dir_all(directory)
         .with_context(|| format!("创建候选配置目录 {} 失败", directory.display()))?;
     let mut candidate = tempfile::Builder::new()
@@ -3262,7 +3288,7 @@ async fn validate_candidate_with_binary(yaml: &str, directory: &Path, binary: &P
         .write_all(yaml.as_bytes())
         .context("写入候选配置失败")?;
     candidate.as_file().sync_all().context("同步候选配置失败")?;
-    validate_with_binary(binary, candidate.path()).await
+    validate_with_binary_until(binary, candidate.path(), cancelled).await
 }
 
 pub(crate) fn validate_managed_snapshot(config_path: &Path, state_path: &Path) -> Result<()> {
@@ -3289,17 +3315,45 @@ pub async fn validate_with_shoes(config_path: &Path) -> Result<()> {
 }
 
 pub(crate) async fn validate_with_binary(binary: &Path, config_path: &Path) -> Result<()> {
+    validate_with_binary_until(binary, config_path, std::future::pending()).await
+}
+
+async fn validate_with_binary_until(
+    binary: &Path,
+    config_path: &Path,
+    cancelled: impl Future<Output = anyhow::Error>,
+) -> Result<()> {
+    use std::process::Stdio;
+    use tokio::io::AsyncReadExt;
+
     let _timer = performance::stage("shoes_dry_run");
     if !binary.is_file() {
         bail!("shoes 尚未安装，无法执行 --dry-run 验证");
     }
-    let output = Command::new(binary)
+    let mut child = Command::new(binary)
         .arg("--dry-run")
         .arg(config_path)
-        .output()
-        .await
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
         .context("无法启动 shoes 配置校验")?;
-    if !output.status.success() {
+    let mut stderr = Vec::new();
+    let mut child_stderr = child.stderr.take().context("无法读取 shoes 校验输出")?;
+    let status = tokio::select! {
+        biased;
+        error = cancelled => {
+            if let Err(kill_error) = child.kill().await {
+                return Err(error.context(format!("终止 shoes 配置校验失败：{kill_error}")));
+            }
+            return Err(error);
+        }
+        result = async { tokio::try_join!(child.wait(), child_stderr.read_to_end(&mut stderr)) } => {
+            result.context("无法等待 shoes 配置校验")?.0
+        }
+    };
+    if !status.success() {
         if fs::read(config_path).is_ok_and(|content| {
             content
                 .windows(b"decryption".len())
@@ -3309,7 +3363,7 @@ pub(crate) async fn validate_with_binary(binary: &Path, config_path: &Path) -> R
         }
         bail!(
             "shoes 拒绝生成的配置：{}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            String::from_utf8_lossy(&stderr).trim()
         );
     }
     Ok(())

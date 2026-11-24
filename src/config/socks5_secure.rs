@@ -133,13 +133,16 @@ impl SecurePlan {
         Ok(output)
     }
 
-    pub(crate) async fn validate(&self) -> Result<()> {
+    pub(crate) async fn validate(
+        &self,
+        interrupt: &crate::socks5_secure::InterruptGuard<'_>,
+    ) -> Result<()> {
         if !utils::command_exists(utils::SHOES_BIN) {
             bail!("未找到可执行的 shoes，请先安装 shoes 后重试");
         }
         let yaml = crate::yaml::to_string(&self.servers)?;
         validate_yaml(&yaml)?;
-        validate_candidate_with_shoes(&yaml, &self.directory).await
+        validate_candidate_with_shoes_until(&yaml, &self.directory, interrupt.cancelled()).await
     }
 
     pub(crate) fn commit_files(&mut self) -> Result<()> {
