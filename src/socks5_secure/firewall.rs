@@ -481,14 +481,8 @@ impl Rule {
                 delete_iptables_rule(backend, program, text).await?;
             }
             Rule::Nft { spec, .. } => {
-                nft_command(
-                    backend,
-                    json!({"delete": {"rule": {
-                        "family": spec["family"], "table": spec["table"],
-                        "chain": spec["chain"], "handle": spec["handle"],
-                    }}}),
-                )
-                .await?;
+                let handle = spec["handle"].as_u64().context("nft rule 缺少 handle")?;
+                delete_nft_rule(backend, spec, handle).await?;
             }
         }
         Ok(())
@@ -519,9 +513,8 @@ impl Rule {
             return Ok(());
         }
         if let Rule::Rich { base, text } = self {
-            if !rich_is_permanent(base) {
-                bail!("无法查询 firewalld 运行时 rich rule 的剩余超时，请检查区域 {} 的规则后手动恢复", base[0]);
-            }
+            // 按删除的逆序恢复，补回运行规则前确认持久副本仍然存在。
+            verify_rich_backing(backend, base, text).await?;
             let mut args = base.clone();
             args.push(format!("--add-rich-rule={text}"));
             backend.execute("firewall-cmd", &args, None).await?;
@@ -553,20 +546,53 @@ impl Rule {
                     }
                     return Err(error);
                 }
-                return Ok(());
+                Ok(())
             }
             Rule::Nft { spec, .. } => {
                 let mut rule = spec.clone();
                 rule.as_object_mut().unwrap().remove("handle");
-                if let Some(next) = current.get(position) {
+                let operation = if let Some(next) = current.get(position) {
                     rule["handle"] = next.handle.context("nft 恢复定位缺少 handle")?.into();
-                    nft_command(backend, json!({"insert": {"rule": rule}})).await?;
+                    json!({"insert": {"rule": rule}})
                 } else {
-                    nft_command(backend, json!({"add": {"rule": rule}})).await?;
+                    json!({"add": {"rule": rule}})
+                };
+                // 从写入回显取 handle，即使管理员同时加了同样的规则也只撤回本次放行。
+                let output = nft_command(backend, operation).await?;
+                let handle = nft_items(&output)?
+                    .iter()
+                    .find_map(|item| {
+                        [&item["insert"]["rule"], &item["add"]["rule"]]
+                            .into_iter()
+                            .find_map(|rule| rule["handle"].as_u64())
+                    })
+                    .filter(|handle| !current.iter().any(|rule| rule.handle == Some(*handle)))
+                    .context("nft 未返回新放行规则的 handle，请检查防火墙")?;
+                let mut still_inserted = true;
+                let verified = self.current(backend).await.and_then(|after| {
+                    still_inserted = after
+                        .iter()
+                        .any(|rule| rule.handle == Some(handle) && rule.text == *text);
+                    verify_insert_order(&current, &after, position, text)?;
+                    if after[position].handle != Some(handle) {
+                        bail!("无法确认恢复的 nft 放行规则，请检查防火墙");
+                    }
+                    Ok(())
+                });
+                if let Err(error) = verified {
+                    if !still_inserted {
+                        return Err(error);
+                    }
+                    return Err(match delete_nft_rule(backend, spec, handle).await {
+                        Ok(()) => error,
+                        Err(cleanup) => {
+                            error.context(format!("撤销 nft 放行规则插入失败：{cleanup:#}"))
+                        }
+                    });
                 }
+                Ok(())
             }
         }
-        verify_insert_order(&current, &self.current(backend).await?, position, text)
     }
 
     async fn restore_ufw(
@@ -605,7 +631,7 @@ impl Rule {
         }
 
         let (program, chain) = ufw_kernel_chain(listener);
-        let mut kernel = ufw_kernel_rules(backend, program, chain).await?;
+        let kernel = ufw_kernel_rules(backend, program, chain).await?;
         match ufw_kernel_count(&kernel, listener, chain) {
             0 => {
                 // 单独补回目标规则，避免重载整个防火墙。
@@ -619,12 +645,29 @@ impl Rule {
                 .context("无法恢复 UFW 内核规则")?;
                 let text = &before[original.kernel_position].text;
                 insert_iptables(backend, program, text, position, kernel.len()).await?;
-                let restored = ufw_kernel_rules(backend, program, chain).await?;
-                verify_insert_order(&kernel, &restored, position, text)?;
-                if !contains_rule_order(&attempt.before, &self.current(backend).await?) {
-                    bail!("补回内核规则时 UFW 持久规则已变化，请检查 ufw status numbered");
+                let verified = async {
+                    let restored = ufw_kernel_rules(backend, program, chain).await?;
+                    verify_insert_order(&kernel, &restored, position, text)?;
+                    let persistent = self.current(backend).await?;
+                    if !contains_rule_order(&attempt.before, &persistent)
+                        || self.position(&persistent).is_none_or(|position| {
+                            position < after_new_denials(&attempt.before, &persistent)
+                        })
+                    {
+                        bail!("补回内核规则时 UFW 持久规则已变化，请检查 ufw status numbered");
+                    }
+                    Ok(())
                 }
-                kernel = restored;
+                .await;
+                if let Err(error) = verified {
+                    if let Err(cleanup) = delete_iptables_rule(backend, program, text).await {
+                        return Err(
+                            error.context(format!("撤销 UFW 内核放行规则插入失败：{cleanup:#}"))
+                        );
+                    }
+                    return Err(error);
+                }
+                return Ok(());
             }
             1 => {}
             count => bail!("UFW 内核规则数量为 {count}，预期为 1，请检查 ufw show raw"),
@@ -1022,7 +1065,11 @@ async fn iptables_input(backend: &mut impl FirewallExecutor, program: &str) -> R
 
 async fn nft_list(backend: &mut impl FirewallExecutor, target: Value) -> Result<Vec<Value>> {
     let output = nft_command(backend, json!({"list": target})).await?;
-    let mut value: Value = serde_json::from_str(&output).context("解析 nft 规则失败")?;
+    nft_items(&output)
+}
+
+fn nft_items(output: &str) -> Result<Vec<Value>> {
+    let mut value: Value = serde_json::from_str(output).context("解析 nft 规则失败")?;
     let Value::Array(items) = value["nftables"].take() else {
         bail!("nft 输出缺少规则列表");
     };
@@ -1030,14 +1077,29 @@ async fn nft_list(backend: &mut impl FirewallExecutor, target: Value) -> Result<
 }
 
 async fn nft_command(backend: &mut impl FirewallExecutor, operation: Value) -> Result<String> {
+    let mut args = vec!["-j".into(), "-s".into()];
+    if operation.get("insert").is_some() || operation.get("add").is_some() {
+        args.extend(["-a".into(), "-e".into()]);
+    }
+    args.extend(["-f".into(), "-".into()]);
     let input = serde_json::to_vec(&json!({"nftables": [operation]}))?;
-    backend
-        .execute(
-            "nft",
-            &["-j".into(), "-s".into(), "-f".into(), "-".into()],
-            Some(&input),
-        )
-        .await
+    backend.execute("nft", &args, Some(&input)).await
+}
+
+async fn delete_nft_rule(
+    backend: &mut impl FirewallExecutor,
+    spec: &Value,
+    handle: u64,
+) -> Result<()> {
+    nft_command(
+        backend,
+        json!({"delete": {"rule": {
+            "family": spec["family"], "table": spec["table"],
+            "chain": spec["chain"], "handle": handle,
+        }}}),
+    )
+    .await?;
+    Ok(())
 }
 
 fn nft_rule_key(rule: &Value) -> String {
@@ -1464,6 +1526,7 @@ mod tests {
         rules: [Vec<&'static str>; 2],
         runtime_timeout: Option<u32>,
         fail_permanent_removal: bool,
+        fail_permanent_restore: bool,
     }
 
     impl FirewallExecutor for FakeFirewalld {
@@ -1490,6 +1553,9 @@ mod tests {
                 "--list-ports" => Ok("1080/tcp".into()),
                 "--list-rich-rules" => Ok(self.rules[permanent].join("\n")),
                 _ if option.strip_prefix("--add-rich-rule=") == Some(SCOPED) => {
+                    if permanent == 1 && self.fail_permanent_restore {
+                        bail!("模拟持久规则恢复失败");
+                    }
                     self.rules[permanent].push(SCOPED);
                     if permanent == 0 {
                         self.runtime_timeout = None;
@@ -1517,6 +1583,7 @@ mod tests {
             rules: [vec![SHARED], vec![SHARED, SCOPED]],
             runtime_timeout: None,
             fail_permanent_removal: false,
+            fail_permanent_restore: false,
         };
         let mut plan = FirewallPlan::capture_with("0.0.0.0:1080".parse().unwrap(), &mut backend)
             .await
@@ -1539,6 +1606,7 @@ mod tests {
                 rules: rules.clone(),
                 runtime_timeout,
                 fail_permanent_removal: false,
+                fail_permanent_restore: false,
             };
             let result =
                 FirewallPlan::capture_with("0.0.0.0:1080".parse().unwrap(), &mut backend).await;
@@ -1549,41 +1617,52 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn socks5_secure_firewalld_cleans_rules_and_restores_known_persistent_rule() {
-        let original = [vec![SHARED, SCOPED], vec![SHARED, SCOPED]];
+    async fn socks5_secure_firewalld_restores_runtime_and_permanent_rules() {
+        for fail_permanent_removal in [false, true] {
+            let original = [vec![SHARED, SCOPED], vec![SHARED, SCOPED]];
+            let mut backend = FakeFirewalld {
+                rules: original.clone(),
+                runtime_timeout: None,
+                fail_permanent_removal,
+                fail_permanent_restore: false,
+            };
+            let mut plan =
+                FirewallPlan::capture_with("0.0.0.0:1080".parse().unwrap(), &mut backend)
+                    .await
+                    .unwrap();
+            let close = plan.close_with(&mut backend).await;
+            if fail_permanent_removal {
+                assert!(format!("{:#}", close.unwrap_err()).contains("持久规则删除失败"));
+                assert_eq!(backend.rules, [vec![SHARED], vec![SHARED, SCOPED]]);
+            } else {
+                close.unwrap();
+                assert_eq!(backend.rules, [vec![SHARED], vec![SHARED]]);
+                assert!(plan.closure_report().contains("已移除 1 条运行时"));
+            }
+            plan.restore_with(&mut backend).await.unwrap();
+            assert_eq!(backend.rules, original);
+            assert_eq!(backend.runtime_timeout, None);
+        }
+    }
+
+    #[tokio::test]
+    async fn socks5_secure_firewalld_does_not_restore_runtime_if_permanent_restore_fails() {
         let mut backend = FakeFirewalld {
-            rules: original.clone(),
-            runtime_timeout: None,
+            rules: [vec![SHARED, SCOPED], vec![SHARED, SCOPED]],
+            runtime_timeout: Some(60),
             fail_permanent_removal: false,
+            fail_permanent_restore: true,
         };
         let mut plan = FirewallPlan::capture_with("0.0.0.0:1080".parse().unwrap(), &mut backend)
             .await
             .unwrap();
         plan.close_with(&mut backend).await.unwrap();
         assert_eq!(backend.rules, [vec![SHARED], vec![SHARED]]);
-        assert!(plan.closure_report().contains("已移除 1 条运行时"));
-        let error = plan.restore_with(&mut backend).await.unwrap_err();
-        assert!(format!("{error:#}").contains("剩余超时"));
-        assert_eq!(backend.rules, [vec![SHARED], vec![SHARED, SCOPED]]);
-        assert_eq!(backend.runtime_timeout, None);
-    }
-
-    #[tokio::test]
-    async fn socks5_secure_firewalld_does_not_make_timed_rule_permanent_on_rollback() {
-        let mut backend = FakeFirewalld {
-            rules: [vec![SHARED, SCOPED], vec![SHARED, SCOPED]],
-            runtime_timeout: Some(60),
-            fail_permanent_removal: true,
-        };
-        let mut plan = FirewallPlan::capture_with("0.0.0.0:1080".parse().unwrap(), &mut backend)
-            .await
-            .unwrap();
-        assert!(plan.close_with(&mut backend).await.is_err());
-        assert_eq!(backend.rules, [vec![SHARED], vec![SHARED, SCOPED]]);
 
         let error = plan.restore_with(&mut backend).await.unwrap_err();
-        assert!(format!("{error:#}").contains("剩余超时"));
-        assert_eq!(backend.rules, [vec![SHARED], vec![SHARED, SCOPED]]);
+        assert!(format!("{error:#}").contains("持久规则恢复失败"));
+        assert!(format!("{error:#}").contains("无对应持久规则"));
+        assert_eq!(backend.rules, [vec![SHARED], vec![SHARED]]);
     }
 
     #[tokio::test]
@@ -1592,6 +1671,7 @@ mod tests {
             rules: [vec![SHARED, SCOPED], vec![SHARED, SCOPED]],
             runtime_timeout: Some(60),
             fail_permanent_removal: false,
+            fail_permanent_restore: false,
         };
         let mut plan = FirewallPlan::capture_with("0.0.0.0:1080".parse().unwrap(), &mut backend)
             .await
@@ -1746,38 +1826,50 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn socks5_secure_ufw_preserves_an_admin_write_during_rule_replacement() {
+        use rustix::fs::{fcntl_lock, FlockOperation};
         use std::io::{BufRead, BufReader};
         use std::process::{Command, Stdio};
+
+        const ADMIN_DIRECTORY: &str = "PING_RUST_TEST_UFW_ADMIN_DIRECTORY";
+        let deny = "-A ufw-user-input -p tcp --dport 8443 -j DROP\n";
+        if let Some(directory) = std::env::var_os(ADMIN_DIRECTORY) {
+            use std::io::Write;
+
+            let directory = Path::new(&directory);
+            let lock = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(directory.join("ufw.lock"))
+                .unwrap();
+            fcntl_lock(&lock, FlockOperation::LockExclusive).unwrap();
+            let mut rules = std::fs::OpenOptions::new()
+                .append(true)
+                .open(directory.join("user.rules"))
+                .unwrap();
+            eprintln!("ready");
+            std::io::copy(&mut std::io::stdin().lock(), &mut std::io::sink()).unwrap();
+            rules.write_all(deny.as_bytes()).unwrap();
+            return;
+        }
 
         let directory = tempfile::tempdir().unwrap();
         let rules = directory.path().join("user.rules");
         let lock = directory.path().join("ufw.lock");
         let before = "-A ufw-user-input -p tcp --dport 1080 -j ACCEPT\n";
-        let deny = "-A ufw-user-input -p tcp --dport 8443 -j DROP\n";
         std::fs::write(&rules, before).unwrap();
-        let mut admin = Command::new("python3")
-            .args([
-                "-c",
-                concat!(
-                    "import fcntl, pathlib, sys\n",
-                    "with open(sys.argv[1], 'w') as lock:\n",
-                    "    fcntl.lockf(lock, fcntl.LOCK_EX)\n",
-                    "    rules = pathlib.Path(sys.argv[2])\n",
-                    "    contents = rules.read_text()\n",
-                    "    print('ready', flush=True)\n",
-                    "    sys.stdin.read()\n",
-                    "    rules.write_text(contents + sys.argv[3])\n",
-                ),
-            ])
-            .arg(&lock)
-            .arg(&rules)
-            .arg(deny)
+        let (_, module) = module_path!().split_once("::").unwrap();
+        let test =
+            format!("{module}::socks5_secure_ufw_preserves_an_admin_write_during_rule_replacement");
+        let mut admin = Command::new(std::env::current_exe().unwrap())
+            .args(["--nocapture", "--exact", &test])
+            .env(ADMIN_DIRECTORY, directory.path())
             .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .unwrap();
         let mut ready = String::new();
-        BufReader::new(admin.stdout.take().unwrap())
+        BufReader::new(admin.stderr.take().unwrap())
             .read_line(&mut ready)
             .unwrap();
         assert_eq!(ready.trim_end(), "ready");
@@ -2128,7 +2220,11 @@ mod tests {
             }
             let error = plan.restore_with(&mut backend).await.unwrap_err();
             assert!(format!("{error:#}").contains("顺序"));
-            assert!(backend.kernel_has_rule);
+            assert_eq!(backend.kernel_has_rule, !reorder_kernel);
+            let kernel = ufw_kernel_rules(&mut backend, "iptables", "ufw-user-input")
+                .await
+                .unwrap();
+            assert!(kernel.iter().any(rule_denies));
             assert_eq!(
                 backend.disk.iter().filter(|entry| **entry == IPV4).count(),
                 1
@@ -2343,6 +2439,7 @@ mod tests {
         iptables_nft: bool,
         chain: &'static str,
         next_handle: u64,
+        concurrent_insertions: Vec<Value>,
     }
 
     #[tokio::test]
@@ -2360,6 +2457,7 @@ mod tests {
             iptables_nft: false,
             chain: "input",
             next_handle: 4,
+            concurrent_insertions: Vec::new(),
         };
         let mut ipv4 = FirewallPlan::capture_with("0.0.0.0:1080".parse().unwrap(), &mut backend)
             .await
@@ -2417,7 +2515,8 @@ mod tests {
                 }
             }
             assert_eq!(program, "nft");
-            assert_eq!(args, ["-j", "-s", "-f", "-"]);
+            let echo = args == ["-j", "-s", "-a", "-e", "-f", "-"];
+            assert!(echo || args == ["-j", "-s", "-f", "-"]);
             let document: serde_json::Value = serde_json::from_slice(input.unwrap())?;
             let operations = document["nftables"].as_array().unwrap();
             assert_eq!(operations.len(), 1);
@@ -2432,6 +2531,7 @@ mod tests {
                 return Ok(json!({"nftables": items}).to_string());
             }
             if let Some(rule) = command.get("delete").and_then(|delete| delete.get("rule")) {
+                assert!(!echo);
                 if !self.iptables_nft {
                     assert_eq!(rule["handle"], self.rules[0]["handle"]);
                 }
@@ -2445,8 +2545,13 @@ mod tests {
                 let mut rule = rule.clone();
                 rule["handle"] = self.next_handle.into();
                 self.next_handle += 1;
+                if echo {
+                    self.rules.push(rule.clone());
+                    return Ok(json!({"nftables": [{"add": {"rule": rule}}]}).to_string());
+                }
                 self.rules.push(rule);
             } else {
+                self.rules.append(&mut self.concurrent_insertions);
                 let mut rule = command["insert"]["rule"].clone();
                 if !self.iptables_nft {
                     assert_eq!(rule["handle"], 3);
@@ -2457,6 +2562,10 @@ mod tests {
                     .position(|live| live["handle"] == rule["handle"]);
                 rule["handle"] = self.next_handle.into();
                 self.next_handle += 1;
+                if echo {
+                    self.rules.insert(position.unwrap(), rule.clone());
+                    return Ok(json!({"nftables": [{"insert": {"rule": rule}}]}).to_string());
+                }
                 self.rules.insert(position.unwrap(), rule);
             }
             Ok(String::new())
@@ -2481,6 +2590,7 @@ mod tests {
             iptables_nft: false,
             chain: "input",
             next_handle: 5,
+            concurrent_insertions: Vec::new(),
         };
         let mut plan = FirewallPlan::capture_with("0.0.0.0:1080".parse().unwrap(), &mut backend)
             .await
@@ -2512,6 +2622,7 @@ mod tests {
             iptables_nft: false,
             chain: "input",
             next_handle: 4,
+            concurrent_insertions: Vec::new(),
         };
         let mut plan = FirewallPlan::capture_with("0.0.0.0:1080".parse().unwrap(), &mut backend)
             .await
@@ -2525,6 +2636,41 @@ mod tests {
         let mut restored = original;
         restored["handle"] = 4.into();
         assert_eq!(backend.rules, [reject, restored]);
+    }
+
+    #[tokio::test]
+    async fn socks5_secure_nft_removes_only_its_accept_inserted_before_a_concurrent_reject() {
+        let allow = json!({
+            "family": "ip", "table": "filter", "chain": "input", "handle": 2,
+            "expr": [
+                {"match": {"op": "==", "left": {"payload": {"protocol": "tcp", "field": "dport"}}, "right": 1080}},
+                {"accept": null}
+            ]
+        });
+        let mut ssh = allow.clone();
+        ssh["handle"] = 3.into();
+        ssh["expr"][0]["match"]["right"] = 22.into();
+        let mut reject = allow.clone();
+        reject["handle"] = 4.into();
+        reject["expr"][1] = json!({"reject": null});
+        let mut admin_allow = allow.clone();
+        admin_allow["handle"] = 5.into();
+        let mut backend = FakeNft {
+            rules: vec![allow, ssh.clone()],
+            iptables_nft: false,
+            chain: "input",
+            next_handle: 6,
+            concurrent_insertions: vec![reject.clone(), admin_allow.clone()],
+        };
+        let mut plan = FirewallPlan::capture_with("0.0.0.0:1080".parse().unwrap(), &mut backend)
+            .await
+            .unwrap();
+        plan.close_with(&mut backend).await.unwrap();
+        assert_eq!(backend.rules.as_slice(), std::slice::from_ref(&ssh));
+
+        let error = plan.restore_with(&mut backend).await.unwrap_err();
+        assert!(format!("{error:#}").contains("相对顺序"));
+        assert_eq!(backend.rules, [ssh, reject, admin_allow]);
     }
 
     #[tokio::test]
@@ -2555,6 +2701,7 @@ mod tests {
             iptables_nft: true,
             chain: "INPUT",
             next_handle: 5,
+            concurrent_insertions: Vec::new(),
         };
         let mut plan = FirewallPlan::capture_with("0.0.0.0:1080".parse().unwrap(), &mut backend)
             .await

@@ -386,14 +386,15 @@ PY
 )
 echo 'SOCKS5 preflight: SIGINT, SIGTERM and timeout remove the candidate and stop dry-run: PASS'
 
-# Exercise an actual systemd stop whose client exits before ExecStop finishes.
+# Exercise an actual slow stop with an exhausted start limit on a referenced unit.
 (
   systemctl_bin="$(command -v systemctl)"
   # /run can be mounted noexec, and shoes.service has its own /tmp.
   scenario="$(mktemp -d /usr/local/lib/socks5-rollback.XXXXXX)"
   dropin=/etc/systemd/system/shoes.service.d
+  target=/run/systemd/system/compat-socks5-slow-stop.target
   mkdir -p "$dropin"
-  trap 'rm -f "$dropin/90-compat-socks5-rollback.conf"; "$systemctl_bin" daemon-reload; rm -rf "$scenario"' EXIT
+  trap '"$systemctl_bin" stop "${target##*/}" || true; rm -f "$dropin/90-compat-socks5-rollback.conf" "$target"; "$systemctl_bin" daemon-reload; rm -rf "$scenario"' EXIT
   cat >"$scenario/systemctl" <<'SH'
 #!/bin/sh
 case "$1" in
@@ -431,7 +432,16 @@ echo ok >>"$2/start-pre-runs"
 SH
   chmod 0755 "$scenario/systemctl" "$scenario/exec-stop" "$scenario/exec-start-pre"
   env PATH="$scenario:$PATH" systemctl probe
+  cat >"$target" <<'EOF'
+[Unit]
+Description=Keep shoes.service loaded during a slow SOCKS5 rollback
+Wants=shoes.service
+EOF
   cat >"$dropin/90-compat-socks5-rollback.conf" <<EOF
+[Unit]
+StartLimitIntervalSec=10min
+StartLimitBurst=1
+
 [Service]
 TimeoutStartSec=10s
 TimeoutStopSec=150s
@@ -440,6 +450,9 @@ ExecStartPre=$scenario/exec-start-pre $NEW $scenario
 ExecStop=$scenario/exec-stop $scenario
 EOF
   "$systemctl_bin" daemon-reload
+  "$systemctl_bin" start "${target##*/}"
+  "$systemctl_bin" is-active --quiet "${target##*/}"
+  "$systemctl_bin" is-active --quiet shoes.service
   before_pid="$("$systemctl_bin" show --property=MainPID --value shoes.service)"
   find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/before"
   if PATH="$scenario:$PATH" SOCKS5_ROLLBACK="$scenario" SOCKS5_SYSTEMCTL="$systemctl_bin" \
@@ -463,7 +476,7 @@ EOF
   find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/after"
   diff -u "$scenario/before" "$scenario/after"
 )
-echo 'SOCKS5 rollback: ExecStartPre reads published state and systemd restores service after slow stop: PASS'
+echo 'SOCKS5 rollback: ExecStartPre reads published state and systemd restores service after slow stop at StartLimitBurst=1: PASS'
 
 # A referenced, stopped unit keeps its start-rate counter. Inject a firewall
 # error only after systemd has started the loopback candidate and it passes verification.

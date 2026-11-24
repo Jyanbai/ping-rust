@@ -659,32 +659,30 @@ impl Systemctl {
     pub(crate) async fn restart_secure_transaction(self, rollback: bool) -> Result<()> {
         utils::require_linux_root()?;
         ensure_systemctl()?;
-        let stop_error = if rollback {
+        if rollback {
             // 取消 systemctl 客户端并不会撤销已提交给 systemd 的任务。先替换待完成的
             // restart，确保恢复的配置由新的进程加载。
-            self.stop_secure_transaction().await.err()
-        } else {
-            None
-        };
-        if let Some(error) = stop_error {
-            // stop 可能已经由 systemd 接管。立即提交替代作业，避免查询状态失败
-            // 或等待旧作业结束时，把恢复后的服务留在停机状态。
-            self.timed(
-                &["restart", "--job-mode=replace", SERVICE_NAME],
-                SECURE_JOB_TIMEOUT,
-            )
-            .await
-            .with_context(|| format!("等待回滚停止失败：{error:#}；提交恢复重启失败"))?;
-        } else if rollback {
-            // inactive 也可能保留启动计数。若 unit 已卸载，reset-failed 会报错，仍应尝试重启。
+            let stop = self.stop_secure_transaction().await;
+            // 停止尚未完成或 unit 仍被引用时也可能保留启动计数。unit 已卸载时
+            // reset-failed 可能报错，仍要尝试重启。
             let reset = self.timed(RESET_FAILED_COMMAND, SECURE_QUERY_TIMEOUT).await;
-            self.timed(RESTART_COMMAND, SECURE_JOB_TIMEOUT)
+            let restart = if stop.is_err() {
+                &["restart", "--job-mode=replace", SERVICE_NAME][..]
+            } else {
+                RESTART_COMMAND
+            };
+            self.timed(restart, SECURE_JOB_TIMEOUT)
                 .await
-                .with_context(|| match reset {
-                    Ok(_) => "重启已恢复的 shoes.service 失败".to_owned(),
-                    Err(error) => {
-                        format!("重置启动限流失败：{error:#}；重启已恢复的 shoes.service 失败")
+                .with_context(|| {
+                    let mut context = String::new();
+                    if let Err(error) = stop {
+                        context.push_str(&format!("等待回滚停止失败：{error:#}；"));
                     }
+                    if let Err(error) = reset {
+                        context.push_str(&format!("重置启动限流失败：{error:#}；"));
+                    }
+                    context.push_str("重启已恢复的 shoes.service 失败");
+                    context
                 })?;
         } else {
             if matches!(

@@ -478,6 +478,7 @@ async fn socks5_secure_refuses_inactive_disabled_custom_unit() {
 #[tokio::test]
 async fn socks5_secure_restart_and_late_failures_restore_config_firewall_and_service() {
     use crate::socks5_secure::Runtime;
+    use clap::Parser;
     struct Fake {
         fail_at: usize,
         fail_firewall_restore: bool,
@@ -567,9 +568,12 @@ async fn socks5_secure_restart_and_late_failures_restore_config_firewall_and_ser
             original: config.clone(),
         };
         let interrupt = crate::socks5_secure::Interrupt::default();
+        let lock_path = directory.path().join("ping-rust.lock");
+        let lock = utils::exclusive_lock(&lock_path).unwrap();
         let error = crate::socks5_secure::apply(&mut plan, &mut fake, &interrupt)
             .await
             .unwrap_err();
+        drop(lock);
         let final_event = if fail_firewall_restore {
             assert!(error.to_string().contains("回滚不完整"));
             assert!(!fake.events.contains(&"restore-service-and-verify"));
@@ -588,6 +592,42 @@ async fn socks5_secure_restart_and_late_failures_restore_config_firewall_and_ser
                 load_servers(&directory.path().join("config.yaml")).unwrap()[0].address,
                 "127.0.0.1:443"
             );
+            let profile_path = directory
+                .path()
+                .join("profiles")
+                .join(profile.config_file_name());
+            let stored: ServerConfig =
+                crate::yaml::from_slice(&fs::read(profile_path).unwrap()).unwrap();
+            assert_eq!(stored.address, "127.0.0.1:443");
+            let state_path = directory.path().join("ping-rust-state.json");
+            let saved = load_state_from(&state_path).unwrap();
+            assert_eq!(saved.profiles[0].listen_address().unwrap(), "127.0.0.1:443");
+            assert!(SecurePlan::already_secure(directory.path(), profile.id).unwrap());
+
+            let id = profile.id.to_string();
+            let output_path = directory.path().join("client.json");
+            for args in [
+                vec!["prs", "url", &id, "--server-address", "example.com"],
+                vec!["prs", "qr", &id, "--server-address", "example.com"],
+                vec![
+                    "prs",
+                    "export",
+                    "sing-box",
+                    "--profile",
+                    &id,
+                    "--server",
+                    "example.com",
+                    "--output",
+                    output_path.to_str().unwrap(),
+                ],
+            ] {
+                let cli = crate::cli::Cli::try_parse_from(args).unwrap();
+                let error = crate::cli::run_with_export_paths(cli, &state_path, &lock_path)
+                    .await
+                    .unwrap_err();
+                assert!(format!("{error:#}").contains("仅监听本机"));
+            }
+            assert!(!output_path.exists());
             continue;
         }
         assert_eq!(
