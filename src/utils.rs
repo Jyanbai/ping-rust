@@ -205,13 +205,29 @@ pub(crate) fn read_with_existing_lock_then<T, U>(
     read: impl Fn() -> Result<T>,
     use_snapshot: impl FnOnce(T) -> Result<U>,
 ) -> Result<U> {
-    let lock_if_exists = || match File::open(path) {
-        Ok(file) => {
-            FileExt::lock_shared(&file).with_context(|| format!("锁定 {} 失败", path.display()))?;
-            Ok(Some(file))
+    let lock_if_exists = || {
+        let file = match File::open(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(error).with_context(|| format!("打开锁文件 {} 失败", path.display()))
+            }
+        };
+        match FileExt::try_lock_shared(&file) {
+            Ok(()) => {}
+            Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {
+                // systemd 启动/停止钩子被写事务同步等待。让它们读取已发布状态，避免互等。
+                if in_shoes_service() {
+                    return Ok(None);
+                }
+                FileExt::lock_shared(&file)
+                    .with_context(|| format!("锁定 {} 失败", path.display()))?;
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("锁定 {} 失败", path.display()))
+            }
         }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error).with_context(|| format!("打开锁文件 {} 失败", path.display())),
+        Ok(Some(file))
     };
     if let Some(_lock) = lock_if_exists()? {
         return use_snapshot(read()?);
@@ -222,6 +238,22 @@ pub(crate) fn read_with_existing_lock_then<T, U>(
         return use_snapshot(read()?);
     }
     use_snapshot(result?)
+}
+
+fn in_shoes_service() -> bool {
+    cfg!(target_os = "linux")
+        && fs::read_to_string("/proc/self/cgroup").is_ok_and(|cgroups| {
+            cgroups.lines().any(|line| {
+                let path = line.strip_prefix("0::").or_else(|| {
+                    let (_, path) = line.split_once(":name=systemd:")?;
+                    Some(path)
+                });
+                path.is_some_and(|path| {
+                    path.split('/')
+                        .any(|part| part == crate::service::SERVICE_NAME)
+                })
+            })
+        })
 }
 
 pub fn atomic_write(destination: &Path, contents: &[u8], mode: u32) -> Result<()> {

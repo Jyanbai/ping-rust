@@ -662,12 +662,7 @@ impl Systemctl {
         let stop_error = if rollback {
             // 取消 systemctl 客户端并不会撤销已提交给 systemd 的任务。先替换待完成的
             // restart，确保恢复的配置由新的进程加载。
-            self.timed(
-                &["stop", "--job-mode=replace", SERVICE_NAME],
-                SECURE_JOB_TIMEOUT,
-            )
-            .await
-            .err()
+            self.stop_secure_transaction().await.err()
         } else {
             None
         };
@@ -680,6 +675,17 @@ impl Systemctl {
             )
             .await
             .with_context(|| format!("等待回滚停止失败：{error:#}；提交恢复重启失败"))?;
+        } else if rollback {
+            // inactive 也可能保留启动计数。若 unit 已卸载，reset-failed 会报错，仍应尝试重启。
+            let reset = self.timed(RESET_FAILED_COMMAND, SECURE_QUERY_TIMEOUT).await;
+            self.timed(RESTART_COMMAND, SECURE_JOB_TIMEOUT)
+                .await
+                .with_context(|| match reset {
+                    Ok(_) => "重启已恢复的 shoes.service 失败".to_owned(),
+                    Err(error) => {
+                        format!("重置启动限流失败：{error:#}；重启已恢复的 shoes.service 失败")
+                    }
+                })?;
         } else {
             if matches!(
                 self.timed_show("ActiveState").await?.as_str(),
@@ -697,6 +703,15 @@ impl Systemctl {
         if !self.secure_is_active().await? {
             bail!("shoes.service 启动后未保持 active，可能已立即退出或进入自动重启");
         }
+        Ok(())
+    }
+
+    pub(crate) async fn stop_secure_transaction(self) -> Result<()> {
+        self.timed(
+            &["stop", "--job-mode=replace", SERVICE_NAME],
+            SECURE_JOB_TIMEOUT,
+        )
+        .await?;
         Ok(())
     }
 

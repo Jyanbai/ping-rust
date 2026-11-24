@@ -480,6 +480,8 @@ async fn socks5_secure_restart_and_late_failures_restore_config_firewall_and_ser
     use crate::socks5_secure::Runtime;
     struct Fake {
         fail_at: usize,
+        fail_firewall_restore: bool,
+        fail_service_stop: bool,
         step: usize,
         events: Vec<&'static str>,
         directory: PathBuf,
@@ -515,6 +517,20 @@ async fn socks5_secure_restart_and_late_failures_restore_config_firewall_and_ser
         }
         async fn restore_firewall(&mut self) -> Result<()> {
             self.events.push("restore-firewall");
+            if self.fail_firewall_restore {
+                bail!("模拟防火墙回滚失败");
+            }
+            Ok(())
+        }
+        async fn stop_service(&mut self) -> Result<()> {
+            assert_eq!(
+                load_servers(&self.directory.join("config.yaml")).unwrap()[0].address,
+                "127.0.0.1:443"
+            );
+            self.events.push("stop-with-candidate-config");
+            if self.fail_service_stop {
+                bail!("模拟停止服务失败");
+            }
             Ok(())
         }
         async fn restore_service(&mut self, _: &ManagedProfile) -> Result<()> {
@@ -526,7 +542,14 @@ async fn socks5_secure_restart_and_late_failures_restore_config_firewall_and_ser
             Ok(())
         }
     }
-    for fail_at in 1..=4 {
+    for (fail_at, fail_firewall_restore, fail_service_stop) in [
+        (1, false, false),
+        (2, false, false),
+        (3, false, false),
+        (4, false, false),
+        (3, true, false),
+        (3, true, true),
+    ] {
         let directory = tempfile::tempdir().unwrap();
         let profile = legacy(directory.path());
         let config = fs::read(directory.path().join("config.yaml")).unwrap();
@@ -536,6 +559,8 @@ async fn socks5_secure_restart_and_late_failures_restore_config_firewall_and_ser
             .unwrap();
         let mut fake = Fake {
             fail_at,
+            fail_firewall_restore,
+            fail_service_stop,
             step: 0,
             events: vec![],
             directory: directory.path().into(),
@@ -545,11 +570,26 @@ async fn socks5_secure_restart_and_late_failures_restore_config_firewall_and_ser
         let error = crate::socks5_secure::apply(&mut plan, &mut fake, &interrupt)
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("已恢复并再次验证"));
+        let final_event = if fail_firewall_restore {
+            assert!(error.to_string().contains("回滚不完整"));
+            assert!(!fake.events.contains(&"restore-service-and-verify"));
+            "stop-with-candidate-config"
+        } else {
+            assert!(error.to_string().contains("已恢复并再次验证"));
+            "restore-service-and-verify"
+        };
         assert_eq!(
             &fake.events[fake.events.len() - 2..],
-            ["restore-firewall", "restore-service-and-verify"]
+            ["restore-firewall", final_event]
         );
+        if fail_service_stop {
+            assert!(error.to_string().contains("暂保留加固配置"));
+            assert_eq!(
+                load_servers(&directory.path().join("config.yaml")).unwrap()[0].address,
+                "127.0.0.1:443"
+            );
+            continue;
+        }
         assert_eq!(
             fs::read(directory.path().join("config.yaml")).unwrap(),
             config
@@ -625,6 +665,10 @@ async fn socks5_secure_publishes_safety_only_after_runtime_verification() {
             self.assert_unpublished();
             self.restored = true;
             Ok(())
+        }
+
+        async fn stop_service(&mut self) -> Result<()> {
+            panic!("防火墙成功恢复后应恢复服务")
         }
     }
 
@@ -987,6 +1031,10 @@ impl crate::socks5_secure::Runtime for InterruptedRuntime<'_> {
         self.service_active = true;
         self.events.push("restore-service");
         Ok(())
+    }
+
+    async fn stop_service(&mut self) -> Result<()> {
+        panic!("防火墙成功恢复后应恢复服务")
     }
 }
 

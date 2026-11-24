@@ -1,7 +1,9 @@
 //! SOCKS5 加固的只读计划与现有受管文件事务。
-use std::net::SocketAddr;
+use std::{net::SocketAddr, time::Duration};
 
 use super::*;
+
+const DRY_RUN_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SecureMode {
@@ -142,7 +144,15 @@ impl SecurePlan {
         }
         let yaml = crate::yaml::to_string(&self.servers)?;
         validate_yaml(&yaml)?;
-        validate_candidate_with_shoes_until(&yaml, &self.directory, interrupt.cancelled()).await
+        let deadline_or_signal = async {
+            tokio::select! {
+                biased;
+                error = interrupt.cancelled() => error,
+                _ = tokio::time::sleep(DRY_RUN_TIMEOUT) =>
+                    anyhow::anyhow!("shoes 配置校验超时，请检查 shoes 后重试"),
+            }
+        };
+        validate_candidate_with_shoes_until(&yaml, &self.directory, deadline_or_signal).await
     }
 
     pub(crate) fn commit_files(&mut self) -> Result<()> {

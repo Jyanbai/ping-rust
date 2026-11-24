@@ -211,6 +211,7 @@ pub(crate) trait Runtime {
     async fn verify(&mut self, profile: &ManagedProfile) -> Result<()>;
     async fn close_firewall(&mut self) -> Result<()>;
     async fn restore_firewall(&mut self) -> Result<()>;
+    async fn stop_service(&mut self) -> Result<()>;
     async fn restore_service(&mut self, original: &ManagedProfile) -> Result<()>;
 }
 
@@ -253,14 +254,32 @@ pub(crate) async fn apply(
     .await;
     if let Err(error) = change {
         let mut failures = Vec::new();
-        // 每一项都尝试，不能因其中一项失败跳过后续恢复。
-        if let Err(error) = plan.rollback() {
-            failures.push(format!("配置={error:#}"));
-        }
-        if let Err(error) = runtime.restore_firewall().await {
+        let firewall_restored = if let Err(error) = runtime.restore_firewall().await {
             failures.push(format!("防火墙={error:#}"));
+            false
+        } else {
+            true
+        };
+        // 未恢复防火墙时，先停服再恢复旧配置，避免热重载重新开放原无认证监听。
+        let can_restore_config = if activation_attempted && !firewall_restored {
+            match runtime.stop_service().await {
+                Ok(()) => true,
+                Err(error) => {
+                    failures.push(format!(
+                        "停止 shoes={error:#}；为避免重新暴露原监听，暂保留加固配置"
+                    ));
+                    false
+                }
+            }
+        } else {
+            true
+        };
+        if can_restore_config {
+            if let Err(error) = plan.rollback() {
+                failures.push(format!("配置={error:#}"));
+            }
         }
-        if activation_attempted {
+        if activation_attempted && firewall_restored {
             if let Err(error) = runtime.restore_service(&plan.original).await {
                 failures.push(format!("服务及原监听验证={error:#}"));
             }
@@ -316,6 +335,9 @@ impl Runtime for SystemRuntime {
     }
     async fn restore_firewall(&mut self) -> Result<()> {
         self.firewall.restore().await
+    }
+    async fn stop_service(&mut self) -> Result<()> {
+        Systemctl::SecureTransaction.stop_secure_transaction().await
     }
     async fn restore_service(&mut self, original: &ManagedProfile) -> Result<()> {
         // 加固只重启现有 unit。恢复配置后重启同一个 unit 即可，无需重建或启用。

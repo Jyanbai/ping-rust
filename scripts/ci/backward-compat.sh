@@ -275,7 +275,7 @@ echo 'v0.2.1: edited authenticated SOCKS5 URL matches loopback listener: PASS'
 python3 - <<'PY'
 import json
 import pathlib
-import yaml
+import re
 
 directory = pathlib.Path('/etc/shoes')
 state_path = directory / 'ping-rust-state.json'
@@ -285,17 +285,27 @@ del profile['credentials']['Socks5']['listen']
 state_path.write_text(json.dumps(state))
 
 for path in [directory / 'config.yaml', directory / 'profiles/SOCKS5-24436.yaml']:
-    document = yaml.safe_load(path.read_text())
-    servers = document if isinstance(document, list) else [document]
-    server = next(s for s in servers if s['address'] == '127.0.0.1:24436')
-    server['address'] = '0.0.0.0:24436'
-    path.write_text(yaml.safe_dump(document))
+    # Preserve the aggregate's YAML scalars and the other protocols verbatim.
+    contents, count = re.subn(
+        rb'(?m)^([ \t]*(?:- )?address: )([\'"]?)127\.0\.0\.1:24436\2$',
+        rb'\g<1>\g<2>0.0.0.0:24436\g<2>', path.read_bytes(),
+    )
+    assert count == 1, 'expected exactly one loopback listener in the generated file'
+    path.write_bytes(contents)
 PY
 systemctl restart shoes.service
-# Signal only the CLI once a substitute shoes is validating the private candidate.
+for _ in {1..50}; do
+  if ss -H -ltn 'sport = :24436' | grep -F '0.0.0.0:24436' >/dev/null; then break; fi
+  sleep 0.1
+done
+ss -H -ltn 'sport = :24436' | grep -F '0.0.0.0:24436' >/dev/null
+"$NEW" socks5 secure compat-socks5-legacy --auth --dry-run >"$WORK/socks5-secure-preview.txt"
+grep -q '^--- profile' "$WORK/socks5-secure-preview.txt"
+# Exercise signal cancellation and an unattended timeout with the same substitute.
 (
   shoes=/usr/local/bin/shoes
   scenario="$(mktemp -d /usr/local/lib/socks5-preflight.XXXXXX)"
+  find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/before"
   mv "$shoes" "$scenario/shoes"
   trap 'mv -f "$scenario/shoes" "$shoes"; rm -rf "$scenario"' EXIT
   cat >"$shoes" <<'PY'
@@ -308,6 +318,7 @@ import time
 import yaml
 
 marker = pathlib.Path(os.environ['SOCKS5_PREFLIGHT'])
+marker.with_suffix('.entered').touch()
 candidate = pathlib.Path(sys.argv[2])
 assert sys.argv[1] == '--dry-run'
 assert candidate.stat().st_mode & 0o777 == 0o600
@@ -316,11 +327,12 @@ protocol = next(s['protocol'] for s in servers if s['address'] == '0.0.0.0:24436
 assert protocol['type'] == 'socks' and protocol['username'] and protocol['password']
 marker.with_suffix('.tmp').write_text(json.dumps([os.getpid(), str(candidate)]))
 marker.with_suffix('.tmp').replace(marker)
-time.sleep(30)
+time.sleep(60)
 marker.with_suffix('.finished').touch()
 PY
   chmod 0755 "$shoes"
   python3 - "$NEW" "$scenario" <<'PY'
+import fcntl
 import json
 import os
 import pathlib
@@ -329,25 +341,35 @@ import subprocess
 import sys
 import time
 
-for sig in (signal.SIGINT, signal.SIGTERM):
-    marker = pathlib.Path(sys.argv[2]) / sig.name
+for sig in (signal.SIGINT, signal.SIGTERM, None):
+    marker = pathlib.Path(sys.argv[2]) / (sig.name if sig else 'timeout')
     proc = subprocess.Popen(
         [sys.argv[1], 'socks5', 'secure', 'compat-socks5-legacy', '--auth', '--yes'],
         env={**os.environ, 'SOCKS5_PREFLIGHT': str(marker)},
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
     )
     child = None
     try:
         deadline = time.monotonic() + 10
         while not marker.exists() and proc.poll() is None and time.monotonic() < deadline:
             time.sleep(0.05)
-        assert marker.exists(), 'shoes did not receive a credential-bearing candidate'
+        assert marker.exists(), (
+            'shoes did not receive a credential-bearing candidate '
+            f'(substitute entered={marker.with_suffix(".entered").exists()}, CLI exit={proc.poll()})'
+        )
         child, candidate = json.loads(marker.read_text())
-        proc.send_signal(sig)
-        assert proc.wait(timeout=5) == 128 + sig
+        if sig is None:
+            _, stderr = proc.communicate(timeout=30)
+            assert proc.returncode == 1, 'stalled dry-run did not fail on its own'
+            assert 'shoes 配置校验超时' in stderr.decode(), 'missing dry-run timeout error'
+        else:
+            proc.send_signal(sig)
+            assert proc.wait(timeout=5) == 128 + sig
         assert not pathlib.Path(candidate).exists(), 'candidate survived cancellation'
         assert not pathlib.Path(f'/proc/{child}').exists(), 'dry-run survived cancellation'
         assert not marker.with_suffix('.finished').exists(), 'dry-run finished after cancellation'
+        with open('/run/lock/ping-rust.lock', 'rb') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         child = None
     finally:
         if proc.poll() is None:
@@ -359,8 +381,10 @@ for sig in (signal.SIGINT, signal.SIGTERM):
             except ProcessLookupError:
                 pass
 PY
+  find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/after"
+  diff -u "$scenario/before" "$scenario/after"
 )
-echo 'SOCKS5 preflight: SIGINT and SIGTERM remove the candidate and stop dry-run: PASS'
+echo 'SOCKS5 preflight: SIGINT, SIGTERM and timeout remove the candidate and stop dry-run: PASS'
 
 # Exercise an actual systemd stop whose client exits before ExecStop finishes.
 (
@@ -398,12 +422,21 @@ touch "$1/stop-entered"
 while kill -0 "$client" 2>/dev/null; do sleep 0.1; done
 touch "$1/stop-after-client"
 SH
-  chmod 0755 "$scenario/systemctl" "$scenario/exec-stop"
+  cat >"$scenario/exec-start-pre" <<'SH'
+#!/bin/sh
+set -eu
+"$1" info compat-socks5-legacy >"$2/info"
+grep -Fq '用户名：无认证' "$2/info"
+echo ok >>"$2/start-pre-runs"
+SH
+  chmod 0755 "$scenario/systemctl" "$scenario/exec-stop" "$scenario/exec-start-pre"
   env PATH="$scenario:$PATH" systemctl probe
   cat >"$dropin/90-compat-socks5-rollback.conf" <<EOF
 [Service]
+TimeoutStartSec=10s
 TimeoutStopSec=150s
 ReadWritePaths=$scenario
+ExecStartPre=$scenario/exec-start-pre $NEW $scenario
 ExecStop=$scenario/exec-stop $scenario
 EOF
   "$systemctl_bin" daemon-reload
@@ -415,6 +448,7 @@ EOF
     exit 1
   fi
   test -f "$scenario/activation-failed"
+  test "$(grep -c '^ok$' "$scenario/start-pre-runs")" -eq 2
   test -f "$scenario/stop-entered"
   for _ in {1..50}; do
     [[ -f "$scenario/stop-after-client" ]] && break
@@ -429,4 +463,56 @@ EOF
   find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/after"
   diff -u "$scenario/before" "$scenario/after"
 )
-echo 'SOCKS5 rollback: systemd finishes stop after its client exits and runs the restored config: PASS'
+echo 'SOCKS5 rollback: ExecStartPre reads published state and systemd restores service after slow stop: PASS'
+
+# A referenced, stopped unit keeps its start-rate counter. Inject a firewall
+# error only after systemd has started the loopback candidate and it passes verification.
+(
+  scenario="$(mktemp -d /usr/local/lib/socks5-start-limit.XXXXXX)"
+  dropin=/etc/systemd/system/shoes.service.d/90-compat-socks5-start-limit.conf
+  target=/run/systemd/system/compat-socks5-rollback.target
+  trap 'systemctl stop "${target##*/}" || true; rm -f "$dropin" "$target"; systemctl daemon-reload; rm -rf "$scenario"' EXIT
+  cat >"$target" <<'EOF'
+[Unit]
+Description=Keep shoes.service loaded during SOCKS5 rollback
+Wants=shoes.service
+EOF
+  cat >"$dropin" <<'EOF'
+[Unit]
+StartLimitIntervalSec=10min
+StartLimitBurst=1
+EOF
+  cat >"$scenario/iptables" <<'SH'
+#!/bin/sh
+set -eu
+case "$*" in
+  --version) echo 'iptables v1.8.9 (legacy)' ;;
+  '-w -S INPUT') echo '-A INPUT -p tcp --dport 24436 -j ACCEPT' ;;
+  '-w -D INPUT -p tcp --dport 24436 -j ACCEPT')
+    touch "$SOCKS5_ROLLBACK/firewall-reached"
+    exit 1
+    ;;
+  *) exit 2 ;;
+esac
+SH
+  chmod 0755 "$scenario/iptables"
+  systemctl daemon-reload
+  systemctl start "${target##*/}"
+  systemctl is-active --quiet "${target##*/}"
+  systemctl is-active --quiet shoes.service
+  before_pid="$(systemctl show --property=MainPID --value shoes.service)"
+  find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/before"
+  if PATH="$scenario:$PATH" SOCKS5_ROLLBACK="$scenario" \
+    "$NEW" socks5 secure compat-socks5-legacy --local --yes >"$WORK/socks5-start-limit.txt" 2>&1; then
+    echo 'Expected SOCKS5 firewall change to fail' >&2
+    exit 1
+  fi
+  test -f "$scenario/firewall-reached"
+  systemctl is-active --quiet shoes.service
+  test "$(systemctl show --property=MainPID --value shoes.service)" != "$before_pid"
+  grep -Fq '原配置、防火墙及服务已恢复并再次验证' "$WORK/socks5-start-limit.txt"
+  ss -H -ltn 'sport = :24436' | grep -F '0.0.0.0:24436' >/dev/null
+  find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/after"
+  diff -u "$scenario/before" "$scenario/after"
+)
+echo 'SOCKS5 rollback: an inactive unit with StartLimitBurst=1 restarts after firewall failure: PASS'
