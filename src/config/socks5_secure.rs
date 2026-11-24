@@ -152,7 +152,7 @@ impl SecurePlan {
                     anyhow::anyhow!("shoes 配置校验超时，请检查 shoes 后重试"),
             }
         };
-        validate_candidate_with_shoes_until(&yaml, &self.directory, deadline_or_signal).await
+        validate_candidate_with_shoes_until(&yaml, &self.directory, Some(deadline_or_signal)).await
     }
 
     pub(crate) fn commit_files(&mut self) -> Result<()> {

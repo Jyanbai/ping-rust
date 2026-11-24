@@ -222,8 +222,9 @@ pub(crate) async fn apply(
 ) -> Result<()> {
     // 防火墙修改结束后再根据实际状态补偿，服务等待可主动取消。
     let interrupt = interrupt.begin()?;
-    runtime.preflight(plan, &interrupt).await?;
+    let preflight = runtime.preflight(plan, &interrupt).await;
     interrupt.check()?;
+    preflight?;
     plan.commit_files()?;
     let mut activation_attempted = false;
     let change = async {
@@ -490,6 +491,15 @@ pub(crate) async fn probe(profile: &ManagedProfile, target: SocketAddr) -> Resul
 
 // 无 shell 插值；所有子进程有超时，stdin 默认关闭。nft 命令通过私有临时文件传入。
 async fn command(program: &str, args: &[String], input: Option<&[u8]>) -> Result<String> {
+    run_command(program, args, input, None).await
+}
+
+async fn run_command(
+    program: &str,
+    args: &[String],
+    input: Option<&[u8]>,
+    xtables_lock_file: Option<&Path>,
+) -> Result<String> {
     use std::io::Write;
     let mut file = input.map(|_| tempfile::tempfile()).transpose()?;
     if let (Some(file), Some(input)) = (&mut file, input) {
@@ -497,7 +507,11 @@ async fn command(program: &str, args: &[String], input: Option<&[u8]>) -> Result
         file.write_all(input)?;
         file.seek(SeekFrom::Start(0))?;
     }
-    let child = Command::from(utils::isolated_command(program))
+    let mut command = Command::from(utils::isolated_command(program));
+    if let Some(path) = xtables_lock_file {
+        command.env("XTABLES_LOCKFILE", path);
+    }
+    let child = command
         .args(args)
         .env("LC_ALL", "C")
         .stdin(file.map(Stdio::from).unwrap_or_else(Stdio::null))

@@ -5,6 +5,12 @@ use std::{net::IpAddr, ops::Range};
 
 trait FirewallExecutor {
     fn available(&self, program: &str) -> bool;
+    async fn with_xtables_lock<T>(
+        &mut self,
+        operation: impl AsyncFnOnce(&mut Self) -> Result<T>,
+    ) -> Result<T> {
+        operation(self).await
+    }
     fn ufw_rules_file(&self, v6: bool) -> Result<String> {
         let path = ufw_rules_path(v6);
         std::fs::read_to_string(path)
@@ -90,11 +96,52 @@ fn replace_ufw_rules_file(path: &Path, lock_path: &Path, before: &str, after: &s
     Ok(())
 }
 
-struct SystemFirewall;
+#[derive(Default)]
+struct SystemFirewall {
+    xtables_lock_file: Option<std::path::PathBuf>,
+}
 
 impl FirewallExecutor for SystemFirewall {
     fn available(&self, program: &str) -> bool {
         utils::command_exists(program)
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn with_xtables_lock<T>(
+        &mut self,
+        operation: impl AsyncFnOnce(&mut Self) -> Result<T>,
+    ) -> Result<T> {
+        use rustix::fs::{flock, open, FlockOperation, Mode, OFlags};
+
+        let lock_path =
+            std::env::var_os("XTABLES_LOCKFILE").unwrap_or_else(|| "/run/xtables.lock".into());
+        let lock = open(
+            lock_path,
+            OFlags::RDONLY | OFlags::CREATE | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::RUSR | Mode::WUSR,
+        )
+        .context("无法打开 xtables 锁，请检查防火墙")?;
+        let acquire = async {
+            loop {
+                match flock(&lock, FlockOperation::NonBlockingLockExclusive) {
+                    Err(rustix::io::Errno::WOULDBLOCK) => {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                    result => return result,
+                }
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(15), acquire)
+            .context("等待 xtables 写锁超时，请检查防火墙")?
+            .context("无法取得 xtables 写锁，请检查防火墙")?;
+        // 父进程持有系统锁；同一事务的子进程使用私有锁，避免再次等待系统锁。
+        let private_lock = tempfile::NamedTempFile::new().context("无法创建 xtables 私有锁")?;
+        let mut backend = Self {
+            xtables_lock_file: Some(private_lock.path().to_owned()),
+        };
+        let result = operation(&mut backend).await;
+        drop(lock);
+        result
     }
 
     async fn execute(
@@ -103,7 +150,7 @@ impl FirewallExecutor for SystemFirewall {
         args: &[String],
         input: Option<&[u8]>,
     ) -> Result<String> {
-        command(program, args, input).await
+        run_command(program, args, input, self.xtables_lock_file.as_deref()).await
     }
 }
 
@@ -166,7 +213,7 @@ impl From<&str> for LiveRule {
 
 impl FirewallPlan {
     pub(super) async fn capture(listener: SocketAddr) -> Result<Self> {
-        Self::capture_with(listener, &mut SystemFirewall).await
+        Self::capture_with(listener, &mut SystemFirewall::default()).await
     }
 
     async fn capture_with(
@@ -200,7 +247,7 @@ impl FirewallPlan {
         } else {
             false
         };
-        if managed_firewalld {
+        let runtime_rich_rules = if managed_firewalld {
             let permanent = capture_firewalld(backend, listener, &["--permanent".into()]).await?;
             let runtime = capture_firewalld(backend, listener, &[]).await?;
             for rule in &runtime {
@@ -214,10 +261,11 @@ impl FirewallPlan {
                     bail!("firewalld 区域 {} 有匹配 TCP 端口 {} 的纯运行时 rich rule，无法查询其剩余超时并安全回滚。请先检查并手动处理该规则后重试", base[0], listener.port());
                 }
             }
-            // 先删除运行规则，确保删除时对应的持久规则仍然存在。
-            plan.rules.extend(runtime);
             plan.rules.extend(permanent);
-        }
+            runtime
+        } else {
+            Vec::new()
+        };
         let (program, family) = if listener.is_ipv4() {
             ("iptables", "ip")
         } else {
@@ -273,17 +321,30 @@ impl FirewallPlan {
                 }
             }
         }
+        // 限时规则无法原样补回。等其他防火墙修改成功后再删除运行态 rich rule。
+        plan.rules.extend(runtime_rich_rules);
         Ok(plan)
     }
 
     pub(super) async fn close(&mut self) -> Result<()> {
-        self.close_with(&mut SystemFirewall).await
+        self.close_with(&mut SystemFirewall::default()).await
     }
 
     async fn close_with(&mut self, backend: &mut impl FirewallExecutor) -> Result<()> {
         for (index, rule) in self.rules.iter().enumerate() {
             let before = rule.current(backend).await?;
             if let Some(position) = rule.position(&before) {
+                if let Rule::Rich { base, text } = rule {
+                    if !rich_is_permanent(base) {
+                        let permanent_base = permanent_rich_base(base);
+                        if !self.attempted.iter().any(|attempt| {
+                            matches!(&self.rules[attempt.rule], Rule::Rich { base, text: persisted }
+                                if base == &permanent_base && persisted == text)
+                        }) {
+                            bail!("firewalld 运行时 rich rule 已无对应持久规则，无法安全修改，请检查防火墙");
+                        }
+                    }
+                }
                 let ufw = match rule {
                     Rule::Ufw { listener, .. } => {
                         Some(UfwAttempt::capture(backend, *listener, &before, position).await?)
@@ -313,7 +374,7 @@ impl FirewallPlan {
     }
 
     pub(super) async fn restore(&mut self) -> Result<()> {
-        self.restore_with(&mut SystemFirewall).await
+        self.restore_with(&mut SystemFirewall::default()).await
     }
 
     async fn restore_with(&mut self, backend: &mut impl FirewallExecutor) -> Result<()> {
@@ -472,7 +533,6 @@ impl Rule {
                 ufw.delete(backend, *listener).await?;
             }
             Rule::Rich { base, text } => {
-                verify_rich_backing(backend, base, text).await?;
                 let mut args = base.clone();
                 args.push(format!("--remove-rich-rule={text}"));
                 backend.execute("firewall-cmd", &args, None).await?;
@@ -489,6 +549,24 @@ impl Rule {
     }
 
     async fn restore(&self, backend: &mut impl FirewallExecutor, attempt: &Attempt) -> Result<()> {
+        if matches!(self, Rule::Iptables { .. }) {
+            return backend
+                .with_xtables_lock(async |backend| self.restore_rule(backend, attempt).await)
+                .await;
+        }
+        self.restore_rule(backend, attempt).await
+    }
+
+    async fn restore_rule(
+        &self,
+        backend: &mut impl FirewallExecutor,
+        attempt: &Attempt,
+    ) -> Result<()> {
+        if let Rule::Rich { base, .. } = self {
+            if !rich_is_permanent(base) {
+                bail!("无法确认 firewalld 运行时 rich rule 的原剩余超时，请检查防火墙");
+            }
+        }
         let current = self.current(backend).await?;
         if let Rule::Ufw { listener, .. } = self {
             return self
@@ -513,8 +591,6 @@ impl Rule {
             return Ok(());
         }
         if let Rule::Rich { base, text } = self {
-            // 按删除的逆序恢复，补回运行规则前确认持久副本仍然存在。
-            verify_rich_backing(backend, base, text).await?;
             let mut args = base.clone();
             args.push(format!("--add-rich-rule={text}"));
             backend.execute("firewall-cmd", &args, None).await?;
@@ -533,13 +609,13 @@ impl Rule {
             Rule::Ufw { .. } | Rule::Rich { .. } => unreachable!(),
             Rule::Iptables { program, text } => {
                 insert_iptables(backend, program, text, position, current.len()).await?;
-                let verified = self
+                let after = self
                     .current(backend)
                     .await
-                    .and_then(|after| verify_insert_order(&current, &after, position, text));
-                if let Err(error) = verified {
-                    // -I 的位置来自先前的查询。若链已改变，按规则内容撤销插入。
-                    if let Err(cleanup) = delete_iptables_rule(backend, program, text).await {
+                    .context("无法复查恢复的 iptables 放行规则")?;
+                if let Err(error) = verify_insert_order(&current, &after, position, text) {
+                    if let Err(cleanup) = undo_iptables_insert(backend, program, text, &after).await
+                    {
                         return Err(
                             error.context(format!("撤销 iptables 放行规则插入失败：{cleanup:#}"))
                         );
@@ -660,7 +736,12 @@ impl Rule {
                 }
                 .await;
                 if let Err(error) = verified {
-                    if let Err(cleanup) = delete_iptables_rule(backend, program, text).await {
+                    let cleanup = async {
+                        let live = ufw_kernel_rules(backend, program, chain).await?;
+                        undo_iptables_insert(backend, program, text, &live).await
+                    }
+                    .await;
+                    if let Err(cleanup) = cleanup {
                         return Err(
                             error.context(format!("撤销 UFW 内核放行规则插入失败：{cleanup:#}"))
                         );
@@ -789,6 +870,19 @@ async fn delete_iptables_rule(
     args.extend_from_slice(&words[1..]);
     backend.execute(program, &args, None).await?;
     Ok(())
+}
+
+async fn undo_iptables_insert(
+    backend: &mut impl FirewallExecutor,
+    program: &str,
+    text: &str,
+    live: &[LiveRule],
+) -> Result<()> {
+    match matching_rule_count(live, text) {
+        0 => Ok(()),
+        1 => delete_iptables_rule(backend, program, text).await,
+        _ => bail!("链中有多条同文放行规则，无法识别本次插入，请检查防火墙"),
+    }
 }
 
 async fn insert_iptables(
@@ -1174,22 +1268,6 @@ fn permanent_rich_base(base: &[String]) -> Vec<String> {
 
 fn rich_is_permanent(base: &[String]) -> bool {
     base.first().is_some_and(|arg| arg == "--permanent")
-}
-
-async fn verify_rich_backing(
-    backend: &mut impl FirewallExecutor,
-    base: &[String],
-    text: &str,
-) -> Result<()> {
-    if rich_is_permanent(base) {
-        return Ok(());
-    }
-    // 只在对应持久规则仍存在时删除运行规则。回滚无法推断它的剩余时限。
-    let persistent = list_rich_rules(backend, &permanent_rich_base(base)).await?;
-    if !persistent.lines().any(|rule| rule.trim() == text) {
-        bail!("firewalld 运行时 rich rule 已无对应持久规则，无法安全修改，请检查防火墙");
-    }
-    Ok(())
 }
 
 fn firewalld_rules(output: &str, listener: SocketAddr, base: &[String]) -> Vec<Rule> {
@@ -1617,7 +1695,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn socks5_secure_firewalld_restores_runtime_and_permanent_rules() {
+    async fn socks5_secure_firewalld_only_restores_permanent_rules_after_runtime_removal() {
         for fail_permanent_removal in [false, true] {
             let original = [vec![SHARED, SCOPED], vec![SHARED, SCOPED]];
             let mut backend = FakeFirewalld {
@@ -1633,16 +1711,39 @@ mod tests {
             let close = plan.close_with(&mut backend).await;
             if fail_permanent_removal {
                 assert!(format!("{:#}", close.unwrap_err()).contains("持久规则删除失败"));
-                assert_eq!(backend.rules, [vec![SHARED], vec![SHARED, SCOPED]]);
+                assert_eq!(backend.rules, original);
+                plan.restore_with(&mut backend).await.unwrap();
+                assert_eq!(backend.rules, original);
             } else {
                 close.unwrap();
                 assert_eq!(backend.rules, [vec![SHARED], vec![SHARED]]);
                 assert!(plan.closure_report().contains("已移除 1 条运行时"));
+                let error = plan.restore_with(&mut backend).await.unwrap_err();
+                assert!(format!("{error:#}").contains("原剩余超时"));
+                assert_eq!(backend.rules, [vec![SHARED], vec![SHARED, SCOPED]]);
             }
-            plan.restore_with(&mut backend).await.unwrap();
-            assert_eq!(backend.rules, original);
             assert_eq!(backend.runtime_timeout, None);
         }
+    }
+
+    #[tokio::test]
+    async fn socks5_secure_firewalld_rollback_preserves_paired_runtime_timeout() {
+        let original = [vec![SHARED, SCOPED], vec![SHARED, SCOPED]];
+        let mut backend = FakeFirewalld {
+            rules: original.clone(),
+            runtime_timeout: Some(60),
+            fail_permanent_removal: true,
+            fail_permanent_restore: false,
+        };
+        let mut plan = FirewallPlan::capture_with("0.0.0.0:1080".parse().unwrap(), &mut backend)
+            .await
+            .unwrap();
+
+        let error = plan.close_with(&mut backend).await.unwrap_err();
+        assert!(format!("{error:#}").contains("持久规则删除失败"));
+        plan.restore_with(&mut backend).await.unwrap();
+        assert_eq!(backend.rules, original);
+        assert_eq!(backend.runtime_timeout, Some(60));
     }
 
     #[tokio::test]
@@ -1661,7 +1762,7 @@ mod tests {
 
         let error = plan.restore_with(&mut backend).await.unwrap_err();
         assert!(format!("{error:#}").contains("持久规则恢复失败"));
-        assert!(format!("{error:#}").contains("无对应持久规则"));
+        assert!(format!("{error:#}").contains("原剩余超时"));
         assert_eq!(backend.rules, [vec![SHARED], vec![SHARED]]);
     }
 
@@ -2237,6 +2338,7 @@ mod tests {
         deletions: usize,
         fail_second_deletion: bool,
         drop_before_insert: Option<&'static str>,
+        rules_after_insert: Vec<&'static str>,
     }
 
     impl FirewallExecutor for FakeIptables {
@@ -2258,7 +2360,8 @@ mod tests {
             if args == ["-w", "-S", "INPUT"] {
                 return Ok(self.rules.join("\n"));
             }
-            match args[1].as_str() {
+            let action = args[1].as_str();
+            match action {
                 "-D" => {
                     self.deletions += 1;
                     // 第二次删除失败前，另一个工具插入无关规则。
@@ -2287,6 +2390,12 @@ mod tests {
                 }
                 _ => panic!("意外操作 {args:?}"),
             }
+            if matches!(action, "-I" | "-A") {
+                drop(
+                    self.rules
+                        .splice(..0, self.rules_after_insert.drain(..).map(str::to_owned)),
+                );
+            }
             Ok(String::new())
         }
     }
@@ -2303,6 +2412,7 @@ mod tests {
             deletions: 0,
             fail_second_deletion: true,
             drop_before_insert: None,
+            rules_after_insert: Vec::new(),
         };
         let mut plan = FirewallPlan::capture_with("0.0.0.0:1080".parse().unwrap(), &mut backend)
             .await
@@ -2330,6 +2440,7 @@ mod tests {
                 deletions: 0,
                 fail_second_deletion: false,
                 drop_before_insert: None,
+                rules_after_insert: Vec::new(),
             };
             let mut plan =
                 FirewallPlan::capture_with("0.0.0.0:1080".parse().unwrap(), &mut backend)
@@ -2351,6 +2462,7 @@ mod tests {
             deletions: 0,
             fail_second_deletion: false,
             drop_before_insert: None,
+            rules_after_insert: Vec::new(),
         };
         let mut plan = FirewallPlan::capture_with("0.0.0.0:1080".parse().unwrap(), &mut backend)
             .await
@@ -2371,6 +2483,7 @@ mod tests {
             deletions: 0,
             fail_second_deletion: false,
             drop_before_insert: Some(drop),
+            rules_after_insert: Vec::new(),
         };
         let mut plan = FirewallPlan::capture_with("0.0.0.0:1080".parse().unwrap(), &mut backend)
             .await
@@ -2383,6 +2496,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn socks5_secure_iptables_preserves_concurrent_identical_accept_before_reject() {
+        let accept = "-A INPUT -p tcp --dport 1080 -j ACCEPT";
+        let reject = "-A INPUT -p tcp --dport 1080 -j REJECT";
+        let ssh = "-A INPUT -p tcp --dport 22 -j ACCEPT";
+        let mut backend = FakeIptables {
+            rules: vec![accept.into(), ssh.into()],
+            deletions: 0,
+            fail_second_deletion: false,
+            drop_before_insert: None,
+            rules_after_insert: vec![accept, reject],
+        };
+        let mut plan = FirewallPlan::capture_with("0.0.0.0:1080".parse().unwrap(), &mut backend)
+            .await
+            .unwrap();
+        plan.close_with(&mut backend).await.unwrap();
+
+        let error = plan.restore_with(&mut backend).await.unwrap_err();
+        assert!(format!("{error:#}").contains("相对顺序"));
+        assert!(format!("{error:#}").contains("多条同文放行规则"));
+        assert_eq!(backend.rules, [accept, reject, accept, ssh]);
+        assert_eq!(backend.deletions, 1);
+    }
+
+    #[tokio::test]
     async fn socks5_secure_iptables_rollback_reports_a_missing_anchor() {
         let mut backend = FakeIptables {
             rules: vec![
@@ -2392,6 +2529,7 @@ mod tests {
             deletions: 0,
             fail_second_deletion: false,
             drop_before_insert: None,
+            rules_after_insert: Vec::new(),
         };
         let mut plan = FirewallPlan::capture_with("0.0.0.0:1080".parse().unwrap(), &mut backend)
             .await
@@ -2414,6 +2552,7 @@ mod tests {
             deletions: 0,
             fail_second_deletion: false,
             drop_before_insert: None,
+            rules_after_insert: Vec::new(),
         };
         let mut plan = FirewallPlan::capture_with("0.0.0.0:1080".parse().unwrap(), &mut backend)
             .await

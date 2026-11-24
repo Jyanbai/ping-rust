@@ -325,7 +325,7 @@ assert candidate.stat().st_mode & 0o777 == 0o600
 servers = yaml.safe_load(candidate.read_text())
 protocol = next(s['protocol'] for s in servers if s['address'] == '0.0.0.0:24436')
 assert protocol['type'] == 'socks' and protocol['username'] and protocol['password']
-marker.with_suffix('.tmp').write_text(json.dumps([os.getpid(), str(candidate)]))
+marker.with_suffix('.tmp').write_text(json.dumps([os.getpid(), os.getpgrp(), str(candidate)]))
 marker.with_suffix('.tmp').replace(marker)
 time.sleep(60)
 marker.with_suffix('.finished').touch()
@@ -341,12 +341,18 @@ import subprocess
 import sys
 import time
 
-for sig in (signal.SIGINT, signal.SIGTERM, None):
-    marker = pathlib.Path(sys.argv[2]) / (sig.name if sig else 'timeout')
+for name, sig, signal_group in (
+    ('SIGINT', signal.SIGINT, False),
+    ('SIGTERM', signal.SIGTERM, False),
+    ('group-SIGINT', signal.SIGINT, True),
+    ('timeout', None, False),
+):
+    marker = pathlib.Path(sys.argv[2]) / name
     proc = subprocess.Popen(
         [sys.argv[1], 'socks5', 'secure', 'compat-socks5-legacy', '--auth', '--yes'],
         env={**os.environ, 'SOCKS5_PREFLIGHT': str(marker)},
         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+        start_new_session=signal_group,
     )
     child = None
     try:
@@ -357,19 +363,27 @@ for sig in (signal.SIGINT, signal.SIGTERM, None):
             'shoes did not receive a credential-bearing candidate '
             f'(substitute entered={marker.with_suffix(".entered").exists()}, CLI exit={proc.poll()})'
         )
-        child, candidate = json.loads(marker.read_text())
+        child, child_group, candidate = json.loads(marker.read_text())
         if sig is None:
             _, stderr = proc.communicate(timeout=30)
             assert proc.returncode == 1, 'stalled dry-run did not fail on its own'
             assert 'shoes 配置校验超时' in stderr.decode(), 'missing dry-run timeout error'
         else:
-            proc.send_signal(sig)
-            assert proc.wait(timeout=5) == 128 + sig
+            if signal_group:
+                # Deliver SIGINT to the CLI's entire group, like terminal Ctrl+C.
+                os.killpg(proc.pid, sig)
+            else:
+                proc.send_signal(sig)
+            _, stderr = proc.communicate(timeout=5)
+            assert proc.returncode == 128 + sig, (name, proc.returncode, stderr.decode())
+            assert 'shoes 拒绝生成的配置' not in stderr.decode()
         assert not pathlib.Path(candidate).exists(), 'candidate survived cancellation'
         assert not pathlib.Path(f'/proc/{child}').exists(), 'dry-run survived cancellation'
         assert not marker.with_suffix('.finished').exists(), 'dry-run finished after cancellation'
         with open('/run/lock/ping-rust.lock', 'rb') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if signal_group:
+            assert child_group != proc.pid, 'dry-run shared the CLI foreground process group'
         child = None
     finally:
         if proc.poll() is None:
@@ -384,7 +398,7 @@ PY
   find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/after"
   diff -u "$scenario/before" "$scenario/after"
 )
-echo 'SOCKS5 preflight: SIGINT, SIGTERM and timeout remove the candidate and stop dry-run: PASS'
+echo 'SOCKS5 preflight: PID signals, process-group SIGINT and timeout clean up dry-run: PASS'
 
 # Exercise an actual slow stop with an exhausted start limit on a referenced unit.
 (

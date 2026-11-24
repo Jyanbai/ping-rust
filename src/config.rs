@@ -3239,13 +3239,13 @@ fn validate_yaml(yaml: &str) -> Result<()> {
 }
 
 async fn validate_candidate_with_shoes(yaml: &str, directory: &Path) -> Result<()> {
-    validate_candidate_with_shoes_until(yaml, directory, std::future::pending()).await
+    validate_candidate_with_shoes_until(yaml, directory, None::<std::future::Pending<_>>).await
 }
 
 async fn validate_candidate_with_shoes_until(
     yaml: &str,
     directory: &Path,
-    cancelled: impl Future<Output = anyhow::Error>,
+    cancelled: Option<impl Future<Output = anyhow::Error>>,
 ) -> Result<()> {
     match validate_candidate_with_binary_until(
         yaml,
@@ -3268,14 +3268,15 @@ async fn validate_candidate_with_shoes_until(
 }
 
 async fn validate_candidate_with_binary(yaml: &str, directory: &Path, binary: &Path) -> Result<()> {
-    validate_candidate_with_binary_until(yaml, directory, binary, std::future::pending()).await
+    validate_candidate_with_binary_until(yaml, directory, binary, None::<std::future::Pending<_>>)
+        .await
 }
 
 async fn validate_candidate_with_binary_until(
     yaml: &str,
     directory: &Path,
     binary: &Path,
-    cancelled: impl Future<Output = anyhow::Error>,
+    cancelled: Option<impl Future<Output = anyhow::Error>>,
 ) -> Result<()> {
     fs::create_dir_all(directory)
         .with_context(|| format!("创建候选配置目录 {} 失败", directory.display()))?;
@@ -3315,13 +3316,13 @@ pub async fn validate_with_shoes(config_path: &Path) -> Result<()> {
 }
 
 pub(crate) async fn validate_with_binary(binary: &Path, config_path: &Path) -> Result<()> {
-    validate_with_binary_until(binary, config_path, std::future::pending()).await
+    validate_with_binary_until(binary, config_path, None::<std::future::Pending<_>>).await
 }
 
 async fn validate_with_binary_until(
     binary: &Path,
     config_path: &Path,
-    cancelled: impl Future<Output = anyhow::Error>,
+    cancelled: Option<impl Future<Output = anyhow::Error>>,
 ) -> Result<()> {
     use std::process::Stdio;
     use tokio::io::AsyncReadExt;
@@ -3330,7 +3331,13 @@ async fn validate_with_binary_until(
     if !binary.is_file() {
         bail!("shoes 尚未安装，无法执行 --dry-run 验证");
     }
-    let mut child = Command::new(binary)
+    let mut command = Command::new(binary);
+    #[cfg(unix)]
+    if cancelled.is_some() {
+        // SOCKS5 加固由父进程处理终端信号，并负责结束和回收校验进程。
+        command.process_group(0);
+    }
+    let mut child = command
         .arg("--dry-run")
         .arg(config_path)
         .stdin(Stdio::null())
@@ -3341,9 +3348,15 @@ async fn validate_with_binary_until(
         .context("无法启动 shoes 配置校验")?;
     let mut stderr = Vec::new();
     let mut child_stderr = child.stderr.take().context("无法读取 shoes 校验输出")?;
+    let cancellation = async {
+        match cancelled {
+            Some(cancelled) => cancelled.await,
+            None => std::future::pending().await,
+        }
+    };
     let status = tokio::select! {
         biased;
-        error = cancelled => {
+        error = cancellation => {
             if let Err(kill_error) = child.kill().await {
                 return Err(error.context(format!("终止 shoes 配置校验失败：{kill_error}")));
             }
