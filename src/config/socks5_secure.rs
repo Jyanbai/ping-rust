@@ -1,9 +1,81 @@
 //! SOCKS5 加固的只读计划与现有受管文件事务。
 use std::{net::SocketAddr, time::Duration};
 
+use fs2::FileExt;
+
 use super::*;
 
 const DRY_RUN_TIMEOUT: Duration = Duration::from_secs(15);
+const PENDING_STATE: &str = ".ping-rust-socks5-secure.pending";
+const UNFINISHED: &str = "上次 SOCKS5 加固未完成。请检查 shoes.service 和防火墙，从备份恢复一致的 config.yaml、profiles 和 ping-rust-state.json，验证服务后再移除 .ping-rust-socks5-secure.pending";
+
+pub(super) fn require_finished(state_path: &Path) -> Result<()> {
+    let path = state_path.with_file_name(PENDING_STATE);
+    if path.try_exists().context("无法检查 SOCKS5 加固事务状态")? {
+        bail!("{UNFINISHED}");
+    }
+    Ok(())
+}
+
+pub(crate) fn load_for_plan(state_path: &Path) -> Result<ManagedState> {
+    require_finished(state_path)?;
+    load_state_file(state_path).map_err(|_| {
+        anyhow::anyhow!("无法读取 SOCKS5 管理状态，请检查 ping-rust-state.json 和 config.yaml")
+    })
+}
+
+fn open_live_pending(state_path: &Path) -> Result<Option<fs::File>> {
+    let file = match fs::File::open(state_path.with_file_name(PENDING_STATE)) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("无法读取 SOCKS5 加固事务状态"),
+    };
+    match FileExt::try_lock_shared(&file) {
+        Ok(()) => bail!("{UNFINISHED}"),
+        Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {
+            Ok(Some(file))
+        }
+        Err(error) => Err(error).context("无法检查 SOCKS5 加固事务锁"),
+    }
+}
+
+pub(crate) fn read_info_state(
+    state_path: &Path,
+    service_hook: bool,
+) -> Result<Option<ManagedState>> {
+    if service_hook {
+        let _ = open_live_pending(state_path)?;
+    } else {
+        require_finished(state_path)?;
+    }
+    state_path
+        .try_exists()?
+        .then(|| load_state_file(state_path))
+        .transpose()
+}
+
+pub(crate) fn read_export_state(state_path: &Path, service_hook: bool) -> Result<ManagedState> {
+    if !service_hook {
+        return load_state_from(state_path);
+    }
+    let Some(pending) = open_live_pending(state_path)? else {
+        return load_state_file(state_path);
+    };
+    // 启动钩子必须导出本次启动读取的配置。回滚启动时聚合配置已恢复，优先使用原状态。
+    let servers = load_servers(&state_path.with_file_name("config.yaml"))
+        .map_err(|_| anyhow::anyhow!("无法读取 SOCKS5 加固期间的聚合配置，请检查 config.yaml"))?;
+    if let Ok(published) = load_state_file(state_path) {
+        if ensure_servers_match_state(&servers, &published.profiles).is_ok() {
+            return Ok(published);
+        }
+    }
+    let candidate: ManagedState =
+        serde_json::from_reader(pending).context("无法解析待发布的 SOCKS5 加固状态")?;
+    ensure_servers_match_state(&servers, &candidate.profiles).map_err(|_| {
+        anyhow::anyhow!("SOCKS5 加固期间的配置与状态不一致，请在加固结束后重试导出")
+    })?;
+    Ok(candidate)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SecureMode {
@@ -20,6 +92,7 @@ pub(crate) struct SecurePlan {
     before_yaml: String,
     before_profile: String,
     rollback: Option<ManagedRollback>,
+    pending: Option<fs::File>,
 }
 
 impl SecurePlan {
@@ -27,9 +100,7 @@ impl SecurePlan {
         directory: &Path,
         id: Uuid,
     ) -> Result<(ManagedState, Vec<ServerConfig>, usize)> {
-        let state = load_state_from(&directory.join("ping-rust-state.json")).map_err(|_| {
-            anyhow::anyhow!("无法读取 SOCKS5 管理状态，请检查 ping-rust-state.json 和 config.yaml")
-        })?;
+        let state = load_for_plan(&directory.join("ping-rust-state.json"))?;
         let index = state
             .profiles
             .iter()
@@ -101,6 +172,7 @@ impl SecurePlan {
             before_yaml,
             before_profile,
             rollback: None,
+            pending: None,
         }))
     }
 
@@ -179,7 +251,24 @@ impl SecurePlan {
         } else {
             None
         };
-        commit::commit_managed_with_state_writer(
+        // 先留下可检测的事务状态，SIGKILL 后导出和重试也能识别未完成的写入。
+        let mut pending = tempfile::NamedTempFile::new_in(&self.directory)
+            .context("无法创建 SOCKS5 加固事务状态")?;
+        utils::set_mode(pending.path(), 0o600)?;
+        FileExt::lock_exclusive(pending.as_file()).context("无法锁定 SOCKS5 加固事务状态")?;
+        serde_json::to_writer(pending.as_file_mut(), &self.state)
+            .context("无法写入 SOCKS5 加固事务状态")?;
+        pending
+            .as_file()
+            .sync_all()
+            .context("无法同步 SOCKS5 加固事务状态")?;
+        self.pending = Some(
+            pending
+                .persist_noclobber(self.directory.join(PENDING_STATE))
+                .map_err(|error| error.error)
+                .context("无法保存 SOCKS5 加固事务状态")?,
+        );
+        let commit = commit::commit_managed_with_state_writer(
             &config,
             &state,
             &profiles,
@@ -189,7 +278,22 @@ impl SecurePlan {
                 Some(original_state) => save_state_to(path, &original_state),
                 None => Ok(()),
             },
-        )?;
+        );
+        if let Err(error) = commit {
+            // 提交函数已尝试回滚。确认原文件都在，再允许后续读写。
+            let restored = read_optional(&config).is_ok_and(|bytes| bytes == rollback.config)
+                && read_optional(&state).is_ok_and(|bytes| bytes == rollback.state)
+                && ProfileDirectorySnapshot::capture(&profiles).is_ok_and(|snapshot| {
+                    snapshot.existed == rollback.profiles.existed
+                        && snapshot.files == rollback.profiles.files
+                });
+            if restored {
+                if let Err(cleanup) = self.finish_pending() {
+                    return Err(error.context(format!("清理 SOCKS5 加固事务状态失败：{cleanup:#}")));
+                }
+            }
+            return Err(error);
+        }
         self.rollback = Some(rollback);
         Ok(())
     }
@@ -197,11 +301,21 @@ impl SecurePlan {
     pub(crate) fn publish_state(&mut self) -> Result<()> {
         save_state_to(&self.directory.join("ping-rust-state.json"), &self.state)
             .context("保存已验证的 SOCKS5 状态失败")?;
+        self.finish_pending()?;
         self.rollback = None;
         Ok(())
     }
 
-    pub(crate) fn rollback(&mut self) -> Result<()> {
+    pub(crate) fn finish_pending(&mut self) -> Result<()> {
+        if self.pending.is_some() {
+            fs::remove_file(self.directory.join(PENDING_STATE))
+                .context("无法清理 SOCKS5 加固事务状态")?;
+            self.pending = None;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn rollback_files(&mut self) -> Result<()> {
         let rollback = self
             .rollback
             .take()

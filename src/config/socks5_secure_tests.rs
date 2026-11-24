@@ -428,7 +428,8 @@ fn socks5_secure_activation_failure_restores_exact_files() {
         .unwrap()
         .unwrap();
     plan.commit_files().unwrap();
-    plan.rollback().unwrap();
+    plan.rollback_files().unwrap();
+    plan.finish_pending().unwrap();
     assert_eq!(
         fs::read(directory.path().join("config.yaml")).unwrap(),
         config
@@ -809,8 +810,21 @@ fn socks5_secure_info_url_qr_and_file_export_wait_for_publish_or_rollback() {
             let (state_path, lock_path) = (state_path.clone(), lock_path.clone());
             let reader = thread::spawn(move || {
                 let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
                     .build()
                     .unwrap();
+                if command == "info" {
+                    // 即使未安装 shoes，也要让此读者执行带输出管道的 Tokio 子进程。
+                    let output = runtime.block_on(async {
+                        tokio::process::Command::new(std::env::current_exe().unwrap())
+                            .arg("--help")
+                            .output()
+                            .await
+                            .unwrap()
+                    });
+                    assert!(output.status.success());
+                    assert!(!output.stdout.is_empty());
+                }
                 ready.send(()).unwrap();
                 let outcome = runtime.block_on(crate::cli::run_with_export_paths(
                     cli,
@@ -834,7 +848,8 @@ fn socks5_secure_info_url_qr_and_file_export_wait_for_publish_or_rollback() {
         }
         assert!(!output_path.exists());
         if rollback {
-            plan.rollback().unwrap();
+            plan.rollback_files().unwrap();
+            plan.finish_pending().unwrap();
         } else {
             plan.publish_state().unwrap();
         }
@@ -851,7 +866,143 @@ fn socks5_secure_info_url_qr_and_file_export_wait_for_publish_or_rollback() {
             }
         }
         assert_eq!(output_path.exists(), public_export);
+        if public_export {
+            let contents: serde_json::Value =
+                serde_json::from_slice(&fs::read(output_path).unwrap()).unwrap();
+            let outbound = contents["outbounds"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|outbound| outbound["type"] == "socks")
+                .unwrap();
+            if rollback {
+                assert!(outbound["username"].is_null());
+                assert!(outbound["password"].is_null());
+            } else {
+                let Credentials::Socks5 {
+                    username, password, ..
+                } = &plan.profile.credentials
+                else {
+                    panic!("需要 SOCKS5 节点");
+                };
+                assert!(outbound["username"].as_str() == username.as_deref());
+                assert!(outbound["password"].as_str() == password.as_deref());
+                assert!(username.is_some() && password.is_some());
+            }
+        }
     }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn socks5_secure_sigkill_after_commit_refuses_retry_and_stale_exports() {
+    use clap::Parser;
+    use std::{
+        io::Read,
+        process::{Command, Stdio},
+        time::{Duration, Instant},
+    };
+
+    const CHILD_DIR: &str = "PING_RUST_TEST_SOCKS5_SIGKILL_DIR";
+    if let Some(directory) = std::env::var_os(CHILD_DIR) {
+        let directory = PathBuf::from(directory);
+        let _lock = utils::exclusive_lock(&directory.join("ping-rust.lock")).unwrap();
+        let mut plan = SecurePlan::prepare(&directory, Uuid::nil(), SecureMode::Auth)
+            .unwrap()
+            .unwrap();
+        plan.commit_files().unwrap();
+        fs::write(directory.join("committed"), b"").unwrap();
+        let _ = std::io::stdin().read_exact(&mut [0]);
+        return;
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let profile = legacy(directory.path());
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "config::socks5_secure_tests::socks5_secure_sigkill_after_commit_refuses_retry_and_stale_exports",
+        ])
+        .env(CHILD_DIR, directory.path())
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !directory.path().join("committed").exists() {
+        assert!(child.try_wait().unwrap().is_none());
+        assert!(Instant::now() < deadline, "子进程未写入候选配置");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    child.kill().unwrap();
+    assert!(!child.wait().unwrap().success());
+
+    let lock_path = directory.path().join("ping-rust.lock");
+    let state_path = directory.path().join("ping-rust-state.json");
+    let config_path = directory.path().join("config.yaml");
+    let output_path = directory.path().join("client.json");
+    let config = fs::read(&config_path).unwrap();
+    let state = fs::read(&state_path).unwrap();
+    let ServerProtocol::Socks {
+        username, password, ..
+    } = &load_servers(&config_path).unwrap()[0].protocol
+    else {
+        panic!("需要 SOCKS5 配置");
+    };
+    assert!(username.is_some() && password.is_some());
+    let stored: ManagedState = serde_json::from_slice(&state).unwrap();
+    assert!(stored.profiles[0].socks5_risk_warning().is_some());
+
+    let retry = crate::cli::Cli::try_parse_from([
+        "prs",
+        "socks5",
+        "secure",
+        &profile.name,
+        "--auth",
+        "--yes",
+    ])
+    .unwrap();
+    let Some(crate::cli::Command::Socks5 {
+        command: crate::cli::Socks5Command::Secure(retry),
+    }) = retry.command
+    else {
+        panic!("需要 SOCKS5 加固命令");
+    };
+    let error = retry
+        .run_in(directory.path(), &lock_path, false)
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("上次 SOCKS5 加固未完成"));
+
+    let error = super::socks5_secure::read_export_state(&state_path, true)
+        .err()
+        .expect("systemd 钩子也必须拒绝已失去写者的事务");
+    assert!(format!("{error:#}").contains("上次 SOCKS5 加固未完成"));
+
+    for args in [
+        vec!["prs", "url", &profile.name],
+        vec!["prs", "qr", &profile.name],
+        vec!["prs", "info", &profile.name],
+        vec![
+            "prs",
+            "export",
+            "sing-box",
+            "--profile",
+            &profile.name,
+            "--server",
+            "example.com",
+            "--output",
+            output_path.to_str().unwrap(),
+        ],
+    ] {
+        let cli = crate::cli::Cli::try_parse_from(args).unwrap();
+        let error = crate::cli::run_with_export_paths(cli, &state_path, &lock_path)
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("上次 SOCKS5 加固未完成"));
+    }
+    assert!(!output_path.exists());
+    assert!(fs::read(config_path).unwrap() == config);
+    assert!(fs::read(state_path).unwrap() == state);
 }
 
 #[test]

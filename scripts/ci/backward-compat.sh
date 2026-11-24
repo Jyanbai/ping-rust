@@ -407,8 +407,9 @@ echo 'SOCKS5 preflight: PID signals, process-group SIGINT and timeout clean up d
   scenario="$(mktemp -d /usr/local/lib/socks5-rollback.XXXXXX)"
   dropin=/etc/systemd/system/shoes.service.d
   target=/run/systemd/system/compat-socks5-slow-stop.target
+  reader=/run/systemd/system/compat-socks5-start-reader.service
   mkdir -p "$dropin"
-  trap '"$systemctl_bin" stop "${target##*/}" || true; rm -f "$dropin/90-compat-socks5-rollback.conf" "$target"; "$systemctl_bin" daemon-reload; rm -rf "$scenario"' EXIT
+  trap '"$systemctl_bin" stop "${target##*/}" "${reader##*/}" || true; rm -f "$dropin/90-compat-socks5-rollback.conf" "$target" "$reader"; "$systemctl_bin" daemon-reload; rm -rf "$scenario"' EXIT
   cat >"$scenario/systemctl" <<'SH'
 #!/bin/sh
 case "$1" in
@@ -444,8 +445,24 @@ set -eu
 grep -Fq '用户名：无认证' "$2/info"
 echo ok >>"$2/start-pre-runs"
 SH
+  cat >"$scenario/reader" <<'SH'
+#!/bin/sh
+set -eu
+"$1" info compat-socks5-legacy >"$2/oneshot-info"
+grep -Fq '用户名：无认证' "$2/oneshot-info"
+"$1" export sing-box --profile compat-socks5-legacy --server example.com \
+  --output "$2/oneshot-export.json" >/dev/null
+echo ok >>"$2/oneshot-runs"
+SH
   chmod 0755 "$scenario/systemctl" "$scenario/exec-stop" "$scenario/exec-start-pre"
+  chmod 0755 "$scenario/reader"
   env PATH="$scenario:$PATH" systemctl probe
+  cat >"$reader" <<EOF
+[Service]
+Type=oneshot
+TimeoutStartSec=5s
+ExecStart=$scenario/reader $NEW $scenario
+EOF
   cat >"$target" <<'EOF'
 [Unit]
 Description=Keep shoes.service loaded during a slow SOCKS5 rollback
@@ -461,6 +478,7 @@ TimeoutStartSec=10s
 TimeoutStopSec=150s
 ReadWritePaths=$scenario
 ExecStartPre=$scenario/exec-start-pre $NEW $scenario
+ExecStartPre=+$systemctl_bin start ${reader##*/}
 ExecStop=$scenario/exec-stop $scenario
 EOF
   "$systemctl_bin" daemon-reload
@@ -476,6 +494,9 @@ EOF
   fi
   test -f "$scenario/activation-failed"
   test "$(grep -c '^ok$' "$scenario/start-pre-runs")" -eq 2
+  test "$(grep -c '^ok$' "$scenario/oneshot-runs")" -eq 2
+  jq -e '[.outbounds[] | select(.type == "socks")] | length == 1 and
+    (.[0] | (has("username") or has("password")) | not)' "$scenario/oneshot-export.json" >/dev/null
   test -f "$scenario/stop-entered"
   for _ in {1..50}; do
     [[ -f "$scenario/stop-after-client" ]] && break
@@ -490,7 +511,7 @@ EOF
   find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/after"
   diff -u "$scenario/before" "$scenario/after"
 )
-echo 'SOCKS5 rollback: ExecStartPre reads published state and systemd restores service after slow stop at StartLimitBurst=1: PASS'
+echo 'SOCKS5 rollback: direct and oneshot ExecStartPre readers finish during activation and rollback: PASS'
 
 # A referenced, stopped unit keeps its start-rate counter. Inject a firewall
 # error only after systemd has started the loopback candidate and it passes verification.
@@ -543,3 +564,24 @@ SH
   diff -u "$scenario/before" "$scenario/after"
 )
 echo 'SOCKS5 rollback: an inactive unit with StartLimitBurst=1 restarts after firewall failure: PASS'
+
+(
+  scenario="$(mktemp -d /usr/local/lib/socks5-start-export.XXXXXX)"
+  dropin=/etc/systemd/system/shoes.service.d/90-compat-socks5-start-export.conf
+  trap 'rm -f "$dropin"; systemctl daemon-reload; rm -rf "$scenario"' EXIT
+  cat >"$dropin" <<EOF
+[Service]
+TimeoutStartSec=10s
+ReadWritePaths=$scenario
+ExecStartPost=$NEW export sing-box --profile compat-socks5-legacy --server example.com --output $scenario/client.json
+EOF
+  systemctl daemon-reload
+  "$NEW" socks5 secure compat-socks5-legacy --auth --yes >"$WORK/socks5-start-export.txt" 2>&1
+  systemctl is-active --quiet shoes.service
+  "$NEW" export sing-box --profile compat-socks5-legacy --server example.com \
+    --output "$scenario/expected.json" >/dev/null
+  jq -e '[.outbounds[] | select(.type == "socks")] | length == 1 and
+    (.[0] | (.username | length) > 0 and (.password | length) > 0)' "$scenario/client.json" >/dev/null
+  cmp -s "$scenario/client.json" "$scenario/expected.json"
+)
+echo 'SOCKS5 authentication: ExecStartPost exports the credentials published after verification: PASS'

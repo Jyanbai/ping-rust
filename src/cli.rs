@@ -91,16 +91,11 @@ impl Socks5SecureArgs {
         require_root: impl FnOnce() -> Result<()>,
         verify: impl AsyncFnOnce(&config::ManagedProfile) -> Result<()>,
     ) -> Result<()> {
-        use config::socks5_secure::SecurePlan;
+        use config::socks5_secure::{load_for_plan, SecurePlan};
 
         let mode = self.mode(tty)?;
         let (id, already_secure) = utils::read_with_existing_lock(lock_path, || {
-            let state =
-                config::load_state_from(&directory.join("ping-rust-state.json")).map_err(|_| {
-                    anyhow::anyhow!(
-                        "无法读取 SOCKS5 管理状态，请检查 ping-rust-state.json 和 config.yaml"
-                    )
-                })?;
+            let state = load_for_plan(&directory.join("ping-rust-state.json"))?;
             let profile = client::select_profile(&state.profiles, Some(&self.profile))?;
             if profile.protocol() != Protocol::Socks5 {
                 bail!("只有 SOCKS5 节点支持 secure");
@@ -734,9 +729,9 @@ pub(crate) async fn run_with_export_paths(
         Command::Url {
             profile,
             server_address,
-        } => utils::read_with_existing_lock_then(
+        } => utils::read_with_existing_lock_or_service_hook(
             lock_path,
-            || config::load_state_from(state_path),
+            |service_hook| config::socks5_secure::read_export_state(state_path, service_hook),
             |state| {
                 print_saved_url(
                     &state.profiles,
@@ -748,9 +743,9 @@ pub(crate) async fn run_with_export_paths(
         Command::Qr {
             profile,
             server_address,
-        } => utils::read_with_existing_lock_then(
+        } => utils::read_with_existing_lock_or_service_hook(
             lock_path,
-            || config::load_state_from(state_path),
+            |service_hook| config::socks5_secure::read_export_state(state_path, service_hook),
             |state| {
                 print_saved_qr(
                     &state.profiles,
@@ -772,9 +767,9 @@ pub(crate) async fn run_with_export_paths(
             profile,
             server,
             output,
-        } => utils::read_with_existing_lock_then(
+        } => utils::read_with_existing_lock_or_service_hook(
             lock_path,
-            || config::load_state_from(state_path),
+            |service_hook| config::socks5_secure::read_export_state(state_path, service_hook),
             |state| {
                 let content =
                     client::export(&state.profiles, profile, format, &server, output.as_deref())?;
@@ -1811,14 +1806,9 @@ async fn show_info(selector: Option<&str>, state_path: &Path, lock_path: &Path) 
     println!("二进制：{}", crate::utils::SHOES_BIN);
     println!("配置：{}", crate::utils::CONFIG_FILE);
     println!("服务：{}", if active { "运行中" } else { "未运行" });
-    utils::read_with_existing_lock_then(
+    utils::read_with_existing_lock_or_service_hook(
         lock_path,
-        || {
-            state_path
-                .exists()
-                .then(|| config::load_state_from(state_path))
-                .transpose()
-        },
+        |service_hook| config::socks5_secure::read_info_state(state_path, service_hook),
         |state| print_info_profiles(selector, state),
     )
 }

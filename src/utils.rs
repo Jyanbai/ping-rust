@@ -205,10 +205,23 @@ pub(crate) fn read_with_existing_lock_then<T, U>(
     read: impl Fn() -> Result<T>,
     use_snapshot: impl FnOnce(T) -> Result<U>,
 ) -> Result<U> {
+    read_with_existing_lock_or_service_hook(path, |_| read(), use_snapshot)
+}
+
+pub(crate) fn read_with_existing_lock_or_service_hook<T, U>(
+    path: &Path,
+    read: impl Fn(bool) -> Result<T>,
+    use_snapshot: impl FnOnce(T) -> Result<U>,
+) -> Result<U> {
+    enum ReadLock {
+        Missing,
+        Acquired(File),
+        ServiceHook,
+    }
     let lock_if_exists = || {
         let file = match File::open(path) {
             Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(ReadLock::Missing),
             Err(error) => {
                 return Err(error).with_context(|| format!("打开锁文件 {} 失败", path.display()))
             }
@@ -216,9 +229,9 @@ pub(crate) fn read_with_existing_lock_then<T, U>(
         match FileExt::try_lock_shared(&file) {
             Ok(()) => {}
             Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {
-                // systemd 启动/停止钩子被写事务同步等待。让它们读取已发布状态，避免互等。
-                if in_shoes_service() {
-                    return Ok(None);
+                // 同步 systemd 钩子也可能在另一个 unit 中执行。INVOCATION_ID 由 manager 提供。
+                if cfg!(target_os = "linux") && env::var_os("INVOCATION_ID").is_some() {
+                    return Ok(ReadLock::ServiceHook);
                 }
                 FileExt::lock_shared(&file)
                     .with_context(|| format!("锁定 {} 失败", path.display()))?;
@@ -227,33 +240,20 @@ pub(crate) fn read_with_existing_lock_then<T, U>(
                 return Err(error).with_context(|| format!("锁定 {} 失败", path.display()))
             }
         }
-        Ok(Some(file))
+        Ok(ReadLock::Acquired(file))
     };
-    if let Some(_lock) = lock_if_exists()? {
-        return use_snapshot(read()?);
+    match lock_if_exists()? {
+        ReadLock::Acquired(_lock) => return use_snapshot(read(false)?),
+        ReadLock::ServiceHook => return use_snapshot(read(true)?),
+        ReadLock::Missing => {}
     }
-    let result = read();
+    let result = read(false);
     // 首次加固可能在无锁读取期间创建锁文件。加锁后重新读取这一份快照。
-    if let Some(_lock) = lock_if_exists()? {
-        return use_snapshot(read()?);
+    match lock_if_exists()? {
+        ReadLock::Acquired(_lock) => use_snapshot(read(false)?),
+        ReadLock::ServiceHook => use_snapshot(read(true)?),
+        ReadLock::Missing => use_snapshot(result?),
     }
-    use_snapshot(result?)
-}
-
-fn in_shoes_service() -> bool {
-    cfg!(target_os = "linux")
-        && fs::read_to_string("/proc/self/cgroup").is_ok_and(|cgroups| {
-            cgroups.lines().any(|line| {
-                let path = line.strip_prefix("0::").or_else(|| {
-                    let (_, path) = line.split_once(":name=systemd:")?;
-                    Some(path)
-                });
-                path.is_some_and(|path| {
-                    path.split('/')
-                        .any(|part| part == crate::service::SERVICE_NAME)
-                })
-            })
-        })
 }
 
 pub fn atomic_write(destination: &Path, contents: &[u8], mode: u32) -> Result<()> {

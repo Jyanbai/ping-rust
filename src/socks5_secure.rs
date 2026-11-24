@@ -275,19 +275,28 @@ pub(crate) async fn apply(
         } else {
             true
         };
-        if can_restore_config {
-            if let Err(error) = plan.rollback() {
+        let config_restored = if can_restore_config {
+            if let Err(error) = plan.rollback_files() {
                 failures.push(format!("配置={error:#}"));
+                false
+            } else {
+                true
             }
         } else {
             // 聚合配置和节点文件保留回环监听，写锁释放前同步导出使用的状态。
             if let Err(error) = plan.publish_state() {
                 failures.push(format!("保存保留的加固状态={error:#}"));
             }
-        }
-        if activation_attempted && firewall_restored {
+            false
+        };
+        if config_restored && activation_attempted && firewall_restored {
             if let Err(error) = runtime.restore_service(&plan.original).await {
                 failures.push(format!("服务及原监听验证={error:#}"));
+            }
+        }
+        if config_restored && failures.is_empty() {
+            if let Err(error) = plan.finish_pending() {
+                failures.push(format!("事务状态={error:#}"));
             }
         }
         let error = if crate::is_interrupted(&error) {
