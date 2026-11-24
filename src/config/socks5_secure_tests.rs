@@ -907,7 +907,11 @@ async fn socks5_secure_sigkill_after_commit_refuses_retry_and_stale_exports() {
     if let Some(directory) = std::env::var_os(CHILD_DIR) {
         let directory = PathBuf::from(directory);
         let _lock = utils::exclusive_lock(&directory.join("ping-rust.lock")).unwrap();
-        let mut plan = SecurePlan::prepare(&directory, Uuid::nil(), SecureMode::Auth)
+        let id = load_state_from(&directory.join("ping-rust-state.json"))
+            .unwrap()
+            .profiles[0]
+            .id;
+        let mut plan = SecurePlan::prepare(&directory, id, SecureMode::Auth)
             .unwrap()
             .unwrap();
         plan.commit_files().unwrap();
@@ -951,6 +955,7 @@ async fn socks5_secure_sigkill_after_commit_refuses_retry_and_stale_exports() {
     assert!(username.is_some() && password.is_some());
     let stored: ManagedState = serde_json::from_slice(&state).unwrap();
     assert!(stored.profiles[0].socks5_risk_warning().is_some());
+    let id = stored.profiles[0].id.to_string();
 
     let retry = crate::cli::Cli::try_parse_from([
         "prs",
@@ -987,7 +992,7 @@ async fn socks5_secure_sigkill_after_commit_refuses_retry_and_stale_exports() {
             "export",
             "sing-box",
             "--profile",
-            &profile.name,
+            &id,
             "--server",
             "example.com",
             "--output",

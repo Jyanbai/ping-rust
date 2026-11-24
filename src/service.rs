@@ -555,6 +555,93 @@ pub fn is_active() -> Result<bool> {
     systemctl_is_active()
 }
 
+// 只有 systemd 正在等待的 shoes 控制进程及其同步读者可以绕过写锁。
+// systemd timer 的独立服务也有 INVOCATION_ID，清理环境的钩子则没有它。
+pub(crate) async fn is_shoes_service_hook() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        shoes_service_hook().await.unwrap_or(false)
+    }
+    #[cfg(not(target_os = "linux"))]
+    false
+}
+
+#[cfg(target_os = "linux")]
+async fn shoes_service_hook() -> Option<bool> {
+    let process = std::process::id();
+    let cgroups = fs::read_to_string("/proc/self/cgroup").ok()?;
+    let cgroup = systemd_cgroup(&cgroups)?;
+    let unit = cgroup.rsplit('/').find(|part| part.ends_with(".service"))?;
+    let systemctl = Systemctl::SecureTransaction;
+    let control_pid = systemctl
+        .timed_show("ControlPID")
+        .await
+        .ok()?
+        .parse::<u32>()
+        .ok()
+        .filter(|pid| *pid != 0)?;
+
+    if unit == SERVICE_NAME {
+        return Some(descends_from(process, control_pid));
+    }
+
+    // 兼容控制进程用阻塞的 systemctl start 启动另一个 oneshot 的钩子。
+    let control = std::path::PathBuf::from(format!("/proc/{control_pid}"));
+    let systemctl_path = utils::command_path("systemctl")?;
+    if !same_executable(&control.join("exe"), &systemctl_path).ok()? {
+        return Some(false);
+    }
+    let command_line = fs::read(control.join("cmdline")).ok()?;
+    let mut args = command_line.split(|byte| *byte == 0);
+    args.next()?;
+    if !args.eq([b"start".as_slice(), unit.as_bytes(), b"".as_slice()]) {
+        return Some(false);
+    }
+    let target_cgroup = systemctl
+        .timed(
+            &["show", "--property=ControlGroup", "--value", "--", unit],
+            SECURE_QUERY_TIMEOUT,
+        )
+        .await
+        .ok()?;
+    Some(
+        !target_cgroup.is_empty()
+            && (cgroup == target_cgroup
+                || cgroup
+                    .strip_prefix(target_cgroup.as_str())
+                    .is_some_and(|suffix| suffix.starts_with('/'))),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn systemd_cgroup(cgroups: &str) -> Option<&str> {
+    cgroups
+        .lines()
+        .find_map(|line| line.split_once(":name=systemd:").map(|(_, path)| path))
+        .or_else(|| cgroups.lines().find_map(|line| line.strip_prefix("0::")))
+}
+
+#[cfg(target_os = "linux")]
+fn descends_from(mut pid: u32, ancestor: u32) -> bool {
+    while pid > 1 {
+        if pid == ancestor {
+            return true;
+        }
+        let parent = fs::read_to_string(format!("/proc/{pid}/status"))
+            .ok()
+            .and_then(|status| {
+                status
+                    .lines()
+                    .find_map(|line| line.strip_prefix("PPid:")?.trim().parse::<u32>().ok())
+            });
+        let Some(parent) = parent else {
+            return false;
+        };
+        pid = parent;
+    }
+    false
+}
+
 fn systemctl_is_active() -> Result<bool> {
     Systemctl::Foreground.is_active()
 }

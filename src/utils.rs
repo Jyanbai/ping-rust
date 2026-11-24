@@ -205,11 +205,12 @@ pub(crate) fn read_with_existing_lock_then<T, U>(
     read: impl Fn() -> Result<T>,
     use_snapshot: impl FnOnce(T) -> Result<U>,
 ) -> Result<U> {
-    read_with_existing_lock_or_service_hook(path, |_| read(), use_snapshot)
+    read_with_existing_lock_or_service_hook(path, false, |_| read(), use_snapshot)
 }
 
 pub(crate) fn read_with_existing_lock_or_service_hook<T, U>(
     path: &Path,
+    is_service_hook: bool,
     read: impl Fn(bool) -> Result<T>,
     use_snapshot: impl FnOnce(T) -> Result<U>,
 ) -> Result<U> {
@@ -229,8 +230,7 @@ pub(crate) fn read_with_existing_lock_or_service_hook<T, U>(
         match FileExt::try_lock_shared(&file) {
             Ok(()) => {}
             Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {
-                // 同步 systemd 钩子也可能在另一个 unit 中执行。INVOCATION_ID 由 manager 提供。
-                if cfg!(target_os = "linux") && env::var_os("INVOCATION_ID").is_some() {
+                if is_service_hook {
                     return Ok(ReadLock::ServiceHook);
                 }
                 FileExt::lock_shared(&file)

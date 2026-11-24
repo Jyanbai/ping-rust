@@ -401,7 +401,7 @@ impl FirewallPlan {
 
     async fn restore_with(&mut self, backend: &mut impl FirewallExecutor) -> Result<()> {
         let mut failures = Vec::new();
-        // 先恢复持久规则，缺失的运行时副本才能按已恢复的持久策略补回。
+        // 先恢复持久规则，再核对删除失败后可能仍在的运行时规则。
         let (runtime_rich, other): (Vec<_>, Vec<_>) = std::mem::take(&mut self.attempted)
             .into_iter()
             .partition(|attempt| {
@@ -618,13 +618,9 @@ impl Rule {
             return Ok(());
         }
         if let Rule::Rich { base, text } = self {
-            if !rich_is_permanent(base)
-                && !list_rich_rules(backend, &permanent_rich_base(base))
-                    .await?
-                    .lines()
-                    .any(|rule| rule.trim() == text.as_str())
-            {
-                bail!("firewalld 持久规则缺失，无法按持久策略恢复运行时规则或确认原剩余超时，请检查防火墙");
+            if !rich_is_permanent(base) {
+                // 同文的持久规则无法证明原运行时规则没有计时器。
+                bail!("firewalld 无法确认已删除的运行时 rich rule 的原剩余超时，请检查防火墙并手动恢复规则");
             }
             let mut args = base.clone();
             args.push(format!("--add-rich-rule={text}"));
@@ -1736,7 +1732,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn socks5_secure_firewalld_rollback_restores_paired_rule_after_removal() {
+    async fn socks5_secure_firewalld_rollback_reports_unknown_timeout_after_removal() {
         let original = [vec![SHARED, SCOPED], vec![SHARED, SCOPED]];
         let mut backend = FakeFirewalld {
             rules: original.clone(),
@@ -1752,8 +1748,32 @@ mod tests {
         assert_eq!(backend.rules, [vec![SHARED], vec![SHARED]]);
         assert!(plan.closure_report().contains("已移除 1 条运行时"));
 
-        plan.restore_with(&mut backend).await.unwrap();
-        assert_eq!(backend.rules, original);
+        let error = plan.restore_with(&mut backend).await.unwrap_err();
+        assert!(format!("{error:#}").contains("原剩余超时"));
+        assert_eq!(backend.rules, [vec![SHARED], original[1].clone()]);
+        assert_eq!(backend.runtime_timeout, None);
+    }
+
+    #[tokio::test]
+    async fn socks5_secure_firewalld_rollback_never_reopens_removed_timed_rule() {
+        let mut backend = FakeFirewalld {
+            rules: [vec![SHARED, SCOPED], vec![SHARED, SCOPED]],
+            runtime_timeout: Some(60),
+            fail_permanent_removal: false,
+            fail_runtime_removal: false,
+            fail_permanent_restore: false,
+        };
+        let mut plan = FirewallPlan::capture_with("0.0.0.0:1080".parse().unwrap(), &mut backend)
+            .await
+            .unwrap();
+        plan.close_with(&mut backend).await.unwrap();
+        assert_eq!(backend.rules, [vec![SHARED], vec![SHARED]]);
+        assert_eq!(backend.runtime_timeout, None);
+
+        // 模拟最终验证失败。持久规则仍可恢复，但不能把运行时限时规则改成永久放行。
+        let error = plan.restore_with(&mut backend).await.unwrap_err();
+        assert!(format!("{error:#}").contains("原剩余超时"));
+        assert_eq!(backend.rules, [vec![SHARED], vec![SHARED, SCOPED]]);
         assert_eq!(backend.runtime_timeout, None);
     }
 

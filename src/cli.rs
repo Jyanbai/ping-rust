@@ -729,31 +729,39 @@ pub(crate) async fn run_with_export_paths(
         Command::Url {
             profile,
             server_address,
-        } => utils::read_with_existing_lock_or_service_hook(
-            lock_path,
-            |service_hook| config::socks5_secure::read_export_state(state_path, service_hook),
-            |state| {
-                print_saved_url(
-                    &state.profiles,
-                    profile.as_deref(),
-                    server_address.as_deref(),
-                )
-            },
-        ),
+        } => {
+            read_profile_snapshot(
+                state_path,
+                lock_path,
+                config::socks5_secure::read_export_state,
+                |state| {
+                    print_saved_url(
+                        &state.profiles,
+                        profile.as_deref(),
+                        server_address.as_deref(),
+                    )
+                },
+            )
+            .await
+        }
         Command::Qr {
             profile,
             server_address,
-        } => utils::read_with_existing_lock_or_service_hook(
-            lock_path,
-            |service_hook| config::socks5_secure::read_export_state(state_path, service_hook),
-            |state| {
-                print_saved_qr(
-                    &state.profiles,
-                    profile.as_deref(),
-                    server_address.as_deref(),
-                )
-            },
-        ),
+        } => {
+            read_profile_snapshot(
+                state_path,
+                lock_path,
+                config::socks5_secure::read_export_state,
+                |state| {
+                    print_saved_qr(
+                        &state.profiles,
+                        profile.as_deref(),
+                        server_address.as_deref(),
+                    )
+                },
+            )
+            .await
+        }
         Command::Delete { profile, yes } => {
             if !yes {
                 anyhow::bail!("删除配置需要显式添加 --yes；也可使用交互菜单确认");
@@ -767,20 +775,29 @@ pub(crate) async fn run_with_export_paths(
             profile,
             server,
             output,
-        } => utils::read_with_existing_lock_or_service_hook(
-            lock_path,
-            |service_hook| config::socks5_secure::read_export_state(state_path, service_hook),
-            |state| {
-                let content =
-                    client::export(&state.profiles, profile, format, &server, output.as_deref())?;
-                if let Some(path) = output {
-                    println!("客户端配置已写入：{}", path.display());
-                } else {
-                    println!("{content}");
-                }
-                Ok(())
-            },
-        ),
+        } => {
+            read_profile_snapshot(
+                state_path,
+                lock_path,
+                config::socks5_secure::read_export_state,
+                |state| {
+                    let content = client::export(
+                        &state.profiles,
+                        profile,
+                        format,
+                        &server,
+                        output.as_deref(),
+                    )?;
+                    if let Some(path) = output {
+                        println!("客户端配置已写入：{}", path.display());
+                    } else {
+                        println!("{content}");
+                    }
+                    Ok(())
+                },
+            )
+            .await
+        }
         Command::CheckPort { port, kind } => {
             let (tcp, udp) = match kind {
                 PortKind::Tcp => (true, false),
@@ -1797,6 +1814,20 @@ pub(crate) async fn regenerate_test_certificate(id: Uuid) -> Result<()> {
     Ok(())
 }
 
+async fn read_profile_snapshot<T>(
+    state_path: &Path,
+    lock_path: &Path,
+    read: impl Fn(&Path, bool) -> Result<T>,
+    use_snapshot: impl FnOnce(T) -> Result<()>,
+) -> Result<()> {
+    utils::read_with_existing_lock_or_service_hook(
+        lock_path,
+        service::is_shoes_service_hook().await,
+        |service_hook| read(state_path, service_hook),
+        use_snapshot,
+    )
+}
+
 async fn show_info(selector: Option<&str>, state_path: &Path, lock_path: &Path) -> Result<()> {
     let version = installer::installed_version()
         .await
@@ -1806,11 +1837,13 @@ async fn show_info(selector: Option<&str>, state_path: &Path, lock_path: &Path) 
     println!("二进制：{}", crate::utils::SHOES_BIN);
     println!("配置：{}", crate::utils::CONFIG_FILE);
     println!("服务：{}", if active { "运行中" } else { "未运行" });
-    utils::read_with_existing_lock_or_service_hook(
+    read_profile_snapshot(
+        state_path,
         lock_path,
-        |service_hook| config::socks5_secure::read_info_state(state_path, service_hook),
+        config::socks5_secure::read_info_state,
         |state| print_info_profiles(selector, state),
     )
+    .await
 }
 
 fn print_info_profiles(selector: Option<&str>, state: Option<config::ManagedState>) -> Result<()> {

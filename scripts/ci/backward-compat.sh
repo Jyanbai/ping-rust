@@ -282,6 +282,7 @@ state_path = directory / 'ping-rust-state.json'
 state = json.loads(state_path.read_text())
 profile = next(p for p in state['profiles'] if p['name'] == 'compat-socks5-legacy')
 del profile['credentials']['Socks5']['listen']
+profile['server_address'] = 'example.com'
 state_path.write_text(json.dumps(state))
 
 for path in [directory / 'config.yaml', directory / 'profiles/SOCKS5-24436.yaml']:
@@ -293,6 +294,7 @@ for path in [directory / 'config.yaml', directory / 'profiles/SOCKS5-24436.yaml'
     assert count == 1, 'expected exactly one loopback listener in the generated file'
     path.write_bytes(contents)
 PY
+legacy_socks5_id="$(jq -er '.profiles[] | select(.name == "compat-socks5-legacy") | .id' /etc/shoes/ping-rust-state.json)"
 systemctl restart shoes.service
 for _ in {1..50}; do
   if ss -H -ltn 'sport = :24436' | grep -F '0.0.0.0:24436' >/dev/null; then break; fi
@@ -408,8 +410,10 @@ echo 'SOCKS5 preflight: PID signals, process-group SIGINT and timeout clean up d
   dropin=/etc/systemd/system/shoes.service.d
   target=/run/systemd/system/compat-socks5-slow-stop.target
   reader=/run/systemd/system/compat-socks5-start-reader.service
+  timer=/run/systemd/system/compat-socks5-timer-export.timer
+  exporter="${timer%.timer}.service"
   mkdir -p "$dropin"
-  trap '"$systemctl_bin" stop "${target##*/}" "${reader##*/}" || true; rm -f "$dropin/90-compat-socks5-rollback.conf" "$target" "$reader"; "$systemctl_bin" daemon-reload; rm -rf "$scenario"' EXIT
+  trap '"$systemctl_bin" stop "${target##*/}" "${reader##*/}" "${timer##*/}" "${exporter##*/}" || true; rm -f "$dropin/90-compat-socks5-rollback.conf" "$target" "$reader" "$timer" "$exporter"; "$systemctl_bin" daemon-reload; rm -rf "$scenario"' EXIT
   cat >"$scenario/systemctl" <<'SH'
 #!/bin/sh
 case "$1" in
@@ -420,6 +424,20 @@ case "$1" in
     # Start the candidate, then report a client error to trigger rollback.
     if [ ! -e "$SOCKS5_ROLLBACK/activation-failed" ]; then
       "$SOCKS5_SYSTEMCTL" "$@" || exit $?
+      "$SOCKS5_SYSTEMCTL" start compat-socks5-timer-export.timer || exit $?
+      for _ in $(seq 1 50); do
+        [ ! -e "$SOCKS5_ROLLBACK/timer-started" ] || break
+        sleep 0.1
+      done
+      [ -e "$SOCKS5_ROLLBACK/timer-started" ] || exit 1
+      # Keep the unverified candidate active long enough for the timer's reader to run.
+      for _ in $(seq 1 20); do
+        if [ -e "$SOCKS5_ROLLBACK/timer-export.json" ]; then
+          touch "$SOCKS5_ROLLBACK/timer-exported-candidate"
+          break
+        fi
+        sleep 0.1
+      done
       touch "$SOCKS5_ROLLBACK/activation-failed"
       exit 1
     fi
@@ -442,26 +460,56 @@ SH
 #!/bin/sh
 set -eu
 "$1" info compat-socks5-legacy >"$2/info"
-grep -Fq '用户名：无认证' "$2/info"
+if grep -Fq '用户名：无认证' "$2/info"; then
+  echo original >>"$2/start-pre-auth"
+else
+  grep -Eq '^  用户名：.+$' "$2/info"
+  echo candidate >>"$2/start-pre-auth"
+fi
 echo ok >>"$2/start-pre-runs"
 SH
   cat >"$scenario/reader" <<'SH'
 #!/bin/sh
 set -eu
 "$1" info compat-socks5-legacy >"$2/oneshot-info"
-grep -Fq '用户名：无认证' "$2/oneshot-info"
-"$1" export sing-box --profile compat-socks5-legacy --server example.com \
+if grep -Fq '用户名：无认证' "$2/oneshot-info"; then
+  echo original >>"$2/oneshot-auth"
+else
+  grep -Eq '^  用户名：.+$' "$2/oneshot-info"
+  echo candidate >>"$2/oneshot-auth"
+fi
+"$1" export sing-box --profile "$3" --server example.com \
   --output "$2/oneshot-export.json" >/dev/null
 echo ok >>"$2/oneshot-runs"
 SH
+  cat >"$scenario/timer-export" <<'SH'
+#!/bin/sh
+set -eu
+test -n "${INVOCATION_ID:-}"
+touch "$2/timer-started"
+"$1" export sing-box --profile "$3" --server example.com \
+  --output "$2/timer-export.json" >/dev/null
+touch "$2/timer-finished"
+SH
   chmod 0755 "$scenario/systemctl" "$scenario/exec-stop" "$scenario/exec-start-pre"
-  chmod 0755 "$scenario/reader"
+  chmod 0755 "$scenario/reader" "$scenario/timer-export"
   env PATH="$scenario:$PATH" systemctl probe
   cat >"$reader" <<EOF
 [Service]
 Type=oneshot
 TimeoutStartSec=5s
-ExecStart=$scenario/reader $NEW $scenario
+ExecStart=$scenario/reader $NEW $scenario $legacy_socks5_id
+EOF
+  cat >"$exporter" <<EOF
+[Service]
+Type=oneshot
+TimeoutStartSec=60s
+ExecStart=$scenario/timer-export $NEW $scenario $legacy_socks5_id
+EOF
+  cat >"$timer" <<'EOF'
+[Timer]
+OnActiveSec=100ms
+AccuracySec=1ms
 EOF
   cat >"$target" <<'EOF'
 [Unit]
@@ -495,8 +543,17 @@ EOF
   test -f "$scenario/activation-failed"
   test "$(grep -c '^ok$' "$scenario/start-pre-runs")" -eq 2
   test "$(grep -c '^ok$' "$scenario/oneshot-runs")" -eq 2
+  test "$(cat "$scenario/start-pre-auth")" = $'candidate\noriginal'
+  test "$(cat "$scenario/oneshot-auth")" = $'candidate\noriginal'
   jq -e '[.outbounds[] | select(.type == "socks")] | length == 1 and
     (.[0] | (has("username") or has("password")) | not)' "$scenario/oneshot-export.json" >/dev/null
+  test ! -e "$scenario/timer-exported-candidate"
+  for _ in {1..50}; do
+    [[ -f "$scenario/timer-finished" ]] && break
+    sleep 0.1
+  done
+  test -f "$scenario/timer-finished"
+  cmp -s "$scenario/timer-export.json" "$scenario/oneshot-export.json"
   test -f "$scenario/stop-entered"
   for _ in {1..50}; do
     [[ -f "$scenario/stop-after-client" ]] && break
@@ -511,7 +568,7 @@ EOF
   find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/after"
   diff -u "$scenario/before" "$scenario/after"
 )
-echo 'SOCKS5 rollback: direct and oneshot ExecStartPre readers finish during activation and rollback: PASS'
+echo 'SOCKS5 rollback: synchronous readers finish and timer export waits for rollback: PASS'
 
 # A referenced, stopped unit keeps its start-rate counter. Inject a firewall
 # error only after systemd has started the loopback candidate and it passes verification.
@@ -569,19 +626,33 @@ echo 'SOCKS5 rollback: an inactive unit with StartLimitBurst=1 restarts after fi
   scenario="$(mktemp -d /usr/local/lib/socks5-start-export.XXXXXX)"
   dropin=/etc/systemd/system/shoes.service.d/90-compat-socks5-start-export.conf
   trap 'rm -f "$dropin"; systemctl daemon-reload; rm -rf "$scenario"' EXIT
+  cat >"$scenario/start-reader" <<'SH'
+#!/bin/sh
+set -eu
+test -z "${INVOCATION_ID:-}"
+"$1" info "$3" >"$2/info"
+"$1" url "$3" >"$2/url"
+sed -n 's/^  URL：//p' "$2/info" >"$2/info-url"
+grep -Eq '^socks5://[^[:space:]@]+@example\.com:24436#' "$2/url"
+cmp -s "$2/info-url" "$2/url"
+"$1" export sing-box --profile "$3" --server example.com --output "$2/client.json" >/dev/null
+SH
+  chmod 0755 "$scenario/start-reader"
   cat >"$dropin" <<EOF
 [Service]
 TimeoutStartSec=10s
 ReadWritePaths=$scenario
-ExecStartPost=$NEW export sing-box --profile compat-socks5-legacy --server example.com --output $scenario/client.json
+ExecStartPost=/usr/bin/env -i $scenario/start-reader $NEW $scenario $legacy_socks5_id
 EOF
   systemctl daemon-reload
   "$NEW" socks5 secure compat-socks5-legacy --auth --yes >"$WORK/socks5-start-export.txt" 2>&1
   systemctl is-active --quiet shoes.service
-  "$NEW" export sing-box --profile compat-socks5-legacy --server example.com \
+  "$NEW" export sing-box --profile "$legacy_socks5_id" --server example.com \
     --output "$scenario/expected.json" >/dev/null
+  "$NEW" url "$legacy_socks5_id" >"$scenario/expected-url"
+  cmp -s "$scenario/url" "$scenario/expected-url"
   jq -e '[.outbounds[] | select(.type == "socks")] | length == 1 and
     (.[0] | (.username | length) > 0 and (.password | length) > 0)' "$scenario/client.json" >/dev/null
   cmp -s "$scenario/client.json" "$scenario/expected.json"
 )
-echo 'SOCKS5 authentication: ExecStartPost exports the credentials published after verification: PASS'
+echo 'SOCKS5 authentication: clean-environment ExecStartPost info, URL and export agree with published credentials: PASS'

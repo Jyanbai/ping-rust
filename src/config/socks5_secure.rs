@@ -44,7 +44,9 @@ pub(crate) fn read_info_state(
     service_hook: bool,
 ) -> Result<Option<ManagedState>> {
     if service_hook {
-        let _ = open_live_pending(state_path)?;
+        if let Some(state) = read_pending_hook_state(state_path)? {
+            return Ok(Some(state));
+        }
     } else {
         require_finished(state_path)?;
     }
@@ -58,23 +60,30 @@ pub(crate) fn read_export_state(state_path: &Path, service_hook: bool) -> Result
     if !service_hook {
         return load_state_from(state_path);
     }
+    match read_pending_hook_state(state_path)? {
+        Some(state) => Ok(state),
+        None => load_state_file(state_path),
+    }
+}
+
+fn read_pending_hook_state(state_path: &Path) -> Result<Option<ManagedState>> {
     let Some(pending) = open_live_pending(state_path)? else {
-        return load_state_file(state_path);
+        return Ok(None);
     };
-    // 启动钩子必须导出本次启动读取的配置。回滚启动时聚合配置已恢复，优先使用原状态。
+    // 同步钩子应读取本次启动使用的配置。回滚启动时聚合配置已恢复，优先使用原状态。
     let servers = load_servers(&state_path.with_file_name("config.yaml"))
         .map_err(|_| anyhow::anyhow!("无法读取 SOCKS5 加固期间的聚合配置，请检查 config.yaml"))?;
     if let Ok(published) = load_state_file(state_path) {
         if ensure_servers_match_state(&servers, &published.profiles).is_ok() {
-            return Ok(published);
+            return Ok(Some(published));
         }
     }
     let candidate: ManagedState =
         serde_json::from_reader(pending).context("无法解析待发布的 SOCKS5 加固状态")?;
     ensure_servers_match_state(&servers, &candidate.profiles).map_err(|_| {
-        anyhow::anyhow!("SOCKS5 加固期间的配置与状态不一致，请在加固结束后重试导出")
+        anyhow::anyhow!("SOCKS5 加固期间的配置与状态不一致，请在加固结束后重试读取")
     })?;
-    Ok(candidate)
+    Ok(Some(candidate))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
