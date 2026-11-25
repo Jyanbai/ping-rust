@@ -1207,6 +1207,7 @@ fn read_menu_state<T>(
             SnapshotAccess::Missing | SnapshotAccess::Unreadable(_) => {
                 config::socks5_secure::read_unlocked_snapshot(state_path, load_state)
             }
+            #[cfg(not(target_os = "linux"))]
             SnapshotAccess::Unreadable(error) => Err(error),
             _ => load_state(),
         },

@@ -44,18 +44,17 @@ where
         servers,
         state,
         write_state,
-        |path, write| {
-            let contents = match write {
-                ManagedWrite::Config(contents)
-                | ManagedWrite::RestoreConfig(contents)
-                | ManagedWrite::RestoreState(contents) => contents,
-            };
-            utils::atomic_write(path, contents, 0o600)
+        |path, write| match write {
+            ManagedWrite::Profiles(documents) => write_profile_documents(path, documents),
+            ManagedWrite::Config(contents)
+            | ManagedWrite::RestoreConfig(contents)
+            | ManagedWrite::RestoreState(contents) => utils::atomic_write(path, contents, 0o600),
         },
     )
 }
 
 pub(super) enum ManagedWrite<'a> {
+    Profiles(&'a BTreeMap<String, Vec<u8>>),
     Config(&'a [u8]),
     RestoreConfig(&'a [u8]),
     RestoreState(&'a [u8]),
@@ -78,7 +77,7 @@ pub(super) fn commit_managed_with_writers(
     let aggregate_yaml = aggregate_profile_documents(&documents, &state.profiles)?;
     let runtime_unchanged = old_config.as_deref() == Some(aggregate_yaml.as_bytes());
     let commit = (|| {
-        write_profile_documents(profiles_path, &documents)?;
+        write_snapshot(profiles_path, ManagedWrite::Profiles(&documents))?;
         write_state(state_path, state)?;
         if !runtime_unchanged {
             write_snapshot(config_path, ManagedWrite::Config(aggregate_yaml.as_bytes()))?;
@@ -155,7 +154,25 @@ pub(super) fn write_profile_documents(
     path: &Path,
     documents: &BTreeMap<String, Vec<u8>>,
 ) -> Result<()> {
-    utils::ensure_directory(path, 0o700)?;
+    write_profile_documents_inner(path, documents, None)
+}
+
+pub(super) fn write_profile_documents_with_access(
+    path: &Path,
+    documents: &BTreeMap<String, Vec<u8>>,
+    snapshot: &ProfileDirectorySnapshot,
+) -> Result<()> {
+    write_profile_documents_inner(path, documents, Some(snapshot))
+}
+
+fn write_profile_documents_inner(
+    path: &Path,
+    documents: &BTreeMap<String, Vec<u8>>,
+    snapshot: Option<&ProfileDirectorySnapshot>,
+) -> Result<()> {
+    if !snapshot.is_some_and(ProfileDirectorySnapshot::existed) {
+        utils::ensure_directory(path, 0o700)?;
+    }
     let mut existing = Vec::new();
     for entry in fs::read_dir(path)? {
         let entry = entry?;
@@ -175,7 +192,11 @@ pub(super) fn write_profile_documents(
         existing.push(name);
     }
     for (name, contents) in documents {
-        utils::atomic_write(&path.join(name), contents, 0o600)?;
+        if let Some(snapshot) = snapshot {
+            snapshot.write_profile(path, name, contents)?;
+        } else {
+            utils::atomic_write(&path.join(name), contents, 0o600)?;
+        }
     }
     for name in existing {
         if !documents.contains_key(&name) {
@@ -190,11 +211,7 @@ pub(super) fn profile_documents_are_current(
     path: &Path,
     documents: &BTreeMap<String, Vec<u8>>,
 ) -> Result<bool> {
-    let snapshot = ProfileDirectorySnapshot::capture(path)?;
-    if !snapshot.existed {
-        return Ok(documents.is_empty());
-    }
-    Ok(snapshot.files == *documents)
+    Ok(ProfileDirectorySnapshot::capture(path)?.matches_documents(documents))
 }
 
 pub(super) fn is_managed_profile_file_name(name: &str) -> bool {

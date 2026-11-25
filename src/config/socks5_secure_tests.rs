@@ -574,30 +574,85 @@ fn socks5_secure_preserves_aggregate_posix_acl_through_rollback() {
 }
 
 #[cfg(target_os = "linux")]
+#[test]
+fn socks5_secure_preserves_profile_directory_and_yaml_access_through_rollback() {
+    use std::os::unix::fs::MetadataExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let profile = legacy(directory.path());
+    let profiles = directory.path().join("profiles");
+    let state = load_state_from(&directory.path().join("ping-rust-state.json")).unwrap();
+    let servers = load_servers(&directory.path().join("config.yaml")).unwrap();
+    write_profile_documents(
+        &profiles,
+        &profile_documents(&servers, &state.profiles).unwrap(),
+    )
+    .unwrap();
+    let yaml = profiles.join(profile.config_file_name());
+    let original_yaml = fs::read(&yaml).unwrap();
+    let assert_yaml_acl = delegate_file_read(&yaml);
+    let assert_directory_access = delegate_access(&profiles, "system.posix_acl_access", 7, 5);
+    let assert_directory_default = delegate_access(&profiles, "system.posix_acl_default", 7, 5);
+    let access_metadata = |path: &Path| {
+        let metadata = fs::metadata(path).unwrap();
+        (metadata.uid(), metadata.gid(), metadata.mode())
+    };
+    let original_directory = access_metadata(&profiles);
+    let original_file = access_metadata(&yaml);
+    let assert_access = || {
+        assert_eq!(access_metadata(&profiles), original_directory);
+        assert_eq!(access_metadata(&yaml), original_file);
+        assert_directory_access();
+        assert_directory_default();
+        assert_yaml_acl();
+    };
+
+    let mut plan = SecurePlan::prepare(directory.path(), profile.id, SecureMode::Auth)
+        .unwrap()
+        .unwrap();
+    plan.commit_files().unwrap();
+    let candidate_yaml = fs::read(&yaml).unwrap();
+    assert!(candidate_yaml != original_yaml);
+    plan.rollback_files().unwrap();
+    plan.finish_pending().unwrap();
+    assert!(fs::read(&yaml).unwrap() == original_yaml);
+    assert_access();
+}
+
+#[cfg(target_os = "linux")]
 fn delegate_file_read(path: &Path) -> impl Fn() + '_ {
+    delegate_access(path, "system.posix_acl_access", 6, 4)
+}
+
+#[cfg(target_os = "linux")]
+fn delegate_access<'a>(
+    path: &'a Path,
+    attribute: &'static str,
+    owner_permissions: u16,
+    reader_permissions: u16,
+) -> impl Fn() + 'a {
     use rustix::fs::{getxattr, setxattr, XattrFlags};
     use std::os::unix::fs::MetadataExt;
 
     let owner = fs::metadata(path).unwrap().uid();
     let reader = if owner == 65534 { 65533_u32 } else { 65534_u32 };
-    let name = "system.posix_acl_access";
-    // Linux ACL xattr v2：仅文件所有者可写，另授权一个指定 UID 读取。
+    // Linux ACL xattr v2：仅所有者可写，并为指定 UID 增加访问权限。
     let mut acl = 2_u32.to_le_bytes().to_vec();
     for (tag, permissions, id) in [
-        (1_u16, 6_u16, u32::MAX),
-        (2, 4, reader),
+        (1_u16, owner_permissions, u32::MAX),
+        (2, reader_permissions, reader),
         (4, 0, u32::MAX),
-        (16, 4, u32::MAX),
+        (16, reader_permissions, u32::MAX),
         (32, 0, u32::MAX),
     ] {
         acl.extend(tag.to_le_bytes());
         acl.extend(permissions.to_le_bytes());
         acl.extend(id.to_le_bytes());
     }
-    setxattr(path, name, &acl, XattrFlags::empty()).unwrap();
+    setxattr(path, attribute, &acl, XattrFlags::empty()).unwrap();
     move || {
         let mut current = [0_u8; 44];
-        let len = getxattr(path, name, current.as_mut_slice()).unwrap();
+        let len = getxattr(path, attribute, current.as_mut_slice()).unwrap();
         assert_eq!(&current[..len], acl.as_slice());
     }
 }

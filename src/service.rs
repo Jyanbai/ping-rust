@@ -555,7 +555,7 @@ pub fn is_active() -> Result<bool> {
     systemctl_is_active()
 }
 
-// 只有 systemd 正在等待的 shoes 控制进程及其同步读者可以绕过写锁。
+// 只有 systemd 正在等待的 shoes 启动/控制进程及其同步读者可以绕过写锁。
 // systemd timer 的独立服务也有 INVOCATION_ID，清理环境的钩子则没有它。
 pub(crate) async fn is_shoes_service_hook() -> bool {
     #[cfg(target_os = "linux")]
@@ -573,24 +573,53 @@ async fn shoes_service_hook() -> Option<bool> {
     let cgroup = systemd_cgroup(&cgroups)?;
     let unit = cgroup.rsplit('/').find(|part| part.ends_with(".service"))?;
     let systemctl = Systemctl::SecureTransaction;
-    let control_pid = systemctl
-        .timed_show("ControlPID")
+    let shoes = systemctl
+        .timed(
+            &[
+                "show",
+                "--property=ControlPID",
+                "--property=MainPID",
+                "--property=ActiveState",
+                "--property=SubState",
+                "--property=Type",
+                SERVICE_NAME,
+            ],
+            SECURE_QUERY_TIMEOUT,
+        )
         .await
-        .ok()?
-        .parse::<u32>()
-        .ok()
-        .filter(|pid| *pid != 0)?;
+        .ok()?;
+    let control_pid = unit_pid(&shoes, "ControlPID");
+    // Type=notify 在 READY=1 之前由 MainPID 阻塞启动作业，即使没有 ControlPID。
+    let notify_main = matches!(
+        unit_property(&shoes, "Type"),
+        Some("notify" | "notify-reload")
+    ) && unit_property(&shoes, "ActiveState") == Some("activating")
+        && unit_property(&shoes, "SubState") == Some("start");
+    let main_pid = if notify_main {
+        unit_pid(&shoes, "MainPID")
+    } else {
+        None
+    };
+    let is_waited_on = |pid| {
+        [control_pid, main_pid]
+            .into_iter()
+            .flatten()
+            .any(|ancestor| descends_from(pid, ancestor))
+    };
 
     if unit == SERVICE_NAME {
-        return Some(descends_from(process, control_pid));
+        return Some(is_waited_on(process));
+    }
+    if control_pid.is_none() && main_pid.is_none() {
+        return Some(false);
     }
 
-    // 同步 systemctl 可以是控制进程本身，也可以由 ExecStartPre 脚本派生。
+    // 同步 systemctl 可以是控制进程本身，也可以由启动脚本派生。
     let systemctl_path = utils::command_path("systemctl")?;
     if !fs::read_dir("/proc")
         .ok()?
         .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse::<u32>().ok())
-        .any(|pid| waits_for_unit(pid, &systemctl_path, unit) && descends_from(pid, control_pid))
+        .any(|pid| waits_for_unit(pid, &systemctl_path, unit) && is_waited_on(pid))
     {
         return Some(false);
     }
@@ -608,12 +637,28 @@ async fn shoes_service_hook() -> Option<bool> {
         )
         .await
         .ok()?;
-    Some(target.lines().any(|line| {
-        line.split_once('=')
-            .filter(|(name, _)| matches!(*name, "MainPID" | "ControlPID"))
-            .and_then(|(_, value)| value.parse::<u32>().ok())
-            .is_some_and(|pid| pid > 1 && descends_from(process, pid))
-    }))
+    Some(
+        ["MainPID", "ControlPID"]
+            .into_iter()
+            .filter_map(|key| unit_pid(&target, key))
+            .any(|pid| descends_from(process, pid)),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn unit_property<'a>(properties: &'a str, key: &str) -> Option<&'a str> {
+    properties
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .find_map(|(name, value)| (name == key).then_some(value))
+}
+
+#[cfg(target_os = "linux")]
+fn unit_pid(properties: &str, key: &str) -> Option<u32> {
+    unit_property(properties, key)?
+        .parse()
+        .ok()
+        .filter(|pid| *pid > 1)
 }
 
 #[cfg(target_os = "linux")]

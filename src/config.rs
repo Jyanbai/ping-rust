@@ -4938,17 +4938,18 @@ mod tests {
         fs::write(profiles.join("VLESS-REALITY-443.yaml"), b"new-profile").unwrap();
         fs::write(&certificate, b"certificate").unwrap();
         fs::write(&certificate_key, b"private-key").unwrap();
+        let old_profiles = dir.path().join("old-profiles");
+        fs::create_dir(&old_profiles).unwrap();
+        fs::write(
+            old_profiles.join("VLESS-REALITY-8443.yaml"),
+            b"old-profile\n",
+        )
+        .unwrap();
 
         ManagedRollback {
             config: Some(b"old-config\n".to_vec()),
             state: None,
-            profiles: ProfileDirectorySnapshot {
-                existed: true,
-                files: BTreeMap::from([(
-                    "VLESS-REALITY-8443.yaml".to_owned(),
-                    b"old-profile\n".to_vec(),
-                )]),
-            },
+            profiles: ProfileDirectorySnapshot::capture(&old_profiles).unwrap(),
             generated_certificate: Some(certificate.clone()),
             generated_certificate_key: Some(certificate_key.clone()),
         }

@@ -679,10 +679,32 @@ echo 'SOCKS5 rollback: synchronous readers finish and timer export waits for rol
 Description=Keep shoes.service loaded during SOCKS5 rollback
 Wants=shoes.service
 EOF
-  cat >"$dropin" <<'EOF'
+  cat >"$scenario/start-notify" <<'SH'
+#!/bin/sh
+set -eu
+test "$(systemctl show --property=ControlPID --value shoes.service)" = 0
+url="$("$1" url "$2")"
+case "$url" in
+  socks5://example.com:24436#*) echo original ;;
+  socks5://127.0.0.1:24436#*) echo candidate ;;
+  *) exit 1 ;;
+esac >>"$3/notify-reads"
+systemd-notify --ready
+exec /usr/local/bin/shoes /etc/shoes/config.yaml
+SH
+  chmod 0755 "$scenario/start-notify"
+  cat >"$dropin" <<EOF
 [Unit]
 StartLimitIntervalSec=10min
 StartLimitBurst=1
+
+[Service]
+Type=notify
+NotifyAccess=all
+TimeoutStartSec=10s
+ReadWritePaths=$scenario
+ExecStart=
+ExecStart=$scenario/start-notify $NEW $legacy_socks5_id $scenario
 EOF
   write_failing_socks5_iptables "$scenario"
   systemctl daemon-reload
@@ -690,6 +712,7 @@ EOF
   systemctl is-active --quiet "${target##*/}"
   systemctl is-active --quiet shoes.service
   before_pid="$(systemctl show --property=MainPID --value shoes.service)"
+  : >"$scenario/notify-reads"
   find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/before"
   if PATH="$scenario:$PATH" SOCKS5_ROLLBACK="$scenario" \
     "$NEW" socks5 secure compat-socks5-legacy --local --yes >"$WORK/socks5-start-limit.txt" 2>&1; then
@@ -697,6 +720,7 @@ EOF
     exit 1
   fi
   test -f "$scenario/firewall-reached"
+  test "$(cat "$scenario/notify-reads")" = $'candidate\noriginal'
   systemctl is-active --quiet shoes.service
   test "$(systemctl show --property=MainPID --value shoes.service)" != "$before_pid"
   grep -Fq '原配置、防火墙及服务已恢复并再次验证' "$WORK/socks5-start-limit.txt"
@@ -704,7 +728,11 @@ EOF
   find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/after"
   diff -u "$scenario/before" "$scenario/after"
 )
-echo 'SOCKS5 rollback: an inactive unit with StartLimitBurst=1 restarts after firewall failure: PASS'
+echo 'SOCKS5 rollback: Type=notify reads before READY=1 and restarts with StartLimitBurst=1: PASS'
+
+# Root systemctl can use systemd's private socket. Delegated readers need the system bus.
+apt-get install -y --no-install-recommends dbus
+systemctl start dbus.service
 
 # Confirm a non-root shoes can start with the candidate and again after a
 # post-commit SIGHUP. The wrapper exposes the transition without logging credentials.
@@ -713,18 +741,66 @@ echo 'SOCKS5 rollback: an inactive unit with StartLimitBurst=1 restarts after fi
   scenario="$(mktemp -d /usr/local/lib/socks5-hangup.XXXXXX)"
   config=/etc/shoes/config.yaml
   state=/etc/shoes/ping-rust-state.json
+  profiles=/etc/shoes/profiles
+  readable_profile=$profiles/SOCKS5-24432.yaml
   dropin=/etc/systemd/system/shoes.service.d/90-compat-socks5-hangup.conf
   original_directory_mode="$(stat -c %a /etc/shoes)"
+  original_profiles_mode="$(stat -c %a "$profiles")"
+  original_profiles_owner="$(stat -c %u:%g "$profiles")"
   cp -p "$config" "$scenario/original-config"
-  trap 'rm -f "$dropin"; if [ -f "$scenario/original-state" ]; then cp -p "$scenario/original-state" "$state"; fi; chown --reference="$scenario/original-config" "$config"; chmod "$original_directory_mode" /etc/shoes; "$systemctl_bin" daemon-reload; "$systemctl_bin" restart shoes.service; rm -rf "$scenario"' EXIT
+  cp -p "$state" "$scenario/original-state"
+  cp -p "$readable_profile" "$scenario/original-profile"
+  trap 'rm -f "$dropin"; cp -p "$scenario/original-state" "$state"; chown --reference="$scenario/original-config" "$config"; chmod "$original_directory_mode" /etc/shoes; chown "$original_profiles_owner" "$profiles"; chmod "$original_profiles_mode" "$profiles"; cp -p "$scenario/original-profile" "$readable_profile"; "$systemctl_bin" daemon-reload; "$systemctl_bin" restart shoes.service; rm -rf "$scenario"' EXIT
   mkdir -p "${dropin%/*}"
   chmod 0711 /etc/shoes
+  chmod 0711 "$scenario"
   chown nobody:nogroup "$config"
-  cat >"$dropin" <<'EOF'
+  mkdir "$scenario/exports"
+  chown nobody:nogroup "$scenario/exports"
+  "$NEW" export sing-box --profile "${ids[1]}" --server example.com \
+    --output "$scenario/unchanged-expected.json" >/dev/null
+  cat >"$scenario/export-unchanged" <<'SH'
+#!/bin/sh
+set -eu
+pending=/etc/shoes/.ping-rust-socks5-secure.pending
+test ! -r "$pending"
+"$1" export sing-box --profile "$2" --server example.com --output "$4/unchanged.json" >/dev/null
+if [ -e "$pending" ]; then
+  if "$1" export sing-box --profile "$3" --server example.com \
+       --output "$4/changed.json" >/dev/null 2>"$4/changed-error"; then
+    # A rollback may export the restored profile. The candidate must never reach this branch.
+    jq -e '[.outbounds[] | select(.type == "socks")] | length == 1 and
+      (.[0] | (has("username") or has("password")) | not)' "$4/changed.json" >/dev/null
+  else
+    grep -Fq '请在 SOCKS5 加固结束后重试文件导出' "$4/changed-error"
+    touch "$4/candidate-export-deferred"
+  fi
+fi
+SH
+  chmod 0755 "$scenario/export-unchanged"
+  cat >"$dropin" <<EOF
 [Service]
 User=nobody
 Group=nogroup
+TimeoutStartSec=10s
+ReadWritePaths=$scenario/exports
+ExecStartPost=$scenario/export-unchanged $NEW ${ids[1]} $legacy_socks5_id $scenario/exports
 EOF
+  python3 - "$state" <<'PY'
+import os
+import pwd
+import struct
+import sys
+
+uid = pwd.getpwnam('nobody').pw_uid
+acl = struct.pack('<I', 2) + b''.join(
+    struct.pack('<HHI', tag, mode, user)
+    for tag, mode, user in [(1, 6, 0xffffffff), (2, 4, uid),
+                            (4, 0, 0xffffffff), (16, 4, 0xffffffff),
+                            (32, 0, 0xffffffff)]
+)
+os.setxattr(sys.argv[1], 'system.posix_acl_access', acl, os.XATTR_CREATE)
+PY
   cat >"$scenario/systemctl" <<'SH'
 #!/bin/sh
 set -eu
@@ -746,6 +822,8 @@ SH
   "$systemctl_bin" restart shoes.service
   before_pid="$("$systemctl_bin" show --property=MainPID --value shoes.service)"
   test "$(stat -c %a:%U:%G "$config")" = '600:nobody:nogroup'
+  cmp -s "$scenario/exports/unchanged.json" "$scenario/unchanged-expected.json"
+  rm "$scenario/exports/unchanged.json"
   find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/before"
   python3 - "$NEW" "$scenario" "$systemctl_bin" <<'PY'
 import json
@@ -778,6 +856,10 @@ try:
         time.sleep(0.05)
     assert marker.exists(), 'non-root shoes did not start with the SOCKS5 candidate'
     assert pending.is_file() and config.read_bytes() != original_config
+    assert (scenario / 'exports/unchanged.json').read_bytes() == (
+        scenario / 'unchanged-expected.json').read_bytes()
+    assert (scenario / 'exports/candidate-export-deferred').is_file()
+    assert not (scenario / 'exports/changed.json').exists()
     assert (config.stat().st_uid, config.stat().st_gid, config.stat().st_mode) == (
         original_stat.st_uid, original_stat.st_gid, original_stat.st_mode
     )
@@ -804,25 +886,10 @@ PY
   find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/after"
   diff -u "$scenario/before" "$scenario/after"
 
-  cp -p "$state" "$scenario/original-state"
-  python3 - "$state" <<'PY'
-import os
-import pwd
-import struct
-import sys
-
-uid = pwd.getpwnam('nobody').pw_uid
-acl = struct.pack('<I', 2) + b''.join(
-    struct.pack('<HHI', tag, mode, user)
-    for tag, mode, user in [(1, 6, 0xffffffff), (2, 4, uid),
-                            (4, 0, 0xffffffff), (16, 4, 0xffffffff),
-                            (32, 0, 0xffffffff)]
-)
-os.setxattr(sys.argv[1], 'system.posix_acl_access', acl, os.XATTR_CREATE)
-PY
   test "$(stat -c %a:%U /run/lock/ping-rust.lock)" = '600:root'
-  mkdir "$scenario/exports"
-  chown nobody:nogroup "$scenario/exports"
+  chown root:nogroup "$profiles"
+  chmod 0710 "$profiles"
+  chown nobody:nogroup "$readable_profile"
   cat >"$scenario/start-reader" <<'SH'
 #!/bin/sh
 set -eu
@@ -831,10 +898,8 @@ printf '%s\n' "$info" | grep -Eq 'socks5://example\.com:24436#'
 "$1" export sing-box --profile "$3" --server example.com --output "$4" >/dev/null
 SH
   chmod 0755 "$scenario/start-reader"
-  chmod 0711 "$scenario"
   cat >>"$dropin" <<EOF
-TimeoutStartSec=10s
-ReadWritePaths=$scenario/exports
+ExecStartPre=/usr/bin/test -r $readable_profile
 ExecStartPost=$scenario/start-reader $NEW $legacy_socks5_id ${ids[1]} $scenario/exports/client.json
 EOF
   "$systemctl_bin" daemon-reload
@@ -849,6 +914,8 @@ EOF
   test ! -e /etc/shoes/.ping-rust-socks5-secure.pending
   cmp -s "$state" "$scenario/original-state"
   cmp -s "$scenario/exports/client.json" "$scenario/expected.json"
+  test "$(stat -c %a:%U:%G "$profiles")" = '710:root:nogroup'
+  test "$(stat -c %a:%U:%G "$readable_profile")" = '600:nobody:nogroup'
   echo 'SOCKS5 rollback: required non-root ExecStartPost reads and exports restored state via ACL: PASS'
 )
 echo 'SOCKS5 rollback: post-commit SIGHUP restores configuration and the non-root service: PASS'
@@ -1026,6 +1093,8 @@ PY
     --output "$scenario/expected.json" >/dev/null
   "$NEW" url "$legacy_socks5_id" >"$scenario/expected-url"
   cmp -s "$scenario/url" "$scenario/expected-url"
+  "$OLD" url "$legacy_socks5_id" >"$scenario/v0.2.1-url"
+  cmp -s "$scenario/v0.2.1-url" "$scenario/expected-url"
   # Once the state is published, a normal restart lets the same hook write it.
   systemctl restart shoes.service
   systemctl is-active --quiet shoes.service

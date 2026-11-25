@@ -1844,7 +1844,7 @@ async fn read_profile_snapshot<T>(
             SnapshotAccess::Unreadable(_)
                 if is_service_hook && config::socks5_secure::pending_exists(state_path)? =>
             {
-                // 非 root 同步钩子可从回滚事务锁定的 inode 读取已恢复的状态。
+                // 非 root 同步钩子可读取事务锁定的已发布状态。
                 Ok((read(state_path, true)?, None))
             }
             #[cfg(target_os = "linux")]

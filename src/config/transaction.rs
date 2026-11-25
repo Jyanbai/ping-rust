@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeMap,
     fs,
+    io::{self, Read},
     path::{Path, PathBuf},
 };
 
@@ -19,9 +20,116 @@ pub(super) struct ManagedRollback {
     pub(super) generated_certificate_key: Option<PathBuf>,
 }
 
+#[derive(PartialEq, Eq)]
 pub(super) struct ProfileDirectorySnapshot {
-    pub(super) existed: bool,
-    pub(super) files: BTreeMap<String, Vec<u8>>,
+    directory: Option<FileAccess>,
+    files: BTreeMap<String, ProfileDocumentSnapshot>,
+}
+
+#[derive(PartialEq, Eq)]
+struct ProfileDocumentSnapshot {
+    contents: Vec<u8>,
+    access: FileAccess,
+}
+
+#[derive(PartialEq, Eq)]
+pub(super) struct FileAccess {
+    permissions: fs::Permissions,
+    #[cfg(unix)]
+    uid: u32,
+    #[cfg(unix)]
+    gid: u32,
+    #[cfg(target_os = "linux")]
+    acl: Option<Vec<u8>>,
+    #[cfg(target_os = "linux")]
+    default_acl: Option<Vec<u8>>,
+}
+
+impl FileAccess {
+    pub(super) fn capture(file: &fs::File) -> io::Result<Self> {
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+
+        let metadata = file.metadata()?;
+        Ok(Self {
+            permissions: metadata.permissions(),
+            #[cfg(unix)]
+            uid: metadata.uid(),
+            #[cfg(unix)]
+            gid: metadata.gid(),
+            #[cfg(target_os = "linux")]
+            acl: read_acl(file, ACCESS_ACL)?,
+            #[cfg(target_os = "linux")]
+            default_acl: if metadata.is_dir() {
+                read_acl(file, DEFAULT_ACL)?
+            } else {
+                None
+            },
+        })
+    }
+
+    pub(super) fn apply(&self, file: &fs::File) -> io::Result<()> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{fchown, MetadataExt};
+
+            let metadata = file.metadata()?;
+            if (metadata.uid(), metadata.gid()) != (self.uid, self.gid) {
+                fchown(file, Some(self.uid), Some(self.gid))?;
+            }
+        }
+        file.set_permissions(self.permissions.clone())?;
+        #[cfg(target_os = "linux")]
+        {
+            write_acl(file, ACCESS_ACL, self.acl.as_deref())?;
+            if file.metadata()?.is_dir() {
+                write_acl(file, DEFAULT_ACL, self.default_acl.as_deref())?;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+const ACCESS_ACL: &str = "system.posix_acl_access";
+#[cfg(target_os = "linux")]
+const DEFAULT_ACL: &str = "system.posix_acl_default";
+
+#[cfg(target_os = "linux")]
+fn read_acl(file: &fs::File, name: &str) -> io::Result<Option<Vec<u8>>> {
+    use rustix::{
+        fs::{fgetxattr, fgetxattr_query},
+        io::Errno,
+    };
+
+    let size = match fgetxattr_query(file, name) {
+        Ok(size) => size,
+        Err(Errno::NODATA | Errno::OPNOTSUPP) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let mut value = vec![0; size];
+    let len = fgetxattr(file, name, value.as_mut_slice())?;
+    value.truncate(len);
+    Ok(Some(value))
+}
+
+#[cfg(target_os = "linux")]
+fn write_acl(file: &fs::File, name: &str, acl: Option<&[u8]>) -> io::Result<()> {
+    use rustix::{
+        fs::{fremovexattr, fsetxattr, XattrFlags},
+        io::Errno,
+    };
+
+    if let Some(acl) = acl {
+        fsetxattr(file, name, acl, XattrFlags::empty())?;
+    } else {
+        // 清除新路径可能从父目录继承的 ACL。
+        match fremovexattr(file, name) {
+            Ok(()) | Err(Errno::NODATA | Errno::OPNOTSUPP) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
 }
 
 impl GenerationResult {
@@ -145,6 +253,17 @@ impl ManagedRollback {
 }
 
 impl ProfileDirectorySnapshot {
+    pub(super) fn existed(&self) -> bool {
+        self.directory.is_some()
+    }
+
+    pub(super) fn matches_documents(&self, documents: &BTreeMap<String, Vec<u8>>) -> bool {
+        self.files
+            .iter()
+            .map(|(name, snapshot)| (name, &snapshot.contents))
+            .eq(documents)
+    }
+
     pub(super) fn capture(path: &Path) -> Result<Self> {
         let metadata = match fs::symlink_metadata(path) {
             Ok(metadata) => Some(metadata),
@@ -155,13 +274,21 @@ impl ProfileDirectorySnapshot {
         };
         let Some(metadata) = metadata else {
             return Ok(Self {
-                existed: false,
+                directory: None,
                 files: BTreeMap::new(),
             });
         };
         if !metadata.is_dir() || metadata.file_type().is_symlink() {
             bail!("节点目录不是普通目录：{}", path.display());
         }
+        #[cfg(unix)]
+        let directory = fs::File::open(path)
+            .and_then(|file| FileAccess::capture(&file))
+            .with_context(|| format!("备份节点目录 {} 的访问权限失败", path.display()))?;
+        #[cfg(not(unix))]
+        let directory = FileAccess {
+            permissions: metadata.permissions(),
+        };
         let mut files = BTreeMap::new();
         for entry in
             fs::read_dir(path).with_context(|| format!("读取节点目录 {} 失败", path.display()))?
@@ -177,16 +304,34 @@ impl ProfileDirectorySnapshot {
                 .file_name()
                 .into_string()
                 .map_err(|_| anyhow!("节点文件名不是 UTF-8：{}", entry.path().display()))?;
-            files.insert(
-                name,
-                fs::read(entry.path())
-                    .with_context(|| format!("读取节点文件 {} 失败", entry.path().display()))?,
-            );
+            let mut file = fs::File::open(entry.path())
+                .with_context(|| format!("打开节点文件 {} 失败", entry.path().display()))?;
+            let mut contents = Vec::new();
+            file.read_to_end(&mut contents)
+                .with_context(|| format!("读取节点文件 {} 失败", entry.path().display()))?;
+            let access = FileAccess::capture(&file).with_context(|| {
+                format!("备份节点文件 {} 的访问权限失败", entry.path().display())
+            })?;
+            files.insert(name, ProfileDocumentSnapshot { contents, access });
         }
         Ok(Self {
-            existed: true,
+            directory: Some(directory),
             files,
         })
+    }
+
+    pub(super) fn write_profile(
+        &self,
+        directory: &Path,
+        name: &str,
+        contents: &[u8],
+    ) -> Result<()> {
+        let path = directory.join(name);
+        if let Some(snapshot) = self.files.get(name) {
+            utils::atomic_write_with(&path, contents, |file| snapshot.access.apply(file))
+        } else {
+            utils::atomic_write(&path, contents, 0o600)
+        }
     }
 
     pub(super) fn restore(self, path: &Path) -> Result<()> {
@@ -200,14 +345,20 @@ impl ProfileDirectorySnapshot {
                     .with_context(|| format!("清理节点路径 {} 失败", path.display()))?;
             }
         }
-        if !self.existed {
+        let Some(directory) = &self.directory else {
             return Ok(());
-        }
+        };
         utils::ensure_directory(path, 0o700)?;
-        for (name, contents) in self.files {
-            utils::atomic_write(&path.join(name), &contents, 0o600)?;
+        for (name, snapshot) in &self.files {
+            utils::atomic_write_with(&path.join(name), &snapshot.contents, |file| {
+                snapshot.access.apply(file)
+            })?;
         }
-        Ok(())
+        #[cfg(unix)]
+        let restored = fs::File::open(path).and_then(|file| directory.apply(&file));
+        #[cfg(not(unix))]
+        let restored = fs::set_permissions(path, directory.permissions.clone());
+        restored.with_context(|| format!("恢复节点目录 {} 的访问权限失败", path.display()))
     }
 }
 

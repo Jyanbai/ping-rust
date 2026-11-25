@@ -3,13 +3,12 @@ use std::{io::Read, net::SocketAddr, time::Duration};
 
 use fs2::FileExt;
 
+use super::transaction::FileAccess;
 use super::*;
 
 const DRY_RUN_TIMEOUT: Duration = Duration::from_secs(15);
 const PENDING_STATE: &str = ".ping-rust-socks5-secure.pending";
 const UNFINISHED: &str = "上次 SOCKS5 加固未完成。请检查 shoes.service 和防火墙，从备份恢复一致的 config.yaml、profiles 和 ping-rust-state.json，验证服务后再移除 .ping-rust-socks5-secure.pending";
-#[cfg(target_os = "linux")]
-const ACCESS_ACL: &str = "system.posix_acl_access";
 #[cfg(target_os = "linux")]
 const RETRY_READ: &str =
     "请在 SOCKS5 加固结束后重试读取；若此提示持续出现，请由管理员检查加固事务状态";
@@ -96,7 +95,7 @@ pub(crate) fn load_for_plan(state_path: &Path) -> Result<ManagedState> {
 
 enum PendingHook {
     Candidate(fs::File),
-    Restored,
+    PublishedOnly,
 }
 
 fn open_live_pending(state_path: &Path) -> Result<Option<PendingHook>> {
@@ -104,11 +103,10 @@ fn open_live_pending(state_path: &Path) -> Result<Option<PendingHook>> {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
-            // 非 root 钩子无法读取私有标记。回滚持有已恢复状态 inode 的锁，
-            // 以此证明事务仍在运行，同时保持候选状态文件的权限不变。
-            let restored = fs::File::open(state_path).context("无法读取已发布的管理状态")?;
-            require_live_lock(&restored)?;
-            return Ok(Some(PendingHook::Restored));
+            // 同步钩子可以通过已发布状态 inode 上的锁确认事务仍在运行。
+            let published = fs::File::open(state_path).context("无法读取已发布的管理状态")?;
+            require_live_lock(&published)?;
+            return Ok(Some(PendingHook::PublishedOnly));
         }
         Err(error) => return Err(error).context("无法读取 SOCKS5 加固事务状态"),
     };
@@ -187,7 +185,29 @@ fn read_pending_hook_state(state_path: &Path, read: HookRead) -> Result<Option<M
         return Ok(published);
     }
     let PendingHook::Candidate(pending) = pending else {
-        bail!("已恢复的 SOCKS5 配置与状态不一致，请检查 config.yaml 和 ping-rust-state.json");
+        if let (HookRead::FileExport(selector), Some(published)) = (read, published) {
+            let selected = crate::client::select_export_profile(&published.profiles, selector)?;
+            // 两种加固模式都会改变目标 SOCKS5 的监听或认证。用相同位置的
+            // 聚合配置核对导出节点，仅导出仍与已发布状态一致的节点。
+            if servers.len() == published.profiles.len()
+                && servers
+                    .iter()
+                    .zip(&published.profiles)
+                    .find(|(_, profile)| profile.id == selected.id)
+                    .is_some_and(|(server, profile)| {
+                        ensure_servers_match_state(
+                            std::slice::from_ref(server),
+                            std::slice::from_ref(profile),
+                        )
+                        .is_ok()
+                    })
+            {
+                return Ok(Some(published));
+            }
+        } else {
+            bail!("SOCKS5 加固期间的配置与已发布状态不一致，请在加固结束后重试读取");
+        }
+        bail!("启动钩子无法将待验证的配置写入客户端文件，请在 SOCKS5 加固结束后重试文件导出");
     };
     let candidate: ManagedState =
         serde_json::from_reader(pending).context("无法解析待发布的 SOCKS5 加固状态")?;
@@ -224,7 +244,7 @@ pub(crate) struct SecurePlan {
     rollback: Option<SecureRollback>,
     pending: Option<fs::File>,
     #[cfg(target_os = "linux")]
-    restored_state_lock: Option<fs::File>,
+    state_lock: Option<fs::File>,
 }
 
 struct SecureRollback {
@@ -272,11 +292,9 @@ impl FileLink {
 
 struct FileSnapshot {
     contents: Vec<u8>,
-    metadata: fs::Metadata,
+    access: FileAccess,
     #[cfg(unix)]
     link: Option<FileLink>,
-    #[cfg(target_os = "linux")]
-    acl: Option<Vec<u8>>,
 }
 
 impl FileSnapshot {
@@ -287,11 +305,9 @@ impl FileSnapshot {
         file.read_to_end(&mut contents)?;
         Ok(Self {
             contents,
-            metadata: file.metadata()?,
+            access: FileAccess::capture(file).context("无法读取文件访问权限")?,
             #[cfg(unix)]
             link: FileLink::capture(path).context("无法备份软链接")?,
-            #[cfg(target_os = "linux")]
-            acl: access_acl(file).context("无法读取文件 ACL")?,
         })
     }
 
@@ -314,42 +330,11 @@ impl FileSnapshot {
     }
 
     fn write(&self, path: &Path, contents: &[u8]) -> Result<()> {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::{fchown, MetadataExt};
-            utils::atomic_write_with(path, contents, |file| {
-                let owner = &self.metadata;
-                let temporary = file.metadata()?;
-                if (temporary.uid(), temporary.gid()) != (owner.uid(), owner.gid()) {
-                    fchown(file, Some(owner.uid()), Some(owner.gid()))?;
-                }
-                file.set_permissions(owner.permissions())?;
-                #[cfg(target_os = "linux")]
-                match &self.acl {
-                    Some(acl) => rustix::fs::fsetxattr(
-                        file,
-                        ACCESS_ACL,
-                        acl,
-                        rustix::fs::XattrFlags::empty(),
-                    )?,
-                    // 清除临时文件可能从父目录继承的 ACL。
-                    None => match rustix::fs::fremovexattr(file, ACCESS_ACL) {
-                        Ok(()) | Err(rustix::io::Errno::NODATA | rustix::io::Errno::OPNOTSUPP) => {}
-                        Err(error) => return Err(error.into()),
-                    },
-                }
-                Ok(())
-            })
-        }
-        #[cfg(not(unix))]
-        utils::atomic_write(path, contents, 0o600)
+        utils::atomic_write_with(path, contents, |file| self.access.apply(file))
     }
 
     fn restored(&self, path: &Path) -> bool {
         let Ok(file) = fs::File::open(path) else {
-            return false;
-        };
-        let Ok(metadata) = file.metadata() else {
             return false;
         };
         #[cfg(unix)]
@@ -369,22 +354,9 @@ impl FileSnapshot {
             if !entry_restored {
                 return false;
             }
-            if (metadata.uid(), metadata.gid(), metadata.mode())
-                != (
-                    self.metadata.uid(),
-                    self.metadata.gid(),
-                    self.metadata.mode(),
-                )
-            {
-                return false;
-            }
-        }
-        #[cfg(target_os = "linux")]
-        if !access_acl(&file).is_ok_and(|acl| acl == self.acl) {
-            return false;
         }
         let mut contents = Vec::new();
-        metadata.permissions() == self.metadata.permissions()
+        FileAccess::capture(&file).is_ok_and(|access| access == self.access)
             && (&file).read_to_end(&mut contents).is_ok()
             && contents == self.contents
     }
@@ -393,24 +365,6 @@ impl FileSnapshot {
         let contents = serde_json::to_vec_pretty(state).context("序列化管理状态失败")?;
         self.write(path, &contents)
     }
-}
-
-#[cfg(target_os = "linux")]
-fn access_acl(file: &fs::File) -> std::io::Result<Option<Vec<u8>>> {
-    use rustix::{
-        fs::{fgetxattr, fgetxattr_query},
-        io::Errno,
-    };
-
-    let size = match fgetxattr_query(file, ACCESS_ACL) {
-        Ok(size) => size,
-        Err(Errno::NODATA | Errno::OPNOTSUPP) => return Ok(None),
-        Err(error) => return Err(error.into()),
-    };
-    let mut value = vec![0; size];
-    let len = fgetxattr(file, ACCESS_ACL, value.as_mut_slice())?;
-    value.truncate(len);
-    Ok(Some(value))
 }
 
 impl SecurePlan {
@@ -492,7 +446,7 @@ impl SecurePlan {
             rollback: None,
             pending: None,
             #[cfg(target_os = "linux")]
-            restored_state_lock: None,
+            state_lock: None,
         }))
     }
 
@@ -598,7 +552,10 @@ impl SecurePlan {
                 .map_err(|error| error.error)
                 .context("无法保存 SOCKS5 加固事务状态")?,
         );
-        // 先持有原 inode 的独占锁，再让 pending 标记保护后续替换出的状态文件。
+        // 候选及回滚启动期间保留当前状态 inode 的独占锁，供委派钩子确认事务存活。
+        #[cfg(target_os = "linux")]
+        let mut state_lock = original_state_file;
+        #[cfg(not(target_os = "linux"))]
         drop(original_state_file);
         let commit = commit::commit_managed_with_writers(
             &config,
@@ -607,10 +564,22 @@ impl SecurePlan {
             &self.servers,
             &self.state,
             |path, _| match original_state {
-                Some(original_state) => rollback.state.save_state(path, &original_state),
+                Some(original_state) => {
+                    rollback.state.save_state(path, &original_state)?;
+                    #[cfg(target_os = "linux")]
+                    {
+                        let state = fs::File::open(path).context("无法打开已迁移的管理状态")?;
+                        FileExt::try_lock_exclusive(&state).context("无法锁定已迁移的管理状态")?;
+                        state_lock = state;
+                    }
+                    Ok(())
+                }
                 None => Ok(()),
             },
             |path, write| match write {
+                commit::ManagedWrite::Profiles(documents) => {
+                    commit::write_profile_documents_with_access(path, documents, &rollback.profiles)
+                }
                 commit::ManagedWrite::Config(contents) => rollback.config.write(path, contents),
                 commit::ManagedWrite::RestoreConfig(contents) => {
                     rollback.config.restore(path, contents)
@@ -624,16 +593,18 @@ impl SecurePlan {
             // 提交函数已尝试回滚。确认原文件都在，再允许后续读写。
             let restored = rollback.config.restored(&config)
                 && rollback.state.restored(&state)
-                && ProfileDirectorySnapshot::capture(&profiles).is_ok_and(|snapshot| {
-                    snapshot.existed == rollback.profiles.existed
-                        && snapshot.files == rollback.profiles.files
-                });
+                && ProfileDirectorySnapshot::capture(&profiles)
+                    .is_ok_and(|snapshot| snapshot == rollback.profiles);
             if restored {
                 if let Err(cleanup) = self.finish_pending() {
                     return Err(error.context(format!("清理 SOCKS5 加固事务状态失败：{cleanup:#}")));
                 }
             }
             return Err(error);
+        }
+        #[cfg(target_os = "linux")]
+        {
+            self.state_lock = Some(state_lock);
         }
         self.rollback = Some(rollback);
         Ok(())
@@ -660,7 +631,7 @@ impl SecurePlan {
             self.pending = None;
             #[cfg(target_os = "linux")]
             {
-                self.restored_state_lock = None;
+                self.state_lock = None;
             }
         }
         Ok(())
@@ -695,10 +666,11 @@ impl SecurePlan {
         }
         #[cfg(target_os = "linux")]
         {
+            self.state_lock = None;
             let state = fs::File::open(self.directory.join("ping-rust-state.json"))
                 .context("无法打开已恢复的管理状态")?;
             FileExt::try_lock_exclusive(&state).context("无法锁定已恢复的管理状态")?;
-            self.restored_state_lock = Some(state);
+            self.state_lock = Some(state);
         }
         Ok(())
     }
