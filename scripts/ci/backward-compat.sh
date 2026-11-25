@@ -321,6 +321,21 @@ SH
   chmod 0755 "$1/iptables"
 }
 
+# Inject a unit change at the first restart, after the loaded command has passed preflight.
+write_socks5_restart_override() {
+  cat >"$1/systemctl" <<'SH'
+#!/bin/sh
+set -eu
+override="${0%/*}/restart.conf"
+if [ "$1" = restart ] && [ -f "$override" ]; then
+  mv "$override" "$SOCKS5_RESTART_DROPIN"
+  "$SOCKS5_SYSTEMCTL" daemon-reload
+fi
+exec "$SOCKS5_SYSTEMCTL" "$@"
+SH
+  chmod 0755 "$1/systemctl"
+}
+
 # The running unit can still be using a configuration with a narrower listener.
 (
   scenario="$(mktemp -d /usr/local/lib/socks5-listener-drift.XXXXXX)"
@@ -623,9 +638,41 @@ EOF
 )
 echo 'SOCKS5-only auth: reject an alternate config with different UDP settings before restart: PASS'
 
-# The override takes effect on restart, after preflight checks the original process.
+# A daemon-reload can change the next ExecStart while the original process
+# still owns all managed listeners.
+(
+  scenario="$(mktemp -d /usr/local/lib/socks5-next-start.XXXXXX)"
+  dropin=/etc/systemd/system/shoes.service.d/90-compat-socks5-next-start.conf
+  trap 'rm -f "$dropin"; systemctl daemon-reload; systemctl restart shoes.service; rm -rf "$scenario"' EXIT
+  umask 077
+  sed 's/0\.0\.0\.0:24431/0.0.0.0:24437/' /etc/shoes/config.yaml >"$scenario/config.yaml"
+  before_pid="$(systemctl show --property=MainPID --value shoes.service)"
+  cat >"$dropin" <<EOF
+[Service]
+ExecStart=
+ExecStart=/usr/local/bin/shoes $scenario/config.yaml
+EOF
+  systemctl daemon-reload
+  test "$(systemctl show --property=MainPID --value shoes.service)" = "$before_pid"
+  ss -H -ltn 'sport = :24431' | grep -Fq '0.0.0.0:24431'
+  find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/before"
+  if "$NEW" socks5 secure "$legacy_socks5_id" --auth --yes >"$scenario/result" 2>&1; then
+    echo 'Expected SOCKS5 hardening to reject the loaded ExecStart override' >&2
+    exit 1
+  fi
+  grep -Fq 'shoes.service 的 ExecStart 未直接使用受管聚合配置' "$scenario/result"
+  test "$(systemctl show --property=MainPID --value shoes.service)" = "$before_pid"
+  systemctl is-active --quiet shoes.service
+  ss -H -ltn 'sport = :24431' | grep -Fq '0.0.0.0:24431'
+  find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/after"
+  diff -u "$scenario/before" "$scenario/after"
+)
+echo 'SOCKS5 auth: reject an alternate ExecStart loaded for the next restart: PASS'
+
+# Inject drift after preflight so this still exercises verification and rollback.
 check_other_auth_after_restart() (
   kind="$1"
+  systemctl_bin="$(command -v systemctl)"
   scenario="$(mktemp -d /usr/local/lib/socks5-restart-auth.XXXXXX)"
   dropin=/etc/systemd/system/shoes.service.d/90-compat-socks5-restart-auth.conf
   trap 'rm -f "$dropin"; systemctl daemon-reload; rm -rf "$scenario"' EXIT
@@ -662,15 +709,16 @@ fi
 exec /usr/local/bin/shoes "$config"
 SH
   chmod 0700 "$scenario/start"
-  cat >"$dropin" <<EOF
+  cat >"$scenario/restart.conf" <<EOF
 [Service]
 ExecStart=
 ExecStart=$scenario/start $scenario/config.yaml
 EOF
-  systemctl daemon-reload
+  write_socks5_restart_override "$scenario"
   before_pid="$(systemctl show --property=MainPID --value shoes.service)"
   find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/before"
-  if "$NEW" socks5 secure "$legacy_socks5_id" --local --yes >"$scenario/result" 2>&1; then
+  if PATH="$scenario:$PATH" SOCKS5_SYSTEMCTL="$systemctl_bin" SOCKS5_RESTART_DROPIN="$dropin" \
+    "$NEW" socks5 secure "$legacy_socks5_id" --local --yes >"$scenario/result" 2>&1; then
     echo 'Expected SOCKS5 local hardening to reject authentication drift on another node after restart' >&2
     exit 1
   fi
@@ -818,12 +866,14 @@ echo 'SOCKS5 preflight: PID signals, process-group SIGINT and timeout clean up d
   dependency_unit="${dependency##*/}"
   notify=/run/systemd/system/compat-socks5-required-notify.service
   notify_unit="${notify##*/}"
+  forking=/run/systemd/system/compat-socks5-required-forking.service
+  forking_unit="${forking##*/}"
   dependency_dropin=$dropin/90-compat-socks5-required-export.conf
   companion=/run/systemd/system/compat-socks5-start-companion.service
   timer=/run/systemd/system/compat-socks5-timer-export.timer
   exporter="${timer%.timer}.service"
   mkdir -p "$dropin"
-  trap '"$systemctl_bin" stop "${target##*/}" "$reader_unit" "$dependency_unit" "$notify_unit" "${companion##*/}" "${timer##*/}" "${exporter##*/}" || true; rm -f "$dropin/90-compat-socks5-rollback.conf" "$dependency_dropin" "$target" "$reader" "$dependency" "$notify" "$companion" "$timer" "$exporter"; "$systemctl_bin" daemon-reload; rm -rf "$scenario"' EXIT
+  trap '"$systemctl_bin" stop "${target##*/}" "$reader_unit" "$dependency_unit" "$notify_unit" "$forking_unit" "${companion##*/}" "${timer##*/}" "${exporter##*/}" || true; rm -f "$dropin/90-compat-socks5-rollback.conf" "$dependency_dropin" "$target" "$reader" "$dependency" "$notify" "$forking" "$companion" "$timer" "$exporter"; "$systemctl_bin" daemon-reload; rm -rf "$scenario"' EXIT
   cat >"$scenario/systemctl" <<'SH'
 #!/bin/sh
 case "$1" in
@@ -961,6 +1011,26 @@ NotifyAccess=all
 TimeoutStartSec=5s
 ExecStart=$scenario/notify-dependency $NEW ${ids[1]} $scenario $notify_unit
 EOF
+  cat >"$scenario/forking-dependency" <<'SH'
+#!/bin/sh
+set -eu
+test "$(systemctl show --property=ControlPID --value "$4")" = "$$"
+"$1" export sing-box --profile "$2" --server example.com --output "$3/forking-export.json" >/dev/null
+cmp -s "$3/dependency-expected.json" "$3/forking-export.json"
+echo ok >>"$3/forking-dependency-runs"
+sleep infinity &
+echo "$!" >"$3/forking.pid"
+SH
+  chmod 0755 "$scenario/forking-dependency"
+  cat >"$forking" <<EOF
+[Unit]
+PartOf=shoes.service
+[Service]
+Type=forking
+PIDFile=$scenario/forking.pid
+TimeoutStartSec=5s
+ExecStart=$scenario/forking-dependency $NEW ${ids[1]} $scenario $forking_unit
+EOF
   cat >"$companion" <<'EOF'
 [Service]
 Type=oneshot
@@ -1003,8 +1073,8 @@ EOF
   # Install the ordered dependency after the initial start. Both restarts must run it.
   cat >"$dependency_dropin" <<EOF
 [Unit]
-Requires=$dependency_unit $notify_unit
-After=$dependency_unit $notify_unit
+Requires=$dependency_unit $notify_unit $forking_unit
+After=$dependency_unit $notify_unit $forking_unit
 EOF
   "$systemctl_bin" daemon-reload
   before_pid="$("$systemctl_bin" show --property=MainPID --value shoes.service)"
@@ -1017,6 +1087,7 @@ EOF
   test -f "$scenario/activation-failed" || { echo 'SOCKS5 rollback did not reach the injected activation failure' >&2; exit 1; }
   test "$(grep -c '^ok$' "$scenario/dependency-runs")" -eq 2
   test "$(grep -c '^ok$' "$scenario/notify-dependency-runs")" -eq 2
+  test "$(grep -c '^ok$' "$scenario/forking-dependency-runs")" -eq 2
   test "$(grep -c '^ok$' "$scenario/start-pre-runs")" -eq 2
   test "$(grep -c '^ok$' "$scenario/oneshot-runs")" -eq 2
   test "$(grep -c '^ok$' "$scenario/oneshot-wrapper-runs")" -eq 2
@@ -1051,11 +1122,13 @@ EOF
 echo 'SOCKS5 rollback: synchronous readers finish and timer export waits for rollback: PASS'
 echo 'SOCKS5 rollback: ordered startup dependency exports during candidate and restored starts: PASS'
 echo 'SOCKS5 rollback: ordered Type=notify dependency exports before READY=1 on both starts: PASS'
+echo 'SOCKS5 rollback: ordered Type=forking dependency exports before forking on both starts: PASS'
 echo 'SOCKS5 rollback: candidate credentials are withheld from redirected export stdout: PASS'
 
 # A referenced, stopped unit keeps its start-rate counter. Inject a firewall
 # error only after systemd has started the loopback candidate and it passes verification.
 (
+  systemctl_bin="$(command -v systemctl)"
   scenario="$(mktemp -d /usr/local/lib/socks5-start-limit.XXXXXX)"
   dropin=/etc/systemd/system/shoes.service.d/90-compat-socks5-start-limit.conf
   target=/run/systemd/system/compat-socks5-rollback.target
@@ -1100,8 +1173,24 @@ if [ ! -s "$3/notify-reads" ]; then
   cmp -s "$3/stop-expected-url" "$3/stop-url"
   "$1" export sing-box --profile "$2" --server example.com --output "$3/stop-client.json" >/dev/null
 else
-  "$1" url "$2" >"$3/stop-candidate-url"
-  grep -Eq '^socks5://127\.0\.0\.1:24436#' "$3/stop-candidate-url"
+  "$1" url "$4" >"$3/stop-other-url"
+  cmp -s "$3/stop-other-expected-url" "$3/stop-other-url"
+  if "$1" url "$2" >"$3/stop-candidate-url" 2>"$3/stop-candidate-url-error"; then
+    mv "$3/stop-candidate-url" "$3/stop-url"
+    exit 1
+  fi
+  grep -Fq '请在加固结束后重试读取' "$3/stop-candidate-url-error"
+  test ! -s "$3/stop-candidate-url"
+  if "$1" qr "$2" >"$3/stop-candidate-qr" 2>"$3/stop-candidate-qr-error"; then
+    exit 1
+  fi
+  grep -Fq '请在加固结束后重试读取' "$3/stop-candidate-qr-error"
+  test ! -s "$3/stop-candidate-qr"
+  if "$1" info "$2" >"$3/stop-candidate-info" 2>"$3/stop-candidate-info-error"; then
+    exit 1
+  fi
+  grep -Fq '请在加固结束后重试读取' "$3/stop-candidate-info-error"
+  if grep -Eq '^配置数量：|^  URL：' "$3/stop-candidate-info"; then exit 1; fi
   if "$1" export sing-box --profile "$2" --server 127.0.0.1 \
     --output "$3/stop-candidate-client.json" >/dev/null 2>"$3/stop-candidate-error"; then
     exit 1
@@ -1118,16 +1207,20 @@ StartLimitIntervalSec=10min
 StartLimitBurst=1
 
 [Service]
-Type=notify
-NotifyAccess=all
 TimeoutStartSec=10s
 ReadWritePaths=$scenario
-ExecStart=
-ExecStart=$scenario/start-notify $NEW $legacy_socks5_id $scenario
 ExecStartPre=+systemctl --quiet start ${stop_reader##*/}
 ExecStop=+systemctl --quiet stop ${stop_reader##*/}
-ExecStop=$scenario/stop-export $NEW $legacy_socks5_id $scenario
+ExecStop=$scenario/stop-export $NEW $legacy_socks5_id $scenario ${ids[1]}
 EOF
+  cp "$dropin" "$scenario/restart.conf"
+  cat >>"$scenario/restart.conf" <<EOF
+Type=notify
+NotifyAccess=all
+ExecStart=
+ExecStart=$scenario/start-notify $NEW $legacy_socks5_id $scenario
+EOF
+  write_socks5_restart_override "$scenario"
   write_failing_socks5_iptables "$scenario"
   systemctl daemon-reload
   systemctl start "${target##*/}"
@@ -1135,11 +1228,13 @@ EOF
   systemctl is-active --quiet shoes.service
   before_pid="$(systemctl show --property=MainPID --value shoes.service)"
   "$NEW" url "$legacy_socks5_id" --server-address example.com >"$scenario/stop-expected-url"
+  "$NEW" url "${ids[1]}" >"$scenario/stop-other-expected-url"
   "$NEW" export sing-box --profile "$legacy_socks5_id" --server example.com \
     --output "$scenario/stop-expected-client.json" >/dev/null
   : >"$scenario/notify-reads"
   find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/before"
   if PATH="$scenario:$PATH" SOCKS5_ROLLBACK="$scenario" \
+    SOCKS5_SYSTEMCTL="$systemctl_bin" SOCKS5_RESTART_DROPIN="$dropin" \
     "$NEW" socks5 secure compat-socks5-legacy --local --yes >"$WORK/socks5-start-limit.txt" 2>&1; then
     echo 'Expected SOCKS5 firewall change to fail' >&2
     exit 1
@@ -1159,7 +1254,7 @@ EOF
 )
 echo 'SOCKS5 rollback: Type=notify reads before READY=1 and restarts with StartLimitBurst=1: PASS'
 echo 'SOCKS5 local: ExecStop exports the original public URL before the candidate starts: PASS'
-echo 'SOCKS5 rollback: candidate ExecStop sees its loopback URL and defers the changed file export: PASS'
+echo 'SOCKS5 rollback: candidate ExecStop defers the changed URL, QR, info and file export: PASS'
 echo 'SOCKS5 rollback: ExecStop synchronously stops a root unit that exports unchanged state: PASS'
 
 # Root systemctl can use systemd's private socket. Delegated readers need the system bus.

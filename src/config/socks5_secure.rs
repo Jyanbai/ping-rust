@@ -224,7 +224,7 @@ fn read_pending_hook_state(
         return Ok(None);
     };
     if let ShoesServiceHook::Stop(invocation) = hook {
-        return read_stop_hook_state(state_path, pending, invocation, read).map(Some);
+        return read_stop_hook_state(state_path, invocation, read).map(Some);
     }
     let PendingHook::Candidate(pending) = pending else {
         // 仅有 state 读取权限时，通过事务标记确认启动的是候选还是已恢复配置。
@@ -253,7 +253,6 @@ fn read_pending_hook_state(
 
 fn read_stop_hook_state(
     state_path: &Path,
-    pending: PendingHook,
     invocation: Option<Uuid>,
     read: HookRead<'_>,
 ) -> Result<ManagedState> {
@@ -264,17 +263,11 @@ fn read_stop_hook_state(
         StopView::RollingBack { candidate } => candidate == Some(invocation),
         StopView::Unavailable => bail!("无法确认停止钩子对应的 shoes.service 实例"),
     };
-    if !uses_candidate {
-        return load_state_file(state_path);
-    }
-    // 回滚已恢复磁盘配置时，停止的仍可能是候选实例。
-    match pending {
-        PendingHook::Candidate(pending) => read_candidate_for_hook(
-            read_candidate(pending)?,
-            load_state_file(state_path).ok(),
-            read,
-        ),
-        PendingHook::PublishedOnly => read_unchanged_published(state_path, read, stop.profile),
+    if uses_candidate {
+        // 停止钩子可能把链接、二维码或客户端配置保存到事务外。
+        read_unchanged_published(state_path, read, stop.profile)
+    } else {
+        load_state_file(state_path)
     }
 }
 

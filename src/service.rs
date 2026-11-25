@@ -712,9 +712,14 @@ async fn detect_shoes_service_hook() -> Option<ShoesServiceHook> {
     // 要求两个启动作业同时存在，避免把独立运行的依赖服务视作同步读者。
     let waiting_oneshot = unit_property(&target, "Type") == Some("oneshot")
         && unit_property(&target, "ActiveState") == Some("activating");
+    // Type=forking 使用 ControlPID 执行 ExecStart，退出后才完成启动。
+    let waiting_forking = unit_property(&target, "Type") == Some("forking")
+        && unit_property(&target, "ActiveState") == Some("activating")
+        && unit_property(&target, "SubState") == Some("start")
+        && unit_pid(&target, "ControlPID").is_some_and(|pid| descends_from(process, pid));
     let waiting_notify =
         waiting_notify_main(&target).is_some_and(|pid| descends_from(process, pid));
-    if !ordered_dependency || !(waiting_oneshot || waiting_notify) {
+    if !ordered_dependency || !(waiting_oneshot || waiting_forking || waiting_notify) {
         return None;
     }
     let jobs = systemctl
@@ -1058,6 +1063,20 @@ impl Systemctl {
 
     pub(crate) async fn secure_invocation_id(self) -> Result<Option<Uuid>> {
         Ok(parse_invocation_id(&self.timed_show("InvocationID").await?))
+    }
+
+    pub(crate) async fn require_managed_shoes_exec_start(self, config: &Path) -> Result<()> {
+        let exec_start = self.timed_show("ExecStart").await?;
+        let shoes = utils::SHOES_BIN;
+        let expected = format!("{{ path={shoes} ; argv[]={shoes} {}", config.display());
+        // systemctl 每条命令输出一条记录，末尾记录执行时间和退出状态。
+        let command = exec_start
+            .rsplit_once(" ; ignore_errors=")
+            .map(|(command, _)| command);
+        if command != Some(expected.as_str()) {
+            bail!("shoes.service 的 ExecStart 未直接使用受管聚合配置；请检查 systemctl cat shoes.service，恢复受管启动命令后运行 systemctl daemon-reload 再重试");
+        }
+        Ok(())
     }
 
     async fn timed_show(self, property: &str) -> Result<String> {

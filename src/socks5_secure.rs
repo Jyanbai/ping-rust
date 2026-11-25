@@ -430,6 +430,9 @@ impl Runtime for SystemRuntime {
         if self.mode == SecureMode::Local {
             self.firewall = firewall::FirewallPlan::capture(listener).await?;
         }
+        systemctl
+            .require_managed_shoes_exec_start(&self.managed_config)
+            .await?;
         if systemctl.secure_invocation_id().await? != Some(invocation) {
             bail!("预检期间 shoes.service 实例已改变，请重试");
         }
