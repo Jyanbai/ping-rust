@@ -336,10 +336,13 @@ impl Runtime for SystemRuntime {
         require_tools(utils::command_exists)?;
         interrupt.check()?;
         plan.validate(interrupt).await?;
-        // 回滚会按磁盘配置重启，先确认它能恢复当前监听。
+        // 回滚会按磁盘配置重启，先核对当前监听和认证。
         let listener = verify_listener(&plan.original, Systemctl::SecureTransaction)
             .await
             .context("原监听与受管配置不一致，无法安全回滚；请先同步 shoes.service 与受管配置")?;
+        verify_authentication(&plan.original, listener)
+            .await
+            .context("原认证与受管配置不一致，无法安全回滚；请先同步 shoes.service 与受管配置")?;
         if self.mode == SecureMode::Local {
             self.firewall = firewall::FirewallPlan::capture(listener).await?;
         }
@@ -398,6 +401,10 @@ pub(crate) async fn verify(profile: &ManagedProfile) -> Result<()> {
 
 async fn verify_with_systemctl(profile: &ManagedProfile, systemctl: Systemctl) -> Result<()> {
     let expected = verify_listener(profile, systemctl).await?;
+    verify_authentication(profile, expected).await
+}
+
+async fn verify_authentication(profile: &ManagedProfile, expected: SocketAddr) -> Result<()> {
     let target = SocketAddr::new(
         if expected.ip().is_unspecified() {
             if expected.is_ipv4() {

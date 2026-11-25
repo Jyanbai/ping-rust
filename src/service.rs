@@ -555,19 +555,26 @@ pub fn is_active() -> Result<bool> {
     systemctl_is_active()
 }
 
-// 只有 systemd 正在等待的 shoes 启动/控制进程及其同步读者可以绕过写锁。
+#[derive(Clone, Copy)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) enum ShoesServiceHook {
+    Start,
+    Stop,
+}
+
+// 只有 systemd 正在等待的 shoes 钩子、启动依赖及其同步读者可以绕过写锁。
 // systemd timer 的独立服务也有 INVOCATION_ID，清理环境的钩子则没有它。
-pub(crate) async fn is_shoes_service_hook() -> bool {
+pub(crate) async fn shoes_service_hook() -> Option<ShoesServiceHook> {
     #[cfg(target_os = "linux")]
     {
-        shoes_service_hook().await.unwrap_or(false)
+        detect_shoes_service_hook().await
     }
     #[cfg(not(target_os = "linux"))]
-    false
+    None
 }
 
 #[cfg(target_os = "linux")]
-async fn shoes_service_hook() -> Option<bool> {
+async fn detect_shoes_service_hook() -> Option<ShoesServiceHook> {
     let process = std::process::id();
     let cgroups = fs::read_to_string("/proc/self/cgroup").ok()?;
     let cgroup = systemd_cgroup(&cgroups)?;
@@ -582,6 +589,9 @@ async fn shoes_service_hook() -> Option<bool> {
                 "--property=ActiveState",
                 "--property=SubState",
                 "--property=Type",
+                "--property=After",
+                "--property=Requires",
+                "--property=Wants",
                 SERVICE_NAME,
             ],
             SECURE_QUERY_TIMEOUT,
@@ -589,6 +599,15 @@ async fn shoes_service_hook() -> Option<bool> {
         .await
         .ok()?;
     let control_pid = unit_pid(&shoes, "ControlPID");
+    let control_phase = if unit_property(&shoes, "ActiveState") == Some("deactivating")
+        || matches!(
+            unit_property(&shoes, "SubState"),
+            Some("stop" | "stop-post")
+        ) {
+        ShoesServiceHook::Stop
+    } else {
+        ShoesServiceHook::Start
+    };
     // Type=notify 在 READY=1 之前由 MainPID 阻塞启动作业，即使没有 ControlPID。
     let notify_main = matches!(
         unit_property(&shoes, "Type"),
@@ -600,28 +619,25 @@ async fn shoes_service_hook() -> Option<bool> {
     } else {
         None
     };
-    let is_waited_on = |pid| {
-        [control_pid, main_pid]
-            .into_iter()
-            .flatten()
-            .any(|ancestor| descends_from(pid, ancestor))
+    let waited_phase = |pid| {
+        [
+            (control_pid, control_phase),
+            (main_pid, ShoesServiceHook::Start),
+        ]
+        .into_iter()
+        .find_map(|(ancestor, phase)| descends_from(pid, ancestor?).then_some(phase))
     };
 
     if unit == SERVICE_NAME {
-        return Some(is_waited_on(process));
+        return waited_phase(process);
     }
-    if control_pid.is_none() && main_pid.is_none() {
-        return Some(false);
-    }
-
-    // 同步 systemctl 可以是控制进程本身，也可以由启动脚本派生。
-    let systemctl_path = utils::command_path("systemctl")?;
-    if !fs::read_dir("/proc")
-        .ok()?
-        .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse::<u32>().ok())
-        .any(|pid| waits_for_unit(pid, &systemctl_path, unit) && is_waited_on(pid))
-    {
-        return Some(false);
+    let has_dependency = |key| {
+        unit_property(&shoes, key).is_some_and(|value| value.split_whitespace().any(|s| s == unit))
+    };
+    let ordered_dependency =
+        has_dependency("After") && (has_dependency("Requires") || has_dependency("Wants"));
+    if control_pid.is_none() && main_pid.is_none() && !ordered_dependency {
+        return None;
     }
     // 用目标 unit 的进程核对读者归属。systemd 报告的 cgroup 路径可能相对于容器根。
     let target = systemctl
@@ -630,6 +646,8 @@ async fn shoes_service_hook() -> Option<bool> {
                 "show",
                 "--property=MainPID",
                 "--property=ControlPID",
+                "--property=ActiveState",
+                "--property=Type",
                 "--",
                 unit,
             ],
@@ -637,12 +655,59 @@ async fn shoes_service_hook() -> Option<bool> {
         )
         .await
         .ok()?;
-    Some(
-        ["MainPID", "ControlPID"]
-            .into_iter()
-            .filter_map(|key| unit_pid(&target, key))
-            .any(|pid| descends_from(process, pid)),
-    )
+    if !["MainPID", "ControlPID"]
+        .into_iter()
+        .filter_map(|key| unit_pid(&target, key))
+        .any(|pid| descends_from(process, pid))
+    {
+        return None;
+    }
+
+    // 同步 systemctl 可以是控制进程本身，也可以由钩子脚本派生。
+    if control_pid.is_some() || main_pid.is_some() {
+        let systemctl_path = utils::command_path("systemctl")?;
+        let delegated = fs::read_dir("/proc")
+            .ok()?
+            .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse::<u32>().ok())
+            .find_map(|pid| {
+                let phase = waited_phase(pid)?;
+                waits_for_unit(pid, &systemctl_path, unit).then_some(phase)
+            });
+        if delegated.is_some() {
+            return delegated;
+        }
+    }
+
+    // 声明的 oneshot 依赖先于 shoes 启动钩子执行，此时可能还没有 shoes ControlPID。
+    // 要求两个启动作业同时存在，避免把独立运行的依赖服务视作同步读者。
+    if !ordered_dependency
+        || unit_property(&target, "Type") != Some("oneshot")
+        || unit_property(&target, "ActiveState") != Some("activating")
+    {
+        return None;
+    }
+    let jobs = systemctl
+        .timed(
+            &[
+                "list-jobs",
+                "--no-legend",
+                "--no-pager",
+                "--full",
+                "--",
+                SERVICE_NAME,
+                unit,
+            ],
+            SECURE_QUERY_TIMEOUT,
+        )
+        .await
+        .ok()?;
+    let has_start_job = |name| {
+        jobs.lines().any(|line| {
+            let mut fields = line.split_whitespace().skip(1);
+            fields.next() == Some(name) && matches!(fields.next(), Some("start" | "restart"))
+        })
+    };
+    (has_start_job(SERVICE_NAME) && has_start_job(unit)).then_some(ShoesServiceHook::Start)
 }
 
 #[cfg(target_os = "linux")]
@@ -664,10 +729,29 @@ fn unit_pid(properties: &str, key: &str) -> Option<u32> {
 #[cfg(target_os = "linux")]
 fn waits_for_unit(pid: u32, executable: &Path, unit: &str) -> bool {
     let process = Path::new("/proc").join(pid.to_string());
-    if !same_executable(&process.join("exe"), executable).unwrap_or(false) {
-        return false;
-    }
-    fs::read(process.join("cmdline")).is_ok_and(|line| systemctl_starts_unit(&line, unit))
+    let matches_executable = match same_executable(&process.join("exe"), executable) {
+        Ok(matches) => matches,
+        // 非 root 委派读者可能无法解引用 root 钩子中的 exe。调用者已核对
+        // 进程属于 systemd 等待的钩子，此时还必须核对内核报告的进程名和 UID。
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::PermissionDenied) =>
+        {
+            fs::read_to_string(process.join("status")).is_ok_and(|status| {
+                status.lines().any(|line| {
+                    line.strip_prefix("Name:")
+                        .is_some_and(|name| name.trim() == "systemctl")
+                }) && status.lines().any(|line| {
+                    line.strip_prefix("Uid:")
+                        .is_some_and(|uids| uids.split_whitespace().nth(1) == Some("0"))
+                })
+            })
+        }
+        Err(_) => false,
+    };
+    matches_executable
+        && fs::read(process.join("cmdline")).is_ok_and(|line| systemctl_starts_unit(&line, unit))
 }
 
 #[cfg(target_os = "linux")]

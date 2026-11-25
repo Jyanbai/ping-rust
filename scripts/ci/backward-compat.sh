@@ -362,6 +362,75 @@ EOF
 )
 echo 'SOCKS5 auth and local: reject drift between the running and managed listener: PASS'
 
+# Reload the default ExecStart while the authenticated process still owns the
+# same wildcard listener that the managed configuration would start anonymously.
+(
+  scenario="$(mktemp -d /usr/local/lib/socks5-auth-drift.XXXXXX)"
+  dropin=/etc/systemd/system/shoes.service.d/90-compat-socks5-auth-drift.conf
+  mkdir -p "${dropin%/*}"
+  trap 'rm -f "$dropin"; systemctl daemon-reload; systemctl restart shoes.service; rm -rf "$scenario"' EXIT
+  python3 - /etc/shoes/config.yaml "$scenario/config.yaml" <<'PY'
+import os
+import sys
+
+import yaml
+
+with open(sys.argv[1]) as source:
+    servers = yaml.safe_load(source)
+server, = (entry for entry in servers if entry['address'] == '0.0.0.0:24436')
+server['protocol'].update(username='compat-user', password='compat-password')
+fd = os.open(sys.argv[2], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+with os.fdopen(fd, 'w') as output:
+    yaml.safe_dump(servers, output)
+PY
+  cat >"$dropin" <<EOF
+[Service]
+ExecStart=
+ExecStart=/usr/local/bin/shoes $scenario/config.yaml
+EOF
+  systemctl daemon-reload
+  systemctl restart shoes.service
+  for _ in {1..50}; do
+    if ss -H -ltn 'sport = :24436' | grep -Fq '0.0.0.0:24436'; then break; fi
+    sleep 0.1
+  done
+  ss -H -ltn 'sport = :24436' | grep -Fq '0.0.0.0:24436'
+  check_authentication() {
+    python3 - <<'PY'
+import socket
+
+with socket.create_connection(('127.0.0.1', 24436), timeout=5) as sock:
+    sock.sendall(bytes([5, 1, 2]))
+    assert sock.makefile('rb').read(2) == bytes([5, 2]), 'expected username/password authentication'
+with socket.create_connection(('127.0.0.1', 24436), timeout=5) as sock:
+    sock.sendall(bytes([5, 1, 0]))
+    try:
+        reply = sock.makefile('rb').read(2)
+    except ConnectionResetError:
+        reply = b''
+    assert reply in (b'', bytes([5, 255])), 'expected anonymous authentication to be rejected'
+PY
+  }
+  check_authentication
+  rm "$dropin"
+  systemctl daemon-reload
+  before_pid="$(systemctl show --property=MainPID --value shoes.service)"
+  find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/before"
+  write_failing_socks5_iptables "$scenario"
+  if PATH="$scenario:$PATH" SOCKS5_ROLLBACK="$scenario" \
+    "$NEW" socks5 secure "$legacy_socks5_id" --local --yes >"$scenario/result" 2>&1; then
+    echo 'Expected SOCKS5 local hardening to reject authentication drift' >&2
+    exit 1
+  fi
+  grep -Fq '原认证与受管配置不一致' "$scenario/result"
+  test ! -e "$scenario/firewall-reached"
+  test "$(systemctl show --property=MainPID --value shoes.service)" = "$before_pid"
+  check_authentication
+  find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/after"
+  diff -u "$scenario/before" "$scenario/after"
+)
+echo 'SOCKS5 local: reject authentication drift on the same listener before rollback can expose it: PASS'
+
 # Exercise signal cancellation and an unattended timeout with the same substitute.
 (
   shoes=/usr/local/bin/shoes
@@ -485,11 +554,14 @@ echo 'SOCKS5 preflight: PID signals, process-group SIGINT and timeout clean up d
   target=/run/systemd/system/compat-socks5-slow-stop.target
   reader=/run/systemd/system/compat-socks5-start-reader.service
   reader_unit="${reader##*/}"
+  dependency=/run/systemd/system/compat-socks5-required-export.service
+  dependency_unit="${dependency##*/}"
+  dependency_dropin=$dropin/90-compat-socks5-required-export.conf
   companion=/run/systemd/system/compat-socks5-start-companion.service
   timer=/run/systemd/system/compat-socks5-timer-export.timer
   exporter="${timer%.timer}.service"
   mkdir -p "$dropin"
-  trap '"$systemctl_bin" stop "${target##*/}" "${reader##*/}" "${companion##*/}" "${timer##*/}" "${exporter##*/}" || true; rm -f "$dropin/90-compat-socks5-rollback.conf" "$target" "$reader" "$companion" "$timer" "$exporter"; "$systemctl_bin" daemon-reload; rm -rf "$scenario"' EXIT
+  trap '"$systemctl_bin" stop "${target##*/}" "$reader_unit" "$dependency_unit" "${companion##*/}" "${timer##*/}" "${exporter##*/}" || true; rm -f "$dropin/90-compat-socks5-rollback.conf" "$dependency_dropin" "$target" "$reader" "$dependency" "$companion" "$timer" "$exporter"; "$systemctl_bin" daemon-reload; rm -rf "$scenario"' EXIT
   cat >"$scenario/systemctl" <<'SH'
 #!/bin/sh
 case "$1" in
@@ -589,6 +661,16 @@ Type=oneshot
 TimeoutStartSec=5s
 ExecStart=$scenario/reader $NEW $scenario $legacy_socks5_id
 EOF
+  "$NEW" export sing-box --profile "${ids[1]}" --server example.com \
+    --output "$scenario/dependency-expected.json" >/dev/null
+  cat >"$dependency" <<EOF
+[Service]
+Type=oneshot
+TimeoutStartSec=5s
+ExecStart=$NEW export sing-box --profile ${ids[1]} --server example.com --output $scenario/dependency-export.json
+ExecStart=/usr/bin/cmp -s $scenario/dependency-expected.json $scenario/dependency-export.json
+ExecStart=/bin/sh -c 'echo ok >>$scenario/dependency-runs'
+EOF
   cat >"$companion" <<'EOF'
 [Service]
 Type=oneshot
@@ -628,6 +710,13 @@ EOF
   "$systemctl_bin" start "${target##*/}"
   "$systemctl_bin" is-active --quiet "${target##*/}"
   "$systemctl_bin" is-active --quiet shoes.service
+  # Install the ordered dependency after the initial start. Both restarts must run it.
+  cat >"$dependency_dropin" <<EOF
+[Unit]
+Requires=$dependency_unit
+After=$dependency_unit
+EOF
+  "$systemctl_bin" daemon-reload
   before_pid="$("$systemctl_bin" show --property=MainPID --value shoes.service)"
   find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/before"
   if PATH="$scenario:$PATH" SOCKS5_ROLLBACK="$scenario" SOCKS5_SYSTEMCTL="$systemctl_bin" \
@@ -636,6 +725,7 @@ EOF
     exit 1
   fi
   test -f "$scenario/activation-failed" || { echo 'SOCKS5 rollback did not reach the injected activation failure' >&2; exit 1; }
+  test "$(grep -c '^ok$' "$scenario/dependency-runs")" -eq 2
   test "$(grep -c '^ok$' "$scenario/start-pre-runs")" -eq 2
   test "$(grep -c '^ok$' "$scenario/oneshot-runs")" -eq 2
   test "$(grep -c '^ok$' "$scenario/oneshot-wrapper-runs")" -eq 2
@@ -666,6 +756,7 @@ EOF
   diff -u "$scenario/before" "$scenario/after"
 )
 echo 'SOCKS5 rollback: synchronous readers finish and timer export waits for rollback: PASS'
+echo 'SOCKS5 rollback: ordered startup dependency exports during candidate and restored starts: PASS'
 
 # A referenced, stopped unit keeps its start-rate counter. Inject a firewall
 # error only after systemd has started the loopback candidate and it passes verification.
@@ -692,7 +783,16 @@ esac >>"$3/notify-reads"
 systemd-notify --ready
 exec /usr/local/bin/shoes /etc/shoes/config.yaml
 SH
-  chmod 0755 "$scenario/start-notify"
+  cat >"$scenario/stop-export" <<'SH'
+#!/bin/sh
+set -eu
+# Only capture the stop of the original process, before the candidate starts.
+test -e /etc/shoes/.ping-rust-socks5-secure.pending || exit 0
+test ! -s "$3/notify-reads" || exit 0
+"$1" url "$2" --server-address example.com >"$3/stop-url"
+cmp -s "$3/stop-expected-url" "$3/stop-url"
+SH
+  chmod 0755 "$scenario/start-notify" "$scenario/stop-export"
   cat >"$dropin" <<EOF
 [Unit]
 StartLimitIntervalSec=10min
@@ -705,6 +805,7 @@ TimeoutStartSec=10s
 ReadWritePaths=$scenario
 ExecStart=
 ExecStart=$scenario/start-notify $NEW $legacy_socks5_id $scenario
+ExecStop=$scenario/stop-export $NEW $legacy_socks5_id $scenario
 EOF
   write_failing_socks5_iptables "$scenario"
   systemctl daemon-reload
@@ -712,6 +813,7 @@ EOF
   systemctl is-active --quiet "${target##*/}"
   systemctl is-active --quiet shoes.service
   before_pid="$(systemctl show --property=MainPID --value shoes.service)"
+  "$NEW" url "$legacy_socks5_id" --server-address example.com >"$scenario/stop-expected-url"
   : >"$scenario/notify-reads"
   find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/before"
   if PATH="$scenario:$PATH" SOCKS5_ROLLBACK="$scenario" \
@@ -720,6 +822,7 @@ EOF
     exit 1
   fi
   test -f "$scenario/firewall-reached"
+  cmp -s "$scenario/stop-expected-url" "$scenario/stop-url"
   test "$(cat "$scenario/notify-reads")" = $'candidate\noriginal'
   systemctl is-active --quiet shoes.service
   test "$(systemctl show --property=MainPID --value shoes.service)" != "$before_pid"
@@ -729,6 +832,7 @@ EOF
   diff -u "$scenario/before" "$scenario/after"
 )
 echo 'SOCKS5 rollback: Type=notify reads before READY=1 and restarts with StartLimitBurst=1: PASS'
+echo 'SOCKS5 local: ExecStop exports the original public URL before the candidate starts: PASS'
 
 # Root systemctl can use systemd's private socket. Delegated readers need the system bus.
 apt-get install -y --no-install-recommends dbus
@@ -744,19 +848,21 @@ systemctl start dbus.service
   profiles=/etc/shoes/profiles
   readable_profile=$profiles/SOCKS5-24432.yaml
   dropin=/etc/systemd/system/shoes.service.d/90-compat-socks5-hangup.conf
+  delegated=/run/systemd/system/compat-socks5-non-root-export.service
+  delegated_unit="${delegated##*/}"
   original_directory_mode="$(stat -c %a /etc/shoes)"
   original_profiles_mode="$(stat -c %a "$profiles")"
   original_profiles_owner="$(stat -c %u:%g "$profiles")"
   cp -p "$config" "$scenario/original-config"
   cp -p "$state" "$scenario/original-state"
   cp -p "$readable_profile" "$scenario/original-profile"
-  trap 'rm -f "$dropin"; cp -p "$scenario/original-state" "$state"; chown --reference="$scenario/original-config" "$config"; chmod "$original_directory_mode" /etc/shoes; chown "$original_profiles_owner" "$profiles"; chmod "$original_profiles_mode" "$profiles"; cp -p "$scenario/original-profile" "$readable_profile"; "$systemctl_bin" daemon-reload; "$systemctl_bin" restart shoes.service; rm -rf "$scenario"' EXIT
+  trap 'rm -f "$dropin" "$delegated"; cp -p "$scenario/original-state" "$state"; chown --reference="$scenario/original-config" "$config"; chmod "$original_directory_mode" /etc/shoes; chown "$original_profiles_owner" "$profiles"; chmod "$original_profiles_mode" "$profiles"; cp -p "$scenario/original-profile" "$readable_profile"; "$systemctl_bin" daemon-reload; "$systemctl_bin" restart shoes.service; rm -rf "$scenario"' EXIT
   mkdir -p "${dropin%/*}"
   chmod 0711 /etc/shoes
   chmod 0711 "$scenario"
   chown nobody:nogroup "$config"
-  mkdir "$scenario/exports"
-  chown nobody:nogroup "$scenario/exports"
+  mkdir "$scenario/exports" "$scenario/delegated"
+  chown nobody:nogroup "$scenario/exports" "$scenario/delegated"
   "$NEW" export sing-box --profile "${ids[1]}" --server example.com \
     --output "$scenario/unchanged-expected.json" >/dev/null
   cat >"$scenario/export-unchanged" <<'SH'
@@ -778,12 +884,21 @@ if [ -e "$pending" ]; then
 fi
 SH
   chmod 0755 "$scenario/export-unchanged"
+  cat >"$delegated" <<EOF
+[Service]
+Type=oneshot
+User=nobody
+Group=nogroup
+TimeoutStartSec=5s
+ExecStart=$scenario/export-unchanged $NEW ${ids[1]} $legacy_socks5_id $scenario/delegated
+EOF
   cat >"$dropin" <<EOF
 [Service]
 User=nobody
 Group=nogroup
 TimeoutStartSec=10s
 ReadWritePaths=$scenario/exports
+ExecStartPre=+$systemctl_bin --quiet start $delegated_unit
 ExecStartPost=$scenario/export-unchanged $NEW ${ids[1]} $legacy_socks5_id $scenario/exports
 EOF
   python3 - "$state" <<'PY'
@@ -823,7 +938,8 @@ SH
   before_pid="$("$systemctl_bin" show --property=MainPID --value shoes.service)"
   test "$(stat -c %a:%U:%G "$config")" = '600:nobody:nogroup'
   cmp -s "$scenario/exports/unchanged.json" "$scenario/unchanged-expected.json"
-  rm "$scenario/exports/unchanged.json"
+  cmp -s "$scenario/delegated/unchanged.json" "$scenario/unchanged-expected.json"
+  rm "$scenario/exports/unchanged.json" "$scenario/delegated/unchanged.json"
   find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/before"
   python3 - "$NEW" "$scenario" "$systemctl_bin" <<'PY'
 import json
@@ -860,6 +976,10 @@ try:
         scenario / 'unchanged-expected.json').read_bytes()
     assert (scenario / 'exports/candidate-export-deferred').is_file()
     assert not (scenario / 'exports/changed.json').exists()
+    assert (scenario / 'delegated/unchanged.json').read_bytes() == (
+        scenario / 'unchanged-expected.json').read_bytes()
+    assert (scenario / 'delegated/candidate-export-deferred').is_file()
+    assert not (scenario / 'delegated/changed.json').exists()
     assert (config.stat().st_uid, config.stat().st_gid, config.stat().st_mode) == (
         original_stat.st_uid, original_stat.st_gid, original_stat.st_mode
     )
@@ -874,6 +994,7 @@ try:
     assert '原配置、防火墙及服务已恢复并再次验证' in stderr.decode()
     assert not pending.exists() and state.read_bytes() == original_state
     assert config.read_bytes() == original_config
+    assert (scenario / 'delegated/changed.json').is_file()
 finally:
     if proc.poll() is None:
         proc.kill()
@@ -919,6 +1040,7 @@ EOF
   echo 'SOCKS5 rollback: required non-root ExecStartPost reads and exports restored state via ACL: PASS'
 )
 echo 'SOCKS5 rollback: post-commit SIGHUP restores configuration and the non-root service: PASS'
+echo 'SOCKS5 rollback: root startup hook can synchronously delegate an ACL-backed export to a non-root unit: PASS'
 
 (
   scenario="$(mktemp -d /usr/local/lib/socks5-start-export.XXXXXX)"

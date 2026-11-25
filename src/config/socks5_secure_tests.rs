@@ -1198,6 +1198,7 @@ fn socks5_secure_info_url_qr_and_file_export_wait_for_publish_or_rollback() {
 #[cfg(unix)]
 #[tokio::test]
 async fn socks5_secure_sigkill_after_commit_refuses_retry_and_stale_exports() {
+    use crate::service::ShoesServiceHook;
     use clap::Parser;
     use std::{
         io::Read,
@@ -1280,10 +1281,12 @@ async fn socks5_secure_sigkill_after_commit_refuses_retry_and_stale_exports() {
         .unwrap_err();
     assert!(format!("{error:#}").contains("上次 SOCKS5 加固未完成"));
 
-    let error = super::socks5_secure::read_export_state(&state_path, true)
-        .err()
-        .expect("systemd 钩子也必须拒绝已失去写者的事务");
-    assert!(format!("{error:#}").contains("上次 SOCKS5 加固未完成"));
+    for hook in [ShoesServiceHook::Start, ShoesServiceHook::Stop] {
+        let error = super::socks5_secure::read_export_state(&state_path, Some(hook))
+            .err()
+            .expect("systemd 钩子也必须拒绝已失去写者的事务");
+        assert!(format!("{error:#}").contains("上次 SOCKS5 加固未完成"));
+    }
 
     for args in [
         vec!["prs", "url", &profile.name],

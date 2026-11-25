@@ -1828,45 +1828,45 @@ async fn read_profile_snapshot<T>(
     state_path: &Path,
     lock_path: &Path,
     file_export: bool,
-    read: impl Fn(&Path, bool) -> Result<T>,
+    read: impl Fn(&Path, Option<service::ShoesServiceHook>) -> Result<T>,
     use_snapshot: impl FnOnce(T) -> Result<()>,
 ) -> Result<()> {
     use utils::SnapshotAccess;
 
     #[cfg(not(target_os = "linux"))]
     let _ = file_export;
-    let is_service_hook = service::is_shoes_service_hook().await;
+    let service_hook = service::shoes_service_hook().await;
     utils::read_with_existing_lock_or_service_hook(
         lock_path,
-        is_service_hook,
+        service_hook.is_some(),
         |access| match access {
             #[cfg(target_os = "linux")]
             SnapshotAccess::Unreadable(_)
-                if is_service_hook && config::socks5_secure::pending_exists(state_path)? =>
+                if service_hook.is_some() && config::socks5_secure::pending_exists(state_path)? =>
             {
                 // 非 root 同步钩子可读取事务锁定的已发布状态。
-                Ok((read(state_path, true)?, None))
+                Ok((read(state_path, service_hook)?, None))
             }
             #[cfg(target_os = "linux")]
             SnapshotAccess::Missing | SnapshotAccess::Unreadable(_) if file_export => {
                 config::socks5_secure::read_unlocked_snapshot(state_path, || {
                     let guard = config::socks5_secure::lock_state_for_file_export(state_path)?;
-                    Ok((read(state_path, false)?, Some(guard)))
+                    Ok((read(state_path, None)?, Some(guard)))
                 })
             }
             SnapshotAccess::Unreadable(_error) => {
                 #[cfg(target_os = "linux")]
                 {
                     config::socks5_secure::read_unlocked_snapshot(state_path, || {
-                        Ok((read(state_path, false)?, None))
+                        Ok((read(state_path, None)?, None))
                     })
                 }
                 #[cfg(not(target_os = "linux"))]
                 Err(_error)
             }
             access => {
-                let service_hook = matches!(access, SnapshotAccess::ServiceHook);
-                Ok((read(state_path, service_hook)?, None::<std::fs::File>))
+                let hook = service_hook.filter(|_| matches!(access, SnapshotAccess::ServiceHook));
+                Ok((read(state_path, hook)?, None::<std::fs::File>))
             }
         },
         |(state, _guard)| use_snapshot(state),

@@ -5,6 +5,7 @@ use fs2::FileExt;
 
 use super::transaction::FileAccess;
 use super::*;
+use crate::service::ShoesServiceHook;
 
 const DRY_RUN_TIMEOUT: Duration = Duration::from_secs(15);
 const PENDING_STATE: &str = ".ping-rust-socks5-secure.pending";
@@ -129,10 +130,10 @@ enum HookRead {
 
 pub(crate) fn read_info_state(
     state_path: &Path,
-    service_hook: bool,
+    service_hook: Option<ShoesServiceHook>,
 ) -> Result<Option<ManagedState>> {
-    if service_hook {
-        if let Some(state) = read_pending_hook_state(state_path, HookRead::Display)? {
+    if let Some(hook) = service_hook {
+        if let Some(state) = read_pending_hook_state(state_path, hook, HookRead::Display)? {
             return Ok(Some(state));
         }
     } else {
@@ -144,13 +145,16 @@ pub(crate) fn read_info_state(
         .transpose()
 }
 
-pub(crate) fn read_export_state(state_path: &Path, service_hook: bool) -> Result<ManagedState> {
+pub(crate) fn read_export_state(
+    state_path: &Path,
+    service_hook: Option<ShoesServiceHook>,
+) -> Result<ManagedState> {
     read_export_snapshot(state_path, service_hook, HookRead::Display)
 }
 
 pub(crate) fn read_file_export_state(
     state_path: &Path,
-    service_hook: bool,
+    service_hook: Option<ShoesServiceHook>,
     profile: Option<Uuid>,
 ) -> Result<ManagedState> {
     read_export_snapshot(state_path, service_hook, HookRead::FileExport(profile))
@@ -158,23 +162,31 @@ pub(crate) fn read_file_export_state(
 
 fn read_export_snapshot(
     state_path: &Path,
-    service_hook: bool,
+    service_hook: Option<ShoesServiceHook>,
     read: HookRead,
 ) -> Result<ManagedState> {
-    if !service_hook {
+    let Some(hook) = service_hook else {
         return load_state_from(state_path);
-    }
-    match read_pending_hook_state(state_path, read)? {
+    };
+    match read_pending_hook_state(state_path, hook, read)? {
         Some(state) => Ok(state),
         None => load_state_file(state_path),
     }
 }
 
-fn read_pending_hook_state(state_path: &Path, read: HookRead) -> Result<Option<ManagedState>> {
+fn read_pending_hook_state(
+    state_path: &Path,
+    hook: ShoesServiceHook,
+    read: HookRead,
+) -> Result<Option<ManagedState>> {
     let Some(pending) = open_live_pending(state_path)? else {
         return Ok(None);
     };
-    // 同步钩子应读取本次启动使用的配置。回滚启动时聚合配置已恢复，优先使用原状态。
+    if matches!(hook, ShoesServiceHook::Stop) {
+        // 重启先停止原实例，此时磁盘上的候选配置还未启动。提交前已保存原监听。
+        return load_state_file(state_path).map(Some);
+    }
+    // 启动钩子读取本次启动使用的配置。回滚启动时聚合配置已恢复，优先使用原状态。
     let servers = load_servers(&state_path.with_file_name("config.yaml"))
         .map_err(|_| anyhow::anyhow!("无法读取 SOCKS5 加固期间的聚合配置，请检查 config.yaml"))?;
     let published = load_state_file(state_path).ok();
