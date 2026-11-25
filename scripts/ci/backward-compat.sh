@@ -376,12 +376,16 @@ ExecStart=/usr/local/bin/shoes $scenario/config.yaml
 EOF
   systemctl daemon-reload
   systemctl restart shoes.service
+  # The target is loaded after the drifted Reality listener.
   for _ in {1..50}; do
-    if ss -H -ltn 'sport = :24437' | grep -Fq '0.0.0.0:24437'; then break; fi
+    if ss -H -ltn 'sport = :24437' | grep -Fq '0.0.0.0:24437' &&
+       ss -H -ltn 'sport = :24436' | grep -Fq '0.0.0.0:24436'; then break; fi
     sleep 0.1
   done
-  ss -H -ltn 'sport = :24436' | grep -Fq '0.0.0.0:24436'
-  ss -H -ltn 'sport = :24437' | grep -Fq '0.0.0.0:24437'
+  ss -H -ltn 'sport = :24436' | grep -Fq '0.0.0.0:24436' ||
+    { echo 'Target SOCKS5 listener did not start' >&2; exit 1; }
+  ss -H -ltn 'sport = :24437' | grep -Fq '0.0.0.0:24437' ||
+    { echo 'Drifted Reality listener did not start' >&2; exit 1; }
   rm "$dropin"
   systemctl daemon-reload
   before_pid="$(systemctl show --property=MainPID --value shoes.service)"
@@ -390,7 +394,11 @@ EOF
     echo 'Expected SOCKS5 hardening to reject listener drift on the Reality profile' >&2
     exit 1
   fi
-  grep -F '原监听与受管配置不一致' "$scenario/result" | grep -Fq '24431'
+  # anyhow prints the context and the missing port on separate lines.
+  grep -Fq '原监听与受管配置不一致' "$scenario/result" ||
+    { echo 'Missing listener drift diagnostic' >&2; exit 1; }
+  grep -Fq '未找到 shoes 的预期监听 0.0.0.0:24431' "$scenario/result" ||
+    { echo 'Listener drift diagnostic did not identify the managed Reality port' >&2; exit 1; }
   test "$(systemctl show --property=MainPID --value shoes.service)" = "$before_pid"
   ss -H -ltn 'sport = :24437' | grep -Fq '0.0.0.0:24437'
   find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/after"
@@ -466,6 +474,73 @@ PY
   diff -u "$scenario/before" "$scenario/after"
 )
 echo 'SOCKS5 local: reject authentication drift on the same listener before rollback can expose it: PASS'
+
+# Keep all listeners and the target unchanged, but give another node a different live password.
+(
+  scenario="$(mktemp -d /usr/local/lib/socks5-other-auth.XXXXXX)"
+  dropin=/etc/systemd/system/shoes.service.d/90-compat-socks5-other-auth.conf
+  trap 'rm -f "$dropin"; systemctl daemon-reload; systemctl restart shoes.service; rm -rf "$scenario"' EXIT
+  umask 077
+  python3 - /etc/shoes/config.yaml "$scenario/config.yaml" <<'PY'
+import sys
+
+import yaml
+
+with open(sys.argv[1]) as source:
+    servers = yaml.safe_load(source)
+server, = (entry for entry in servers if entry['address'] == '0.0.0.0:24432')
+protocol = server['protocol']
+assert protocol['username'] and protocol['password'] != 'compat-live-password'
+protocol['password'] = 'compat-live-password'
+with open(sys.argv[2], 'w') as output:
+    yaml.safe_dump(servers, output)
+PY
+  cat >"$dropin" <<EOF
+[Service]
+ExecStart=
+ExecStart=/usr/local/bin/shoes $scenario/config.yaml
+EOF
+  systemctl daemon-reload
+  systemctl restart shoes.service
+  for _ in {1..50}; do
+    if ss -H -ltn 'sport = :24436' | grep -Fq '0.0.0.0:24436'; then break; fi
+    sleep 0.1
+  done
+  ss -H -ltn 'sport = :24436' | grep -Fq '0.0.0.0:24436'
+  check_live_password() {
+    python3 - "$scenario/config.yaml" <<'PY'
+import socket
+import sys
+
+import yaml
+
+with open(sys.argv[1]) as source:
+    server, = (entry for entry in yaml.safe_load(source) if entry['address'] == '0.0.0.0:24432')
+username = server['protocol']['username'].encode()
+password = server['protocol']['password'].encode()
+with socket.create_connection(('127.0.0.1', 24432), timeout=5) as sock, sock.makefile('rb') as reply:
+    sock.sendall(bytes([5, 1, 2]))
+    assert reply.read(2) == bytes([5, 2]), 'expected username/password authentication'
+    sock.sendall(bytes([1, len(username)]) + username + bytes([len(password)]) + password)
+    assert reply.read(2) == bytes([1, 0]), 'the running node must still accept its live password'
+PY
+  }
+  check_live_password
+  rm "$dropin"
+  systemctl daemon-reload
+  before_pid="$(systemctl show --property=MainPID --value shoes.service)"
+  find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/before"
+  if "$NEW" socks5 secure "$legacy_socks5_id" --auth --yes >"$scenario/result" 2>&1; then
+    echo 'Expected SOCKS5 hardening to reject password drift on another node' >&2
+    exit 1
+  fi
+  grep -Fq '端口 24432 的原认证与受管配置不一致' "$scenario/result"
+  test "$(systemctl show --property=MainPID --value shoes.service)" = "$before_pid"
+  check_live_password
+  find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/after"
+  diff -u "$scenario/before" "$scenario/after"
+)
+echo 'SOCKS5 auth: reject password drift on another SOCKS5 listener: PASS'
 
 # Exercise signal cancellation and an unattended timeout with the same substitute.
 (
@@ -634,11 +709,19 @@ exec "$SOCKS5_SYSTEMCTL" "$@"
 SH
   cat >"$scenario/exec-stop" <<'SH'
 #!/bin/sh
-[ -s "$1/stop-client" ] || exit 0
-read -r client <"$1/stop-client"
-touch "$1/stop-entered"
+set -eu
+[ -s "$2/stop-client" ] || exit 0
+read -r client <"$2/stop-client"
+touch "$2/stop-entered"
+if "$1" export sing-box --profile "$3" --server example.com \
+  >"$2/stop-redirected.json" 2>"$2/stop-redirected-error"; then
+  exit 1
+fi
+grep -Fq '请在 SOCKS5 加固结束后重试文件导出' "$2/stop-redirected-error"
+test ! -s "$2/stop-redirected.json"
+touch "$2/stop-redirect-checked"
 while kill -0 "$client" 2>/dev/null; do sleep 0.1; done
-touch "$1/stop-after-client"
+touch "$2/stop-after-client"
 SH
   cat >"$scenario/exec-start-pre" <<'SH'
 #!/bin/sh
@@ -740,7 +823,7 @@ TimeoutStopSec=150s
 ReadWritePaths=$scenario
 ExecStartPre=$scenario/exec-start-pre $NEW $scenario
 ExecStartPre=+$scenario/start-oneshot $systemctl_bin ${reader_unit%.service} ${companion##*/} $scenario
-ExecStop=$scenario/exec-stop $scenario
+ExecStop=$scenario/exec-stop $NEW $scenario $legacy_socks5_id
 EOF
   "$systemctl_bin" daemon-reload
   "$systemctl_bin" start "${target##*/}"
@@ -778,6 +861,8 @@ EOF
   test -f "$scenario/timer-finished" || { echo 'SOCKS5 timer export did not finish after rollback' >&2; exit 1; }
   cmp -s "$scenario/timer-export.json" "$scenario/oneshot-export.json"
   test -f "$scenario/stop-entered"
+  test -f "$scenario/stop-redirect-checked"
+  test ! -s "$scenario/stop-redirected.json"
   for _ in {1..50}; do
     [[ -f "$scenario/stop-after-client" ]] && break
     sleep 0.1
@@ -793,6 +878,7 @@ EOF
 )
 echo 'SOCKS5 rollback: synchronous readers finish and timer export waits for rollback: PASS'
 echo 'SOCKS5 rollback: ordered startup dependency exports during candidate and restored starts: PASS'
+echo 'SOCKS5 rollback: candidate credentials are withheld from redirected export stdout: PASS'
 
 # A referenced, stopped unit keeps its start-rate counter. Inject a firewall
 # error only after systemd has started the loopback candidate and it passes verification.
@@ -800,11 +886,24 @@ echo 'SOCKS5 rollback: ordered startup dependency exports during candidate and r
   scenario="$(mktemp -d /usr/local/lib/socks5-start-limit.XXXXXX)"
   dropin=/etc/systemd/system/shoes.service.d/90-compat-socks5-start-limit.conf
   target=/run/systemd/system/compat-socks5-rollback.target
-  trap 'systemctl stop "${target##*/}" || true; rm -f "$dropin" "$target"; systemctl daemon-reload; rm -rf "$scenario"' EXIT
+  stop_reader=/run/systemd/system/compat-socks5-stop-reader.service
+  trap 'systemctl stop "${target##*/}" "${stop_reader##*/}" || true; rm -f "$dropin" "$target" "$stop_reader"; systemctl daemon-reload; rm -rf "$scenario"' EXIT
   cat >"$target" <<'EOF'
 [Unit]
 Description=Keep shoes.service loaded during SOCKS5 rollback
 Wants=shoes.service
+EOF
+  "$NEW" export sing-box --profile "${ids[1]}" --server example.com \
+    --output "$scenario/stop-other-expected.json" >/dev/null
+  cat >"$stop_reader" <<EOF
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStopSec=5s
+ExecStart=/bin/true
+ExecStop=$NEW export sing-box --profile ${ids[1]} --server example.com --output $scenario/stop-other.json
+ExecStop=/usr/bin/cmp -s $scenario/stop-other-expected.json $scenario/stop-other.json
+ExecStop=/bin/sh -c 'echo ok >>$scenario/delegated-stop-reads'
 EOF
   cat >"$scenario/start-notify" <<'SH'
 #!/bin/sh
@@ -852,6 +951,8 @@ TimeoutStartSec=10s
 ReadWritePaths=$scenario
 ExecStart=
 ExecStart=$scenario/start-notify $NEW $legacy_socks5_id $scenario
+ExecStartPre=+systemctl --quiet start ${stop_reader##*/}
+ExecStop=+systemctl --quiet stop ${stop_reader##*/}
 ExecStop=$scenario/stop-export $NEW $legacy_socks5_id $scenario
 EOF
   write_failing_socks5_iptables "$scenario"
@@ -873,6 +974,7 @@ EOF
   test -f "$scenario/firewall-reached"
   cmp -s "$scenario/stop-expected-url" "$scenario/stop-url"
   cmp -s "$scenario/stop-expected-client.json" "$scenario/stop-client.json"
+  test "$(cat "$scenario/delegated-stop-reads")" = $'ok\nok'
   test -f "$scenario/stop-candidate-checked"
   test "$(cat "$scenario/notify-reads")" = $'candidate\noriginal'
   systemctl is-active --quiet shoes.service
@@ -885,6 +987,7 @@ EOF
 echo 'SOCKS5 rollback: Type=notify reads before READY=1 and restarts with StartLimitBurst=1: PASS'
 echo 'SOCKS5 local: ExecStop exports the original public URL before the candidate starts: PASS'
 echo 'SOCKS5 rollback: candidate ExecStop sees its loopback URL and defers the changed file export: PASS'
+echo 'SOCKS5 rollback: ExecStop synchronously stops a root unit that exports unchanged state: PASS'
 
 # Root systemctl can use systemd's private socket. Delegated readers need the system bus.
 apt-get install -y --no-install-recommends dbus
@@ -1090,6 +1193,57 @@ EOF
   test "$(stat -c %a:%U:%G "$profiles")" = '710:root:nogroup'
   test "$(stat -c %a:%U:%G "$readable_profile")" = '600:nobody:nogroup'
   echo 'SOCKS5 rollback: required non-root ExecStartPost reads and exports restored state via ACL: PASS'
+
+  # Repeat with explicit listen metadata and access to state alone. The root
+  # service can read config.yaml, but its delegated start hook cannot.
+  jq '(.profiles[] | select(.name == "compat-socks5-legacy") |
+    .credentials.Socks5.listen) = {"address": "0.0.0.0", "legacy_public_address": "0.0.0.0"}' \
+    "$state" >"$scenario/explicit-state"
+  cat "$scenario/explicit-state" >"$state"
+  chown root:root "$config"
+  rm -f "$scenario/delegated/changed.json" "$scenario/delegated/candidate-export-deferred" \
+    "$scenario/delegated/unchanged.json"
+  cat >"$scenario/reject-candidate" <<'SH'
+#!/bin/sh
+set -eu
+url="$("$1" url "$2")"
+case "$url" in
+  socks5://example.com:24436#*) exit 0 ;;
+  socks5://*@example.com:24436#*) touch "$3/state-only-candidate-started"; exit 1 ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod 0755 "$scenario/reject-candidate"
+  cat >"$dropin" <<EOF
+[Service]
+TimeoutStartSec=10s
+ReadWritePaths=$scenario
+ExecStartPre=+$systemctl_bin --quiet start $delegated_unit
+ExecStartPost=$scenario/reject-candidate $NEW $legacy_socks5_id $scenario
+EOF
+  cat >>"$delegated" <<EOF
+ExecStartPre=/usr/bin/test -r $state
+ExecStartPre=/usr/bin/test ! -r $config
+EOF
+  test "$(stat -c %a:%U:%G "$config")" = '600:root:root'
+  "$systemctl_bin" daemon-reload
+  "$systemctl_bin" restart shoes.service
+  cmp -s "$scenario/delegated/unchanged.json" "$scenario/unchanged-expected.json"
+  rm "$scenario/delegated/unchanged.json"
+  if "$NEW" socks5 secure "$legacy_socks5_id" --auth --yes >"$scenario/state-only-rollback" 2>&1; then
+    echo 'Expected the required root hook to reject the candidate after the state-only export' >&2
+    exit 1
+  fi
+  test -f "$scenario/state-only-candidate-started"
+  test -f "$scenario/delegated/candidate-export-deferred"
+  grep -Fq '原配置、防火墙及服务已恢复并再次验证' "$scenario/state-only-rollback"
+  "$systemctl_bin" is-active --quiet shoes.service
+  cmp -s "$state" "$scenario/explicit-state"
+  cmp -s "$config" "$scenario/original-config"
+  test "$(stat -c %a:%U:%G "$config")" = '600:root:root'
+  cmp -s "$scenario/delegated/unchanged.json" "$scenario/unchanged-expected.json"
+  test -s "$scenario/delegated/changed.json"
+  echo 'SOCKS5 rollback: a delegated start hook exports with access to state alone: PASS'
 )
 echo 'SOCKS5 rollback: post-commit SIGHUP restores configuration and the non-root service: PASS'
 echo 'SOCKS5 rollback: root startup hook can synchronously delegate an ACL-backed export to a non-root unit: PASS'

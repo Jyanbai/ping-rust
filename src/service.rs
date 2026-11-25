@@ -753,11 +753,11 @@ fn waits_for_unit(pid: u32, executable: &Path, unit: &str) -> bool {
         Err(_) => false,
     };
     matches_executable
-        && fs::read(process.join("cmdline")).is_ok_and(|line| systemctl_activates_unit(&line, unit))
+        && fs::read(process.join("cmdline")).is_ok_and(|line| systemctl_waits_for_unit(&line, unit))
 }
 
 #[cfg(target_os = "linux")]
-fn systemctl_activates_unit(command_line: &[u8], unit: &str) -> bool {
+fn systemctl_waits_for_unit(command_line: &[u8], unit: &str) -> bool {
     let Some(command_line) = command_line.strip_suffix(b"\0") else {
         return false;
     };
@@ -783,7 +783,7 @@ fn systemctl_activates_unit(command_line: &[u8], unit: &str) -> bool {
             matches_unit |=
                 arg == unit.as_bytes() || systemctl_service_shorthand(arg, unit.as_bytes());
         } else {
-            if !matches!(arg, b"start" | b"restart") {
+            if !matches!(arg, b"start" | b"restart" | b"stop") {
                 return false;
             }
             has_verb = true;
@@ -1079,8 +1079,8 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn socks5_secure_recognizes_blocking_local_systemctl_start_and_restart() {
-        let waits = |command: &str| systemctl_activates_unit(command.as_bytes(), "helper.service");
+    fn socks5_secure_recognizes_blocking_local_systemctl_start_restart_and_stop() {
+        let waits = |command: &str| systemctl_waits_for_unit(command.as_bytes(), "helper.service");
         for command in [
             "systemctl\0start\0helper.service\0",
             "systemctl\0start\0helper\0",
@@ -1093,6 +1093,8 @@ mod tests {
             "systemctl\0start\0--\0helper.service\0companion.service\0",
             "systemctl\0restart\0helper.service\0",
             "systemctl\0--quiet\0restart\0--\0helper\0",
+            "systemctl\0stop\0helper.service\0",
+            "systemctl\0--quiet\0stop\0--\0helper\0",
         ] {
             assert!(waits(command), "{command:?}");
         }
@@ -1112,14 +1114,17 @@ mod tests {
             "systemctl\0--no-block\0restart\0helper.service\0",
             "systemctl\0--user\0restart\0helper.service\0",
             "systemctl\0restart\0other.service\0",
+            "systemctl\0stop\0helper.service\0--no-block\0",
+            "systemctl\0--user\0stop\0helper.service\0",
+            "systemctl\0stop\0other.service\0",
         ] {
             assert!(!waits(command), "{command:?}");
         }
-        assert!(systemctl_activates_unit(
+        assert!(systemctl_waits_for_unit(
             b"systemctl\0start\0helper.with-dot\0",
             "helper.with-dot.service"
         ));
-        assert!(!systemctl_activates_unit(
+        assert!(!systemctl_waits_for_unit(
             b"systemctl\0start\0helper.timer\0",
             "helper.timer.service"
         ));

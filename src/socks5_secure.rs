@@ -310,6 +310,9 @@ pub(crate) async fn apply(
             false
         };
         if config_restored && activation_attempted && firewall_restored {
+            if let Err(error) = plan.mark_config_restored() {
+                failures.push(format!("回滚启动钩子状态={error:#}"));
+            }
             if let Err(error) = runtime.restore_service(&plan.original).await {
                 failures.push(format!("服务及原监听验证={error:#}"));
             }
@@ -382,6 +385,17 @@ impl Runtime for SystemRuntime {
         verify_authentication(&plan.original, listener)
             .await
             .context("原认证与受管配置不一致，无法安全回滚；请先同步 shoes.service 与受管配置")?;
+        for profile in plan.other_socks5_profiles() {
+            let address = profile.listen_address()?.parse()?;
+            verify_authentication(profile, address)
+                .await
+                .with_context(|| {
+                    format!(
+                        "端口 {} 的原认证与受管配置不一致，请先同步 shoes.service 与受管配置",
+                        profile.port
+                    )
+                })?;
+        }
         if self.mode == SecureMode::Local {
             self.firewall = firewall::FirewallPlan::capture(listener).await?;
         }

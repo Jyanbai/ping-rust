@@ -778,17 +778,12 @@ pub(crate) async fn run_with_export_paths(
             server,
             output,
         } => {
-            let file_export = output.is_some();
             read_profile_snapshot(
                 state_path,
                 lock_path,
-                file_export,
+                true,
                 |path, service_hook| {
-                    if file_export {
-                        config::socks5_secure::read_file_export_state(path, service_hook, profile)
-                    } else {
-                        config::socks5_secure::read_export_state(path, service_hook)
-                    }
+                    config::socks5_secure::read_client_export_state(path, service_hook, profile)
                 },
                 |state| {
                     let content = client::export(
@@ -1827,14 +1822,14 @@ pub(crate) async fn regenerate_test_certificate(id: Uuid) -> Result<()> {
 async fn read_profile_snapshot<T>(
     state_path: &Path,
     lock_path: &Path,
-    file_export: bool,
+    client_export: bool,
     read: impl Fn(&Path, Option<service::ShoesServiceHook>) -> Result<T>,
     use_snapshot: impl FnOnce(T) -> Result<()>,
 ) -> Result<()> {
     use utils::SnapshotAccess;
 
     #[cfg(not(target_os = "linux"))]
-    let _ = file_export;
+    let _ = client_export;
     let service_hook = service::shoes_service_hook().await;
     utils::read_with_existing_lock_or_service_hook(
         lock_path,
@@ -1848,7 +1843,7 @@ async fn read_profile_snapshot<T>(
                 Ok((read(state_path, service_hook)?, None))
             }
             #[cfg(target_os = "linux")]
-            SnapshotAccess::Missing | SnapshotAccess::Unreadable(_) if file_export => {
+            SnapshotAccess::Missing | SnapshotAccess::Unreadable(_) if client_export => {
                 config::socks5_secure::read_unlocked_snapshot(state_path, || {
                     let guard = config::socks5_secure::lock_state_for_file_export(state_path)?;
                     Ok((read(state_path, None)?, Some(guard)))
