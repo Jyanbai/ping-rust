@@ -362,13 +362,33 @@ EOF
 )
 echo 'SOCKS5 auth and local: reject drift between the running and managed listener: PASS'
 
-# Keep the target SOCKS5 identical while another running profile uses a different port.
-(
-  scenario="$(mktemp -d /usr/local/lib/socks5-other-listener.XXXXXX)"
-  dropin=/etc/systemd/system/shoes.service.d/90-compat-socks5-other-listener.conf
+check_other_reality_drift() (
+  kind="$1"
+  scenario="$(mktemp -d /usr/local/lib/socks5-other-reality.XXXXXX)"
+  dropin=/etc/systemd/system/shoes.service.d/90-compat-socks5-other-reality.conf
   trap 'rm -f "$dropin"; systemctl daemon-reload; systemctl restart shoes.service; rm -rf "$scenario"' EXIT
-  sed 's/0\.0\.0\.0:24431/0.0.0.0:24437/' /etc/shoes/config.yaml >"$scenario/config.yaml"
-  chmod 0600 "$scenario/config.yaml"
+  umask 077
+  reality_port=24431
+  if [[ "$kind" == port ]]; then reality_port=24437; fi
+  python3 - "$scenario/config.yaml" "$kind" "$reality_port" <<'PY'
+import sys
+import uuid
+
+import yaml
+
+with open('/etc/shoes/config.yaml') as source:
+    servers = yaml.safe_load(source)
+reality, = (server for server in servers if server['address'] == '0.0.0.0:24431')
+if sys.argv[2] == 'port':
+    reality['address'] = f'0.0.0.0:{sys.argv[3]}'
+else:
+    target, = reality['protocol']['reality_targets'].values()
+    protocol = target['protocol']
+    assert 'user_id' in protocol
+    protocol['user_id'] = str(uuid.uuid4())
+with open(sys.argv[1], 'w') as output:
+    yaml.safe_dump(servers, output)
+PY
   cat >"$dropin" <<EOF
 [Service]
 ExecStart=
@@ -378,33 +398,40 @@ EOF
   systemctl restart shoes.service
   # The target is loaded after the drifted Reality listener.
   for _ in {1..50}; do
-    if ss -H -ltn 'sport = :24437' | grep -Fq '0.0.0.0:24437' &&
+    if ss -H -ltn "sport = :$reality_port" | grep -Fq "0.0.0.0:$reality_port" &&
        ss -H -ltn 'sport = :24436' | grep -Fq '0.0.0.0:24436'; then break; fi
     sleep 0.1
   done
   ss -H -ltn 'sport = :24436' | grep -Fq '0.0.0.0:24436' ||
     { echo 'Target SOCKS5 listener did not start' >&2; exit 1; }
-  ss -H -ltn 'sport = :24437' | grep -Fq '0.0.0.0:24437' ||
+  ss -H -ltn "sport = :$reality_port" | grep -Fq "0.0.0.0:$reality_port" ||
     { echo 'Drifted Reality listener did not start' >&2; exit 1; }
   rm "$dropin"
   systemctl daemon-reload
   before_pid="$(systemctl show --property=MainPID --value shoes.service)"
   find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/before"
   if "$NEW" socks5 secure "$legacy_socks5_id" --auth --yes >"$scenario/result" 2>&1; then
-    echo 'Expected SOCKS5 hardening to reject listener drift on the Reality profile' >&2
+    echo "Expected SOCKS5 hardening to reject Reality $kind drift" >&2
     exit 1
   fi
-  # anyhow prints the context and the missing port on separate lines.
-  grep -Fq '原监听与受管配置不一致' "$scenario/result" ||
-    { echo 'Missing listener drift diagnostic' >&2; exit 1; }
-  grep -Fq '未找到 shoes 的预期监听 0.0.0.0:24431' "$scenario/result" ||
-    { echo 'Listener drift diagnostic did not identify the managed Reality port' >&2; exit 1; }
+  if [[ "$kind" == port ]]; then
+    # anyhow prints the context and the missing port on separate lines.
+    grep -Fq '原监听与受管配置不一致' "$scenario/result" ||
+      { echo 'Missing listener drift diagnostic' >&2; exit 1; }
+    grep -Fq '未找到 shoes 的预期监听 0.0.0.0:24431' "$scenario/result" ||
+      { echo 'Listener drift diagnostic did not identify the managed Reality port' >&2; exit 1; }
+  else
+    grep -Fq '原 shoes 进程未使用受管聚合配置' "$scenario/result"
+  fi
   test "$(systemctl show --property=MainPID --value shoes.service)" = "$before_pid"
-  ss -H -ltn 'sport = :24437' | grep -Fq '0.0.0.0:24437'
+  ss -H -ltn "sport = :$reality_port" | grep -Fq "0.0.0.0:$reality_port"
   find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/after"
   diff -u "$scenario/before" "$scenario/after"
 )
+check_other_reality_drift port
 echo 'SOCKS5 auth: reject drift on the Reality listener with an unchanged target: PASS'
+check_other_reality_drift uuid
+echo 'SOCKS5 auth: reject a different Reality UUID on the same running listener: PASS'
 
 # Reload the default ExecStart while the authenticated process still owns the
 # same wildcard listener that the managed configuration would start anonymously.
@@ -543,13 +570,15 @@ PY
 echo 'SOCKS5 auth: reject password drift on another SOCKS5 listener: PASS'
 
 # The override takes effect on restart, after preflight checks the original process.
-(
+check_other_auth_after_restart() (
+  kind="$1"
   scenario="$(mktemp -d /usr/local/lib/socks5-restart-auth.XXXXXX)"
   dropin=/etc/systemd/system/shoes.service.d/90-compat-socks5-restart-auth.conf
   trap 'rm -f "$dropin"; systemctl daemon-reload; rm -rf "$scenario"' EXIT
   umask 077
-  python3 - /etc/shoes/config.yaml "$scenario/config.yaml" <<'PY'
+  python3 - /etc/shoes/config.yaml "$scenario/config.yaml" "$kind" <<'PY'
 import sys
+import uuid
 
 import yaml
 
@@ -557,10 +586,15 @@ with open(sys.argv[1]) as source:
     servers = yaml.safe_load(source)
 target, = (entry for entry in servers if entry['address'] == '0.0.0.0:24436')
 target['address'] = '127.0.0.1:24436'
-other, = (entry for entry in servers if entry['address'] == '0.0.0.0:24432')
-username = other['protocol'].pop('username')
-password = other['protocol'].pop('password')
-assert username and password
+if sys.argv[3] == 'socks5':
+    other, = (entry for entry in servers if entry['address'] == '0.0.0.0:24432')
+    username = other['protocol'].pop('username')
+    password = other['protocol'].pop('password')
+    assert username and password
+else:
+    other, = (entry for entry in servers if entry['address'] == '0.0.0.0:24431')
+    reality, = other['protocol']['reality_targets'].values()
+    reality['protocol']['user_id'] = str(uuid.uuid4())
 with open(sys.argv[2], 'w') as output:
     yaml.safe_dump(servers, output)
 PY
@@ -586,7 +620,11 @@ EOF
     echo 'Expected SOCKS5 local hardening to reject authentication drift on another node after restart' >&2
     exit 1
   fi
-  grep -Fq '端口 24432 的运行态认证与受管配置不一致' "$scenario/result"
+  if [[ "$kind" == socks5 ]]; then
+    grep -Fq '端口 24432 的运行态认证与受管配置不一致' "$scenario/result"
+  else
+    grep -Fq '重启后的 shoes 进程未使用受管聚合配置' "$scenario/result"
+  fi
   grep -Fq '原配置、防火墙及服务已恢复并再次验证' "$scenario/result"
   systemctl is-active --quiet shoes.service
   test "$(systemctl show --property=MainPID --value shoes.service)" != "$before_pid"
@@ -594,7 +632,10 @@ EOF
   find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/after"
   diff -u "$scenario/before" "$scenario/after"
 )
+check_other_auth_after_restart socks5
 echo 'SOCKS5 local: reject authentication drift on another node after restart and roll back: PASS'
+check_other_auth_after_restart reality
+echo 'SOCKS5 local: reject a different Reality UUID after restart and roll back: PASS'
 
 # Exercise signal cancellation and an unattended timeout with the same substitute.
 (
@@ -721,12 +762,14 @@ echo 'SOCKS5 preflight: PID signals, process-group SIGINT and timeout clean up d
   reader_unit="${reader##*/}"
   dependency=/run/systemd/system/compat-socks5-required-export.service
   dependency_unit="${dependency##*/}"
+  notify=/run/systemd/system/compat-socks5-required-notify.service
+  notify_unit="${notify##*/}"
   dependency_dropin=$dropin/90-compat-socks5-required-export.conf
   companion=/run/systemd/system/compat-socks5-start-companion.service
   timer=/run/systemd/system/compat-socks5-timer-export.timer
   exporter="${timer%.timer}.service"
   mkdir -p "$dropin"
-  trap '"$systemctl_bin" stop "${target##*/}" "$reader_unit" "$dependency_unit" "${companion##*/}" "${timer##*/}" "${exporter##*/}" || true; rm -f "$dropin/90-compat-socks5-rollback.conf" "$dependency_dropin" "$target" "$reader" "$dependency" "$companion" "$timer" "$exporter"; "$systemctl_bin" daemon-reload; rm -rf "$scenario"' EXIT
+  trap '"$systemctl_bin" stop "${target##*/}" "$reader_unit" "$dependency_unit" "$notify_unit" "${companion##*/}" "${timer##*/}" "${exporter##*/}" || true; rm -f "$dropin/90-compat-socks5-rollback.conf" "$dependency_dropin" "$target" "$reader" "$dependency" "$notify" "$companion" "$timer" "$exporter"; "$systemctl_bin" daemon-reload; rm -rf "$scenario"' EXIT
   cat >"$scenario/systemctl" <<'SH'
 #!/bin/sh
 case "$1" in
@@ -844,6 +887,26 @@ ExecStart=$NEW export sing-box --profile ${ids[1]} --server example.com --output
 ExecStart=/usr/bin/cmp -s $scenario/dependency-expected.json $scenario/dependency-export.json
 ExecStart=/bin/sh -c 'echo ok >>$scenario/dependency-runs'
 EOF
+  cat >"$scenario/notify-dependency" <<'SH'
+#!/bin/sh
+set -eu
+test "$(systemctl show --property=ControlPID --value "$4")" = 0
+"$1" export sing-box --profile "$2" --server example.com --output "$3/notify-export.json" >/dev/null
+cmp -s "$3/dependency-expected.json" "$3/notify-export.json"
+echo ok >>"$3/notify-dependency-runs"
+systemd-notify --ready
+exec sleep infinity
+SH
+  chmod 0755 "$scenario/notify-dependency"
+  cat >"$notify" <<EOF
+[Unit]
+PartOf=shoes.service
+[Service]
+Type=notify
+NotifyAccess=all
+TimeoutStartSec=5s
+ExecStart=$scenario/notify-dependency $NEW ${ids[1]} $scenario $notify_unit
+EOF
   cat >"$companion" <<'EOF'
 [Service]
 Type=oneshot
@@ -886,8 +949,8 @@ EOF
   # Install the ordered dependency after the initial start. Both restarts must run it.
   cat >"$dependency_dropin" <<EOF
 [Unit]
-Requires=$dependency_unit
-After=$dependency_unit
+Requires=$dependency_unit $notify_unit
+After=$dependency_unit $notify_unit
 EOF
   "$systemctl_bin" daemon-reload
   before_pid="$("$systemctl_bin" show --property=MainPID --value shoes.service)"
@@ -899,6 +962,7 @@ EOF
   fi
   test -f "$scenario/activation-failed" || { echo 'SOCKS5 rollback did not reach the injected activation failure' >&2; exit 1; }
   test "$(grep -c '^ok$' "$scenario/dependency-runs")" -eq 2
+  test "$(grep -c '^ok$' "$scenario/notify-dependency-runs")" -eq 2
   test "$(grep -c '^ok$' "$scenario/start-pre-runs")" -eq 2
   test "$(grep -c '^ok$' "$scenario/oneshot-runs")" -eq 2
   test "$(grep -c '^ok$' "$scenario/oneshot-wrapper-runs")" -eq 2
@@ -932,6 +996,7 @@ EOF
 )
 echo 'SOCKS5 rollback: synchronous readers finish and timer export waits for rollback: PASS'
 echo 'SOCKS5 rollback: ordered startup dependency exports during candidate and restored starts: PASS'
+echo 'SOCKS5 rollback: ordered Type=notify dependency exports before READY=1 on both starts: PASS'
 echo 'SOCKS5 rollback: candidate credentials are withheld from redirected export stdout: PASS'
 
 # A referenced, stopped unit keeps its start-rate counter. Inject a firewall
@@ -1278,7 +1343,28 @@ EOF
   cat >>"$delegated" <<EOF
 ExecStartPre=/usr/bin/test -r $state
 ExecStartPre=/usr/bin/test ! -r $config
+ExecStart=$scenario/query-unchanged $NEW ${ids[1]} $legacy_socks5_id $scenario/delegated
 EOF
+  cat >"$scenario/query-unchanged" <<'SH'
+#!/bin/sh
+set -eu
+"$1" url COMPAT-SOCKS5 >"$4/query-url"
+"$1" qr "$2" >"$4/query-qr"
+"$1" info "$2" >"$4/query-info"
+grep -Fq "$2 | compat-socks5 |" "$4/query-info"
+if [ -e /etc/shoes/.ping-rust-socks5-secure.pending ] && [ ! -e "$4/changed.json" ]; then
+  cp "$4/query-url" "$4/candidate-unchanged-url"
+  cp "$4/query-qr" "$4/candidate-unchanged-qr"
+  if "$1" url "$3" >"$4/candidate-url" 2>/dev/null; then exit 1; fi
+  test ! -s "$4/candidate-url"
+  if "$1" info >"$4/candidate-info" 2>/dev/null; then exit 1; fi
+  if grep -q '^配置数量：' "$4/candidate-info"; then exit 1; fi
+  touch "$4/candidate-queries-checked"
+fi
+SH
+  chmod 0755 "$scenario/query-unchanged"
+  "$NEW" url "${ids[1]}" >"$scenario/query-expected-url"
+  "$NEW" qr "${ids[1]}" >"$scenario/query-expected-qr"
   test "$(stat -c %a:%U:%G "$config")" = '600:root:root'
   "$systemctl_bin" daemon-reload
   "$systemctl_bin" restart shoes.service
@@ -1290,12 +1376,17 @@ EOF
   fi
   test -f "$scenario/state-only-candidate-started"
   test -f "$scenario/delegated/candidate-export-deferred"
+  test -f "$scenario/delegated/candidate-queries-checked"
+  cmp -s "$scenario/delegated/candidate-unchanged-url" "$scenario/query-expected-url"
+  cmp -s "$scenario/delegated/candidate-unchanged-qr" "$scenario/query-expected-qr"
   grep -Fq '原配置、防火墙及服务已恢复并再次验证' "$scenario/state-only-rollback"
   "$systemctl_bin" is-active --quiet shoes.service
   cmp -s "$state" "$scenario/explicit-state"
   cmp -s "$config" "$scenario/original-config"
   test "$(stat -c %a:%U:%G "$config")" = '600:root:root'
   cmp -s "$scenario/delegated/unchanged.json" "$scenario/unchanged-expected.json"
+  cmp -s "$scenario/delegated/query-url" "$scenario/query-expected-url"
+  cmp -s "$scenario/delegated/query-qr" "$scenario/query-expected-qr"
   test -s "$scenario/delegated/changed.json"
   echo 'SOCKS5 rollback: a delegated start hook exports with access to state alone: PASS'
 )

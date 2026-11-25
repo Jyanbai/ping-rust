@@ -319,6 +319,43 @@ fn same_executable(running: &Path, installed: &Path) -> Result<bool> {
     }
 }
 
+pub(crate) fn require_managed_shoes_process(pid: u32, config: &Path) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::{ffi::OsStrExt, fs::MetadataExt};
+
+        let process = Path::new("/proc").join(pid.to_string());
+        if !same_executable(&process.join("exe"), Path::new(utils::SHOES_BIN))? {
+            bail!("运行中的 shoes 二进制与受管路径不一致");
+        }
+        // daemon-reload 只更新 unit，不会替换当前进程的启动参数。
+        let command_line = fs::read(process.join("cmdline")).context("无法读取 shoes 启动参数")?;
+        let mut arguments = command_line
+            .strip_suffix(&[0])
+            .context("无法确认 shoes 启动参数")?
+            .split(|&byte| byte == 0);
+        let relative_config = config
+            .strip_prefix("/")
+            .context("受管配置路径必须为绝对路径")?;
+        if arguments.nth(1) != Some(config.as_os_str().as_bytes()) || arguments.next().is_some() {
+            bail!("shoes 启动参数未指向唯一的受管聚合配置");
+        }
+        // 检查服务的挂载命名空间，避免相同参数实际上指向另一个文件。
+        let live = fs::metadata(process.join("root").join(relative_config))
+            .context("无法检查 shoes 进程可见的聚合配置")?;
+        let managed = fs::metadata(config).context("无法检查受管聚合配置")?;
+        if (live.dev(), live.ino()) != (managed.dev(), managed.ino()) {
+            bail!("shoes 进程可见的聚合配置与受管文件不同");
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (pid, config);
+        bail!("无法检查 shoes 进程的聚合配置");
+    }
+}
+
 pub fn hot_reload_and_verify(
     snapshot: HotReloadSnapshot,
     expected_ports: &BTreeSet<u16>,
@@ -610,17 +647,7 @@ async fn detect_shoes_service_hook() -> Option<ShoesServiceHook> {
     } else {
         ShoesServiceHook::Start
     };
-    // Type=notify 在 READY=1 之前由 MainPID 阻塞启动作业，即使没有 ControlPID。
-    let notify_main = matches!(
-        unit_property(&shoes, "Type"),
-        Some("notify" | "notify-reload")
-    ) && unit_property(&shoes, "ActiveState") == Some("activating")
-        && unit_property(&shoes, "SubState") == Some("start");
-    let main_pid = if notify_main {
-        unit_pid(&shoes, "MainPID")
-    } else {
-        None
-    };
+    let main_pid = waiting_notify_main(&shoes);
     let waited_phase = |pid| {
         [
             (control_pid, control_phase),
@@ -649,6 +676,7 @@ async fn detect_shoes_service_hook() -> Option<ShoesServiceHook> {
                 "--property=MainPID",
                 "--property=ControlPID",
                 "--property=ActiveState",
+                "--property=SubState",
                 "--property=Type",
                 "--",
                 unit,
@@ -680,12 +708,13 @@ async fn detect_shoes_service_hook() -> Option<ShoesServiceHook> {
         }
     }
 
-    // 声明的 oneshot 依赖先于 shoes 启动钩子执行，此时可能还没有 shoes ControlPID。
+    // 有序依赖先于 shoes 启动钩子执行，此时可能还没有 shoes ControlPID。
     // 要求两个启动作业同时存在，避免把独立运行的依赖服务视作同步读者。
-    if !ordered_dependency
-        || unit_property(&target, "Type") != Some("oneshot")
-        || unit_property(&target, "ActiveState") != Some("activating")
-    {
+    let waiting_oneshot = unit_property(&target, "Type") == Some("oneshot")
+        && unit_property(&target, "ActiveState") == Some("activating");
+    let waiting_notify =
+        waiting_notify_main(&target).is_some_and(|pid| descends_from(process, pid));
+    if !ordered_dependency || !(waiting_oneshot || waiting_notify) {
         return None;
     }
     let jobs = systemctl
@@ -710,6 +739,21 @@ async fn detect_shoes_service_hook() -> Option<ShoesServiceHook> {
         })
     };
     (has_start_job(SERVICE_NAME) && has_start_job(unit)).then_some(ShoesServiceHook::Start)
+}
+
+#[cfg(target_os = "linux")]
+fn waiting_notify_main(properties: &str) -> Option<u32> {
+    // READY=1 之前由 MainPID 阻塞启动作业，即使没有 ControlPID。
+    if matches!(
+        unit_property(properties, "Type"),
+        Some("notify" | "notify-reload")
+    ) && unit_property(properties, "ActiveState") == Some("activating")
+        && unit_property(properties, "SubState") == Some("start")
+    {
+        unit_pid(properties, "MainPID")
+    } else {
+        None
+    }
 }
 
 #[cfg(target_os = "linux")]

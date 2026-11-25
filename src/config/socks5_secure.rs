@@ -13,6 +13,7 @@ const PENDING_STOP: &str = ".ping-rust-socks5-secure.stop";
 const UNFINISHED: &str = "上次 SOCKS5 加固未完成。请检查 shoes.service 和防火墙，从备份恢复一致的 config.yaml、profiles 和 ping-rust-state.json，验证服务后再移除 .ping-rust-socks5-secure.pending 和 .ping-rust-socks5-secure.stop（若存在）";
 const DEFER_FILE_EXPORT: &str =
     "服务钩子无法将待验证的配置写入客户端文件，请在 SOCKS5 加固结束后重试文件导出";
+const DEFER_DISPLAY: &str = "SOCKS5 加固期间的配置与已发布状态不一致，请在加固结束后重试读取";
 #[cfg(target_os = "linux")]
 const RETRY_READ: &str =
     "请在 SOCKS5 加固结束后重试读取；若此提示持续出现，请由管理员检查加固事务状态";
@@ -126,8 +127,9 @@ fn require_live_lock(file: &fs::File) -> Result<()> {
     }
 }
 
-enum HookRead {
-    Display,
+enum HookRead<'a> {
+    List,
+    Profile(Option<&'a str>),
     ClientExport(Option<Uuid>),
 }
 
@@ -167,9 +169,11 @@ enum StopView {
 pub(crate) fn read_info_state(
     state_path: &Path,
     service_hook: Option<ShoesServiceHook>,
+    selector: Option<&str>,
 ) -> Result<Option<ManagedState>> {
     if let Some(hook) = service_hook {
-        if let Some(state) = read_pending_hook_state(state_path, hook, HookRead::Display)? {
+        let read = selector.map_or(HookRead::List, |name| HookRead::Profile(Some(name)));
+        if let Some(state) = read_pending_hook_state(state_path, hook, read)? {
             return Ok(Some(state));
         }
     } else {
@@ -184,8 +188,9 @@ pub(crate) fn read_info_state(
 pub(crate) fn read_export_state(
     state_path: &Path,
     service_hook: Option<ShoesServiceHook>,
+    selector: Option<&str>,
 ) -> Result<ManagedState> {
-    read_export_snapshot(state_path, service_hook, HookRead::Display)
+    read_export_snapshot(state_path, service_hook, HookRead::Profile(selector))
 }
 
 pub(crate) fn read_client_export_state(
@@ -199,7 +204,7 @@ pub(crate) fn read_client_export_state(
 fn read_export_snapshot(
     state_path: &Path,
     service_hook: Option<ShoesServiceHook>,
-    read: HookRead,
+    read: HookRead<'_>,
 ) -> Result<ManagedState> {
     let Some(hook) = service_hook else {
         return load_state_from(state_path);
@@ -213,7 +218,7 @@ fn read_export_snapshot(
 fn read_pending_hook_state(
     state_path: &Path,
     hook: ShoesServiceHook,
-    read: HookRead,
+    read: HookRead<'_>,
 ) -> Result<Option<ManagedState>> {
     let Some(pending) = open_live_pending(state_path)? else {
         return Ok(None);
@@ -227,10 +232,7 @@ fn read_pending_hook_state(
         if stop.config_restored {
             return load_state_file(state_path).map(Some);
         }
-        if let HookRead::ClientExport(selector) = read {
-            return read_unchanged_export(state_path, selector, stop.profile).map(Some);
-        }
-        bail!("SOCKS5 加固期间的配置与已发布状态不一致，请在加固结束后重试读取");
+        return read_unchanged_published(state_path, read, stop.profile).map(Some);
     };
     // 启动钩子读取本次启动使用的配置。回滚启动时聚合配置已恢复，优先使用原状态。
     let servers = load_servers(&state_path.with_file_name("config.yaml"))
@@ -253,7 +255,7 @@ fn read_stop_hook_state(
     state_path: &Path,
     pending: PendingHook,
     invocation: Option<Uuid>,
-    read: HookRead,
+    read: HookRead<'_>,
 ) -> Result<ManagedState> {
     let stop = PendingStop::read(state_path)?;
     let invocation = invocation.context("无法确认停止钩子对应的 shoes.service 实例")?;
@@ -272,24 +274,29 @@ fn read_stop_hook_state(
             load_state_file(state_path).ok(),
             read,
         ),
-        PendingHook::PublishedOnly => {
-            if let HookRead::ClientExport(selector) = read {
-                return read_unchanged_export(state_path, selector, stop.profile);
-            }
-            bail!("停止钩子无法读取待验证的配置，请在 SOCKS5 加固结束后重试读取");
-        }
+        PendingHook::PublishedOnly => read_unchanged_published(state_path, read, stop.profile),
     }
 }
 
-fn read_unchanged_export(
+fn read_unchanged_published(
     state_path: &Path,
-    selector: Option<Uuid>,
+    read: HookRead<'_>,
     changed_profile: Uuid,
 ) -> Result<ManagedState> {
     let published = load_state_file(state_path)?;
-    let selected = crate::client::select_export_profile(&published.profiles, selector)?;
+    let (selected, defer) = match read {
+        HookRead::List => bail!("{DEFER_DISPLAY}"),
+        HookRead::Profile(selector) => (
+            crate::client::select_profile(&published.profiles, selector)?,
+            DEFER_DISPLAY,
+        ),
+        HookRead::ClientExport(selector) => (
+            crate::client::select_export_profile(&published.profiles, selector)?,
+            DEFER_FILE_EXPORT,
+        ),
+    };
     if selected.id == changed_profile {
-        bail!("{DEFER_FILE_EXPORT}");
+        bail!("{defer}");
     }
     Ok(published)
 }
@@ -301,7 +308,7 @@ fn read_candidate(pending: fs::File) -> Result<ManagedState> {
 fn read_candidate_for_hook(
     candidate: ManagedState,
     published: Option<ManagedState>,
-    read: HookRead,
+    read: HookRead<'_>,
 ) -> Result<ManagedState> {
     if let HookRead::ClientExport(selector) = read {
         if let Some(published) = published {
@@ -385,6 +392,37 @@ struct FileSnapshot {
     access: FileAccess,
     #[cfg(unix)]
     link: Option<FileLink>,
+    #[cfg(target_os = "linux")]
+    label: Option<(&'static str, Vec<u8>)>,
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[test]
+fn socks5_secure_preserves_aggregate_label_on_atomic_commit_and_rollback() {
+    use rustix::fs::{getxattr, setxattr, XattrFlags};
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.yaml");
+    fs::write(&path, b"original").unwrap();
+    // 模拟与父目录默认值不同的标签，使测试也能在未启用 SELinux 的 CI 上运行。
+    let attribute = "user.ping_rust_test_selinux";
+    let label = b"system_u:object_r:shoes_conf_t:s0\0";
+    setxattr(&path, attribute, label, XattrFlags::empty()).unwrap();
+    let original =
+        FileSnapshot::capture_with_label(&path, &fs::File::open(&path).unwrap(), attribute)
+            .unwrap();
+
+    let assert_file = |contents: &[u8]| {
+        assert_eq!(fs::read(&path).unwrap(), contents);
+        let mut value = [0; 64];
+        let len = getxattr(&path, attribute, value.as_mut_slice()).unwrap();
+        assert_eq!(&value[..len], label);
+    };
+    original.write(&path, b"candidate").unwrap();
+    assert_file(b"candidate");
+    original.restore(&path, &original.contents).unwrap();
+    assert_file(b"original");
+    assert!(original.restored(&path));
 }
 
 impl FileSnapshot {
@@ -398,15 +436,37 @@ impl FileSnapshot {
             access: FileAccess::capture(file).context("无法读取文件访问权限")?,
             #[cfg(unix)]
             link: FileLink::capture(path).context("无法备份软链接")?,
+            #[cfg(target_os = "linux")]
+            label: None,
         })
     }
 
+    fn capture_config(path: &Path, file: &fs::File) -> Result<Self> {
+        #[cfg(target_os = "linux")]
+        {
+            Self::capture_with_label(path, file, "security.selinux")
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Self::capture(path, file)
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn capture_with_label(path: &Path, file: &fs::File, attribute: &'static str) -> Result<Self> {
+        let mut snapshot = Self::capture(path, file)?;
+        snapshot.label = super::transaction::read_file_xattr(file, attribute)
+            .context("无法读取聚合配置的 SELinux 标签")?
+            .map(|label| (attribute, label));
+        Ok(snapshot)
+    }
+
     fn restore(&self, path: &Path, contents: &[u8]) -> Result<()> {
+        if self.restored(path) {
+            return Ok(());
+        }
         #[cfg(unix)]
         if let Some(link) = &self.link {
-            if self.restored(path) {
-                return Ok(());
-            }
             link.restore(path)?;
             if !self.restored(path) {
                 bail!(
@@ -420,7 +480,19 @@ impl FileSnapshot {
     }
 
     fn write(&self, path: &Path, contents: &[u8]) -> Result<()> {
-        utils::atomic_write_with(path, contents, |file| self.access.apply(file))
+        utils::atomic_write_with(path, contents, |file| {
+            self.access.apply(file)?;
+            #[cfg(target_os = "linux")]
+            if let Some((attribute, label)) = &self.label {
+                use rustix::fs::{fsetxattr, XattrFlags};
+
+                let current = super::transaction::read_file_xattr(file, attribute)?;
+                if current.as_deref() != Some(label.as_slice()) {
+                    fsetxattr(file, *attribute, label, XattrFlags::empty())?;
+                }
+            }
+            Ok(())
+        })
     }
 
     fn restored(&self, path: &Path) -> bool {
@@ -442,6 +514,14 @@ impl FileSnapshot {
                 None => entry.is_file(),
             };
             if !entry_restored {
+                return false;
+            }
+        }
+        #[cfg(target_os = "linux")]
+        if let Some((attribute, label)) = &self.label {
+            if !super::transaction::read_file_xattr(&file, attribute)
+                .is_ok_and(|current| current.as_deref() == Some(label.as_slice()))
+            {
                 return false;
             }
         }
@@ -591,6 +671,13 @@ impl SecurePlan {
         })
     }
 
+    pub(crate) fn has_other_protocols(&self) -> bool {
+        self.state
+            .profiles
+            .iter()
+            .any(|profile| profile.protocol() != Protocol::Socks5)
+    }
+
     pub(crate) async fn validate(
         &self,
         interrupt: &crate::socks5_secure::InterruptGuard<'_>,
@@ -626,7 +713,7 @@ impl SecurePlan {
             Err(error) => return Err(error).context("无法锁定原管理状态"),
         }
         let rollback = SecureRollback {
-            config: FileSnapshot::capture(&config, &original_config)
+            config: FileSnapshot::capture_config(&config, &original_config)
                 .context("无法备份原聚合配置")?,
             state: FileSnapshot::capture(&state, &original_state_file)
                 .context("无法备份原管理状态")?,

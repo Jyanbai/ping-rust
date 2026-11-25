@@ -1282,7 +1282,7 @@ async fn socks5_secure_sigkill_after_commit_refuses_retry_and_stale_exports() {
     assert!(format!("{error:#}").contains("上次 SOCKS5 加固未完成"));
 
     for hook in [ShoesServiceHook::Start, ShoesServiceHook::Stop(None)] {
-        let error = super::socks5_secure::read_export_state(&state_path, Some(hook))
+        let error = super::socks5_secure::read_export_state(&state_path, Some(hook), None)
             .err()
             .expect("systemd 钩子也必须拒绝已失去写者的事务");
         assert!(format!("{error:#}").contains("上次 SOCKS5 加固未完成"));

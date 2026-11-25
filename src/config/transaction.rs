@@ -58,10 +58,10 @@ impl FileAccess {
             #[cfg(unix)]
             gid: metadata.gid(),
             #[cfg(target_os = "linux")]
-            acl: read_acl(file, ACCESS_ACL)?,
+            acl: read_file_xattr(file, ACCESS_ACL)?,
             #[cfg(target_os = "linux")]
             default_acl: if metadata.is_dir() {
-                read_acl(file, DEFAULT_ACL)?
+                read_file_xattr(file, DEFAULT_ACL)?
             } else {
                 None
             },
@@ -96,7 +96,7 @@ const ACCESS_ACL: &str = "system.posix_acl_access";
 const DEFAULT_ACL: &str = "system.posix_acl_default";
 
 #[cfg(target_os = "linux")]
-fn read_acl(file: &fs::File, name: &str) -> io::Result<Option<Vec<u8>>> {
+pub(super) fn read_file_xattr(file: &fs::File, name: &str) -> io::Result<Option<Vec<u8>>> {
     use rustix::{
         fs::{fgetxattr, fgetxattr_query},
         io::Errno,

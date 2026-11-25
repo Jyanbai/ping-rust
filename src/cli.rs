@@ -734,7 +734,9 @@ pub(crate) async fn run_with_export_paths(
                 state_path,
                 lock_path,
                 false,
-                config::socks5_secure::read_export_state,
+                |path, hook| {
+                    config::socks5_secure::read_export_state(path, hook, profile.as_deref())
+                },
                 |state| {
                     print_saved_url(
                         &state.profiles,
@@ -753,7 +755,9 @@ pub(crate) async fn run_with_export_paths(
                 state_path,
                 lock_path,
                 false,
-                config::socks5_secure::read_export_state,
+                |path, hook| {
+                    config::socks5_secure::read_export_state(path, hook, profile.as_deref())
+                },
                 |state| {
                     print_saved_qr(
                         &state.profiles,
@@ -1881,7 +1885,7 @@ async fn show_info(selector: Option<&str>, state_path: &Path, lock_path: &Path) 
         state_path,
         lock_path,
         false,
-        config::socks5_secure::read_info_state,
+        |path, hook| config::socks5_secure::read_info_state(path, hook, selector),
         |state| print_info_profiles(selector, state),
     )
     .await

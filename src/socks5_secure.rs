@@ -1,6 +1,12 @@
 //! 加固命令：持锁提交、激活、探测以及配置/防火墙/服务的补偿事务。
 use std::{
-    io, net::SocketAddr, ops::AsyncFnOnce, path::Path, process::Stdio, sync::Mutex, time::Duration,
+    io,
+    net::SocketAddr,
+    ops::AsyncFnOnce,
+    path::{Path, PathBuf},
+    process::Stdio,
+    sync::Mutex,
+    time::Duration,
 };
 
 use anyhow::{bail, Context, Result};
@@ -195,6 +201,9 @@ pub(crate) async fn run(
         firewall: firewall::FirewallPlan::default(),
         listeners: OtherListeners::default(),
         other_socks5_profiles: plan.other_socks5_profiles().cloned().collect(),
+        managed_config: plan
+            .has_other_protocols()
+            .then(|| directory.join("config.yaml")),
         rollback_stop: None,
     };
     apply(&mut plan, &mut runtime, &INTERRUPT).await?;
@@ -349,6 +358,7 @@ struct SystemRuntime {
     firewall: firewall::FirewallPlan,
     listeners: OtherListeners,
     other_socks5_profiles: Vec<ManagedProfile>,
+    managed_config: Option<PathBuf>,
     rollback_stop: Option<Result<()>>,
 }
 
@@ -370,6 +380,18 @@ impl SystemRuntime {
                         profile.port
                     )
                 })?;
+        }
+        Ok(())
+    }
+
+    async fn verify_config_source(&self, pid: u32, phase: &str) -> Result<()> {
+        if let Some(config) = &self.managed_config {
+            crate::service::require_managed_shoes_process(pid, config).with_context(|| {
+                format!("{phase} shoes 进程未使用受管聚合配置，无法验证其他协议的配置；请先同步 shoes.service 与受管配置")
+            })?;
+        }
+        if Systemctl::SecureTransaction.secure_main_pid().await? != Some(pid) {
+            bail!("验证配置期间 shoes.service 的 MainPID 已改变，请重试");
         }
         Ok(())
     }
@@ -398,13 +420,17 @@ impl Runtime for SystemRuntime {
             };
             listeners.push(address.parse().context("受管节点监听地址无效")?);
         }
-        let listener = verify_listener(&plan.original, systemctl, Some(&self.listeners))
-            .await
-            .context("原监听与受管配置不一致，无法安全回滚；请先同步 shoes.service 与受管配置")?;
+        let (listener, main_pid) =
+            verify_listener(&plan.original, systemctl, Some(&self.listeners))
+                .await
+                .context(
+                    "原监听与受管配置不一致，无法安全回滚；请先同步 shoes.service 与受管配置",
+                )?;
         verify_authentication(&plan.original, listener)
             .await
             .context("原认证与受管配置不一致，无法安全回滚；请先同步 shoes.service 与受管配置")?;
         self.verify_other_authentication("原").await?;
+        self.verify_config_source(main_pid, "原").await?;
         if self.mode == SecureMode::Local {
             self.firewall = firewall::FirewallPlan::capture(listener).await?;
         }
@@ -420,10 +446,11 @@ impl Runtime for SystemRuntime {
             .await
     }
     async fn verify(&mut self, profile: &ManagedProfile) -> Result<()> {
-        let expected =
+        let (expected, main_pid) =
             verify_listener(profile, Systemctl::SecureTransaction, Some(&self.listeners)).await?;
         verify_authentication(profile, expected).await?;
-        self.verify_other_authentication("运行态").await
+        self.verify_other_authentication("运行态").await?;
+        self.verify_config_source(main_pid, "重启后的").await
     }
     async fn close_firewall(&mut self) -> Result<()> {
         self.firewall.close().await
@@ -477,7 +504,7 @@ async fn listener_output(transport: char) -> Result<String> {
 }
 
 pub(crate) async fn verify(profile: &ManagedProfile) -> Result<()> {
-    let expected = verify_listener(profile, Systemctl::Foreground, None).await?;
+    let (expected, _) = verify_listener(profile, Systemctl::Foreground, None).await?;
     verify_authentication(profile, expected).await
 }
 
@@ -504,7 +531,7 @@ async fn verify_listener(
     profile: &ManagedProfile,
     systemctl: Systemctl,
     others: Option<&OtherListeners>,
-) -> Result<SocketAddr> {
+) -> Result<(SocketAddr, u32)> {
     if !systemctl.secure_is_active().await? {
         bail!("shoes.service 未处于 active 状态");
     }
@@ -537,7 +564,7 @@ async fn verify_listener(
             bail!("检查监听期间 shoes.service 的 MainPID 已改变，请重试");
         }
     }
-    Ok(expected)
+    Ok((expected, main_pid))
 }
 
 fn owned_listeners(output: &str, main_pid: u32) -> impl Iterator<Item = &str> {
