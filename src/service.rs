@@ -2,6 +2,7 @@ use std::{collections::BTreeSet, fs, path::Path, process::Command, thread, time:
 
 use anyhow::{bail, Context, Result};
 use clap::ValueEnum;
+use uuid::Uuid;
 
 use crate::{installer, performance, utils};
 
@@ -559,7 +560,7 @@ pub fn is_active() -> Result<bool> {
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) enum ShoesServiceHook {
     Start,
-    Stop,
+    Stop(Option<Uuid>),
 }
 
 // 只有 systemd 正在等待的 shoes 钩子、启动依赖及其同步读者可以绕过写锁。
@@ -586,6 +587,7 @@ async fn detect_shoes_service_hook() -> Option<ShoesServiceHook> {
                 "show",
                 "--property=ControlPID",
                 "--property=MainPID",
+                "--property=InvocationID",
                 "--property=ActiveState",
                 "--property=SubState",
                 "--property=Type",
@@ -604,7 +606,7 @@ async fn detect_shoes_service_hook() -> Option<ShoesServiceHook> {
             unit_property(&shoes, "SubState"),
             Some("stop" | "stop-post")
         ) {
-        ShoesServiceHook::Stop
+        ShoesServiceHook::Stop(unit_property(&shoes, "InvocationID").and_then(parse_invocation_id))
     } else {
         ShoesServiceHook::Start
     };
@@ -751,16 +753,16 @@ fn waits_for_unit(pid: u32, executable: &Path, unit: &str) -> bool {
         Err(_) => false,
     };
     matches_executable
-        && fs::read(process.join("cmdline")).is_ok_and(|line| systemctl_starts_unit(&line, unit))
+        && fs::read(process.join("cmdline")).is_ok_and(|line| systemctl_activates_unit(&line, unit))
 }
 
 #[cfg(target_os = "linux")]
-fn systemctl_starts_unit(command_line: &[u8], unit: &str) -> bool {
+fn systemctl_activates_unit(command_line: &[u8], unit: &str) -> bool {
     let Some(command_line) = command_line.strip_suffix(b"\0") else {
         return false;
     };
     let mut args = command_line.split(|byte| *byte == 0).skip(1);
-    let mut starts = false;
+    let mut has_verb = false;
     let mut matches_unit = false;
     let mut parse_options = true;
     while let Some(arg) = args.next() {
@@ -777,14 +779,14 @@ fn systemctl_starts_unit(command_line: &[u8], unit: &str) -> bool {
                 mode if mode.starts_with(b"--job-mode=") && mode.len() > b"--job-mode=".len() => {}
                 _ => return false,
             }
-        } else if starts {
+        } else if has_verb {
             matches_unit |=
                 arg == unit.as_bytes() || systemctl_service_shorthand(arg, unit.as_bytes());
         } else {
-            if arg != b"start" {
+            if !matches!(arg, b"start" | b"restart") {
                 return false;
             }
-            starts = true;
+            has_verb = true;
         }
     }
     matches_unit
@@ -945,13 +947,13 @@ impl Systemctl {
         )
     }
 
-    pub(crate) async fn restart_secure_transaction(self, rollback: bool) -> Result<()> {
+    pub(crate) async fn restart_secure_transaction(
+        self,
+        rollback_stop: Option<Result<()>>,
+    ) -> Result<()> {
         utils::require_linux_root()?;
         ensure_systemctl()?;
-        if rollback {
-            // 取消 systemctl 客户端并不会撤销已提交给 systemd 的任务。先替换待完成的
-            // restart，确保恢复的配置由新的进程加载。
-            let stop = self.stop_secure_transaction().await;
+        if let Some(stop) = rollback_stop {
             // 停止尚未完成或 unit 仍被引用时也可能保留启动计数。unit 已卸载时
             // reset-failed 可能报错，仍要尝试重启。
             let reset = self.timed(RESET_FAILED_COMMAND, SECURE_QUERY_TIMEOUT).await;
@@ -1010,6 +1012,10 @@ impl Systemctl {
         parse_main_pid(&self.timed_show("MainPID").await?)
     }
 
+    pub(crate) async fn secure_invocation_id(self) -> Result<Option<Uuid>> {
+        Ok(parse_invocation_id(&self.timed_show("InvocationID").await?))
+    }
+
     async fn timed_show(self, property: &str) -> Result<String> {
         self.timed(
             &[
@@ -1026,6 +1032,10 @@ impl Systemctl {
     async fn timed(self, args: &[&str], timeout: Duration) -> Result<String> {
         wait_for_systemctl(self.command("systemctl"), args, timeout).await
     }
+}
+
+fn parse_invocation_id(value: &str) -> Option<Uuid> {
+    Uuid::parse_str(value).ok().filter(|id| !id.is_nil())
 }
 
 fn parse_main_pid(value: &str) -> Result<Option<u32>> {
@@ -1069,8 +1079,8 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn socks5_secure_recognizes_only_blocking_local_systemctl_start() {
-        let waits = |command: &str| systemctl_starts_unit(command.as_bytes(), "helper.service");
+    fn socks5_secure_recognizes_blocking_local_systemctl_start_and_restart() {
+        let waits = |command: &str| systemctl_activates_unit(command.as_bytes(), "helper.service");
         for command in [
             "systemctl\0start\0helper.service\0",
             "systemctl\0start\0helper\0",
@@ -1081,6 +1091,8 @@ mod tests {
             "systemctl\0start\0--job-mode\0replace\0helper.service\0",
             "systemctl\0--quiet\0start\0companion.service\0helper\0",
             "systemctl\0start\0--\0helper.service\0companion.service\0",
+            "systemctl\0restart\0helper.service\0",
+            "systemctl\0--quiet\0restart\0--\0helper\0",
         ] {
             assert!(waits(command), "{command:?}");
         }
@@ -1097,14 +1109,17 @@ mod tests {
             "systemctl\0start\0helper\0companion.service\0--no-block\0",
             "systemctl\0start\0other.service\0companion.service\0",
             "systemctl\0show\0other.service\0helper.service\0",
+            "systemctl\0--no-block\0restart\0helper.service\0",
+            "systemctl\0--user\0restart\0helper.service\0",
+            "systemctl\0restart\0other.service\0",
         ] {
             assert!(!waits(command), "{command:?}");
         }
-        assert!(systemctl_starts_unit(
+        assert!(systemctl_activates_unit(
             b"systemctl\0start\0helper.with-dot\0",
             "helper.with-dot.service"
         ));
-        assert!(!systemctl_starts_unit(
+        assert!(!systemctl_activates_unit(
             b"systemctl\0start\0helper.timer\0",
             "helper.timer.service"
         ));

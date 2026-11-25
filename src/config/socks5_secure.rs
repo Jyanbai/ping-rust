@@ -9,7 +9,10 @@ use crate::service::ShoesServiceHook;
 
 const DRY_RUN_TIMEOUT: Duration = Duration::from_secs(15);
 const PENDING_STATE: &str = ".ping-rust-socks5-secure.pending";
-const UNFINISHED: &str = "上次 SOCKS5 加固未完成。请检查 shoes.service 和防火墙，从备份恢复一致的 config.yaml、profiles 和 ping-rust-state.json，验证服务后再移除 .ping-rust-socks5-secure.pending";
+const PENDING_STOP: &str = ".ping-rust-socks5-secure.stop";
+const UNFINISHED: &str = "上次 SOCKS5 加固未完成。请检查 shoes.service 和防火墙，从备份恢复一致的 config.yaml、profiles 和 ping-rust-state.json，验证服务后再移除 .ping-rust-socks5-secure.pending 和 .ping-rust-socks5-secure.stop（若存在）";
+const DEFER_FILE_EXPORT: &str =
+    "服务钩子无法将待验证的配置写入客户端文件，请在 SOCKS5 加固结束后重试文件导出";
 #[cfg(target_os = "linux")]
 const RETRY_READ: &str =
     "请在 SOCKS5 加固结束后重试读取；若此提示持续出现，请由管理员检查加固事务状态";
@@ -128,6 +131,19 @@ enum HookRead {
     FileExport(Option<Uuid>),
 }
 
+#[derive(Serialize, Deserialize)]
+struct PendingStop {
+    profile: Uuid,
+    view: StopView,
+}
+
+#[derive(Serialize, Deserialize)]
+enum StopView {
+    Activating { original: Uuid },
+    RollingBack { candidate: Option<Uuid> },
+    Unavailable,
+}
+
 pub(crate) fn read_info_state(
     state_path: &Path,
     service_hook: Option<ShoesServiceHook>,
@@ -182,9 +198,8 @@ fn read_pending_hook_state(
     let Some(pending) = open_live_pending(state_path)? else {
         return Ok(None);
     };
-    if matches!(hook, ShoesServiceHook::Stop) {
-        // 重启先停止原实例，此时磁盘上的候选配置还未启动。提交前已保存原监听。
-        return load_state_file(state_path).map(Some);
+    if let ShoesServiceHook::Stop(invocation) = hook {
+        return read_stop_hook_state(state_path, pending, invocation, read).map(Some);
     }
     // 启动钩子读取本次启动使用的配置。回滚启动时聚合配置已恢复，优先使用原状态。
     let servers = load_servers(&state_path.with_file_name("config.yaml"))
@@ -219,24 +234,75 @@ fn read_pending_hook_state(
         } else {
             bail!("SOCKS5 加固期间的配置与已发布状态不一致，请在加固结束后重试读取");
         }
-        bail!("启动钩子无法将待验证的配置写入客户端文件，请在 SOCKS5 加固结束后重试文件导出");
+        bail!("{DEFER_FILE_EXPORT}");
     };
-    let candidate: ManagedState =
-        serde_json::from_reader(pending).context("无法解析待发布的 SOCKS5 加固状态")?;
+    let candidate = read_candidate(pending)?;
     ensure_servers_match_state(&servers, &candidate.profiles).map_err(|_| {
         anyhow::anyhow!("SOCKS5 加固期间的配置与状态不一致，请在加固结束后重试读取")
     })?;
+    read_candidate_for_hook(candidate, published, read).map(Some)
+}
+
+fn read_stop_hook_state(
+    state_path: &Path,
+    pending: PendingHook,
+    invocation: Option<Uuid>,
+    read: HookRead,
+) -> Result<ManagedState> {
+    let marker = fs::File::open(state_path.with_file_name(PENDING_STOP))
+        .context("无法读取 SOCKS5 加固期间的停止钩子状态")?;
+    let stop: PendingStop =
+        serde_json::from_reader(marker).context("无法解析 SOCKS5 加固期间的停止钩子状态")?;
+    let invocation = invocation.context("无法确认停止钩子对应的 shoes.service 实例")?;
+    let uses_candidate = match stop.view {
+        StopView::Activating { original } => invocation != original,
+        StopView::RollingBack { candidate } => candidate == Some(invocation),
+        StopView::Unavailable => bail!("无法确认停止钩子对应的 shoes.service 实例"),
+    };
+    if !uses_candidate {
+        return load_state_file(state_path);
+    }
+    // 回滚已恢复磁盘配置时，停止的仍可能是候选实例。
+    match pending {
+        PendingHook::Candidate(pending) => read_candidate_for_hook(
+            read_candidate(pending)?,
+            load_state_file(state_path).ok(),
+            read,
+        ),
+        PendingHook::PublishedOnly => {
+            if let HookRead::FileExport(selector) = read {
+                let published = load_state_file(state_path)?;
+                let selected = crate::client::select_export_profile(&published.profiles, selector)?;
+                if selected.id != stop.profile {
+                    return Ok(published);
+                }
+                bail!("{DEFER_FILE_EXPORT}");
+            }
+            bail!("停止钩子无法读取待验证的配置，请在 SOCKS5 加固结束后重试读取");
+        }
+    }
+}
+
+fn read_candidate(pending: fs::File) -> Result<ManagedState> {
+    serde_json::from_reader(pending).context("无法解析待发布的 SOCKS5 加固状态")
+}
+
+fn read_candidate_for_hook(
+    candidate: ManagedState,
+    published: Option<ManagedState>,
+    read: HookRead,
+) -> Result<ManagedState> {
     if let HookRead::FileExport(selector) = read {
         if let Some(published) = published {
             let before = crate::client::select_export_profile(&published.profiles, selector)?;
             let after = crate::client::select_export_profile(&candidate.profiles, selector)?;
             if serde_json::to_value(before)? == serde_json::to_value(after)? {
-                return Ok(Some(published));
+                return Ok(published);
             }
         }
-        bail!("启动钩子无法将待验证的配置写入客户端文件，请在 SOCKS5 加固结束后重试文件导出");
+        bail!("{DEFER_FILE_EXPORT}");
     }
-    Ok(Some(candidate))
+    Ok(candidate)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -251,6 +317,7 @@ pub(crate) struct SecurePlan {
     state: ManagedState,
     pub(crate) original: ManagedProfile,
     pub(crate) profile: ManagedProfile,
+    pub(crate) original_invocation: Option<Uuid>,
     before_yaml: String,
     before_profile: String,
     rollback: Option<SecureRollback>,
@@ -453,6 +520,7 @@ impl SecurePlan {
             state,
             original,
             profile,
+            original_invocation: None,
             before_yaml,
             before_profile,
             rollback: None,
@@ -491,6 +559,19 @@ impl SecurePlan {
             }
         }
         Ok(output)
+    }
+
+    pub(crate) fn other_listeners(&self) -> impl Iterator<Item = (&str, bool)> {
+        self.servers
+            .iter()
+            .zip(&self.state.profiles)
+            .filter(|(_, profile)| profile.id != self.profile.id)
+            .map(|(server, _)| {
+                (
+                    server.address.as_str(),
+                    server.transport.as_deref() == Some("quic"),
+                )
+            })
     }
 
     pub(crate) async fn validate(
@@ -564,6 +645,14 @@ impl SecurePlan {
                 .map_err(|error| error.error)
                 .context("无法保存 SOCKS5 加固事务状态")?,
         );
+        if let Some(original) = self.original_invocation {
+            if let Err(error) = self.write_pending_stop(StopView::Activating { original }) {
+                if let Err(cleanup) = self.finish_pending() {
+                    return Err(error.context(format!("清理 SOCKS5 加固事务状态失败：{cleanup:#}")));
+                }
+                return Err(error);
+            }
+        }
         // 候选及回滚启动期间保留当前状态 inode 的独占锁，供委派钩子确认事务存活。
         #[cfg(target_os = "linux")]
         let mut state_lock = original_state_file;
@@ -638,6 +727,11 @@ impl SecurePlan {
 
     pub(crate) fn finish_pending(&mut self) -> Result<()> {
         if self.pending.is_some() {
+            match fs::remove_file(self.directory.join(PENDING_STOP)) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error).context("无法清理 SOCKS5 加固停止钩子状态"),
+            }
             fs::remove_file(self.directory.join(PENDING_STATE))
                 .context("无法清理 SOCKS5 加固事务状态")?;
             self.pending = None;
@@ -647,6 +741,30 @@ impl SecurePlan {
             }
         }
         Ok(())
+    }
+
+    pub(crate) fn capture_rollback_stop(&self, invocation: Result<Option<Uuid>>) -> Result<()> {
+        let view = match invocation {
+            Ok(current) => StopView::RollingBack {
+                candidate: current.filter(|id| Some(*id) != self.original_invocation),
+            },
+            Err(_) => StopView::Unavailable,
+        };
+        self.write_pending_stop(view)
+    }
+
+    fn write_pending_stop(&self, view: StopView) -> Result<()> {
+        // 这里仅保存实例和节点标识。非 root 钩子仍通过原状态 inode 检查事务锁。
+        let marker = PendingStop {
+            profile: self.profile.id,
+            view,
+        };
+        utils::atomic_write(
+            &self.directory.join(PENDING_STOP),
+            &serde_json::to_vec(&marker)?,
+            0o644,
+        )
+        .context("无法保存 SOCKS5 加固停止钩子状态")
     }
 
     pub(crate) fn rollback_files(&mut self) -> Result<()> {

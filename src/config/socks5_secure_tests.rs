@@ -806,8 +806,8 @@ async fn socks5_secure_restart_and_late_failures_restore_config_firewall_and_ser
             &mut self,
             _: &SecurePlan,
             _: &crate::socks5_secure::InterruptGuard<'_>,
-        ) -> Result<()> {
-            Ok(())
+        ) -> Result<Option<Uuid>> {
+            Ok(None)
         }
 
         async fn activate(&mut self) -> Result<()> {
@@ -976,8 +976,8 @@ async fn socks5_secure_publishes_safety_only_after_runtime_verification() {
             &mut self,
             _: &SecurePlan,
             _: &crate::socks5_secure::InterruptGuard<'_>,
-        ) -> Result<()> {
-            Ok(())
+        ) -> Result<Option<Uuid>> {
+            Ok(None)
         }
 
         async fn activate(&mut self) -> Result<()> {
@@ -1281,7 +1281,7 @@ async fn socks5_secure_sigkill_after_commit_refuses_retry_and_stale_exports() {
         .unwrap_err();
     assert!(format!("{error:#}").contains("上次 SOCKS5 加固未完成"));
 
-    for hook in [ShoesServiceHook::Start, ShoesServiceHook::Stop] {
+    for hook in [ShoesServiceHook::Start, ShoesServiceHook::Stop(None)] {
         let error = super::socks5_secure::read_export_state(&state_path, Some(hook))
             .err()
             .expect("systemd 钩子也必须拒绝已失去写者的事务");
@@ -1462,9 +1462,10 @@ impl crate::socks5_secure::Runtime for InterruptedRuntime<'_> {
         &mut self,
         _: &SecurePlan,
         _: &crate::socks5_secure::InterruptGuard<'_>,
-    ) -> Result<()> {
+    ) -> Result<Option<Uuid>> {
         assert!(!self.directory.join("profiles").exists());
-        crate::socks5_secure::require_tools(|tool| self.has_ss || tool != "ss")
+        crate::socks5_secure::require_tools(|tool| self.has_ss || tool != "ss")?;
+        Ok(None)
     }
 
     async fn activate(&mut self) -> Result<()> {

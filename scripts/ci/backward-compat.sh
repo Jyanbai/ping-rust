@@ -362,6 +362,42 @@ EOF
 )
 echo 'SOCKS5 auth and local: reject drift between the running and managed listener: PASS'
 
+# Keep the target SOCKS5 identical while another running profile uses a different port.
+(
+  scenario="$(mktemp -d /usr/local/lib/socks5-other-listener.XXXXXX)"
+  dropin=/etc/systemd/system/shoes.service.d/90-compat-socks5-other-listener.conf
+  trap 'rm -f "$dropin"; systemctl daemon-reload; systemctl restart shoes.service; rm -rf "$scenario"' EXIT
+  sed 's/0\.0\.0\.0:24431/0.0.0.0:24437/' /etc/shoes/config.yaml >"$scenario/config.yaml"
+  chmod 0600 "$scenario/config.yaml"
+  cat >"$dropin" <<EOF
+[Service]
+ExecStart=
+ExecStart=/usr/local/bin/shoes $scenario/config.yaml
+EOF
+  systemctl daemon-reload
+  systemctl restart shoes.service
+  for _ in {1..50}; do
+    if ss -H -ltn 'sport = :24437' | grep -Fq '0.0.0.0:24437'; then break; fi
+    sleep 0.1
+  done
+  ss -H -ltn 'sport = :24436' | grep -Fq '0.0.0.0:24436'
+  ss -H -ltn 'sport = :24437' | grep -Fq '0.0.0.0:24437'
+  rm "$dropin"
+  systemctl daemon-reload
+  before_pid="$(systemctl show --property=MainPID --value shoes.service)"
+  find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/before"
+  if "$NEW" socks5 secure "$legacy_socks5_id" --auth --yes >"$scenario/result" 2>&1; then
+    echo 'Expected SOCKS5 hardening to reject listener drift on the Reality profile' >&2
+    exit 1
+  fi
+  grep -F '原监听与受管配置不一致' "$scenario/result" | grep -Fq '24431'
+  test "$(systemctl show --property=MainPID --value shoes.service)" = "$before_pid"
+  ss -H -ltn 'sport = :24437' | grep -Fq '0.0.0.0:24437'
+  find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/after"
+  diff -u "$scenario/before" "$scenario/after"
+)
+echo 'SOCKS5 auth: reject drift on the Reality listener with an unchanged target: PASS'
+
 # Reload the default ExecStart while the authenticated process still owns the
 # same wildcard listener that the managed configuration would start anonymously.
 (
@@ -786,11 +822,22 @@ SH
   cat >"$scenario/stop-export" <<'SH'
 #!/bin/sh
 set -eu
-# Only capture the stop of the original process, before the candidate starts.
 test -e /etc/shoes/.ping-rust-socks5-secure.pending || exit 0
-test ! -s "$3/notify-reads" || exit 0
-"$1" url "$2" --server-address example.com >"$3/stop-url"
-cmp -s "$3/stop-expected-url" "$3/stop-url"
+if [ ! -s "$3/notify-reads" ]; then
+  "$1" url "$2" --server-address example.com >"$3/stop-url"
+  cmp -s "$3/stop-expected-url" "$3/stop-url"
+  "$1" export sing-box --profile "$2" --server example.com --output "$3/stop-client.json" >/dev/null
+else
+  "$1" url "$2" >"$3/stop-candidate-url"
+  grep -Eq '^socks5://127\.0\.0\.1:24436#' "$3/stop-candidate-url"
+  if "$1" export sing-box --profile "$2" --server 127.0.0.1 \
+    --output "$3/stop-candidate-client.json" >/dev/null 2>"$3/stop-candidate-error"; then
+    exit 1
+  fi
+  grep -Fq '请在 SOCKS5 加固结束后重试文件导出' "$3/stop-candidate-error"
+  test ! -e "$3/stop-candidate-client.json"
+  touch "$3/stop-candidate-checked"
+fi
 SH
   chmod 0755 "$scenario/start-notify" "$scenario/stop-export"
   cat >"$dropin" <<EOF
@@ -814,6 +861,8 @@ EOF
   systemctl is-active --quiet shoes.service
   before_pid="$(systemctl show --property=MainPID --value shoes.service)"
   "$NEW" url "$legacy_socks5_id" --server-address example.com >"$scenario/stop-expected-url"
+  "$NEW" export sing-box --profile "$legacy_socks5_id" --server example.com \
+    --output "$scenario/stop-expected-client.json" >/dev/null
   : >"$scenario/notify-reads"
   find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/before"
   if PATH="$scenario:$PATH" SOCKS5_ROLLBACK="$scenario" \
@@ -823,6 +872,8 @@ EOF
   fi
   test -f "$scenario/firewall-reached"
   cmp -s "$scenario/stop-expected-url" "$scenario/stop-url"
+  cmp -s "$scenario/stop-expected-client.json" "$scenario/stop-client.json"
+  test -f "$scenario/stop-candidate-checked"
   test "$(cat "$scenario/notify-reads")" = $'candidate\noriginal'
   systemctl is-active --quiet shoes.service
   test "$(systemctl show --property=MainPID --value shoes.service)" != "$before_pid"
@@ -833,6 +884,7 @@ EOF
 )
 echo 'SOCKS5 rollback: Type=notify reads before READY=1 and restarts with StartLimitBurst=1: PASS'
 echo 'SOCKS5 local: ExecStop exports the original public URL before the candidate starts: PASS'
+echo 'SOCKS5 rollback: candidate ExecStop sees its loopback URL and defers the changed file export: PASS'
 
 # Root systemctl can use systemd's private socket. Delegated readers need the system bus.
 apt-get install -y --no-install-recommends dbus
@@ -1042,6 +1094,40 @@ EOF
 echo 'SOCKS5 rollback: post-commit SIGHUP restores configuration and the non-root service: PASS'
 echo 'SOCKS5 rollback: root startup hook can synchronously delegate an ACL-backed export to a non-root unit: PASS'
 
+# Keep both filter backends active while the normal iptables binary uses nf_tables.
+(
+  apt-get install -y --no-install-recommends iptables nftables
+  scenario="$(mktemp -d /usr/local/lib/socks5-mixed-firewall.XXXXXX)"
+  cp -a /etc/shoes "$scenario/original"
+  trap 'iptables-legacy -w -D INPUT -p tcp --dport 24436 -j ACCEPT 2>/dev/null || true; iptables-legacy -w -D INPUT -p tcp --dport 24437 -j ACCEPT 2>/dev/null || true; nft delete table ip compat_socks5 2>/dev/null || true; cp -a "$scenario/original/." /etc/shoes/; systemctl restart shoes.service; rm -rf "$scenario"' EXIT
+  iptables-legacy -w -A INPUT -p tcp --dport 24436 -j ACCEPT
+  iptables-legacy -w -A INPUT -p tcp --dport 24437 -j ACCEPT
+  update-alternatives --set iptables "$(command -v iptables-nft)"
+  iptables --version | grep -Fq '(nf_tables)'
+  nft -f - <<'NFT'
+table ip compat_socks5 {
+  chain input {
+    type filter hook input priority 0; policy accept;
+    tcp dport 24436 accept
+  }
+}
+NFT
+  "$NEW" socks5 secure "$legacy_socks5_id" --local --yes >"$scenario/result" 2>&1
+  iptables-legacy -w -S INPUT >"$scenario/legacy-after"
+  grep -Fq -- '--dport 24437 -j ACCEPT' "$scenario/legacy-after"
+  if grep -Fq -- '--dport 24436 -j ACCEPT' "$scenario/legacy-after"; then
+    echo 'SOCKS5 legacy INPUT allow survived with iptables-nft selected' >&2
+    exit 1
+  fi
+  nft list chain ip compat_socks5 input >"$scenario/nft-after"
+  if grep -Fq 'tcp dport 24436 accept' "$scenario/nft-after"; then
+    echo 'SOCKS5 nft INPUT allow survived' >&2
+    exit 1
+  fi
+  ss -H -ltn 'sport = :24436' | grep -Fq '127.0.0.1:24436'
+)
+echo 'SOCKS5 local: close both nft and legacy INPUT allows with iptables-nft selected: PASS'
+
 (
   scenario="$(mktemp -d /usr/local/lib/socks5-start-export.XXXXXX)"
   dropin=/etc/systemd/system/shoes.service.d/90-compat-socks5-start-export.conf
@@ -1225,3 +1311,32 @@ PY
   cmp -s "$scenario/client.json" "$scenario/expected.json"
 )
 echo 'SOCKS5 authentication: clean-environment ExecStartPost info, URL and export agree with published credentials: PASS'
+
+# Backup restore holds the writer lock across restart. Its startup hook waits
+# for another root unit to export the restored state.
+(
+  scenario="$(mktemp -d /usr/local/lib/socks5-restart-export.XXXXXX)"
+  dropin=/etc/systemd/system/shoes.service.d/90-compat-socks5-restart-export.conf
+  helper=/run/systemd/system/compat-socks5-restart-export.service
+  systemctl_bin="$(command -v systemctl)"
+  trap 'rm -f "$dropin" "$helper"; "$systemctl_bin" daemon-reload; rm -rf "$scenario"' EXIT
+  "$NEW" backup "$scenario/backup.tar.gz" >/dev/null
+  "$NEW" export sing-box --profile "$legacy_socks5_id" --server example.com \
+    --output "$scenario/expected.json" >/dev/null
+  cat >"$helper" <<EOF
+[Service]
+Type=oneshot
+TimeoutStartSec=5s
+ExecStart=$NEW export sing-box --profile $legacy_socks5_id --server example.com --output $scenario/client.json
+EOF
+  cat >"$dropin" <<EOF
+[Service]
+TimeoutStartSec=10s
+ExecStartPre=$systemctl_bin --quiet restart ${helper##*/}
+EOF
+  "$systemctl_bin" daemon-reload
+  "$NEW" restore "$scenario/backup.tar.gz" >"$scenario/result" 2>&1
+  cmp -s "$scenario/expected.json" "$scenario/client.json"
+  "$systemctl_bin" is-active --quiet shoes.service
+)
+echo 'Backup restore: a synchronous systemctl restart helper can export restored state: PASS'

@@ -8,6 +8,9 @@ mod nft_netlink;
 
 trait FirewallExecutor {
     fn available(&self, program: &str) -> bool;
+    fn legacy_filter_active(&self, _ipv4: bool) -> Result<bool> {
+        Ok(false)
+    }
     async fn with_xtables_lock<T>(
         &mut self,
         operation: impl AsyncFnOnce(&mut Self) -> Result<T>,
@@ -113,6 +116,21 @@ struct SystemFirewall {
 impl FirewallExecutor for SystemFirewall {
     fn available(&self, program: &str) -> bool {
         utils::command_exists(program)
+    }
+
+    fn legacy_filter_active(&self, ipv4: bool) -> Result<bool> {
+        let path = if ipv4 {
+            "/proc/net/ip_tables_names"
+        } else {
+            "/proc/net/ip6_tables_names"
+        };
+        match std::fs::read_to_string(path) {
+            Ok(tables) => Ok(tables.lines().any(|table| table == "filter")),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => {
+                Err(error).with_context(|| format!("无法检查 {path} 中的 legacy 防火墙表"))
+            }
+        }
     }
 
     #[cfg(target_os = "linux")]
@@ -278,10 +296,10 @@ impl FirewallPlan {
             plan.rules
                 .extend(capture_firewalld(backend, listener, &["--permanent".into()]).await?);
         }
-        let (program, family) = if listener.is_ipv4() {
-            ("iptables", "ip")
+        let (program, legacy_program, family) = if listener.is_ipv4() {
+            ("iptables", "iptables-legacy", "ip")
         } else {
-            ("ip6tables", "ip6")
+            ("ip6tables", "ip6tables-legacy", "ip6")
         };
         let has_iptables = backend.available(program);
         let iptables_nft = has_iptables
@@ -330,7 +348,23 @@ impl FirewallPlan {
                 backend.nft_generation()?;
             }
         }
-        if has_iptables && !iptables_nft {
+        // 切换 alternatives 不会清空内核中的 legacy 表。绑定显式后端，
+        // 避免删除、复查或回滚时按当前别名操作另一套表。
+        let legacy = if has_iptables && !iptables_nft {
+            Some(if backend.available(legacy_program) {
+                legacy_program
+            } else {
+                program
+            })
+        } else if backend.legacy_filter_active(listener.is_ipv4())? {
+            if !backend.available(legacy_program) {
+                bail!("检测到 legacy filter 表，请安装提供 {legacy_program} 的 iptables 后重试");
+            }
+            Some(legacy_program)
+        } else {
+            None
+        };
+        if let Some(program) = legacy {
             for rule in iptables_input(backend, program).await?.lines() {
                 if iptables_delete_args(rule, listener).is_some() {
                     plan.rules.push(Rule::Iptables {

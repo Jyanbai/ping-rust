@@ -193,6 +193,8 @@ pub(crate) async fn run(
     let mut runtime = SystemRuntime {
         mode,
         firewall: firewall::FirewallPlan::default(),
+        listeners: OtherListeners::default(),
+        rollback_stop: None,
     };
     apply(&mut plan, &mut runtime, &INTERRUPT).await?;
     if mode == SecureMode::Auth {
@@ -212,12 +214,19 @@ pub(crate) async fn run(
 }
 
 pub(crate) trait Runtime {
-    async fn preflight(&mut self, plan: &SecurePlan, interrupt: &InterruptGuard<'_>) -> Result<()>;
+    async fn preflight(
+        &mut self,
+        plan: &SecurePlan,
+        interrupt: &InterruptGuard<'_>,
+    ) -> Result<Option<Uuid>>;
     async fn activate(&mut self) -> Result<()>;
     async fn verify(&mut self, profile: &ManagedProfile) -> Result<()>;
     async fn close_firewall(&mut self) -> Result<()>;
     async fn restore_firewall(&mut self) -> Result<()>;
     async fn stop_service(&mut self) -> Result<()>;
+    async fn prepare_service_rollback(&mut self, _plan: &SecurePlan) -> Result<()> {
+        Ok(())
+    }
     async fn restore_service(&mut self, original: &ManagedProfile) -> Result<()>;
 }
 
@@ -230,7 +239,7 @@ pub(crate) async fn apply(
     let interrupt = interrupt.begin()?;
     let preflight = runtime.preflight(plan, &interrupt).await;
     interrupt.check()?;
-    preflight?;
+    plan.original_invocation = preflight?;
     plan.commit_files()?;
     let mut activation_attempted = false;
     let change = async {
@@ -281,6 +290,11 @@ pub(crate) async fn apply(
         } else {
             true
         };
+        if activation_attempted && firewall_restored {
+            if let Err(error) = runtime.prepare_service_rollback(plan).await {
+                failures.push(format!("回滚停止钩子状态={error:#}"));
+            }
+        }
         let config_restored = if can_restore_config {
             if let Err(error) = plan.rollback_files() {
                 failures.push(format!("配置={error:#}"));
@@ -329,15 +343,40 @@ pub(crate) async fn apply(
 struct SystemRuntime {
     mode: SecureMode,
     firewall: firewall::FirewallPlan,
+    listeners: OtherListeners,
+    rollback_stop: Option<Result<()>>,
+}
+
+#[derive(Default)]
+struct OtherListeners {
+    tcp: Vec<SocketAddr>,
+    quic: Vec<SocketAddr>,
 }
 
 impl Runtime for SystemRuntime {
-    async fn preflight(&mut self, plan: &SecurePlan, interrupt: &InterruptGuard<'_>) -> Result<()> {
+    async fn preflight(
+        &mut self,
+        plan: &SecurePlan,
+        interrupt: &InterruptGuard<'_>,
+    ) -> Result<Option<Uuid>> {
         require_tools(utils::command_exists)?;
         interrupt.check()?;
         plan.validate(interrupt).await?;
-        // 回滚会按磁盘配置重启，先核对当前监听和认证。
-        let listener = verify_listener(&plan.original, Systemctl::SecureTransaction)
+        let systemctl = Systemctl::SecureTransaction;
+        let invocation = systemctl
+            .secure_invocation_id()
+            .await?
+            .context("无法确认正在运行的 shoes.service 实例")?;
+        // 重启会替换整个进程，先检查所有配置的服务端监听。
+        for (address, quic) in plan.other_listeners() {
+            let listeners = if quic {
+                &mut self.listeners.quic
+            } else {
+                &mut self.listeners.tcp
+            };
+            listeners.push(address.parse().context("受管节点监听地址无效")?);
+        }
+        let listener = verify_listener(&plan.original, systemctl, Some(&self.listeners))
             .await
             .context("原监听与受管配置不一致，无法安全回滚；请先同步 shoes.service 与受管配置")?;
         verify_authentication(&plan.original, listener)
@@ -346,16 +385,21 @@ impl Runtime for SystemRuntime {
         if self.mode == SecureMode::Local {
             self.firewall = firewall::FirewallPlan::capture(listener).await?;
         }
-        Ok(())
+        if systemctl.secure_invocation_id().await? != Some(invocation) {
+            bail!("预检期间 shoes.service 实例已改变，请重试");
+        }
+        Ok(Some(invocation))
     }
 
     async fn activate(&mut self) -> Result<()> {
         Systemctl::SecureTransaction
-            .restart_secure_transaction(false)
+            .restart_secure_transaction(None)
             .await
     }
     async fn verify(&mut self, profile: &ManagedProfile) -> Result<()> {
-        verify_with_systemctl(profile, Systemctl::SecureTransaction).await
+        let expected =
+            verify_listener(profile, Systemctl::SecureTransaction, Some(&self.listeners)).await?;
+        verify_authentication(profile, expected).await
     }
     async fn close_firewall(&mut self) -> Result<()> {
         self.firewall.close().await
@@ -366,10 +410,23 @@ impl Runtime for SystemRuntime {
     async fn stop_service(&mut self) -> Result<()> {
         Systemctl::SecureTransaction.stop_secure_transaction().await
     }
+    async fn prepare_service_rollback(&mut self, plan: &SecurePlan) -> Result<()> {
+        // 取消 systemctl 客户端并不会撤销它已提交的重启。先发停止作业，
+        // 让候选实例的停止钩子在恢复文件之前执行。
+        let stop = self.stop_service().await;
+        let invocation = if stop.is_ok() {
+            Ok(None)
+        } else {
+            Systemctl::SecureTransaction.secure_invocation_id().await
+        };
+        self.rollback_stop = Some(stop);
+        plan.capture_rollback_stop(invocation)
+    }
     async fn restore_service(&mut self, original: &ManagedProfile) -> Result<()> {
         // 加固只重启现有 unit。恢复配置后重启同一个 unit 即可，无需重建或启用。
+        let stop = self.rollback_stop.take().context("缺少回滚停止作业结果")?;
         Systemctl::SecureTransaction
-            .restart_secure_transaction(true)
+            .restart_secure_transaction(Some(stop))
             .await?;
         self.verify(original).await
     }
@@ -384,10 +441,10 @@ pub(crate) fn require_tools(exists: impl Fn(&str) -> bool) -> Result<()> {
     Ok(())
 }
 
-async fn listener_output() -> Result<String> {
+async fn listener_output(transport: char) -> Result<String> {
     // 分别查询两个地址族，避免 ss 的 `*` 掩盖额外的 IPv6 公网监听。
-    let ipv4 = command("ss", &["-H".into(), "-ltnp4".into()], None).await?;
-    let ipv6 = command("ss", &["-H".into(), "-ltnp6".into()], None).await?;
+    let ipv4 = command("ss", &["-H".into(), format!("-l{transport}np4")], None).await?;
+    let ipv6 = command("ss", &["-H".into(), format!("-l{transport}np6")], None).await?;
     Ok(format!(
         "{}\n{}",
         ipv4.replace("*:", "0.0.0.0:"),
@@ -396,11 +453,7 @@ async fn listener_output() -> Result<String> {
 }
 
 pub(crate) async fn verify(profile: &ManagedProfile) -> Result<()> {
-    verify_with_systemctl(profile, Systemctl::Foreground).await
-}
-
-async fn verify_with_systemctl(profile: &ManagedProfile, systemctl: Systemctl) -> Result<()> {
-    let expected = verify_listener(profile, systemctl).await?;
+    let expected = verify_listener(profile, Systemctl::Foreground, None).await?;
     verify_authentication(profile, expected).await
 }
 
@@ -423,7 +476,11 @@ async fn verify_authentication(profile: &ManagedProfile, expected: SocketAddr) -
     Ok(())
 }
 
-async fn verify_listener(profile: &ManagedProfile, systemctl: Systemctl) -> Result<SocketAddr> {
+async fn verify_listener(
+    profile: &ManagedProfile,
+    systemctl: Systemctl,
+    others: Option<&OtherListeners>,
+) -> Result<SocketAddr> {
     if !systemctl.secure_is_active().await? {
         bail!("shoes.service 未处于 active 状态");
     }
@@ -432,26 +489,49 @@ async fn verify_listener(profile: &ManagedProfile, systemctl: Systemctl) -> Resu
         .secure_main_pid()
         .await?
         .context("shoes.service 的 MainPID 不可用")?;
-    let output = listener_output().await?;
+    let output = listener_output('t').await?;
     check_listeners(&output, expected, main_pid)?;
+    if let Some(others) = others {
+        for &address in &others.tcp {
+            check_listeners(&output, address, main_pid)?;
+        }
+        for local in owned_listeners(&output, main_pid) {
+            let address = local
+                .parse::<SocketAddr>()
+                .context("无法解析 shoes TCP 监听地址")?;
+            if address != expected && !others.tcp.contains(&address) {
+                bail!("shoes 持有受管配置中没有的 TCP 监听端口 {}", address.port());
+            }
+        }
+        if !others.quic.is_empty() {
+            let output = listener_output('u').await?;
+            for &address in &others.quic {
+                check_listeners(&output, address, main_pid)?;
+            }
+        }
+        if systemctl.secure_main_pid().await? != Some(main_pid) {
+            bail!("检查监听期间 shoes.service 的 MainPID 已改变，请重试");
+        }
+    }
     Ok(expected)
+}
+
+fn owned_listeners(output: &str, main_pid: u32) -> impl Iterator<Item = &str> {
+    let owner = format!(",pid={main_pid},");
+    output.lines().filter_map(move |line| {
+        // 只校验 shoes 持有的 socket；其他进程可合法占用同端口的不同地址。
+        let mut fields = line.split_whitespace();
+        let local = fields.nth(3)?;
+        fields
+            .skip(1)
+            .any(|field| field.contains(&owner))
+            .then_some(local)
+    })
 }
 
 pub(crate) fn check_listeners(output: &str, expected: SocketAddr, main_pid: u32) -> Result<()> {
     let mut found = false;
-    let owner = format!(",pid={main_pid},");
-    for line in output.lines() {
-        // 只校验 shoes 持有的 socket；其他进程可合法占用同端口的不同地址。
-        if !line
-            .split_whitespace()
-            .skip(5)
-            .any(|field| field.contains(&owner))
-        {
-            continue;
-        }
-        let Some(local) = line.split_whitespace().nth(3) else {
-            continue;
-        };
+    for local in owned_listeners(output, main_pid) {
         let Some((_, port)) = local.rsplit_once(':') else {
             continue;
         };
