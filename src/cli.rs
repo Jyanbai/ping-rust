@@ -778,14 +778,17 @@ pub(crate) async fn run_with_export_paths(
             server,
             output,
         } => {
+            let file_export = output.is_some();
             read_profile_snapshot(
                 state_path,
                 lock_path,
-                output.is_some(),
-                if output.is_some() {
-                    config::socks5_secure::read_file_export_state
-                } else {
-                    config::socks5_secure::read_export_state
+                file_export,
+                |path, service_hook| {
+                    if file_export {
+                        config::socks5_secure::read_file_export_state(path, service_hook, profile)
+                    } else {
+                        config::socks5_secure::read_export_state(path, service_hook)
+                    }
                 },
                 |state| {
                     let content = client::export(
@@ -1832,9 +1835,10 @@ async fn read_profile_snapshot<T>(
 
     #[cfg(not(target_os = "linux"))]
     let _ = file_export;
+    let is_service_hook = service::is_shoes_service_hook().await;
     utils::read_with_existing_lock_or_service_hook(
         lock_path,
-        service::is_shoes_service_hook().await,
+        is_service_hook,
         |access| match access {
             #[cfg(target_os = "linux")]
             SnapshotAccess::Missing | SnapshotAccess::Unreadable(_) if file_export => {
@@ -1846,6 +1850,10 @@ async fn read_profile_snapshot<T>(
             SnapshotAccess::Unreadable(_error) => {
                 #[cfg(target_os = "linux")]
                 {
+                    // 回滚时同步钩子可读取已恢复状态，根用户的写锁仍不可读。
+                    if is_service_hook && config::socks5_secure::pending_exists(state_path)? {
+                        return Ok((read(state_path, true)?, None));
+                    }
                     config::socks5_secure::read_unlocked_snapshot(state_path, || {
                         Ok((read(state_path, false)?, None))
                     })

@@ -29,14 +29,7 @@ pub fn export(
     server: &str,
     output: Option<&Path>,
 ) -> Result<String> {
-    let profile = match profile_id {
-        Some(id) => profiles
-            .iter()
-            .find(|profile| profile.id == id)
-            .with_context(|| format!("未找到配置 {id}"))?,
-        None if profiles.len() == 1 => &profiles[0],
-        None => bail!("存在多个配置，请用 --profile <UUID> 指定导出对象"),
-    };
+    let profile = select_export_profile(profiles, profile_id)?;
     let content = render(profile, format, server)?;
     if let Some(notice) = export_notice(profile, format) {
         eprintln!("{notice}");
@@ -45,6 +38,20 @@ pub fn export(
         utils::atomic_write(path, content.as_bytes(), 0o600)?;
     }
     Ok(content)
+}
+
+pub(crate) fn select_export_profile(
+    profiles: &[ManagedProfile],
+    profile_id: Option<Uuid>,
+) -> Result<&ManagedProfile> {
+    match profile_id {
+        Some(id) => profiles
+            .iter()
+            .find(|profile| profile.id == id)
+            .with_context(|| format!("未找到配置 {id}")),
+        None if profiles.len() == 1 => Ok(&profiles[0]),
+        None => bail!("存在多个配置，请用 --profile <UUID> 指定导出对象"),
+    }
 }
 
 /// 导出格式无法完整表达节点偏好时的能力说明；CLI 与菜单导出共用同一提示。

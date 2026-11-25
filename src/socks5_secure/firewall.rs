@@ -215,6 +215,7 @@ struct UfwAttempt {
     kernel: Vec<LiveRule>,
     kernel_position: usize,
     kernel_deleted: bool,
+    persistent_deleted: bool,
 }
 
 #[derive(PartialEq, Eq)]
@@ -721,8 +722,8 @@ impl Rule {
     ) -> Result<()> {
         let original = attempt.ufw.as_ref().context("缺少 UFW 规则快照")?;
         if self.position(current).is_none() {
-            // 内核删除失败时，缺失的放行可能是管理员撤销的。
-            if !original.kernel_deleted {
+            // 内核删除成功不代表持久规则由本次事务删除。
+            if !original.persistent_deleted {
                 bail!(
                     "无法确认本次操作删除了 UFW 放行，持久规则已变化，请检查 ufw status numbered"
                 );
@@ -853,6 +854,7 @@ impl UfwAttempt {
             kernel,
             kernel_position,
             kernel_deleted: false,
+            persistent_deleted: false,
         })
     }
 
@@ -875,6 +877,7 @@ impl UfwAttempt {
             &self.file.contents,
             &self.file_without_allow(),
         )?;
+        self.persistent_deleted = true;
         let live = ufw_kernel_rules(backend, program, chain).await?;
         if ufw_kernel_count(&live, listener, chain) != 0 {
             bail!("UFW 运行时放行规则未移除，请检查 {program} -S {chain}");
@@ -2041,7 +2044,9 @@ mod tests {
         ipv6: bool,
         kernel_has_rule: bool,
         admin_deletes_before_kernel_delete: bool,
+        admin_deletes_before_disk_update: bool,
         keep_disk_on_delete_failure: bool,
+        fail_close_check: bool,
         kernel_reorders_on_insert: bool,
         other_family_runtime_rule: bool,
         delete_succeeds: bool,
@@ -2087,16 +2092,25 @@ mod tests {
 
         fn replace_ufw_rules_file(&mut self, v6: bool, before: &str, after: &str) -> Result<()> {
             assert_eq!(v6, self.ipv6);
-            assert_eq!(before, self.ufw_rules_file(v6)?);
             let allow = if v6 { IPV6 } else { IPV4 };
+            if self.admin_deletes_before_disk_update && before.contains("--dport 1080 -j ACCEPT") {
+                assert!(!self.kernel_has_rule);
+                self.admin_deletes_before_disk_update = false;
+                self.disk.retain(|entry| *entry != allow);
+                assert_ne!(before, self.ufw_rules_file(v6)?);
+                bail!("UFW 持久规则已并发修改，请检查后重试");
+            }
+            assert_eq!(before, self.ufw_rules_file(v6)?);
             if let Some(index) = self.disk.iter().position(|entry| *entry == allow) {
                 assert!(!after.contains("-p tcp --dport 1080 -j ACCEPT"));
-                if !self.keep_disk_on_delete_failure {
-                    self.disk.remove(index);
-                }
-                if !self.delete_succeeds {
+                if !self.delete_succeeds && self.keep_disk_on_delete_failure {
                     self.disk.insert(0, OTHER);
                     bail!("模拟 UFW 持久规则写入失败");
+                }
+                self.disk.remove(index);
+                if !self.delete_succeeds {
+                    self.disk.insert(0, OTHER);
+                    self.fail_close_check = true;
                 }
             } else {
                 let restored = after
@@ -2156,6 +2170,9 @@ mod tests {
                     [_, _, chain] if chain == "INPUT" => Ok("-P INPUT ACCEPT".into()),
                     [_, _, chain] if chain == kernel_chain => {
                         assert_eq!(args, ["-w", "-S", kernel_chain]);
+                        if std::mem::take(&mut self.fail_close_check) {
+                            bail!("模拟 UFW 持久规则提交后的内核查询失败");
+                        }
                         let mut rules = format!("-N {kernel_chain}\n");
                         let allow =
                             format!("-A {kernel_chain} -p tcp -m tcp --dport 1080 -j ACCEPT\n");
@@ -2252,7 +2269,9 @@ mod tests {
                 ipv6,
                 kernel_has_rule: true,
                 admin_deletes_before_kernel_delete: true,
+                admin_deletes_before_disk_update: false,
                 keep_disk_on_delete_failure: false,
+                fail_close_check: false,
                 kernel_reorders_on_insert: false,
                 other_family_runtime_rule: true,
                 delete_succeeds: true,
@@ -2270,13 +2289,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn socks5_secure_ufw_does_not_restore_an_allow_revoked_before_disk_commit() {
+        for (address, ipv6) in [("0.0.0.0:1080", false), ("[::]:1080", true)] {
+            let mut backend = FakeUfw {
+                disk: vec![IPV4, IPV6],
+                ipv6,
+                kernel_has_rule: true,
+                admin_deletes_before_kernel_delete: false,
+                admin_deletes_before_disk_update: true,
+                keep_disk_on_delete_failure: false,
+                fail_close_check: false,
+                kernel_reorders_on_insert: false,
+                other_family_runtime_rule: true,
+                delete_succeeds: true,
+            };
+            let mut plan = FirewallPlan::capture_with(address.parse().unwrap(), &mut backend)
+                .await
+                .unwrap();
+            let error = plan.close_with(&mut backend).await.unwrap_err();
+            assert!(format!("{error:#}").contains("UFW 持久规则已并发修改"));
+            let error = plan.restore_with(&mut backend).await.unwrap_err();
+            assert!(format!("{error:#}").contains("无法确认"));
+            assert_eq!(backend.disk, [if ipv6 { IPV4 } else { IPV6 }]);
+            assert!(!backend.kernel_has_rule);
+        }
+    }
+
+    #[tokio::test]
     async fn socks5_secure_ufw_preserves_runtime_ipv6_deny_during_ipv4_close_and_rollback() {
         let mut backend = FakeUfw {
             disk: vec![IPV4, IPV6],
             ipv6: false,
             kernel_has_rule: true,
             admin_deletes_before_kernel_delete: false,
+            admin_deletes_before_disk_update: false,
             keep_disk_on_delete_failure: false,
+            fail_close_check: false,
             kernel_reorders_on_insert: false,
             other_family_runtime_rule: true,
             delete_succeeds: true,
@@ -2313,7 +2361,9 @@ mod tests {
             ipv6: false,
             kernel_has_rule: true,
             admin_deletes_before_kernel_delete: false,
+            admin_deletes_before_disk_update: false,
             keep_disk_on_delete_failure: false,
+            fail_close_check: false,
             kernel_reorders_on_insert: false,
             other_family_runtime_rule: false,
             delete_succeeds: false,
@@ -2338,7 +2388,9 @@ mod tests {
                     ipv6,
                     kernel_has_rule: true,
                     admin_deletes_before_kernel_delete: false,
+                    admin_deletes_before_disk_update: false,
                     keep_disk_on_delete_failure,
+                    fail_close_check: false,
                     kernel_reorders_on_insert: false,
                     other_family_runtime_rule: false,
                     delete_succeeds: false,
@@ -2366,7 +2418,9 @@ mod tests {
                 ipv6,
                 kernel_has_rule: true,
                 admin_deletes_before_kernel_delete: false,
+                admin_deletes_before_disk_update: false,
                 keep_disk_on_delete_failure: false,
+                fail_close_check: false,
                 kernel_reorders_on_insert: false,
                 other_family_runtime_rule: false,
                 delete_succeeds: false,
@@ -2390,7 +2444,9 @@ mod tests {
                 ipv6: false,
                 kernel_has_rule: true,
                 admin_deletes_before_kernel_delete: false,
+                admin_deletes_before_disk_update: false,
                 keep_disk_on_delete_failure: false,
+                fail_close_check: false,
                 kernel_reorders_on_insert: false,
                 other_family_runtime_rule: false,
                 delete_succeeds: false,

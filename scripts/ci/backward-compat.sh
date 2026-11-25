@@ -303,6 +303,43 @@ done
 ss -H -ltn 'sport = :24436' | grep -F '0.0.0.0:24436' >/dev/null
 "$NEW" socks5 secure compat-socks5-legacy --auth --dry-run >"$WORK/socks5-secure-preview.txt"
 grep -q '^--- profile' "$WORK/socks5-secure-preview.txt"
+
+# The running unit can still be using a configuration with a narrower listener.
+(
+  scenario="$(mktemp -d /usr/local/lib/socks5-listener-drift.XXXXXX)"
+  dropin=/etc/systemd/system/shoes.service.d/90-compat-socks5-listener.conf
+  mkdir -p "${dropin%/*}"
+  trap 'rm -f "$dropin"; systemctl daemon-reload; systemctl restart shoes.service; rm -rf "$scenario"' EXIT
+  sed 's/0\.0\.0\.0:24436/127.0.0.1:24436/' /etc/shoes/config.yaml >"$scenario/config.yaml"
+  chmod 0600 "$scenario/config.yaml"
+  cat >"$dropin" <<EOF
+[Service]
+ExecStart=
+ExecStart=/usr/local/bin/shoes $scenario/config.yaml
+EOF
+  systemctl daemon-reload
+  systemctl restart shoes.service
+  for _ in {1..50}; do
+    if ss -H -ltn 'sport = :24436' | grep -Fq '127.0.0.1:24436'; then break; fi
+    sleep 0.1
+  done
+  ss -H -ltn 'sport = :24436' | grep -Fq '127.0.0.1:24436'
+  rm "$dropin"
+  systemctl daemon-reload
+  before_pid="$(systemctl show --property=MainPID --value shoes.service)"
+  find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/before"
+  if "$NEW" socks5 secure "$legacy_socks5_id" --auth --yes >"$scenario/result" 2>&1; then
+    echo 'Expected SOCKS5 authentication hardening to reject listener drift' >&2
+    exit 1
+  fi
+  grep -Fq '实际监听地址不符合预期' "$scenario/result"
+  test "$(systemctl show --property=MainPID --value shoes.service)" = "$before_pid"
+  ss -H -ltn 'sport = :24436' | grep -Fq '127.0.0.1:24436'
+  find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/after"
+  diff -u "$scenario/before" "$scenario/after"
+)
+echo 'SOCKS5 authentication: rejects drift between the running and managed listener: PASS'
+
 # Exercise signal cancellation and an unattended timeout with the same substitute.
 (
   shoes=/usr/local/bin/shoes
@@ -645,10 +682,11 @@ echo 'SOCKS5 rollback: an inactive unit with StartLimitBurst=1 restarts after fi
   systemctl_bin="$(command -v systemctl)"
   scenario="$(mktemp -d /usr/local/lib/socks5-hangup.XXXXXX)"
   config=/etc/shoes/config.yaml
+  state=/etc/shoes/ping-rust-state.json
   dropin=/etc/systemd/system/shoes.service.d/90-compat-socks5-hangup.conf
   original_directory_mode="$(stat -c %a /etc/shoes)"
   cp -p "$config" "$scenario/original-config"
-  trap 'rm -f "$dropin"; chown --reference="$scenario/original-config" "$config"; chmod "$original_directory_mode" /etc/shoes; "$systemctl_bin" daemon-reload; "$systemctl_bin" restart shoes.service; rm -rf "$scenario"' EXIT
+  trap 'rm -f "$dropin"; if [ -f "$scenario/original-state" ]; then cp -p "$scenario/original-state" "$state"; fi; chown --reference="$scenario/original-config" "$config"; chmod "$original_directory_mode" /etc/shoes; "$systemctl_bin" daemon-reload; "$systemctl_bin" restart shoes.service; rm -rf "$scenario"' EXIT
   mkdir -p "${dropin%/*}"
   chmod 0711 /etc/shoes
   chown nobody:nogroup "$config"
@@ -735,6 +773,47 @@ PY
   test "$(stat -c %a:%U:%G "$config")" = '600:nobody:nogroup'
   find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/after"
   diff -u "$scenario/before" "$scenario/after"
+
+  cp -p "$state" "$scenario/original-state"
+  python3 - "$state" <<'PY'
+import os
+import pwd
+import struct
+import sys
+
+uid = pwd.getpwnam('nobody').pw_uid
+acl = struct.pack('<I', 2) + b''.join(
+    struct.pack('<HHI', tag, mode, user)
+    for tag, mode, user in [(1, 6, 0xffffffff), (2, 4, uid),
+                            (4, 0, 0xffffffff), (16, 4, 0xffffffff),
+                            (32, 0, 0xffffffff)]
+)
+os.setxattr(sys.argv[1], 'system.posix_acl_access', acl, os.XATTR_CREATE)
+PY
+  test "$(stat -c %a:%U /run/lock/ping-rust.lock)" = '600:root'
+  cat >"$scenario/start-reader" <<'SH'
+#!/bin/sh
+set -eu
+info="$("$1" info "$2")"
+printf '%s\n' "$info" | grep -Eq 'socks5://example\.com:24436#'
+SH
+  chmod 0755 "$scenario/start-reader"
+  chmod 0711 "$scenario"
+  cat >>"$dropin" <<EOF
+TimeoutStartSec=10s
+ExecStartPost=$scenario/start-reader $NEW $legacy_socks5_id
+EOF
+  "$systemctl_bin" daemon-reload
+  "$systemctl_bin" restart shoes.service
+  if "$NEW" socks5 secure "$legacy_socks5_id" --auth --yes >"$scenario/acl-rollback" 2>&1; then
+    echo 'Expected the hook requiring the original URL to reject the candidate' >&2
+    exit 1
+  fi
+  grep -Fq '原配置、防火墙及服务已恢复并再次验证' "$scenario/acl-rollback"
+  "$systemctl_bin" is-active --quiet shoes.service
+  test ! -e /etc/shoes/.ping-rust-socks5-secure.pending
+  cmp -s "$state" "$scenario/original-state"
+  echo 'SOCKS5 rollback: required non-root ExecStartPost reads restored state via ACL: PASS'
 )
 echo 'SOCKS5 rollback: post-commit SIGHUP restores configuration and the non-root service: PASS'
 
@@ -751,6 +830,8 @@ test -z "${INVOCATION_ID:-}"
 sed -n 's/^  URL：//p' "$2/info" >"$2/info-url"
 grep -Eq '^socks5://[^[:space:]@]+@example\.com:24436#' "$2/url"
 cmp -s "$2/info-url" "$2/url"
+"$1" export sing-box --profile "$4" --server example.com \
+  --output "$2/unchanged-client.json" >/dev/null
 if ! "$1" export sing-box --profile "$3" --server example.com \
   --output "$2/client.json" >/dev/null 2>"$2/export-error"; then
   grep -Fq '请在 SOCKS5 加固结束后重试文件导出' "$2/export-error"
@@ -763,9 +844,11 @@ SH
 [Service]
 TimeoutStartSec=10s
 ReadWritePaths=$scenario
-ExecStartPost=/usr/bin/env -i $scenario/start-reader $NEW $scenario $legacy_socks5_id
+ExecStartPost=/usr/bin/env -i $scenario/start-reader $NEW $scenario $legacy_socks5_id ${ids[1]}
 EOF
   systemctl daemon-reload
+  "$NEW" export sing-box --profile "${ids[1]}" --server example.com \
+    --output "$scenario/unchanged-expected.json" >/dev/null
   # Delegate state access before hardening, while keeping the writer lock private.
   python3 - "$NEW" "$legacy_socks5_id" "$WORK/socks5-start-export.txt" <<'PY'
 import errno
@@ -851,6 +934,7 @@ with TemporaryDirectory() as work:
 PY
   echo 'SOCKS5 readers: delegated state ACL survives hardening with a private lock and respects a pending transaction: PASS'
   systemctl is-active --quiet shoes.service
+  cmp -s "$scenario/unchanged-client.json" "$scenario/unchanged-expected.json"
   test -f "$scenario/deferred-export"
   test ! -e "$scenario/client.json"
   "$NEW" export sing-box --profile "$legacy_socks5_id" --server example.com \

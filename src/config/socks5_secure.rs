@@ -14,7 +14,7 @@ const ACCESS_ACL: &str = "system.posix_acl_access";
 const RETRY_READ: &str =
     "请在 SOCKS5 加固结束后重试读取；若此提示持续出现，请由管理员检查加固事务状态";
 
-fn pending_exists(state_path: &Path) -> Result<bool> {
+pub(crate) fn pending_exists(state_path: &Path) -> Result<bool> {
     state_path
         .with_file_name(PENDING_STATE)
         .try_exists()
@@ -94,19 +94,39 @@ pub(crate) fn load_for_plan(state_path: &Path) -> Result<ManagedState> {
     })
 }
 
-fn open_live_pending(state_path: &Path) -> Result<Option<fs::File>> {
-    let file = match fs::File::open(state_path.with_file_name(PENDING_STATE)) {
+enum PendingHook {
+    Candidate(fs::File),
+    Restored,
+}
+
+fn open_live_pending(state_path: &Path) -> Result<Option<PendingHook>> {
+    let pending = match fs::File::open(state_path.with_file_name(PENDING_STATE)) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            // 非 root 钩子无法读取私有标记。回滚持有已恢复状态 inode 的锁，
+            // 以此证明事务仍在运行，同时保持候选状态文件的权限不变。
+            let restored = fs::File::open(state_path).context("无法读取已发布的管理状态")?;
+            require_live_lock(&restored)?;
+            return Ok(Some(PendingHook::Restored));
+        }
         Err(error) => return Err(error).context("无法读取 SOCKS5 加固事务状态"),
     };
-    match FileExt::try_lock_shared(&file) {
+    require_live_lock(&pending)?;
+    Ok(Some(PendingHook::Candidate(pending)))
+}
+
+fn require_live_lock(file: &fs::File) -> Result<()> {
+    match FileExt::try_lock_shared(file) {
         Ok(()) => bail!("{UNFINISHED}"),
-        Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {
-            Ok(Some(file))
-        }
+        Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => Ok(()),
         Err(error) => Err(error).context("无法检查 SOCKS5 加固事务锁"),
     }
+}
+
+enum HookRead {
+    Display,
+    FileExport(Option<Uuid>),
 }
 
 pub(crate) fn read_info_state(
@@ -114,7 +134,7 @@ pub(crate) fn read_info_state(
     service_hook: bool,
 ) -> Result<Option<ManagedState>> {
     if service_hook {
-        if let Some(state) = read_pending_hook_state(state_path, true)? {
+        if let Some(state) = read_pending_hook_state(state_path, HookRead::Display)? {
             return Ok(Some(state));
         }
     } else {
@@ -127,53 +147,63 @@ pub(crate) fn read_info_state(
 }
 
 pub(crate) fn read_export_state(state_path: &Path, service_hook: bool) -> Result<ManagedState> {
-    read_export_snapshot(state_path, service_hook, true)
+    read_export_snapshot(state_path, service_hook, HookRead::Display)
 }
 
 pub(crate) fn read_file_export_state(
     state_path: &Path,
     service_hook: bool,
+    profile: Option<Uuid>,
 ) -> Result<ManagedState> {
-    read_export_snapshot(state_path, service_hook, false)
+    read_export_snapshot(state_path, service_hook, HookRead::FileExport(profile))
 }
 
 fn read_export_snapshot(
     state_path: &Path,
     service_hook: bool,
-    allow_candidate: bool,
+    read: HookRead,
 ) -> Result<ManagedState> {
     if !service_hook {
         return load_state_from(state_path);
     }
-    match read_pending_hook_state(state_path, allow_candidate)? {
+    match read_pending_hook_state(state_path, read)? {
         Some(state) => Ok(state),
         None => load_state_file(state_path),
     }
 }
 
-fn read_pending_hook_state(
-    state_path: &Path,
-    allow_candidate: bool,
-) -> Result<Option<ManagedState>> {
+fn read_pending_hook_state(state_path: &Path, read: HookRead) -> Result<Option<ManagedState>> {
     let Some(pending) = open_live_pending(state_path)? else {
         return Ok(None);
     };
     // 同步钩子应读取本次启动使用的配置。回滚启动时聚合配置已恢复，优先使用原状态。
     let servers = load_servers(&state_path.with_file_name("config.yaml"))
         .map_err(|_| anyhow::anyhow!("无法读取 SOCKS5 加固期间的聚合配置，请检查 config.yaml"))?;
-    if let Ok(published) = load_state_file(state_path) {
-        if ensure_servers_match_state(&servers, &published.profiles).is_ok() {
-            return Ok(Some(published));
-        }
+    let published = load_state_file(state_path).ok();
+    if published
+        .as_ref()
+        .is_some_and(|state| ensure_servers_match_state(&servers, &state.profiles).is_ok())
+    {
+        return Ok(published);
     }
-    if !allow_candidate {
-        bail!("启动钩子无法将待验证的配置写入客户端文件，请在 SOCKS5 加固结束后重试文件导出");
-    }
+    let PendingHook::Candidate(pending) = pending else {
+        bail!("已恢复的 SOCKS5 配置与状态不一致，请检查 config.yaml 和 ping-rust-state.json");
+    };
     let candidate: ManagedState =
         serde_json::from_reader(pending).context("无法解析待发布的 SOCKS5 加固状态")?;
     ensure_servers_match_state(&servers, &candidate.profiles).map_err(|_| {
         anyhow::anyhow!("SOCKS5 加固期间的配置与状态不一致，请在加固结束后重试读取")
     })?;
+    if let HookRead::FileExport(selector) = read {
+        if let Some(published) = published {
+            let before = crate::client::select_export_profile(&published.profiles, selector)?;
+            let after = crate::client::select_export_profile(&candidate.profiles, selector)?;
+            if serde_json::to_value(before)? == serde_json::to_value(after)? {
+                return Ok(Some(published));
+            }
+        }
+        bail!("启动钩子无法将待验证的配置写入客户端文件，请在 SOCKS5 加固结束后重试文件导出");
+    }
     Ok(Some(candidate))
 }
 
@@ -193,12 +223,93 @@ pub(crate) struct SecurePlan {
     before_profile: String,
     rollback: Option<SecureRollback>,
     pending: Option<fs::File>,
+    #[cfg(target_os = "linux")]
+    restored_state_lock: Option<fs::File>,
 }
 
 struct SecureRollback {
     config: FileSnapshot,
+    #[cfg(unix)]
+    config_link: Option<ConfigLink>,
     state: FileSnapshot,
     profiles: ProfileDirectorySnapshot,
+}
+
+impl SecureRollback {
+    fn restore_config(&self, path: &Path, contents: &[u8]) -> Result<()> {
+        #[cfg(unix)]
+        if let Some(link) = &self.config_link {
+            if self.config_restored(path) {
+                return Ok(());
+            }
+            link.restore(path)?;
+            if !self.config_restored(path) {
+                bail!("聚合配置软链接已恢复，但目标文件已变更，请检查 config.yaml");
+            }
+            return Ok(());
+        }
+        self.config.write(path, contents)
+    }
+
+    fn config_restored(&self, path: &Path) -> bool {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+
+            let Ok(metadata) = fs::symlink_metadata(path) else {
+                return false;
+            };
+            let entry_restored = match &self.config_link {
+                Some(link) => {
+                    metadata.is_symlink()
+                        && (metadata.uid(), metadata.gid()) == (link.uid, link.gid)
+                        && fs::read_link(path).is_ok_and(|target| target == link.target)
+                }
+                None => metadata.is_file(),
+            };
+            if !entry_restored {
+                return false;
+            }
+        }
+        self.config.restored(path)
+    }
+}
+
+#[cfg(unix)]
+struct ConfigLink {
+    target: PathBuf,
+    uid: u32,
+    gid: u32,
+}
+
+#[cfg(unix)]
+impl ConfigLink {
+    fn capture(path: &Path) -> Result<Option<Self>> {
+        use std::os::unix::fs::MetadataExt;
+
+        let metadata = fs::symlink_metadata(path)?;
+        if !metadata.is_symlink() {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            target: fs::read_link(path)?,
+            uid: metadata.uid(),
+            gid: metadata.gid(),
+        }))
+    }
+
+    fn restore(&self, path: &Path) -> Result<()> {
+        use std::os::unix::fs::{lchown, symlink, MetadataExt};
+
+        let temporary = tempfile::tempdir_in(path.parent().context("聚合配置没有父目录")?)?;
+        let link = temporary.path().join("config.yaml");
+        symlink(&self.target, &link)?;
+        let metadata = fs::symlink_metadata(&link)?;
+        if (metadata.uid(), metadata.gid()) != (self.uid, self.gid) {
+            lchown(&link, Some(self.uid), Some(self.gid))?;
+        }
+        fs::rename(&link, path).context("无法原子恢复聚合配置软链接")
+    }
 }
 
 struct FileSnapshot {
@@ -384,6 +495,8 @@ impl SecurePlan {
             before_profile,
             rollback: None,
             pending: None,
+            #[cfg(target_os = "linux")]
+            restored_state_lock: None,
         }))
     }
 
@@ -454,6 +567,8 @@ impl SecurePlan {
         }
         let rollback = SecureRollback {
             config: FileSnapshot::capture(&original_config).context("无法备份原聚合配置")?,
+            #[cfg(unix)]
+            config_link: ConfigLink::capture(&config).context("无法备份聚合配置软链接")?,
             state: FileSnapshot::capture(&original_state_file).context("无法备份原管理状态")?,
             profiles: ProfileDirectorySnapshot::capture(&profiles)?,
         };
@@ -499,17 +614,19 @@ impl SecurePlan {
                 Some(original_state) => rollback.state.save_state(path, &original_state),
                 None => Ok(()),
             },
-            |path, contents| {
-                if path == state.as_path() {
+            |path, write| match write {
+                commit::ManagedWrite::Config(contents) => rollback.config.write(path, contents),
+                commit::ManagedWrite::RestoreConfig(contents) => {
+                    rollback.restore_config(path, contents)
+                }
+                commit::ManagedWrite::RestoreState(contents) => {
                     rollback.state.write(path, contents)
-                } else {
-                    rollback.config.write(path, contents)
                 }
             },
         );
         if let Err(error) = commit {
             // 提交函数已尝试回滚。确认原文件都在，再允许后续读写。
-            let restored = rollback.config.restored(&config)
+            let restored = rollback.config_restored(&config)
                 && rollback.state.restored(&state)
                 && ProfileDirectorySnapshot::capture(&profiles).is_ok_and(|snapshot| {
                     snapshot.existed == rollback.profiles.existed
@@ -545,6 +662,10 @@ impl SecurePlan {
             fs::remove_file(self.directory.join(PENDING_STATE))
                 .context("无法清理 SOCKS5 加固事务状态")?;
             self.pending = None;
+            #[cfg(target_os = "linux")]
+            {
+                self.restored_state_lock = None;
+            }
         }
         Ok(())
     }
@@ -556,7 +677,7 @@ impl SecurePlan {
             .context("没有已提交的 SOCKS5 加固事务")?;
         let mut failures = Vec::new();
         // 先还原聚合配置，再恢复可能缺少显式 listen 的旧状态。
-        match rollback.config.write(
+        match rollback.restore_config(
             &self.directory.join("config.yaml"),
             &rollback.config.contents,
         ) {
@@ -575,6 +696,13 @@ impl SecurePlan {
         }
         if !failures.is_empty() {
             bail!("恢复受管配置失败：{}", failures.join("；"));
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let state = fs::File::open(self.directory.join("ping-rust-state.json"))
+                .context("无法打开已恢复的管理状态")?;
+            FileExt::try_lock_exclusive(&state).context("无法锁定已恢复的管理状态")?;
+            self.restored_state_lock = Some(state);
         }
         Ok(())
     }

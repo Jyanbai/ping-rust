@@ -334,13 +334,19 @@ struct SystemRuntime {
 impl Runtime for SystemRuntime {
     async fn preflight(&mut self, plan: &SecurePlan, interrupt: &InterruptGuard<'_>) -> Result<()> {
         require_tools(utils::command_exists)?;
-        listener_output().await?;
         if self.mode == SecureMode::Local {
+            listener_output().await?;
             let listener = plan.original.listen_address()?.parse()?;
             self.firewall = firewall::FirewallPlan::capture(listener).await?;
         }
         interrupt.check()?;
-        plan.validate(interrupt).await
+        plan.validate(interrupt).await?;
+        if self.mode == SecureMode::Auth {
+            verify_listener(&plan.original, Systemctl::SecureTransaction)
+                .await
+                .context("--auth 要求保持运行中的监听，请先同步 shoes.service 与受管配置")?;
+        }
+        Ok(())
     }
 
     async fn activate(&mut self) -> Result<()> {
@@ -394,16 +400,7 @@ pub(crate) async fn verify(profile: &ManagedProfile) -> Result<()> {
 }
 
 async fn verify_with_systemctl(profile: &ManagedProfile, systemctl: Systemctl) -> Result<()> {
-    if !systemctl.secure_is_active().await? {
-        bail!("shoes.service 未处于 active 状态");
-    }
-    let expected: SocketAddr = profile.listen_address()?.parse()?;
-    let main_pid = systemctl
-        .secure_main_pid()
-        .await?
-        .context("shoes.service 的 MainPID 不可用")?;
-    let output = listener_output().await?;
-    check_listeners(&output, expected, main_pid)?;
+    let expected = verify_listener(profile, systemctl).await?;
     let target = SocketAddr::new(
         if expected.ip().is_unspecified() {
             if expected.is_ipv4() {
@@ -420,6 +417,20 @@ async fn verify_with_systemctl(profile: &ManagedProfile, systemctl: Systemctl) -
         .await
         .context("SOCKS5 认证验证超时")??;
     Ok(())
+}
+
+async fn verify_listener(profile: &ManagedProfile, systemctl: Systemctl) -> Result<SocketAddr> {
+    if !systemctl.secure_is_active().await? {
+        bail!("shoes.service 未处于 active 状态");
+    }
+    let expected: SocketAddr = profile.listen_address()?.parse()?;
+    let main_pid = systemctl
+        .secure_main_pid()
+        .await?
+        .context("shoes.service 的 MainPID 不可用")?;
+    let output = listener_output().await?;
+    check_listeners(&output, expected, main_pid)?;
+    Ok(expected)
 }
 
 pub(crate) fn check_listeners(output: &str, expected: SocketAddr, main_pid: u32) -> Result<()> {

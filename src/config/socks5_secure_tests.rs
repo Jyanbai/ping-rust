@@ -443,6 +443,53 @@ fn socks5_secure_activation_failure_restores_exact_files() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn socks5_secure_rollback_restores_aggregate_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempfile::tempdir().unwrap();
+    let profile = legacy(directory.path());
+    let config = directory.path().join("config.yaml");
+    let managed = Path::new("managed/aggregate.yaml");
+    let target = directory.path().join(managed);
+    fs::create_dir(target.parent().unwrap()).unwrap();
+    fs::rename(&config, &target).unwrap();
+    symlink(managed, &config).unwrap();
+    let original = fs::read(&target).unwrap();
+
+    let profiles = directory.path().join("profiles");
+    fs::create_dir(&profiles).unwrap();
+    let unmanaged = profiles.join("manual.yaml");
+    fs::write(&unmanaged, b"# unmanaged file\n").unwrap();
+    let mut failed = SecurePlan::prepare(directory.path(), profile.id, SecureMode::Auth)
+        .unwrap()
+        .unwrap();
+    let error = failed.commit_files().unwrap_err();
+    assert!(format!("{error:#}").contains("非 ping-rust 文件"));
+    assert_eq!(fs::read_link(&config).unwrap(), managed);
+    assert_eq!(fs::read(&config).unwrap(), original);
+    assert!(!directory
+        .path()
+        .join(".ping-rust-socks5-secure.pending")
+        .exists());
+    fs::remove_file(unmanaged).unwrap();
+
+    let mut plan = SecurePlan::prepare(directory.path(), profile.id, SecureMode::Auth)
+        .unwrap()
+        .unwrap();
+    plan.commit_files().unwrap();
+    assert_ne!(fs::read(&config).unwrap(), original);
+    assert_eq!(fs::read(&target).unwrap(), original);
+    plan.rollback_files().unwrap();
+    plan.finish_pending().unwrap();
+
+    assert_eq!(fs::read_link(&config).unwrap(), managed);
+    assert_eq!(fs::read(&config).unwrap(), original);
+    fs::write(&target, b"# update from the configuration manager\n").unwrap();
+    assert_eq!(fs::read(&config).unwrap(), fs::read(&target).unwrap());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn socks5_secure_preserves_aggregate_owner_group_and_mode_through_rollback() {
     use std::os::unix::fs::MetadataExt;
 
