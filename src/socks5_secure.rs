@@ -201,9 +201,7 @@ pub(crate) async fn run(
         firewall: firewall::FirewallPlan::default(),
         listeners: OtherListeners::default(),
         other_socks5_profiles: plan.other_socks5_profiles().cloned().collect(),
-        managed_config: plan
-            .has_other_protocols()
-            .then(|| directory.join("config.yaml")),
+        managed_config: directory.join("config.yaml"),
         rollback_stop: None,
     };
     apply(&mut plan, &mut runtime, &INTERRUPT).await?;
@@ -358,7 +356,7 @@ struct SystemRuntime {
     firewall: firewall::FirewallPlan,
     listeners: OtherListeners,
     other_socks5_profiles: Vec<ManagedProfile>,
-    managed_config: Option<PathBuf>,
+    managed_config: PathBuf,
     rollback_stop: Option<Result<()>>,
 }
 
@@ -385,11 +383,9 @@ impl SystemRuntime {
     }
 
     async fn verify_config_source(&self, pid: u32, phase: &str) -> Result<()> {
-        if let Some(config) = &self.managed_config {
-            crate::service::require_managed_shoes_process(pid, config).with_context(|| {
-                format!("{phase} shoes 进程未使用受管聚合配置，无法验证其他协议的配置；请先同步 shoes.service 与受管配置")
-            })?;
-        }
+        crate::service::require_managed_shoes_process(pid, &self.managed_config).with_context(
+            || format!("{phase} shoes 进程未使用受管聚合配置；请先同步 shoes.service 与受管配置"),
+        )?;
         if Systemctl::SecureTransaction.secure_main_pid().await? != Some(pid) {
             bail!("验证配置期间 shoes.service 的 MainPID 已改变，请重试");
         }

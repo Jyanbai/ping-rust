@@ -265,10 +265,11 @@ impl UfwScope {
 
     fn kernel_delete_args(self, line: &str, chain: &str) -> Option<Vec<String>> {
         let args = iptables_delete_args_in_chain(line, self.listener, chain)?;
-        let destination = args[2..].chunks_exact(2).find(|option| option[0] == "-d");
+        let (options, _) = args[2..].as_chunks::<2>();
+        let destination = options.iter().find(|[option, _]| option == "-d");
         destination
-            .map_or(self.destination.is_none(), |option| {
-                self.matches_destination(&option[1])
+            .map_or(self.destination.is_none(), |[_, address]| {
+                self.matches_destination(address)
             })
             .then_some(args)
     }
@@ -1574,8 +1575,10 @@ fn unrestricted(scope: Option<(IpAddr, u8)>, listener: IpAddr) -> bool {
 
 fn matches_destination(scope: Option<(IpAddr, u8)>, listener: IpAddr) -> bool {
     if listener.is_unspecified() {
+        // 回环专用规则仍可供收紧后的监听使用。
         scope.is_some_and(|(ip, prefix)| {
-            ip.is_ipv4() == listener.is_ipv4() && (prefix == 0 || prefix == host_prefix(ip))
+            ip.is_ipv4() == listener.is_ipv4()
+                && (prefix == 0 || (prefix == host_prefix(ip) && !ip.is_loopback()))
         })
     } else {
         scope == Some((listener, host_prefix(listener)))

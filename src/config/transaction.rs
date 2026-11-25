@@ -43,6 +43,8 @@ pub(super) struct FileAccess {
     acl: Option<Vec<u8>>,
     #[cfg(target_os = "linux")]
     default_acl: Option<Vec<u8>>,
+    #[cfg(target_os = "linux")]
+    selinux_label: Option<Vec<u8>>,
 }
 
 impl FileAccess {
@@ -65,6 +67,8 @@ impl FileAccess {
             } else {
                 None
             },
+            #[cfg(target_os = "linux")]
+            selinux_label: read_file_xattr(file, SELINUX_LABEL)?,
         })
     }
 
@@ -81,9 +85,16 @@ impl FileAccess {
         file.set_permissions(self.permissions.clone())?;
         #[cfg(target_os = "linux")]
         {
+            use rustix::fs::{fsetxattr, XattrFlags};
+
             write_acl(file, ACCESS_ACL, self.acl.as_deref())?;
             if file.metadata()?.is_dir() {
                 write_acl(file, DEFAULT_ACL, self.default_acl.as_deref())?;
+            }
+            if let Some(label) = &self.selinux_label {
+                if read_file_xattr(file, SELINUX_LABEL)?.as_ref() != Some(label) {
+                    fsetxattr(file, SELINUX_LABEL, label, XattrFlags::empty())?;
+                }
             }
         }
         Ok(())
@@ -94,9 +105,16 @@ impl FileAccess {
 const ACCESS_ACL: &str = "system.posix_acl_access";
 #[cfg(target_os = "linux")]
 const DEFAULT_ACL: &str = "system.posix_acl_default";
+// 单元测试使用可写的 xattr，覆盖未启用 SELinux 的 runner。
+#[cfg(target_os = "linux")]
+const SELINUX_LABEL: &str = if cfg!(test) {
+    "user.ping_rust_test_selinux"
+} else {
+    "security.selinux"
+};
 
 #[cfg(target_os = "linux")]
-pub(super) fn read_file_xattr(file: &fs::File, name: &str) -> io::Result<Option<Vec<u8>>> {
+fn read_file_xattr(file: &fs::File, name: &str) -> io::Result<Option<Vec<u8>>> {
     use rustix::{
         fs::{fgetxattr, fgetxattr_query},
         io::Errno,

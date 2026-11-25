@@ -6,7 +6,6 @@ use std::{
     fs::{self, File},
     io::{self, Read, Write},
     net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream},
-    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
@@ -405,8 +404,8 @@ fn write_upstream(path: &Path, port: u16, password: &str) -> io::Result<()> {
     )
 }
 
-fn validate_shoes(shoes: &Path, config: &Path) -> TestResult {
-    let output = Command::new(shoes)
+fn validate_shoes(command: &mut Command, config: &Path) -> TestResult {
+    let output = command
         .arg("--dry-run")
         .arg(config)
         .stdin(Stdio::inherit())
@@ -508,17 +507,16 @@ fn bounded_diagnostic(text: &str) -> String {
 #[test]
 fn dry_run_failure_preserves_stderr_and_redacted_yaml() {
     let root = tempfile::tempdir().unwrap();
-    let shoes = root.path().join("shoes");
-    fs::write(&shoes, "#!/bin/sh\necho 'schema rejected' >&2\nexit 7\n").unwrap();
-    fs::set_permissions(&shoes, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut shoes = Command::new("/bin/sh");
+    shoes.args(["-c", "echo 'schema rejected' >&2; exit 7"]);
     let config = root.path().join("client.yaml");
     fs::write(
         &config,
         "protocol:\n  type: reality\n  private_key: test-private-material\n  user_id: test-user-material\n",
     )
     .unwrap();
-    let error = validate_shoes(&shoes, &config).unwrap_err().to_string();
-    assert!(error.contains("schema rejected"));
+    let error = validate_shoes(&mut shoes, &config).unwrap_err().to_string();
+    assert!(error.contains("schema rejected"), "{error}");
     assert!(error.contains("reality"));
     assert!(error.contains("[REDACTED]"));
     assert!(!error.contains("test-private-material"));
@@ -528,7 +526,7 @@ fn dry_run_failure_preserves_stderr_and_redacted_yaml() {
 #[test]
 fn dry_run_success_keeps_output_silent() {
     let config = tempfile::NamedTempFile::new().unwrap();
-    assert!(validate_shoes(Path::new("/bin/true"), config.path()).is_ok());
+    assert!(validate_shoes(&mut Command::new("/bin/true"), config.path()).is_ok());
 }
 
 #[test]
@@ -840,8 +838,8 @@ fn run_acceptance(harness: &mut Harness) -> TestResult {
     let upstream_two = harness.path("upstream-two.yaml");
     write_upstream(&upstream_one, *upstream_one_port, "chain-one-password")?;
     write_upstream(&upstream_two, *upstream_two_port, "chain-two-password")?;
-    validate_shoes(&shoes, &upstream_one)?;
-    validate_shoes(&shoes, &upstream_two)?;
+    validate_shoes(&mut Command::new(&shoes), &upstream_one)?;
+    validate_shoes(&mut Command::new(&shoes), &upstream_two)?;
     harness.spawn_logged(
         "upstream-one",
         Command::new("ip")
@@ -958,7 +956,7 @@ fn run_acceptance(harness: &mut Harness) -> TestResult {
 
     let client_config = harness.path("client.yaml");
     write_reality_client(&client_config, *client_port)?;
-    validate_shoes(&shoes, &client_config)?;
+    validate_shoes(&mut Command::new(&shoes), &client_config)?;
     harness.spawn_logged("client", Command::new(&shoes).arg(&client_config))?;
     wait_for_port(SocketAddr::from(([127, 0, 0, 1], *client_port)))?;
 

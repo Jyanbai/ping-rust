@@ -569,6 +569,60 @@ PY
 )
 echo 'SOCKS5 auth: reject password drift on another SOCKS5 listener: PASS'
 
+# A SOCKS5-only deployment can have identical TCP and auth with different UDP settings.
+(
+  scenario="$(mktemp -d /usr/local/lib/socks5-udp-drift.XXXXXX)"
+  dropin=/etc/systemd/system/shoes.service.d/90-compat-socks5-udp-drift.conf
+  cp -a /etc/shoes "$scenario/original"
+  trap 'rm -f "$dropin"; cp -a "$scenario/original/." /etc/shoes/; systemctl daemon-reload; systemctl restart shoes.service; rm -rf "$scenario"' EXIT
+  umask 077
+  state=/etc/shoes/ping-rust-state.json
+  jq '.profiles |= map(select(.port == 24432 or .port == 24436)) |
+    del(.xhttp_profiles, .sudoku_profiles)' "$state" >"$scenario/state.json"
+  cat "$scenario/state.json" >"$state"
+  python3 - "$scenario/live.yaml" <<'PY'
+import pathlib
+import sys
+
+import yaml
+
+config = pathlib.Path('/etc/shoes/config.yaml')
+ports = {'0.0.0.0:24432', '0.0.0.0:24436'}
+servers = [entry for entry in yaml.safe_load(config.read_text()) if entry['address'] in ports]
+assert {entry['address'] for entry in servers} == ports and len(servers) == 2
+config.write_text(yaml.safe_dump(servers))
+other, = (entry for entry in servers if entry['address'] == '0.0.0.0:24432')
+assert other['protocol']['udp_enabled'] is True
+other['protocol']['udp_enabled'] = False
+pathlib.Path(sys.argv[1]).write_text(yaml.safe_dump(servers))
+PY
+  cat >"$dropin" <<EOF
+[Service]
+ExecStart=
+ExecStart=/usr/local/bin/shoes $scenario/live.yaml
+EOF
+  systemctl daemon-reload
+  systemctl restart shoes.service
+  for _ in {1..50}; do
+    if ss -H -ltn 'sport = :24436' | grep -Fq '0.0.0.0:24436'; then break; fi
+    sleep 0.1
+  done
+  ss -H -ltn 'sport = :24436' | grep -Fq '0.0.0.0:24436'
+  rm "$dropin"
+  systemctl daemon-reload
+  before_pid="$(systemctl show --property=MainPID --value shoes.service)"
+  find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/before"
+  if "$NEW" socks5 secure "$legacy_socks5_id" --auth --yes >"$scenario/result" 2>&1; then
+    echo 'Expected SOCKS5-only hardening to reject configuration source drift' >&2
+    exit 1
+  fi
+  grep -Fq '原 shoes 进程未使用受管聚合配置' "$scenario/result"
+  test "$(systemctl show --property=MainPID --value shoes.service)" = "$before_pid"
+  find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/after"
+  diff -u "$scenario/before" "$scenario/after"
+)
+echo 'SOCKS5-only auth: reject an alternate config with different UDP settings before restart: PASS'
+
 # The override takes effect on restart, after preflight checks the original process.
 check_other_auth_after_restart() (
   kind="$1"
@@ -1398,9 +1452,11 @@ echo 'SOCKS5 rollback: root startup hook can synchronously delegate an ACL-backe
   apt-get install -y --no-install-recommends iptables nftables
   scenario="$(mktemp -d /usr/local/lib/socks5-mixed-firewall.XXXXXX)"
   cp -a /etc/shoes "$scenario/original"
-  trap 'iptables-legacy -w -D INPUT -d 203.0.113.8/32 -p tcp --dport 24436 -j ACCEPT 2>/dev/null || true; iptables-legacy -w -D INPUT -p tcp --dport 24436 -j ACCEPT 2>/dev/null || true; iptables-legacy -w -D INPUT -p tcp --dport 24437 -j ACCEPT 2>/dev/null || true; nft delete table ip compat_socks5 2>/dev/null || true; cp -a "$scenario/original/." /etc/shoes/; systemctl restart shoes.service; rm -rf "$scenario"' EXIT
+  trap 'iptables-legacy -w -D INPUT -p tcp --dport 24436 -j DROP 2>/dev/null || true; iptables-legacy -w -D INPUT -d 127.0.0.1/32 -p tcp --dport 24436 -j ACCEPT 2>/dev/null || true; iptables-legacy -w -D INPUT -d 203.0.113.8/32 -p tcp --dport 24436 -j ACCEPT 2>/dev/null || true; iptables-legacy -w -D INPUT -p tcp --dport 24436 -j ACCEPT 2>/dev/null || true; iptables-legacy -w -D INPUT -p tcp --dport 24437 -j ACCEPT 2>/dev/null || true; nft delete table ip compat_socks5 2>/dev/null || true; cp -a "$scenario/original/." /etc/shoes/; systemctl restart shoes.service; rm -rf "$scenario"' EXIT
   iptables-legacy -w -A INPUT -p tcp --dport 24436 -j ACCEPT
   iptables-legacy -w -A INPUT -d 203.0.113.8/32 -p tcp --dport 24436 -j ACCEPT
+  iptables-legacy -w -A INPUT -d 127.0.0.1/32 -p tcp --dport 24436 -j ACCEPT
+  iptables-legacy -w -A INPUT -p tcp --dport 24436 -j DROP
   iptables-legacy -w -A INPUT -p tcp --dport 24437 -j ACCEPT
   update-alternatives --set iptables "$(command -v iptables-nft)"
   iptables --version | grep -Fq '(nf_tables)'
@@ -1414,8 +1470,11 @@ table ip compat_socks5 {
 NFT
   "$NEW" socks5 secure "$legacy_socks5_id" --local --yes >"$scenario/result" 2>&1
   iptables-legacy -w -S INPUT >"$scenario/legacy-after"
+  loopback_rule='-A INPUT -d 127.0.0.1/32 -p tcp -m tcp --dport 24436 -j ACCEPT'
+  grep -Fxq -- "$loopback_rule" "$scenario/legacy-after"
+  grep -Fq -- '--dport 24436 -j DROP' "$scenario/legacy-after"
   grep -Fq -- '--dport 24437 -j ACCEPT' "$scenario/legacy-after"
-  if grep -Fq -- '--dport 24436 -j ACCEPT' "$scenario/legacy-after"; then
+  if grep -Fvx -- "$loopback_rule" "$scenario/legacy-after" | grep -F -- '--dport 24436 -j ACCEPT'; then
     echo 'SOCKS5 legacy INPUT allow survived with iptables-nft selected' >&2
     exit 1
   fi
@@ -1427,6 +1486,7 @@ NFT
   ss -H -ltn 'sport = :24436' | grep -Fq '127.0.0.1:24436'
 )
 echo 'SOCKS5 local: close both nft and legacy INPUT allows with iptables-nft selected: PASS'
+echo 'SOCKS5 local: keep the loopback allow when other traffic on the port is denied: PASS'
 
 (
   scenario="$(mktemp -d /usr/local/lib/socks5-start-export.XXXXXX)"

@@ -392,8 +392,6 @@ struct FileSnapshot {
     access: FileAccess,
     #[cfg(unix)]
     link: Option<FileLink>,
-    #[cfg(target_os = "linux")]
-    label: Option<(&'static str, Vec<u8>)>,
 }
 
 #[cfg(all(test, target_os = "linux"))]
@@ -408,9 +406,7 @@ fn socks5_secure_preserves_aggregate_label_on_atomic_commit_and_rollback() {
     let attribute = "user.ping_rust_test_selinux";
     let label = b"system_u:object_r:shoes_conf_t:s0\0";
     setxattr(&path, attribute, label, XattrFlags::empty()).unwrap();
-    let original =
-        FileSnapshot::capture_with_label(&path, &fs::File::open(&path).unwrap(), attribute)
-            .unwrap();
+    let original = FileSnapshot::capture(&path, &fs::File::open(&path).unwrap()).unwrap();
 
     let assert_file = |contents: &[u8]| {
         assert_eq!(fs::read(&path).unwrap(), contents);
@@ -436,29 +432,7 @@ impl FileSnapshot {
             access: FileAccess::capture(file).context("无法读取文件访问权限")?,
             #[cfg(unix)]
             link: FileLink::capture(path).context("无法备份软链接")?,
-            #[cfg(target_os = "linux")]
-            label: None,
         })
-    }
-
-    fn capture_config(path: &Path, file: &fs::File) -> Result<Self> {
-        #[cfg(target_os = "linux")]
-        {
-            Self::capture_with_label(path, file, "security.selinux")
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            Self::capture(path, file)
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    fn capture_with_label(path: &Path, file: &fs::File, attribute: &'static str) -> Result<Self> {
-        let mut snapshot = Self::capture(path, file)?;
-        snapshot.label = super::transaction::read_file_xattr(file, attribute)
-            .context("无法读取聚合配置的 SELinux 标签")?
-            .map(|label| (attribute, label));
-        Ok(snapshot)
     }
 
     fn restore(&self, path: &Path, contents: &[u8]) -> Result<()> {
@@ -480,19 +454,7 @@ impl FileSnapshot {
     }
 
     fn write(&self, path: &Path, contents: &[u8]) -> Result<()> {
-        utils::atomic_write_with(path, contents, |file| {
-            self.access.apply(file)?;
-            #[cfg(target_os = "linux")]
-            if let Some((attribute, label)) = &self.label {
-                use rustix::fs::{fsetxattr, XattrFlags};
-
-                let current = super::transaction::read_file_xattr(file, attribute)?;
-                if current.as_deref() != Some(label.as_slice()) {
-                    fsetxattr(file, *attribute, label, XattrFlags::empty())?;
-                }
-            }
-            Ok(())
-        })
+        utils::atomic_write_with(path, contents, |file| self.access.apply(file))
     }
 
     fn restored(&self, path: &Path) -> bool {
@@ -514,14 +476,6 @@ impl FileSnapshot {
                 None => entry.is_file(),
             };
             if !entry_restored {
-                return false;
-            }
-        }
-        #[cfg(target_os = "linux")]
-        if let Some((attribute, label)) = &self.label {
-            if !super::transaction::read_file_xattr(&file, attribute)
-                .is_ok_and(|current| current.as_deref() == Some(label.as_slice()))
-            {
                 return false;
             }
         }
@@ -671,13 +625,6 @@ impl SecurePlan {
         })
     }
 
-    pub(crate) fn has_other_protocols(&self) -> bool {
-        self.state
-            .profiles
-            .iter()
-            .any(|profile| profile.protocol() != Protocol::Socks5)
-    }
-
     pub(crate) async fn validate(
         &self,
         interrupt: &crate::socks5_secure::InterruptGuard<'_>,
@@ -713,7 +660,7 @@ impl SecurePlan {
             Err(error) => return Err(error).context("无法锁定原管理状态"),
         }
         let rollback = SecureRollback {
-            config: FileSnapshot::capture_config(&config, &original_config)
+            config: FileSnapshot::capture(&config, &original_config)
                 .context("无法备份原聚合配置")?,
             state: FileSnapshot::capture(&state, &original_state_file)
                 .context("无法备份原管理状态")?,

@@ -691,6 +691,68 @@ fn socks5_secure_preserves_state_posix_acl_through_publish_and_rollback() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn socks5_secure_preserves_state_and_profile_labels_through_publish_and_rollback() {
+    use rustix::fs::{getxattr, setxattr, XattrFlags};
+
+    // 模拟自定义 SELinux 标签，以便普通 Linux CI 也能验证原子替换。
+    let attribute = "user.ping_rust_test_selinux";
+    for rollback in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let profile = legacy(directory.path());
+        let state_path = directory.path().join("ping-rust-state.json");
+        let profiles = directory.path().join("profiles");
+        let state = load_state_from(&state_path).unwrap();
+        let servers = load_servers(&directory.path().join("config.yaml")).unwrap();
+        write_profile_documents(
+            &profiles,
+            &profile_documents(&servers, &state.profiles).unwrap(),
+        )
+        .unwrap();
+        let yaml = profiles.join(profile.config_file_name());
+        let labels = [
+            (
+                &state_path,
+                b"system_u:object_r:shoes_state_t:s0\0".as_slice(),
+            ),
+            (&profiles, b"system_u:object_r:shoes_dir_t:s0\0".as_slice()),
+            (&yaml, b"system_u:object_r:shoes_profile_t:s0\0".as_slice()),
+        ];
+        for (path, label) in labels {
+            setxattr(path, attribute, label, XattrFlags::empty()).unwrap();
+        }
+        let assert_labels = || {
+            for (path, label) in labels {
+                let mut value = [0; 64];
+                let len = getxattr(path, attribute, value.as_mut_slice())
+                    .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+                assert_eq!(&value[..len], label, "{}", path.display());
+            }
+        };
+        let original_state = fs::read(&state_path).unwrap();
+        let original_yaml = fs::read(&yaml).unwrap();
+        let mut plan = SecurePlan::prepare(directory.path(), profile.id, SecureMode::Auth)
+            .unwrap()
+            .unwrap();
+
+        assert_labels();
+        plan.commit_files().unwrap();
+        assert!(fs::read(&yaml).unwrap() != original_yaml);
+        assert_labels();
+        if rollback {
+            plan.rollback_files().unwrap();
+            plan.finish_pending().unwrap();
+            assert!(fs::read(&state_path).unwrap() == original_state);
+            assert!(fs::read(&yaml).unwrap() == original_yaml);
+        } else {
+            plan.publish_state().unwrap();
+            assert!(SecurePlan::already_secure(directory.path(), profile.id).unwrap());
+        }
+        assert_labels();
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn socks5_secure_commit_requires_unlocked_file_exports_to_release_the_state() {
     use fs2::FileExt;
 
