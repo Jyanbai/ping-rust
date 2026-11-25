@@ -647,11 +647,41 @@ fn systemctl_starts_unit(command_line: &[u8], unit: &str) -> bool {
                 mode if mode.starts_with(b"--job-mode=") && mode.len() > b"--job-mode=".len() => {}
                 _ => return false,
             }
-        } else if expected.next() != Some(arg) {
-            return false;
+        } else {
+            match expected.next() {
+                Some(word) if word == arg => {}
+                Some(word) if word == unit.as_bytes() && systemctl_service_shorthand(arg, word) => {
+                }
+                _ => return false,
+            }
         }
     }
     expected.next().is_none()
+}
+
+#[cfg(target_os = "linux")]
+fn systemctl_service_shorthand(arg: &[u8], unit: &[u8]) -> bool {
+    // systemctl 只在参数没有已知单元类型时补上 .service。
+    unit.strip_suffix(b".service") == Some(arg)
+        && !arg
+            .iter()
+            .rposition(|byte| *byte == b'.')
+            .is_some_and(|dot| {
+                matches!(
+                    &arg[dot + 1..],
+                    b"service"
+                        | b"socket"
+                        | b"target"
+                        | b"device"
+                        | b"mount"
+                        | b"automount"
+                        | b"swap"
+                        | b"timer"
+                        | b"path"
+                        | b"slice"
+                        | b"scope"
+                )
+            })
 }
 
 #[cfg(target_os = "linux")]
@@ -912,6 +942,8 @@ mod tests {
         let waits = |command: &str| systemctl_starts_unit(command.as_bytes(), "helper.service");
         for command in [
             "systemctl\0start\0helper.service\0",
+            "systemctl\0start\0helper\0",
+            "systemctl\0--quiet\0start\0--\0helper\0",
             "systemctl\0--quiet\0start\0helper.service\0",
             "systemctl\0start\0-q\0--no-ask-password\0--\0helper.service\0",
             "systemctl\0--job-mode=replace\0start\0helper.service\0",
@@ -927,9 +959,19 @@ mod tests {
             "systemctl\0--machine=container\0start\0helper.service\0",
             "systemctl\0show\0helper.service\0",
             "systemctl\0start\0other.service\0",
+            "systemctl\0start\0other\0",
+            "systemctl\0start\0helper\0--no-block\0",
         ] {
             assert!(!waits(command), "{command:?}");
         }
+        assert!(systemctl_starts_unit(
+            b"systemctl\0start\0helper.with-dot\0",
+            "helper.with-dot.service"
+        ));
+        assert!(!systemctl_starts_unit(
+            b"systemctl\0start\0helper.timer\0",
+            "helper.timer.service"
+        ));
     }
 
     #[cfg(unix)]

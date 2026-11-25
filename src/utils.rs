@@ -205,14 +205,28 @@ pub(crate) fn read_with_existing_lock_then<T, U>(
     read: impl Fn() -> Result<T>,
     use_snapshot: impl FnOnce(T) -> Result<U>,
 ) -> Result<U> {
-    read_with_existing_lock_or_service_hook(path, false, |_| read(), Err, use_snapshot)
+    read_with_existing_lock_or_service_hook(
+        path,
+        false,
+        |access| match access {
+            SnapshotAccess::Unreadable(error) => Err(error),
+            _ => read(),
+        },
+        use_snapshot,
+    )
+}
+
+pub(crate) enum SnapshotAccess {
+    Locked,
+    ServiceHook,
+    Missing,
+    Unreadable(anyhow::Error),
 }
 
 pub(crate) fn read_with_existing_lock_or_service_hook<T, U>(
     path: &Path,
     is_service_hook: bool,
-    read: impl Fn(bool) -> Result<T>,
-    read_if_lock_unreadable: impl FnOnce(anyhow::Error) -> Result<T>,
+    read: impl Fn(SnapshotAccess) -> Result<T>,
     use_snapshot: impl FnOnce(T) -> Result<U>,
 ) -> Result<U> {
     enum ReadLock {
@@ -252,17 +266,19 @@ pub(crate) fn read_with_existing_lock_or_service_hook<T, U>(
         Ok(ReadLock::Acquired(file))
     };
     match lock_if_exists()? {
-        ReadLock::Acquired(_lock) => return use_snapshot(read(false)?),
-        ReadLock::ServiceHook => return use_snapshot(read(true)?),
-        ReadLock::Unreadable(error) => return use_snapshot(read_if_lock_unreadable(error)?),
+        ReadLock::Acquired(_lock) => return use_snapshot(read(SnapshotAccess::Locked)?),
+        ReadLock::ServiceHook => return use_snapshot(read(SnapshotAccess::ServiceHook)?),
+        ReadLock::Unreadable(error) => {
+            return use_snapshot(read(SnapshotAccess::Unreadable(error))?)
+        }
         ReadLock::Missing => {}
     }
-    let result = read(false);
+    let result = read(SnapshotAccess::Missing);
     // 首次加固可能在无锁读取期间创建锁文件。加锁后重新读取这一份快照。
     match lock_if_exists()? {
-        ReadLock::Acquired(_lock) => use_snapshot(read(false)?),
-        ReadLock::ServiceHook => use_snapshot(read(true)?),
-        ReadLock::Unreadable(error) => use_snapshot(read_if_lock_unreadable(error)?),
+        ReadLock::Acquired(_lock) => use_snapshot(read(SnapshotAccess::Locked)?),
+        ReadLock::ServiceHook => use_snapshot(read(SnapshotAccess::ServiceHook)?),
+        ReadLock::Unreadable(error) => use_snapshot(read(SnapshotAccess::Unreadable(error))?),
         ReadLock::Missing => use_snapshot(result?),
     }
 }

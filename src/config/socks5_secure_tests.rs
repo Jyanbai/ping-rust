@@ -468,13 +468,27 @@ fn socks5_secure_preserves_aggregate_owner_group_and_mode_through_rollback() {
 #[cfg(target_os = "linux")]
 #[test]
 fn socks5_secure_preserves_aggregate_posix_acl_through_rollback() {
-    use rustix::fs::{getxattr, setxattr, XattrFlags};
-    use std::os::unix::fs::MetadataExt;
-
     let directory = tempfile::tempdir().unwrap();
     let profile = legacy(directory.path());
     let config = directory.path().join("config.yaml");
-    let owner = fs::metadata(&config).unwrap().uid();
+    let assert_acl = delegate_file_read(&config);
+    assert_acl();
+    let mut plan = SecurePlan::prepare(directory.path(), profile.id, SecureMode::Auth)
+        .unwrap()
+        .unwrap();
+    plan.commit_files().unwrap();
+    assert_acl();
+    plan.rollback_files().unwrap();
+    assert_acl();
+    plan.finish_pending().unwrap();
+}
+
+#[cfg(target_os = "linux")]
+fn delegate_file_read(path: &Path) -> impl Fn() + '_ {
+    use rustix::fs::{getxattr, setxattr, XattrFlags};
+    use std::os::unix::fs::MetadataExt;
+
+    let owner = fs::metadata(path).unwrap().uid();
     let reader = if owner == 65534 { 65533_u32 } else { 65534_u32 };
     let name = "system.posix_acl_access";
     // Linux ACL xattr v2：仅文件所有者可写，另授权一个指定 UID 读取。
@@ -490,21 +504,77 @@ fn socks5_secure_preserves_aggregate_posix_acl_through_rollback() {
         acl.extend(permissions.to_le_bytes());
         acl.extend(id.to_le_bytes());
     }
-    setxattr(&config, name, &acl, XattrFlags::empty()).unwrap();
-    let assert_acl = || {
+    setxattr(path, name, &acl, XattrFlags::empty()).unwrap();
+    move || {
         let mut current = [0_u8; 44];
-        let len = getxattr(&config, name, current.as_mut_slice()).unwrap();
+        let len = getxattr(path, name, current.as_mut_slice()).unwrap();
         assert_eq!(&current[..len], acl.as_slice());
-    };
-    assert_acl();
-    let mut plan = SecurePlan::prepare(directory.path(), profile.id, SecureMode::Auth)
-        .unwrap()
-        .unwrap();
-    plan.commit_files().unwrap();
-    assert_acl();
-    plan.rollback_files().unwrap();
-    assert_acl();
-    plan.finish_pending().unwrap();
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn socks5_secure_preserves_state_posix_acl_through_publish_and_rollback() {
+    for rollback in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let profile = legacy(directory.path());
+        let state_path = directory.path().join("ping-rust-state.json");
+        if !rollback {
+            let explicit_listen = load_state_from(&state_path).unwrap();
+            save_state_to(&state_path, &explicit_listen).unwrap();
+        }
+        let original = fs::read(&state_path).unwrap();
+        let assert_acl = delegate_file_read(&state_path);
+        assert_acl();
+
+        let mut plan = SecurePlan::prepare(directory.path(), profile.id, SecureMode::Auth)
+            .unwrap()
+            .unwrap();
+        plan.commit_files().unwrap();
+        assert_acl();
+        if rollback {
+            plan.rollback_files().unwrap();
+            plan.finish_pending().unwrap();
+            assert!(fs::read(&state_path).unwrap() == original);
+        } else {
+            plan.publish_state().unwrap();
+            assert!(SecurePlan::already_secure(directory.path(), profile.id).unwrap());
+        }
+        assert_acl();
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn socks5_secure_commit_requires_unlocked_file_exports_to_release_the_state() {
+    use fs2::FileExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let profile = legacy(directory.path());
+    let state = directory.path().join("ping-rust-state.json");
+    let config = directory.path().join("config.yaml");
+    let original_state = fs::read(&state).unwrap();
+    let original_config = fs::read(&config).unwrap();
+    for mode in [SecureMode::Auth, SecureMode::Local] {
+        let mut plan = SecurePlan::prepare(directory.path(), profile.id, mode)
+            .unwrap()
+            .unwrap();
+        let guard = fs::File::open(&state).unwrap();
+        FileExt::lock_shared(&guard).unwrap();
+        let error = plan.commit_files().unwrap_err();
+        assert!(format!("{error:#}").contains("文件导出"));
+        assert!(fs::read(&state).unwrap() == original_state);
+        assert!(fs::read(&config).unwrap() == original_config);
+        assert!(!directory
+            .path()
+            .join(".ping-rust-socks5-secure.pending")
+            .exists());
+        drop(guard);
+
+        plan.commit_files().unwrap();
+        plan.rollback_files().unwrap();
+        plan.finish_pending().unwrap();
+    }
 }
 
 #[cfg(target_os = "linux")]

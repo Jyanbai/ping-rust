@@ -410,6 +410,7 @@ echo 'SOCKS5 preflight: PID signals, process-group SIGINT and timeout clean up d
   dropin=/etc/systemd/system/shoes.service.d
   target=/run/systemd/system/compat-socks5-slow-stop.target
   reader=/run/systemd/system/compat-socks5-start-reader.service
+  reader_unit="${reader##*/}"
   timer=/run/systemd/system/compat-socks5-timer-export.timer
   exporter="${timer%.timer}.service"
   mkdir -p "$dropin"
@@ -540,7 +541,7 @@ TimeoutStartSec=10s
 TimeoutStopSec=150s
 ReadWritePaths=$scenario
 ExecStartPre=$scenario/exec-start-pre $NEW $scenario
-ExecStartPre=+$scenario/start-oneshot $systemctl_bin ${reader##*/} $scenario
+ExecStartPre=+$scenario/start-oneshot $systemctl_bin ${reader_unit%.service} $scenario
 ExecStop=$scenario/exec-stop $scenario
 EOF
   "$systemctl_bin" daemon-reload
@@ -765,26 +766,9 @@ ReadWritePaths=$scenario
 ExecStartPost=/usr/bin/env -i $scenario/start-reader $NEW $scenario $legacy_socks5_id
 EOF
   systemctl daemon-reload
-  "$NEW" socks5 secure compat-socks5-legacy --auth --yes >"$WORK/socks5-start-export.txt" 2>&1
-  systemctl is-active --quiet shoes.service
-  test -f "$scenario/deferred-export"
-  test ! -e "$scenario/client.json"
-  "$NEW" export sing-box --profile "$legacy_socks5_id" --server example.com \
-    --output "$scenario/expected.json" >/dev/null
-  "$NEW" url "$legacy_socks5_id" >"$scenario/expected-url"
-  cmp -s "$scenario/url" "$scenario/expected-url"
-  # Once the state is published, a normal restart lets the same hook write it.
-  systemctl restart shoes.service
-  systemctl is-active --quiet shoes.service
-  jq -e '[.outbounds[] | select(.type == "socks")] | length == 1 and
-    (.[0] | (.username | length) > 0 and (.password | length) > 0)' "$scenario/client.json" >/dev/null
-  cmp -s "$scenario/client.json" "$scenario/expected.json"
-)
-echo 'SOCKS5 authentication: clean-environment ExecStartPost info, URL and export agree with published credentials: PASS'
-
-# A delegated reader can access the committed state via ACL while the existing
-# writer lock stays root-only. It must still reject any active or stale marker.
-python3 - "$NEW" "$legacy_socks5_id" <<'PY'
+  # Delegate state access before hardening, while keeping the writer lock private.
+  python3 - "$NEW" "$legacy_socks5_id" "$WORK/socks5-start-export.txt" <<'PY'
+import errno
 import fcntl
 import json
 import os
@@ -795,7 +779,7 @@ import subprocess
 import sys
 from tempfile import TemporaryDirectory
 
-binary, profile = sys.argv[1:]
+binary, profile, secure_log = sys.argv[1:]
 reader = pwd.getpwnam('nobody')
 directory = Path('/etc/shoes')
 state = directory / 'ping-rust-state.json'
@@ -832,6 +816,10 @@ with TemporaryDirectory() as work:
     os.setxattr(state, acl_name, acl, os.XATTR_CREATE)
     try:
         os.chmod(directory, 0o711)
+        with open(secure_log, 'wb') as log:
+            subprocess.run([binary, 'socks5', 'secure', 'compat-socks5-legacy', '--auth', '--yes'],
+                           stdout=log, stderr=subprocess.STDOUT, check=True)
+        assert os.getxattr(state, acl_name) == acl
         for command in [['info', profile], ['url', profile], ['qr', profile], export]:
             result = as_reader(command)
             assert result.returncode == 0, (command[0], result.returncode)
@@ -839,6 +827,11 @@ with TemporaryDirectory() as work:
         socks = next(item for item in json.loads(original)['outbounds']
                      if item['type'] == 'socks')
         assert socks['username'] and socks['password']
+        # A writer can hold the state inode before publishing the pending marker.
+        assert not pending.exists()
+        with state.open('rb') as guarded_state:
+            fcntl.flock(guarded_state, fcntl.LOCK_EX)
+            assert_export_blocked(original)
         pending.touch(mode=0o600, exist_ok=False)
         try:
             with pending.open('rb') as marker:
@@ -849,7 +842,26 @@ with TemporaryDirectory() as work:
             pending.unlink()
     finally:
         os.chmod(directory, directory_mode)
-        os.removexattr(state, acl_name)
+        try:
+            os.removexattr(state, acl_name)
+        except OSError as error:
+            if error.errno != errno.ENODATA:
+                raise
         os.chmod(state, state_mode)
 PY
-echo 'SOCKS5 readers: delegated state ACL works with a private lock and respects a pending transaction: PASS'
+  echo 'SOCKS5 readers: delegated state ACL survives hardening with a private lock and respects a pending transaction: PASS'
+  systemctl is-active --quiet shoes.service
+  test -f "$scenario/deferred-export"
+  test ! -e "$scenario/client.json"
+  "$NEW" export sing-box --profile "$legacy_socks5_id" --server example.com \
+    --output "$scenario/expected.json" >/dev/null
+  "$NEW" url "$legacy_socks5_id" >"$scenario/expected-url"
+  cmp -s "$scenario/url" "$scenario/expected-url"
+  # Once the state is published, a normal restart lets the same hook write it.
+  systemctl restart shoes.service
+  systemctl is-active --quiet shoes.service
+  jq -e '[.outbounds[] | select(.type == "socks")] | length == 1 and
+    (.[0] | (.username | length) > 0 and (.password | length) > 0)' "$scenario/client.json" >/dev/null
+  cmp -s "$scenario/client.json" "$scenario/expected.json"
+)
+echo 'SOCKS5 authentication: clean-environment ExecStartPost info, URL and export agree with published credentials: PASS'

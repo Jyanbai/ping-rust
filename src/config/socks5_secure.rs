@@ -10,6 +10,9 @@ const PENDING_STATE: &str = ".ping-rust-socks5-secure.pending";
 const UNFINISHED: &str = "上次 SOCKS5 加固未完成。请检查 shoes.service 和防火墙，从备份恢复一致的 config.yaml、profiles 和 ping-rust-state.json，验证服务后再移除 .ping-rust-socks5-secure.pending";
 #[cfg(target_os = "linux")]
 const ACCESS_ACL: &str = "system.posix_acl_access";
+#[cfg(target_os = "linux")]
+const RETRY_READ: &str =
+    "请在 SOCKS5 加固结束后重试读取；若此提示持续出现，请由管理员检查加固事务状态";
 
 fn pending_exists(state_path: &Path) -> Result<bool> {
     state_path
@@ -46,12 +49,12 @@ pub(crate) fn read_unlocked_snapshot<T>(
     let generation = || Ok::<_, anyhow::Error>((identity(state_path)?, identity(&config_path)?));
     let check_pending = || {
         if pending_exists(state_path)? {
-            bail!("请在 SOCKS5 加固结束后重试读取；若此提示持续出现，请由管理员检查加固事务状态");
+            bail!("{RETRY_READ}");
         }
         Ok(())
     };
 
-    // 只处理无权打开专用写锁的读者。兼容旧状态时也可能读取聚合配置。
+    // 兼容旧状态时也可能读取聚合配置。
     check_pending()?;
     let before = generation()?;
     let result = read();
@@ -61,6 +64,27 @@ pub(crate) fn read_unlocked_snapshot<T>(
         bail!("读取期间受管配置已变更，请重试");
     }
     result
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn lock_state_for_file_export(state_path: &Path) -> Result<fs::File> {
+    use std::os::unix::fs::MetadataExt;
+
+    let file = fs::File::open(state_path).context("无法读取文件导出所需的管理状态")?;
+    match FileExt::try_lock_shared(&file) {
+        Ok(()) => {}
+        Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {
+            bail!("{RETRY_READ}");
+        }
+        Err(error) => return Err(error).context("无法锁定文件导出所需的管理状态"),
+    }
+    // 打开与加锁之间可能已发布新 inode。不能用旧 inode 的锁保护新快照。
+    let locked = file.metadata().context("无法检查加锁的管理状态")?;
+    let current = fs::metadata(state_path).context("无法检查当前管理状态")?;
+    if (locked.dev(), locked.ino()) != (current.dev(), current.ino()) {
+        bail!("读取期间受管配置已变更，请重试");
+    }
+    Ok(file)
 }
 
 pub(crate) fn load_for_plan(state_path: &Path) -> Result<ManagedState> {
@@ -172,28 +196,43 @@ pub(crate) struct SecurePlan {
 }
 
 struct SecureRollback {
-    config: Vec<u8>,
-    config_metadata: fs::Metadata,
-    #[cfg(target_os = "linux")]
-    config_acl: Option<Vec<u8>>,
-    state: Option<Vec<u8>>,
+    config: FileSnapshot,
+    state: FileSnapshot,
     profiles: ProfileDirectorySnapshot,
 }
 
-impl SecureRollback {
-    fn write_config(&self, path: &Path, contents: &[u8]) -> Result<()> {
+struct FileSnapshot {
+    contents: Vec<u8>,
+    metadata: fs::Metadata,
+    #[cfg(target_os = "linux")]
+    acl: Option<Vec<u8>>,
+}
+
+impl FileSnapshot {
+    fn capture(mut file: &fs::File) -> Result<Self> {
+        let mut contents = Vec::new();
+        file.read_to_end(&mut contents)?;
+        Ok(Self {
+            contents,
+            metadata: file.metadata()?,
+            #[cfg(target_os = "linux")]
+            acl: access_acl(file).context("无法读取文件 ACL")?,
+        })
+    }
+
+    fn write(&self, path: &Path, contents: &[u8]) -> Result<()> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::{fchown, MetadataExt};
             utils::atomic_write_with(path, contents, |file| {
-                let owner = &self.config_metadata;
+                let owner = &self.metadata;
                 let temporary = file.metadata()?;
                 if (temporary.uid(), temporary.gid()) != (owner.uid(), owner.gid()) {
                     fchown(file, Some(owner.uid()), Some(owner.gid()))?;
                 }
                 file.set_permissions(owner.permissions())?;
                 #[cfg(target_os = "linux")]
-                match &self.config_acl {
+                match &self.acl {
                     Some(acl) => rustix::fs::fsetxattr(
                         file,
                         ACCESS_ACL,
@@ -213,8 +252,11 @@ impl SecureRollback {
         utils::atomic_write(path, contents, 0o600)
     }
 
-    fn config_restored(&self, path: &Path) -> bool {
-        let Ok(metadata) = fs::metadata(path) else {
+    fn restored(&self, path: &Path) -> bool {
+        let Ok(file) = fs::File::open(path) else {
+            return false;
+        };
+        let Ok(metadata) = file.metadata() else {
             return false;
         };
         #[cfg(unix)]
@@ -222,27 +264,32 @@ impl SecureRollback {
             use std::os::unix::fs::MetadataExt;
             if (metadata.uid(), metadata.gid(), metadata.mode())
                 != (
-                    self.config_metadata.uid(),
-                    self.config_metadata.gid(),
-                    self.config_metadata.mode(),
+                    self.metadata.uid(),
+                    self.metadata.gid(),
+                    self.metadata.mode(),
                 )
             {
                 return false;
             }
         }
         #[cfg(target_os = "linux")]
-        if !fs::File::open(path)
-            .is_ok_and(|file| config_access_acl(&file).is_ok_and(|acl| acl == self.config_acl))
-        {
+        if !access_acl(&file).is_ok_and(|acl| acl == self.acl) {
             return false;
         }
-        metadata.permissions() == self.config_metadata.permissions()
-            && fs::read(path).is_ok_and(|bytes| bytes == self.config)
+        let mut contents = Vec::new();
+        metadata.permissions() == self.metadata.permissions()
+            && (&file).read_to_end(&mut contents).is_ok()
+            && contents == self.contents
+    }
+
+    fn save_state(&self, path: &Path, state: &ManagedState) -> Result<()> {
+        let contents = serde_json::to_vec_pretty(state).context("序列化管理状态失败")?;
+        self.write(path, &contents)
     }
 }
 
 #[cfg(target_os = "linux")]
-fn config_access_acl(file: &fs::File) -> std::io::Result<Option<Vec<u8>>> {
+fn access_acl(file: &fs::File) -> std::io::Result<Option<Vec<u8>>> {
     use rustix::{
         fs::{fgetxattr, fgetxattr_query},
         io::Errno,
@@ -395,17 +442,19 @@ impl SecurePlan {
         let config = self.directory.join("config.yaml");
         let state = self.directory.join("ping-rust-state.json");
         let profiles = self.directory.join("profiles");
-        let mut original = fs::File::open(&config).context("无法读取原聚合配置")?;
-        let mut original_config = Vec::new();
-        original
-            .read_to_end(&mut original_config)
-            .context("无法读取原聚合配置")?;
+        let original_config = fs::File::open(&config).context("无法读取原聚合配置")?;
+        let original_state_file = fs::File::open(&state).context("无法读取原管理状态")?;
+        #[cfg(target_os = "linux")]
+        match FileExt::try_lock_exclusive(&original_state_file) {
+            Ok(()) => {}
+            Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {
+                bail!("有客户端文件导出正在读取管理状态，请在导出结束后重试加固");
+            }
+            Err(error) => return Err(error).context("无法锁定原管理状态"),
+        }
         let rollback = SecureRollback {
-            config: original_config,
-            config_metadata: original.metadata().context("无法读取原聚合配置权限")?,
-            #[cfg(target_os = "linux")]
-            config_acl: config_access_acl(&original).context("无法读取原聚合配置 ACL")?,
-            state: read_optional(&state)?,
+            config: FileSnapshot::capture(&original_config).context("无法备份原聚合配置")?,
+            state: FileSnapshot::capture(&original_state_file).context("无法备份原管理状态")?,
             profiles: ProfileDirectorySnapshot::capture(&profiles)?,
         };
         let original_state = if socks5::listen_migration_pending(&state)? {
@@ -438,6 +487,8 @@ impl SecurePlan {
                 .map_err(|error| error.error)
                 .context("无法保存 SOCKS5 加固事务状态")?,
         );
+        // 先持有原 inode 的独占锁，再让 pending 标记保护后续替换出的状态文件。
+        drop(original_state_file);
         let commit = commit::commit_managed_with_writers(
             &config,
             &state,
@@ -445,15 +496,21 @@ impl SecurePlan {
             &self.servers,
             &self.state,
             |path, _| match original_state {
-                Some(original_state) => save_state_to(path, &original_state),
+                Some(original_state) => rollback.state.save_state(path, &original_state),
                 None => Ok(()),
             },
-            |path, contents| rollback.write_config(path, contents),
+            |path, contents| {
+                if path == state.as_path() {
+                    rollback.state.write(path, contents)
+                } else {
+                    rollback.config.write(path, contents)
+                }
+            },
         );
         if let Err(error) = commit {
             // 提交函数已尝试回滚。确认原文件都在，再允许后续读写。
-            let restored = rollback.config_restored(&config)
-                && read_optional(&state).is_ok_and(|bytes| bytes == rollback.state)
+            let restored = rollback.config.restored(&config)
+                && rollback.state.restored(&state)
                 && ProfileDirectorySnapshot::capture(&profiles).is_ok_and(|snapshot| {
                     snapshot.existed == rollback.profiles.existed
                         && snapshot.files == rollback.profiles.files
@@ -470,7 +527,13 @@ impl SecurePlan {
     }
 
     pub(crate) fn publish_state(&mut self) -> Result<()> {
-        save_state_to(&self.directory.join("ping-rust-state.json"), &self.state)
+        let rollback = self
+            .rollback
+            .as_ref()
+            .context("没有已提交的 SOCKS5 加固事务")?;
+        rollback
+            .state
+            .save_state(&self.directory.join("ping-rust-state.json"), &self.state)
             .context("保存已验证的 SOCKS5 状态失败")?;
         self.finish_pending()?;
         self.rollback = None;
@@ -493,12 +556,14 @@ impl SecurePlan {
             .context("没有已提交的 SOCKS5 加固事务")?;
         let mut failures = Vec::new();
         // 先还原聚合配置，再恢复可能缺少显式 listen 的旧状态。
-        match rollback.write_config(&self.directory.join("config.yaml"), &rollback.config) {
+        match rollback.config.write(
+            &self.directory.join("config.yaml"),
+            &rollback.config.contents,
+        ) {
             Ok(()) => {
-                if let Err(error) = transaction::restore_snapshot(
+                if let Err(error) = rollback.state.write(
                     &self.directory.join("ping-rust-state.json"),
-                    rollback.state.as_deref(),
-                    0o600,
+                    &rollback.state.contents,
                 ) {
                     failures.push(format!("状态={error:#}"));
                 }

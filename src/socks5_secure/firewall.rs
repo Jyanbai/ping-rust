@@ -214,6 +214,7 @@ struct UfwAttempt {
     entry: Range<usize>,
     kernel: Vec<LiveRule>,
     kernel_position: usize,
+    kernel_deleted: bool,
 }
 
 #[derive(PartialEq, Eq)]
@@ -405,7 +406,7 @@ impl FirewallPlan {
             }
             return Ok(());
         }
-        rule.delete(backend, attempted.last().unwrap()).await
+        rule.delete(backend, attempted.last_mut().unwrap()).await
     }
 
     pub(super) async fn restore(&mut self) -> Result<()> {
@@ -559,10 +560,14 @@ impl Rule {
         }
     }
 
-    async fn delete(&self, backend: &mut impl FirewallExecutor, attempt: &Attempt) -> Result<()> {
+    async fn delete(
+        &self,
+        backend: &mut impl FirewallExecutor,
+        attempt: &mut Attempt,
+    ) -> Result<()> {
         match self {
             Rule::Ufw { listener, .. } => {
-                let ufw = attempt.ufw.as_ref().context("缺少 UFW 规则快照")?;
+                let ufw = attempt.ufw.as_mut().context("缺少 UFW 规则快照")?;
                 ufw.delete(backend, *listener).await?;
             }
             Rule::Rich { base, text } => {
@@ -716,6 +721,12 @@ impl Rule {
     ) -> Result<()> {
         let original = attempt.ufw.as_ref().context("缺少 UFW 规则快照")?;
         if self.position(current).is_none() {
+            // 内核删除失败时，缺失的放行可能是管理员撤销的。
+            if !original.kernel_deleted {
+                bail!(
+                    "无法确认本次操作删除了 UFW 放行，持久规则已变化，请检查 ufw status numbered"
+                );
+            }
             let position = checked_firewall_restore_position(
                 &attempt.before,
                 attempt.position,
@@ -750,6 +761,9 @@ impl Rule {
         let (program, chain) = ufw_kernel_chain(listener);
         let kernel = ufw_kernel_rules(backend, program, chain).await?;
         match ufw_kernel_count(&kernel, listener, chain) {
+            0 if !original.kernel_deleted => {
+                bail!("无法确认本次操作删除了 UFW 内核放行，请检查 {program} -S {chain}");
+            }
             0 => {
                 // 单独补回目标规则，避免重载整个防火墙。
                 let before = &original.kernel;
@@ -838,11 +852,12 @@ impl UfwAttempt {
             entry,
             kernel,
             kernel_position,
+            kernel_deleted: false,
         })
     }
 
     async fn delete(
-        &self,
+        &mut self,
         backend: &mut impl FirewallExecutor,
         listener: SocketAddr,
     ) -> Result<()> {
@@ -854,6 +869,7 @@ impl UfwAttempt {
                 .context("无法解析待删除的 UFW 内核规则")?,
         );
         backend.execute(program, &args, None).await?;
+        self.kernel_deleted = true;
         backend.replace_ufw_rules_file(
             listener.is_ipv6(),
             &self.file.contents,
@@ -1015,9 +1031,9 @@ fn rule_may_deny_port(rule: &LiveRule, port: u16) -> bool {
             let Some(expressions) = spec["expr"].as_array() else {
                 return false;
             };
-            // 跳转、goto 和 verdict map 可以把匹配的流量交给拒绝规则。
+            // return 在基础链上应用默认策略；跳转和 verdict map 也可能拒绝流量。
             let Some(verdict) = expressions.iter().position(|expr| {
-                ["drop", "reject", "jump", "goto", "vmap"]
+                ["drop", "reject", "return", "jump", "goto", "vmap"]
                     .iter()
                     .any(|action| expr.get(*action).is_some())
             }) else {
@@ -2024,6 +2040,7 @@ mod tests {
         disk: Vec<&'static str>,
         ipv6: bool,
         kernel_has_rule: bool,
+        admin_deletes_before_kernel_delete: bool,
         keep_disk_on_delete_failure: bool,
         kernel_reorders_on_insert: bool,
         other_family_runtime_rule: bool,
@@ -2176,6 +2193,13 @@ mod tests {
                             rule,
                             ["-p", "tcp", "-m", "tcp", "--dport", "1080", "-j", "ACCEPT"]
                         );
+                        if action == "-D" && self.admin_deletes_before_kernel_delete {
+                            self.admin_deletes_before_kernel_delete = false;
+                            self.kernel_has_rule = false;
+                            let allow = if self.ipv6 { IPV6 } else { IPV4 };
+                            self.disk.retain(|entry| *entry != allow);
+                            bail!("管理员已删除 UFW 放行，内核规则不存在");
+                        }
                         assert_eq!(self.kernel_has_rule, action == "-D");
                         self.kernel_has_rule = action != "-D";
                         Ok(String::new())
@@ -2221,11 +2245,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn socks5_secure_ufw_does_not_restore_an_allow_deleted_by_the_admin() {
+        for (address, ipv6) in [("0.0.0.0:1080", false), ("[::]:1080", true)] {
+            let mut backend = FakeUfw {
+                disk: vec![IPV4, IPV6],
+                ipv6,
+                kernel_has_rule: true,
+                admin_deletes_before_kernel_delete: true,
+                keep_disk_on_delete_failure: false,
+                kernel_reorders_on_insert: false,
+                other_family_runtime_rule: true,
+                delete_succeeds: true,
+            };
+            let mut plan = FirewallPlan::capture_with(address.parse().unwrap(), &mut backend)
+                .await
+                .unwrap();
+            let error = plan.close_with(&mut backend).await.unwrap_err();
+            assert!(format!("{error:#}").contains("管理员已删除"));
+            let error = plan.restore_with(&mut backend).await.unwrap_err();
+            assert!(format!("{error:#}").contains("无法确认"));
+            assert_eq!(backend.disk, [if ipv6 { IPV4 } else { IPV6 }]);
+            assert!(!backend.kernel_has_rule);
+        }
+    }
+
+    #[tokio::test]
     async fn socks5_secure_ufw_preserves_runtime_ipv6_deny_during_ipv4_close_and_rollback() {
         let mut backend = FakeUfw {
             disk: vec![IPV4, IPV6],
             ipv6: false,
             kernel_has_rule: true,
+            admin_deletes_before_kernel_delete: false,
             keep_disk_on_delete_failure: false,
             kernel_reorders_on_insert: false,
             other_family_runtime_rule: true,
@@ -2262,6 +2312,7 @@ mod tests {
             disk: vec![IPV4, IPV6],
             ipv6: false,
             kernel_has_rule: true,
+            admin_deletes_before_kernel_delete: false,
             keep_disk_on_delete_failure: false,
             kernel_reorders_on_insert: false,
             other_family_runtime_rule: false,
@@ -2286,6 +2337,7 @@ mod tests {
                     disk: vec![IPV4, IPV6],
                     ipv6,
                     kernel_has_rule: true,
+                    admin_deletes_before_kernel_delete: false,
                     keep_disk_on_delete_failure,
                     kernel_reorders_on_insert: false,
                     other_family_runtime_rule: false,
@@ -2313,6 +2365,7 @@ mod tests {
                 disk: vec![APP, deny, allow, tail],
                 ipv6,
                 kernel_has_rule: true,
+                admin_deletes_before_kernel_delete: false,
                 keep_disk_on_delete_failure: false,
                 kernel_reorders_on_insert: false,
                 other_family_runtime_rule: false,
@@ -2336,6 +2389,7 @@ mod tests {
                 disk: vec![APP, DENY, IPV4, IPV6],
                 ipv6: false,
                 kernel_has_rule: true,
+                admin_deletes_before_kernel_delete: false,
                 keep_disk_on_delete_failure: false,
                 kernel_reorders_on_insert: false,
                 other_family_runtime_rule: false,
@@ -2358,7 +2412,9 @@ mod tests {
             let kernel = ufw_kernel_rules(&mut backend, "iptables", "ufw-user-input")
                 .await
                 .unwrap();
-            assert!(kernel.iter().any(rule_denies));
+            assert!(kernel
+                .iter()
+                .any(|rule| rule.text.ends_with("--dport 1080 -j DROP")));
             assert_eq!(
                 backend.disk.iter().filter(|entry| **entry == IPV4).count(),
                 1
@@ -2862,7 +2918,7 @@ mod tests {
                 let mut items = vec![json!({"chain": {
                     "family": self.rules.first().map_or("ip", |rule| rule["family"].as_str().unwrap()),
                     "table": "filter", "name": self.chain, "hook": "input", "type": "filter",
-                    "handle": 1
+                    "handle": 1, "policy": "drop"
                 }})];
                 items.extend(self.rules.iter().map(|rule| json!({"rule": rule})));
                 return Ok(json!({"nftables": items}).to_string());
@@ -2979,7 +3035,11 @@ mod tests {
         let mut ssh = allow.clone();
         ssh["handle"] = 3.into();
         ssh["expr"][0]["match"]["right"] = 22.into();
-        for verdict in ["jump", "goto"] {
+        for (verdict, detail) in [
+            ("jump", json!({"target": "admin-deny"})),
+            ("goto", json!({"target": "admin-deny"})),
+            ("return", Value::Null),
+        ] {
             let mut backend = FakeNft {
                 rules: vec![allow.clone(), ssh.clone()],
                 iptables_nft: false,
@@ -2995,7 +3055,7 @@ mod tests {
             plan.close_with(&mut backend).await.unwrap();
             let mut transfer = allow.clone();
             transfer["handle"] = 4.into();
-            transfer["expr"][1] = json!({(verdict): {"target": "admin-deny"}});
+            transfer["expr"][1] = json!({(verdict): detail});
             backend.rules.push(transfer.clone());
             let error = plan.restore_with(&mut backend).await.unwrap_err();
             assert!(format!("{error:#}").contains("顺序"));

@@ -733,6 +733,7 @@ pub(crate) async fn run_with_export_paths(
             read_profile_snapshot(
                 state_path,
                 lock_path,
+                false,
                 config::socks5_secure::read_export_state,
                 |state| {
                     print_saved_url(
@@ -751,6 +752,7 @@ pub(crate) async fn run_with_export_paths(
             read_profile_snapshot(
                 state_path,
                 lock_path,
+                false,
                 config::socks5_secure::read_export_state,
                 |state| {
                     print_saved_qr(
@@ -779,6 +781,7 @@ pub(crate) async fn run_with_export_paths(
             read_profile_snapshot(
                 state_path,
                 lock_path,
+                output.is_some(),
                 if output.is_some() {
                     config::socks5_secure::read_file_export_state
                 } else {
@@ -1821,22 +1824,41 @@ pub(crate) async fn regenerate_test_certificate(id: Uuid) -> Result<()> {
 async fn read_profile_snapshot<T>(
     state_path: &Path,
     lock_path: &Path,
+    file_export: bool,
     read: impl Fn(&Path, bool) -> Result<T>,
     use_snapshot: impl FnOnce(T) -> Result<()>,
 ) -> Result<()> {
+    use utils::SnapshotAccess;
+
+    #[cfg(not(target_os = "linux"))]
+    let _ = file_export;
     utils::read_with_existing_lock_or_service_hook(
         lock_path,
         service::is_shoes_service_hook().await,
-        |service_hook| read(state_path, service_hook),
-        |_lock_error| {
+        |access| match access {
             #[cfg(target_os = "linux")]
-            return config::socks5_secure::read_unlocked_snapshot(state_path, || {
-                read(state_path, false)
-            });
-            #[cfg(not(target_os = "linux"))]
-            Err(_lock_error)
+            SnapshotAccess::Missing | SnapshotAccess::Unreadable(_) if file_export => {
+                config::socks5_secure::read_unlocked_snapshot(state_path, || {
+                    let guard = config::socks5_secure::lock_state_for_file_export(state_path)?;
+                    Ok((read(state_path, false)?, Some(guard)))
+                })
+            }
+            SnapshotAccess::Unreadable(_error) => {
+                #[cfg(target_os = "linux")]
+                {
+                    config::socks5_secure::read_unlocked_snapshot(state_path, || {
+                        Ok((read(state_path, false)?, None))
+                    })
+                }
+                #[cfg(not(target_os = "linux"))]
+                Err(_error)
+            }
+            access => {
+                let service_hook = matches!(access, SnapshotAccess::ServiceHook);
+                Ok((read(state_path, service_hook)?, None::<std::fs::File>))
+            }
         },
-        use_snapshot,
+        |(state, _guard)| use_snapshot(state),
     )
 }
 
@@ -1852,6 +1874,7 @@ async fn show_info(selector: Option<&str>, state_path: &Path, lock_path: &Path) 
     read_profile_snapshot(
         state_path,
         lock_path,
+        false,
         config::socks5_secure::read_info_state,
         |state| print_info_profiles(selector, state),
     )
@@ -2276,6 +2299,48 @@ fn print_certificate_notice(result: &config::GenerationResult) {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn socks5_secure_file_export_without_main_lock_guards_the_output_write() {
+        use fs2::FileExt;
+        use std::fs;
+
+        let directory = tempfile::tempdir().unwrap();
+        let state = directory.path().join("ping-rust-state.json");
+        let lock = directory.path().join("ping-rust.lock");
+        let output = directory.path().join("client.json");
+        fs::write(&state, b"snapshot").unwrap();
+        fs::write(&output, b"previous export").unwrap();
+        let export = || {
+            read_profile_snapshot(
+                &state,
+                &lock,
+                true,
+                |path, _| Ok(fs::read(path)?),
+                |snapshot| {
+                    // 模拟写者在读完快照后、原子替换前尝试加固。
+                    let writer = fs::File::open(&state)?;
+                    let error = FileExt::try_lock_exclusive(&writer).unwrap_err();
+                    assert_eq!(
+                        error.raw_os_error(),
+                        fs2::lock_contended_error().raw_os_error()
+                    );
+                    utils::atomic_write(&output, &snapshot, 0o600)
+                },
+            )
+        };
+        let writer = fs::File::open(&state).unwrap();
+        FileExt::lock_exclusive(&writer).unwrap();
+        let error = export().await.unwrap_err();
+        assert!(format!("{error:#}").contains("请在 SOCKS5 加固结束后重试读取"));
+        assert_eq!(fs::read(&output).unwrap(), b"previous export");
+        drop(writer);
+
+        export().await.unwrap();
+        assert_eq!(fs::read(output).unwrap(), b"snapshot");
+        assert!(!lock.exists());
+    }
+
     #[test]
     fn socks5_secure_arguments_and_noninteractive_mode_are_explicit() {
         for mode in ["--auth", "--local"] {

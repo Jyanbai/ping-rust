@@ -55,7 +55,7 @@ pub(super) fn commit_managed_with_writers(
     servers: &[ServerConfig],
     state: &ManagedState,
     write_state: impl FnOnce(&Path, &ManagedState) -> Result<()>,
-    write_config: impl Fn(&Path, &[u8]) -> Result<()>,
+    write_snapshot: impl Fn(&Path, &[u8]) -> Result<()>,
 ) -> Result<()> {
     let _timer = performance::stage("config_commit");
     let old_config = read_optional(config_path)?;
@@ -68,14 +68,17 @@ pub(super) fn commit_managed_with_writers(
         write_profile_documents(profiles_path, &documents)?;
         write_state(state_path, state)?;
         if !runtime_unchanged {
-            write_config(config_path, aggregate_yaml.as_bytes())?;
+            write_snapshot(config_path, aggregate_yaml.as_bytes())?;
         }
         Ok::<(), anyhow::Error>(())
     })();
     if let Err(error) = commit {
-        let state_rollback = restore_snapshot(state_path, old_state.as_deref(), 0o600);
+        let state_rollback = match old_state {
+            Some(bytes) => write_snapshot(state_path, &bytes),
+            None => restore_snapshot(state_path, None, 0o600),
+        };
         let config_rollback = match old_config {
-            Some(bytes) => write_config(config_path, &bytes),
+            Some(bytes) => write_snapshot(config_path, &bytes),
             None => restore_snapshot(config_path, None, 0o600),
         };
         let profiles_rollback = old_profiles.restore(profiles_path);
