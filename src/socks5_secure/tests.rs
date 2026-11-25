@@ -94,6 +94,31 @@ fn socks5_secure_local_preserves_other_rules_on_the_same_port() {
 }
 
 #[test]
+fn socks5_secure_wildcard_matches_dedicated_host_allows_in_its_family() {
+    for (listener, host, subnet, other_family) in [
+        (
+            "0.0.0.0:1080",
+            "203.0.113.8/32",
+            "203.0.113.0/24",
+            "2001:db8::8/128",
+        ),
+        (
+            "[::]:1080",
+            "2001:db8::8/128",
+            "2001:db8::/64",
+            "203.0.113.8/32",
+        ),
+    ] {
+        let listener = listener.parse().unwrap();
+        let rule = |destination| format!("-A INPUT -d {destination} -p tcp --dport 1080 -j ACCEPT");
+        assert!(firewall::iptables_delete_args(&rule(host), listener).is_some());
+        for destination in [subnet, other_family] {
+            assert!(firewall::iptables_delete_args(&rule(destination), listener).is_none());
+        }
+    }
+}
+
+#[test]
 fn socks5_secure_listener_verification_rejects_extra_public_binds() {
     // 原有地址断言保留；ss -p 的归属信息由公共测试入口补齐。
     let check_listeners = |output: &str, expected| {

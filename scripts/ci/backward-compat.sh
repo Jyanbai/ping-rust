@@ -542,6 +542,60 @@ PY
 )
 echo 'SOCKS5 auth: reject password drift on another SOCKS5 listener: PASS'
 
+# The override takes effect on restart, after preflight checks the original process.
+(
+  scenario="$(mktemp -d /usr/local/lib/socks5-restart-auth.XXXXXX)"
+  dropin=/etc/systemd/system/shoes.service.d/90-compat-socks5-restart-auth.conf
+  trap 'rm -f "$dropin"; systemctl daemon-reload; rm -rf "$scenario"' EXIT
+  umask 077
+  python3 - /etc/shoes/config.yaml "$scenario/config.yaml" <<'PY'
+import sys
+
+import yaml
+
+with open(sys.argv[1]) as source:
+    servers = yaml.safe_load(source)
+target, = (entry for entry in servers if entry['address'] == '0.0.0.0:24436')
+target['address'] = '127.0.0.1:24436'
+other, = (entry for entry in servers if entry['address'] == '0.0.0.0:24432')
+username = other['protocol'].pop('username')
+password = other['protocol'].pop('password')
+assert username and password
+with open(sys.argv[2], 'w') as output:
+    yaml.safe_dump(servers, output)
+PY
+  cat >"$scenario/start" <<'SH'
+#!/bin/sh
+set -eu
+config=/etc/shoes/config.yaml
+if grep -Fq '127.0.0.1:24436' "$config"; then
+  config="$1"
+fi
+exec /usr/local/bin/shoes "$config"
+SH
+  chmod 0700 "$scenario/start"
+  cat >"$dropin" <<EOF
+[Service]
+ExecStart=
+ExecStart=$scenario/start $scenario/config.yaml
+EOF
+  systemctl daemon-reload
+  before_pid="$(systemctl show --property=MainPID --value shoes.service)"
+  find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/before"
+  if "$NEW" socks5 secure "$legacy_socks5_id" --local --yes >"$scenario/result" 2>&1; then
+    echo 'Expected SOCKS5 local hardening to reject authentication drift on another node after restart' >&2
+    exit 1
+  fi
+  grep -Fq '端口 24432 的运行态认证与受管配置不一致' "$scenario/result"
+  grep -Fq '原配置、防火墙及服务已恢复并再次验证' "$scenario/result"
+  systemctl is-active --quiet shoes.service
+  test "$(systemctl show --property=MainPID --value shoes.service)" != "$before_pid"
+  ss -H -ltn 'sport = :24436' | grep -Fq '0.0.0.0:24436'
+  find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/after"
+  diff -u "$scenario/before" "$scenario/after"
+)
+echo 'SOCKS5 local: reject authentication drift on another node after restart and roll back: PASS'
+
 # Exercise signal cancellation and an unattended timeout with the same substitute.
 (
   shoes=/usr/local/bin/shoes
@@ -1253,8 +1307,9 @@ echo 'SOCKS5 rollback: root startup hook can synchronously delegate an ACL-backe
   apt-get install -y --no-install-recommends iptables nftables
   scenario="$(mktemp -d /usr/local/lib/socks5-mixed-firewall.XXXXXX)"
   cp -a /etc/shoes "$scenario/original"
-  trap 'iptables-legacy -w -D INPUT -p tcp --dport 24436 -j ACCEPT 2>/dev/null || true; iptables-legacy -w -D INPUT -p tcp --dport 24437 -j ACCEPT 2>/dev/null || true; nft delete table ip compat_socks5 2>/dev/null || true; cp -a "$scenario/original/." /etc/shoes/; systemctl restart shoes.service; rm -rf "$scenario"' EXIT
+  trap 'iptables-legacy -w -D INPUT -d 203.0.113.8/32 -p tcp --dport 24436 -j ACCEPT 2>/dev/null || true; iptables-legacy -w -D INPUT -p tcp --dport 24436 -j ACCEPT 2>/dev/null || true; iptables-legacy -w -D INPUT -p tcp --dport 24437 -j ACCEPT 2>/dev/null || true; nft delete table ip compat_socks5 2>/dev/null || true; cp -a "$scenario/original/." /etc/shoes/; systemctl restart shoes.service; rm -rf "$scenario"' EXIT
   iptables-legacy -w -A INPUT -p tcp --dport 24436 -j ACCEPT
+  iptables-legacy -w -A INPUT -d 203.0.113.8/32 -p tcp --dport 24436 -j ACCEPT
   iptables-legacy -w -A INPUT -p tcp --dport 24437 -j ACCEPT
   update-alternatives --set iptables "$(command -v iptables-nft)"
   iptables --version | grep -Fq '(nf_tables)'
@@ -1467,30 +1522,50 @@ PY
 echo 'SOCKS5 authentication: clean-environment ExecStartPost info, URL and export agree with published credentials: PASS'
 
 # Backup restore holds the writer lock across restart. Its startup hook waits
-# for another root unit to export the restored state.
+# for a root unit to export the restored state, then restarts the active unit.
 (
   scenario="$(mktemp -d /usr/local/lib/socks5-restart-export.XXXXXX)"
   dropin=/etc/systemd/system/shoes.service.d/90-compat-socks5-restart-export.conf
   helper=/run/systemd/system/compat-socks5-restart-export.service
+  pending=/etc/shoes/.ping-rust-socks5-secure.pending
   systemctl_bin="$(command -v systemctl)"
-  trap 'rm -f "$dropin" "$helper"; "$systemctl_bin" daemon-reload; rm -rf "$scenario"' EXIT
+  umask 077
+  trap '"$systemctl_bin" stop "${helper##*/}" || true; rm -f "$dropin" "$helper" "$pending"; "$systemctl_bin" daemon-reload; rm -rf "$scenario"' EXIT
   "$NEW" backup "$scenario/backup.tar.gz" >/dev/null
   "$NEW" export sing-box --profile "$legacy_socks5_id" --server example.com \
     --output "$scenario/expected.json" >/dev/null
+  # Reproduce the on-disk state left by SIGKILL just after publishing the marker.
+  jq --arg id "$legacy_socks5_id" '(.profiles[] | select(.id == $id) | .credentials.Socks5) |=
+    (.username = "compat-pending-user" | .password = "compat-pending-password")' \
+    /etc/shoes/ping-rust-state.json >"$scenario/pending"
+  install -m 0600 "$scenario/pending" "$pending"
+  if "$NEW" backup "$scenario/unfinished.tar.gz" >"$scenario/backup-result" 2>&1; then
+    echo 'Expected backup to refuse an unfinished SOCKS5 transaction' >&2
+    exit 1
+  fi
+  grep -Fq '上次 SOCKS5 加固未完成' "$scenario/backup-result"
+  test ! -e "$scenario/unfinished.tar.gz"
+  cmp -s "$scenario/pending" "$pending"
   cat >"$helper" <<EOF
 [Service]
 Type=oneshot
+RemainAfterExit=yes
 TimeoutStartSec=5s
 ExecStart=$NEW export sing-box --profile $legacy_socks5_id --server example.com --output $scenario/client.json
+ExecStartPost=/bin/sh -c 'echo ok >>$scenario/helper-runs'
 EOF
   cat >"$dropin" <<EOF
 [Service]
 TimeoutStartSec=10s
 ExecStartPre=$systemctl_bin --quiet restart ${helper##*/}
+ExecStartPre=$systemctl_bin --quiet try-restart ${helper##*/}
 EOF
   "$systemctl_bin" daemon-reload
   "$NEW" restore "$scenario/backup.tar.gz" >"$scenario/result" 2>&1
+  test ! -e "$pending"
   cmp -s "$scenario/expected.json" "$scenario/client.json"
+  test "$(grep -cx ok "$scenario/helper-runs")" -eq 2
   "$systemctl_bin" is-active --quiet shoes.service
 )
-echo 'Backup restore: a synchronous systemctl restart helper can export restored state: PASS'
+echo 'Backup: refuse an unfinished SOCKS5 transaction and recover from the previous archive: PASS'
+echo 'Backup restore: synchronous systemctl restart and try-restart helpers can export restored state: PASS'

@@ -194,6 +194,7 @@ pub(crate) async fn run(
         mode,
         firewall: firewall::FirewallPlan::default(),
         listeners: OtherListeners::default(),
+        other_socks5_profiles: plan.other_socks5_profiles().cloned().collect(),
         rollback_stop: None,
     };
     apply(&mut plan, &mut runtime, &INTERRUPT).await?;
@@ -347,6 +348,7 @@ struct SystemRuntime {
     mode: SecureMode,
     firewall: firewall::FirewallPlan,
     listeners: OtherListeners,
+    other_socks5_profiles: Vec<ManagedProfile>,
     rollback_stop: Option<Result<()>>,
 }
 
@@ -354,6 +356,23 @@ struct SystemRuntime {
 struct OtherListeners {
     tcp: Vec<SocketAddr>,
     quic: Vec<SocketAddr>,
+}
+
+impl SystemRuntime {
+    async fn verify_other_authentication(&self, phase: &str) -> Result<()> {
+        for profile in &self.other_socks5_profiles {
+            let address = profile.listen_address()?.parse()?;
+            verify_authentication(profile, address)
+                .await
+                .with_context(|| {
+                    format!(
+                        "端口 {} 的{phase}认证与受管配置不一致，请先同步 shoes.service 与受管配置",
+                        profile.port
+                    )
+                })?;
+        }
+        Ok(())
+    }
 }
 
 impl Runtime for SystemRuntime {
@@ -385,17 +404,7 @@ impl Runtime for SystemRuntime {
         verify_authentication(&plan.original, listener)
             .await
             .context("原认证与受管配置不一致，无法安全回滚；请先同步 shoes.service 与受管配置")?;
-        for profile in plan.other_socks5_profiles() {
-            let address = profile.listen_address()?.parse()?;
-            verify_authentication(profile, address)
-                .await
-                .with_context(|| {
-                    format!(
-                        "端口 {} 的原认证与受管配置不一致，请先同步 shoes.service 与受管配置",
-                        profile.port
-                    )
-                })?;
-        }
+        self.verify_other_authentication("原").await?;
         if self.mode == SecureMode::Local {
             self.firewall = firewall::FirewallPlan::capture(listener).await?;
         }
@@ -413,7 +422,8 @@ impl Runtime for SystemRuntime {
     async fn verify(&mut self, profile: &ManagedProfile) -> Result<()> {
         let expected =
             verify_listener(profile, Systemctl::SecureTransaction, Some(&self.listeners)).await?;
-        verify_authentication(profile, expected).await
+        verify_authentication(profile, expected).await?;
+        self.verify_other_authentication("运行态").await
     }
     async fn close_firewall(&mut self) -> Result<()> {
         self.firewall.close().await

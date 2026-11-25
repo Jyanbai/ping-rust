@@ -71,6 +71,7 @@ pub fn backup(output: Option<PathBuf>) -> Result<PathBuf> {
     if !source.is_dir() {
         bail!("配置目录 {} 不存在", source.display());
     }
+    config::socks5_secure::require_finished(Path::new(utils::STATE_FILE))?;
     let destination =
         output.unwrap_or_else(|| PathBuf::from(format!("shoes-backup-{}.tar.gz", timestamp())));
     if destination.exists() {

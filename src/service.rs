@@ -783,7 +783,7 @@ fn systemctl_waits_for_unit(command_line: &[u8], unit: &str) -> bool {
             matches_unit |=
                 arg == unit.as_bytes() || systemctl_service_shorthand(arg, unit.as_bytes());
         } else {
-            if !matches!(arg, b"start" | b"restart" | b"stop") {
+            if !matches!(arg, b"start" | b"restart" | b"try-restart" | b"stop") {
                 return false;
             }
             has_verb = true;
@@ -1079,7 +1079,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn socks5_secure_recognizes_blocking_local_systemctl_start_restart_and_stop() {
+    fn socks5_secure_recognizes_blocking_local_systemctl_commands() {
         let waits = |command: &str| systemctl_waits_for_unit(command.as_bytes(), "helper.service");
         for command in [
             "systemctl\0start\0helper.service\0",
@@ -1093,6 +1093,7 @@ mod tests {
             "systemctl\0start\0--\0helper.service\0companion.service\0",
             "systemctl\0restart\0helper.service\0",
             "systemctl\0--quiet\0restart\0--\0helper\0",
+            "systemctl\0--quiet\0try-restart\0helper.service\0",
             "systemctl\0stop\0helper.service\0",
             "systemctl\0--quiet\0stop\0--\0helper\0",
         ] {
@@ -1114,6 +1115,8 @@ mod tests {
             "systemctl\0--no-block\0restart\0helper.service\0",
             "systemctl\0--user\0restart\0helper.service\0",
             "systemctl\0restart\0other.service\0",
+            "systemctl\0--no-block\0try-restart\0helper.service\0",
+            "systemctl\0try-restart\0other.service\0",
             "systemctl\0stop\0helper.service\0--no-block\0",
             "systemctl\0--user\0stop\0helper.service\0",
             "systemctl\0stop\0other.service\0",

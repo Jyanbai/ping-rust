@@ -1542,7 +1542,9 @@ fn unrestricted(scope: Option<(IpAddr, u8)>, listener: IpAddr) -> bool {
 
 fn matches_destination(scope: Option<(IpAddr, u8)>, listener: IpAddr) -> bool {
     if listener.is_unspecified() {
-        unrestricted(scope, listener)
+        scope.is_some_and(|(ip, prefix)| {
+            ip.is_ipv4() == listener.is_ipv4() && (prefix == 0 || prefix == host_prefix(ip))
+        })
     } else {
         scope == Some((listener, host_prefix(listener)))
     }

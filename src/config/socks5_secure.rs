@@ -24,7 +24,7 @@ pub(crate) fn pending_exists(state_path: &Path) -> Result<bool> {
         .context("无法检查 SOCKS5 加固事务状态")
 }
 
-pub(super) fn require_finished(state_path: &Path) -> Result<()> {
+pub(crate) fn require_finished(state_path: &Path) -> Result<()> {
     if pending_exists(state_path)? {
         bail!("{UNFINISHED}");
     }
