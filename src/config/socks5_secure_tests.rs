@@ -465,6 +465,69 @@ fn socks5_secure_preserves_aggregate_owner_group_and_mode_through_rollback() {
     plan.finish_pending().unwrap();
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn socks5_secure_preserves_aggregate_posix_acl_through_rollback() {
+    use rustix::fs::{getxattr, setxattr, XattrFlags};
+    use std::os::unix::fs::MetadataExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let profile = legacy(directory.path());
+    let config = directory.path().join("config.yaml");
+    let owner = fs::metadata(&config).unwrap().uid();
+    let reader = if owner == 65534 { 65533_u32 } else { 65534_u32 };
+    let name = "system.posix_acl_access";
+    // Linux ACL xattr v2：仅文件所有者可写，另授权一个指定 UID 读取。
+    let mut acl = 2_u32.to_le_bytes().to_vec();
+    for (tag, permissions, id) in [
+        (1_u16, 6_u16, u32::MAX),
+        (2, 4, reader),
+        (4, 0, u32::MAX),
+        (16, 4, u32::MAX),
+        (32, 0, u32::MAX),
+    ] {
+        acl.extend(tag.to_le_bytes());
+        acl.extend(permissions.to_le_bytes());
+        acl.extend(id.to_le_bytes());
+    }
+    setxattr(&config, name, &acl, XattrFlags::empty()).unwrap();
+    let assert_acl = || {
+        let mut current = [0_u8; 44];
+        let len = getxattr(&config, name, current.as_mut_slice()).unwrap();
+        assert_eq!(&current[..len], acl.as_slice());
+    };
+    assert_acl();
+    let mut plan = SecurePlan::prepare(directory.path(), profile.id, SecureMode::Auth)
+        .unwrap()
+        .unwrap();
+    plan.commit_files().unwrap();
+    assert_acl();
+    plan.rollback_files().unwrap();
+    assert_acl();
+    plan.finish_pending().unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn socks5_secure_unlocked_read_rejects_concurrent_file_replacement() {
+    use super::socks5_secure::read_unlocked_snapshot;
+
+    let directory = tempfile::tempdir().unwrap();
+    legacy(directory.path());
+    let state_path = directory.path().join("ping-rust-state.json");
+    for name in ["ping-rust-state.json", "config.yaml"] {
+        let replaced = directory.path().join(name);
+        let error = read_unlocked_snapshot(&state_path, || {
+            let snapshot = load_state_from(&state_path)?;
+            utils::atomic_write(&replaced, &fs::read(&replaced)?, 0o600)?;
+            Ok(snapshot)
+        })
+        .err()
+        .expect("文件已替换，必须丢弃本次快照");
+        assert!(format!("{error:#}").contains("读取期间受管配置已变更"));
+    }
+}
+
 #[tokio::test]
 async fn socks5_secure_refuses_inactive_disabled_custom_unit() {
     for mode in [SecureMode::Auth, SecureMode::Local] {

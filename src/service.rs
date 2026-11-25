@@ -622,13 +622,36 @@ fn waits_for_unit(pid: u32, executable: &Path, unit: &str) -> bool {
     if !same_executable(&process.join("exe"), executable).unwrap_or(false) {
         return false;
     }
-    fs::read(process.join("cmdline")).is_ok_and(|command_line| {
-        command_line.split(|byte| *byte == 0).skip(1).eq([
-            b"start".as_slice(),
-            unit.as_bytes(),
-            b"".as_slice(),
-        ])
-    })
+    fs::read(process.join("cmdline")).is_ok_and(|line| systemctl_starts_unit(&line, unit))
+}
+
+#[cfg(target_os = "linux")]
+fn systemctl_starts_unit(command_line: &[u8], unit: &str) -> bool {
+    let Some(command_line) = command_line.strip_suffix(b"\0") else {
+        return false;
+    };
+    let mut args = command_line.split(|byte| *byte == 0).skip(1);
+    let mut expected = [b"start".as_slice(), unit.as_bytes()].into_iter();
+    let mut parse_options = true;
+    while let Some(arg) = args.next() {
+        if parse_options && arg.starts_with(b"-") {
+            // 只允许本机系统管理器上仍会等待作业完成的选项。
+            match arg {
+                b"--" => parse_options = false,
+                b"-q" | b"--quiet" | b"--no-ask-password" | b"--no-pager" | b"--system"
+                | b"--wait" => {}
+                b"--job-mode"
+                    if args
+                        .next()
+                        .is_some_and(|mode| !mode.starts_with(b"-") && !mode.is_empty()) => {}
+                mode if mode.starts_with(b"--job-mode=") && mode.len() > b"--job-mode=".len() => {}
+                _ => return false,
+            }
+        } else if expected.next() != Some(arg) {
+            return false;
+        }
+    }
+    expected.next().is_none()
 }
 
 #[cfg(target_os = "linux")]
@@ -882,6 +905,32 @@ fn ensure_systemctl() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn socks5_secure_recognizes_only_blocking_local_systemctl_start() {
+        let waits = |command: &str| systemctl_starts_unit(command.as_bytes(), "helper.service");
+        for command in [
+            "systemctl\0start\0helper.service\0",
+            "systemctl\0--quiet\0start\0helper.service\0",
+            "systemctl\0start\0-q\0--no-ask-password\0--\0helper.service\0",
+            "systemctl\0--job-mode=replace\0start\0helper.service\0",
+            "systemctl\0start\0--job-mode\0replace\0helper.service\0",
+        ] {
+            assert!(waits(command), "{command:?}");
+        }
+        for command in [
+            "systemctl\0--quiet\0--no-block\0start\0helper.service\0",
+            "systemctl\0start\0helper.service\0--no-block\0",
+            "systemctl\0--user\0start\0helper.service\0",
+            "systemctl\0--host=example.com\0start\0helper.service\0",
+            "systemctl\0--machine=container\0start\0helper.service\0",
+            "systemctl\0show\0helper.service\0",
+            "systemctl\0start\0other.service\0",
+        ] {
+            assert!(!waits(command), "{command:?}");
+        }
+    }
 
     #[cfg(unix)]
     #[tokio::test]

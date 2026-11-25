@@ -8,13 +8,59 @@ use super::*;
 const DRY_RUN_TIMEOUT: Duration = Duration::from_secs(15);
 const PENDING_STATE: &str = ".ping-rust-socks5-secure.pending";
 const UNFINISHED: &str = "上次 SOCKS5 加固未完成。请检查 shoes.service 和防火墙，从备份恢复一致的 config.yaml、profiles 和 ping-rust-state.json，验证服务后再移除 .ping-rust-socks5-secure.pending";
+#[cfg(target_os = "linux")]
+const ACCESS_ACL: &str = "system.posix_acl_access";
+
+fn pending_exists(state_path: &Path) -> Result<bool> {
+    state_path
+        .with_file_name(PENDING_STATE)
+        .try_exists()
+        .context("无法检查 SOCKS5 加固事务状态")
+}
 
 pub(super) fn require_finished(state_path: &Path) -> Result<()> {
-    let path = state_path.with_file_name(PENDING_STATE);
-    if path.try_exists().context("无法检查 SOCKS5 加固事务状态")? {
+    if pending_exists(state_path)? {
         bail!("{UNFINISHED}");
     }
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn read_unlocked_snapshot<T>(
+    state_path: &Path,
+    read: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    use std::{io, os::unix::fs::MetadataExt};
+
+    let identity = |path: &Path| match fs::symlink_metadata(path) {
+        Ok(meta) => Ok(Some((
+            meta.dev(),
+            meta.ino(),
+            meta.ctime(),
+            meta.ctime_nsec(),
+        ))),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).context("无法检查受管文件是否已变更"),
+    };
+    let config_path = state_path.with_file_name("config.yaml");
+    let generation = || Ok::<_, anyhow::Error>((identity(state_path)?, identity(&config_path)?));
+    let check_pending = || {
+        if pending_exists(state_path)? {
+            bail!("请在 SOCKS5 加固结束后重试读取；若此提示持续出现，请由管理员检查加固事务状态");
+        }
+        Ok(())
+    };
+
+    // 只处理无权打开专用写锁的读者。兼容旧状态时也可能读取聚合配置。
+    check_pending()?;
+    let before = generation()?;
+    let result = read();
+    let after = generation()?;
+    check_pending()?;
+    if before != after {
+        bail!("读取期间受管配置已变更，请重试");
+    }
+    result
 }
 
 pub(crate) fn load_for_plan(state_path: &Path) -> Result<ManagedState> {
@@ -44,7 +90,7 @@ pub(crate) fn read_info_state(
     service_hook: bool,
 ) -> Result<Option<ManagedState>> {
     if service_hook {
-        if let Some(state) = read_pending_hook_state(state_path)? {
+        if let Some(state) = read_pending_hook_state(state_path, true)? {
             return Ok(Some(state));
         }
     } else {
@@ -57,16 +103,34 @@ pub(crate) fn read_info_state(
 }
 
 pub(crate) fn read_export_state(state_path: &Path, service_hook: bool) -> Result<ManagedState> {
+    read_export_snapshot(state_path, service_hook, true)
+}
+
+pub(crate) fn read_file_export_state(
+    state_path: &Path,
+    service_hook: bool,
+) -> Result<ManagedState> {
+    read_export_snapshot(state_path, service_hook, false)
+}
+
+fn read_export_snapshot(
+    state_path: &Path,
+    service_hook: bool,
+    allow_candidate: bool,
+) -> Result<ManagedState> {
     if !service_hook {
         return load_state_from(state_path);
     }
-    match read_pending_hook_state(state_path)? {
+    match read_pending_hook_state(state_path, allow_candidate)? {
         Some(state) => Ok(state),
         None => load_state_file(state_path),
     }
 }
 
-fn read_pending_hook_state(state_path: &Path) -> Result<Option<ManagedState>> {
+fn read_pending_hook_state(
+    state_path: &Path,
+    allow_candidate: bool,
+) -> Result<Option<ManagedState>> {
     let Some(pending) = open_live_pending(state_path)? else {
         return Ok(None);
     };
@@ -77,6 +141,9 @@ fn read_pending_hook_state(state_path: &Path) -> Result<Option<ManagedState>> {
         if ensure_servers_match_state(&servers, &published.profiles).is_ok() {
             return Ok(Some(published));
         }
+    }
+    if !allow_candidate {
+        bail!("启动钩子无法将待验证的配置写入客户端文件，请在 SOCKS5 加固结束后重试文件导出");
     }
     let candidate: ManagedState =
         serde_json::from_reader(pending).context("无法解析待发布的 SOCKS5 加固状态")?;
@@ -107,6 +174,8 @@ pub(crate) struct SecurePlan {
 struct SecureRollback {
     config: Vec<u8>,
     config_metadata: fs::Metadata,
+    #[cfg(target_os = "linux")]
+    config_acl: Option<Vec<u8>>,
     state: Option<Vec<u8>>,
     profiles: ProfileDirectorySnapshot,
 }
@@ -122,7 +191,22 @@ impl SecureRollback {
                 if (temporary.uid(), temporary.gid()) != (owner.uid(), owner.gid()) {
                     fchown(file, Some(owner.uid()), Some(owner.gid()))?;
                 }
-                file.set_permissions(owner.permissions())
+                file.set_permissions(owner.permissions())?;
+                #[cfg(target_os = "linux")]
+                match &self.config_acl {
+                    Some(acl) => rustix::fs::fsetxattr(
+                        file,
+                        ACCESS_ACL,
+                        acl,
+                        rustix::fs::XattrFlags::empty(),
+                    )?,
+                    // 清除临时文件可能从父目录继承的 ACL。
+                    None => match rustix::fs::fremovexattr(file, ACCESS_ACL) {
+                        Ok(()) | Err(rustix::io::Errno::NODATA | rustix::io::Errno::OPNOTSUPP) => {}
+                        Err(error) => return Err(error.into()),
+                    },
+                }
+                Ok(())
             })
         }
         #[cfg(not(unix))]
@@ -146,9 +230,33 @@ impl SecureRollback {
                 return false;
             }
         }
+        #[cfg(target_os = "linux")]
+        if !fs::File::open(path)
+            .is_ok_and(|file| config_access_acl(&file).is_ok_and(|acl| acl == self.config_acl))
+        {
+            return false;
+        }
         metadata.permissions() == self.config_metadata.permissions()
             && fs::read(path).is_ok_and(|bytes| bytes == self.config)
     }
+}
+
+#[cfg(target_os = "linux")]
+fn config_access_acl(file: &fs::File) -> std::io::Result<Option<Vec<u8>>> {
+    use rustix::{
+        fs::{fgetxattr, fgetxattr_query},
+        io::Errno,
+    };
+
+    let size = match fgetxattr_query(file, ACCESS_ACL) {
+        Ok(size) => size,
+        Err(Errno::NODATA | Errno::OPNOTSUPP) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let mut value = vec![0; size];
+    let len = fgetxattr(file, ACCESS_ACL, value.as_mut_slice())?;
+    value.truncate(len);
+    Ok(Some(value))
 }
 
 impl SecurePlan {
@@ -295,6 +403,8 @@ impl SecurePlan {
         let rollback = SecureRollback {
             config: original_config,
             config_metadata: original.metadata().context("无法读取原聚合配置权限")?,
+            #[cfg(target_os = "linux")]
+            config_acl: config_access_acl(&original).context("无法读取原聚合配置 ACL")?,
             state: read_optional(&state)?,
             profiles: ProfileDirectorySnapshot::capture(&profiles)?,
         };

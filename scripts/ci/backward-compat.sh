@@ -471,7 +471,7 @@ SH
   cat >"$scenario/start-oneshot" <<'SH'
 #!/bin/sh
 set -eu
-"$1" start "$2"
+"$1" --quiet start "$2"
 # Keep the shell as ControlPID while systemctl waits.
 echo ok >>"$3/oneshot-wrapper-runs"
 SH
@@ -485,8 +485,14 @@ else
   grep -Eq '^  用户名：.+$' "$2/oneshot-info"
   echo candidate >>"$2/oneshot-auth"
 fi
-"$1" export sing-box --profile "$3" --server example.com \
-  --output "$2/oneshot-export.json" >/dev/null
+if [ ! -e "$2/oneshot-export.json" ]; then
+  if ! "$1" export sing-box --profile "$3" --server example.com \
+    --output "$2/oneshot-export.json" >/dev/null 2>"$2/oneshot-export-error"; then
+    grep -Fq '请在 SOCKS5 加固结束后重试文件导出' "$2/oneshot-export-error"
+    test ! -e "$2/oneshot-export.json"
+    touch "$2/oneshot-deferred-export"
+  fi
+fi
 echo ok >>"$2/oneshot-runs"
 SH
   cat >"$scenario/timer-export" <<'SH'
@@ -554,6 +560,7 @@ EOF
   test "$(grep -c '^ok$' "$scenario/oneshot-wrapper-runs")" -eq 2
   test "$(cat "$scenario/start-pre-auth")" = $'candidate\noriginal'
   test "$(cat "$scenario/oneshot-auth")" = $'candidate\noriginal'
+  test -f "$scenario/oneshot-deferred-export"
   jq -e '[.outbounds[] | select(.type == "socks")] | length == 1 and
     (.[0] | (has("username") or has("password")) | not)' "$scenario/oneshot-export.json" >/dev/null
   test ! -e "$scenario/timer-exported-candidate"
@@ -743,7 +750,12 @@ test -z "${INVOCATION_ID:-}"
 sed -n 's/^  URL：//p' "$2/info" >"$2/info-url"
 grep -Eq '^socks5://[^[:space:]@]+@example\.com:24436#' "$2/url"
 cmp -s "$2/info-url" "$2/url"
-"$1" export sing-box --profile "$3" --server example.com --output "$2/client.json" >/dev/null
+if ! "$1" export sing-box --profile "$3" --server example.com \
+  --output "$2/client.json" >/dev/null 2>"$2/export-error"; then
+  grep -Fq '请在 SOCKS5 加固结束后重试文件导出' "$2/export-error"
+  test ! -e "$2/client.json"
+  touch "$2/deferred-export"
+fi
 SH
   chmod 0755 "$scenario/start-reader"
   cat >"$dropin" <<EOF
@@ -755,12 +767,89 @@ EOF
   systemctl daemon-reload
   "$NEW" socks5 secure compat-socks5-legacy --auth --yes >"$WORK/socks5-start-export.txt" 2>&1
   systemctl is-active --quiet shoes.service
+  test -f "$scenario/deferred-export"
+  test ! -e "$scenario/client.json"
   "$NEW" export sing-box --profile "$legacy_socks5_id" --server example.com \
     --output "$scenario/expected.json" >/dev/null
   "$NEW" url "$legacy_socks5_id" >"$scenario/expected-url"
   cmp -s "$scenario/url" "$scenario/expected-url"
+  # Once the state is published, a normal restart lets the same hook write it.
+  systemctl restart shoes.service
+  systemctl is-active --quiet shoes.service
   jq -e '[.outbounds[] | select(.type == "socks")] | length == 1 and
     (.[0] | (.username | length) > 0 and (.password | length) > 0)' "$scenario/client.json" >/dev/null
   cmp -s "$scenario/client.json" "$scenario/expected.json"
 )
 echo 'SOCKS5 authentication: clean-environment ExecStartPost info, URL and export agree with published credentials: PASS'
+
+# A delegated reader can access the committed state via ACL while the existing
+# writer lock stays root-only. It must still reject any active or stale marker.
+python3 - "$NEW" "$legacy_socks5_id" <<'PY'
+import fcntl
+import json
+import os
+from pathlib import Path
+import pwd
+import struct
+import subprocess
+import sys
+from tempfile import TemporaryDirectory
+
+binary, profile = sys.argv[1:]
+reader = pwd.getpwnam('nobody')
+directory = Path('/etc/shoes')
+state = directory / 'ping-rust-state.json'
+pending = directory / '.ping-rust-socks5-secure.pending'
+lock = Path('/run/lock/ping-rust.lock')
+assert lock.stat().st_uid == 0 and lock.stat().st_mode & 0o777 == 0o600
+directory_mode = directory.stat().st_mode & 0o7777
+state_mode = state.stat().st_mode & 0o7777
+acl_name = 'system.posix_acl_access'
+undefined_id = 0xffffffff
+acl = struct.pack('<I', 2) + b''.join(
+    struct.pack('<HHI', tag, mode, uid)
+    for tag, mode, uid in [(1, 6, undefined_id), (2, 4, reader.pw_uid),
+                           (4, 0, undefined_id), (16, 4, undefined_id),
+                           (32, 0, undefined_id)]
+)
+with TemporaryDirectory() as work:
+    os.chown(work, reader.pw_uid, reader.pw_gid)
+    output = Path(work) / 'sing-box.json'
+    export = ['export', 'sing-box', '--profile', profile, '--server', 'example.com',
+              '--output', str(output)]
+
+    def as_reader(command):
+        return subprocess.run([binary, *command], user=reader.pw_uid,
+                              group=reader.pw_gid, extra_groups=[], timeout=10,
+                              capture_output=True)
+
+    def assert_export_blocked(original):
+        result = as_reader(export)
+        assert result.returncode != 0
+        assert '请在 SOCKS5 加固结束后重试读取' in result.stderr.decode()
+        assert output.read_bytes() == original
+
+    os.setxattr(state, acl_name, acl, os.XATTR_CREATE)
+    try:
+        os.chmod(directory, 0o711)
+        for command in [['info', profile], ['url', profile], ['qr', profile], export]:
+            result = as_reader(command)
+            assert result.returncode == 0, (command[0], result.returncode)
+        original = output.read_bytes()
+        socks = next(item for item in json.loads(original)['outbounds']
+                     if item['type'] == 'socks')
+        assert socks['username'] and socks['password']
+        pending.touch(mode=0o600, exist_ok=False)
+        try:
+            with pending.open('rb') as marker:
+                fcntl.flock(marker, fcntl.LOCK_EX)
+                assert_export_blocked(original)
+            assert_export_blocked(original)
+        finally:
+            pending.unlink()
+    finally:
+        os.chmod(directory, directory_mode)
+        os.removexattr(state, acl_name)
+        os.chmod(state, state_mode)
+PY
+echo 'SOCKS5 readers: delegated state ACL works with a private lock and respects a pending transaction: PASS'

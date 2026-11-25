@@ -1015,10 +1015,12 @@ fn rule_may_deny_port(rule: &LiveRule, port: u16) -> bool {
             let Some(expressions) = spec["expr"].as_array() else {
                 return false;
             };
-            let Some(verdict) = expressions
-                .iter()
-                .position(|expr| expr.get("drop").is_some() || expr.get("reject").is_some())
-            else {
+            // 跳转、goto 和 verdict map 可以把匹配的流量交给拒绝规则。
+            let Some(verdict) = expressions.iter().position(|expr| {
+                ["drop", "reject", "jump", "goto", "vmap"]
+                    .iter()
+                    .any(|action| expr.get(*action).is_some())
+            }) else {
                 return false;
             };
             !expressions[..verdict].iter().any(|expr| {
@@ -1044,8 +1046,10 @@ fn rule_may_deny_port(rule: &LiveRule, port: u16) -> bool {
     }
     let words = shell_words(&rule.text);
     words.windows(2).any(|words| {
-        matches!(words[0].as_str(), "-j" | "--jump")
-            && matches!(words[1].as_str(), "DROP" | "REJECT")
+        // 这里只持有当前链的快照。自定义目标可能进入有拒绝规则的链。
+        matches!(words[0].as_str(), "-g" | "--goto")
+            || (matches!(words[0].as_str(), "-j" | "--jump")
+                && !matches!(words[1].as_str(), "ACCEPT" | "LOG" | "NFLOG"))
     }) && (words.iter().any(|word| word == "!")
         || !words.windows(2).any(|words| {
             matches!(words[0].as_str(), "--dport" | "--destination-port")
@@ -2652,6 +2656,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn socks5_secure_iptables_keeps_new_chain_transfers_before_restored_allow() {
+        let allow = "-A INPUT -p tcp --dport 1080 -j ACCEPT";
+        let ssh = "-A INPUT -p tcp --dport 22 -j ACCEPT";
+        // INPUT 的快照只包含跳转入口，看不到目标链内部的拒绝规则。
+        for transfer in [
+            "-A INPUT -p tcp --dport 1080 -j admin-deny",
+            "-A INPUT -p tcp --dport 1080 -g admin-deny",
+        ] {
+            let mut backend = FakeIptables {
+                rules: vec![allow.into(), ssh.into()],
+                deletions: 0,
+                fail_second_deletion: false,
+                drop_before_insert: None,
+                rules_after_insert: Vec::new(),
+                locked: false,
+                insert_after_snapshot: None,
+            };
+            let mut plan =
+                FirewallPlan::capture_with("0.0.0.0:1080".parse().unwrap(), &mut backend)
+                    .await
+                    .unwrap();
+            plan.close_with(&mut backend).await.unwrap();
+            backend.rules.push(transfer.into());
+            let error = plan.restore_with(&mut backend).await.unwrap_err();
+            assert!(format!("{error:#}").contains("顺序"));
+            assert_eq!(backend.rules, [ssh, transfer]);
+        }
+    }
+
+    #[tokio::test]
     async fn socks5_secure_iptables_restores_before_ssh_with_new_reject_on_another_port() {
         let allow = "-A INPUT -p tcp --dport 1080 -j ACCEPT";
         let ssh = "-A INPUT -p tcp --dport 22 -j ACCEPT";
@@ -2931,6 +2965,42 @@ mod tests {
         let mut restored = original;
         restored["handle"] = 4.into();
         assert_eq!(backend.rules, [reject, restored]);
+    }
+
+    #[tokio::test]
+    async fn socks5_secure_nft_keeps_new_chain_transfers_before_restored_allow() {
+        let allow = json!({
+            "family": "ip", "table": "filter", "chain": "input", "handle": 2,
+            "expr": [
+                {"match": {"op": "==", "left": {"payload": {"protocol": "tcp", "field": "dport"}}, "right": 1080}},
+                {"accept": null}
+            ]
+        });
+        let mut ssh = allow.clone();
+        ssh["handle"] = 3.into();
+        ssh["expr"][0]["match"]["right"] = 22.into();
+        for verdict in ["jump", "goto"] {
+            let mut backend = FakeNft {
+                rules: vec![allow.clone(), ssh.clone()],
+                iptables_nft: false,
+                chain: "input",
+                next_handle: 5,
+                concurrent_insertions: Vec::new(),
+                replace_before_delete: None,
+            };
+            let mut plan =
+                FirewallPlan::capture_with("0.0.0.0:1080".parse().unwrap(), &mut backend)
+                    .await
+                    .unwrap();
+            plan.close_with(&mut backend).await.unwrap();
+            let mut transfer = allow.clone();
+            transfer["handle"] = 4.into();
+            transfer["expr"][1] = json!({(verdict): {"target": "admin-deny"}});
+            backend.rules.push(transfer.clone());
+            let error = plan.restore_with(&mut backend).await.unwrap_err();
+            assert!(format!("{error:#}").contains("顺序"));
+            assert_eq!(backend.rules, [ssh.clone(), transfer]);
+        }
     }
 
     #[tokio::test]

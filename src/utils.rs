@@ -205,26 +205,35 @@ pub(crate) fn read_with_existing_lock_then<T, U>(
     read: impl Fn() -> Result<T>,
     use_snapshot: impl FnOnce(T) -> Result<U>,
 ) -> Result<U> {
-    read_with_existing_lock_or_service_hook(path, false, |_| read(), use_snapshot)
+    read_with_existing_lock_or_service_hook(path, false, |_| read(), Err, use_snapshot)
 }
 
 pub(crate) fn read_with_existing_lock_or_service_hook<T, U>(
     path: &Path,
     is_service_hook: bool,
     read: impl Fn(bool) -> Result<T>,
+    read_if_lock_unreadable: impl FnOnce(anyhow::Error) -> Result<T>,
     use_snapshot: impl FnOnce(T) -> Result<U>,
 ) -> Result<U> {
     enum ReadLock {
         Missing,
         Acquired(File),
         ServiceHook,
+        Unreadable(anyhow::Error),
     }
     let lock_if_exists = || {
         let file = match File::open(path) {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(ReadLock::Missing),
             Err(error) => {
-                return Err(error).with_context(|| format!("打开锁文件 {} 失败", path.display()))
+                let denied = error.kind() == io::ErrorKind::PermissionDenied;
+                let error = anyhow::Error::new(error)
+                    .context(format!("打开锁文件 {} 失败", path.display()));
+                return if denied {
+                    Ok(ReadLock::Unreadable(error))
+                } else {
+                    Err(error)
+                };
             }
         };
         match FileExt::try_lock_shared(&file) {
@@ -245,6 +254,7 @@ pub(crate) fn read_with_existing_lock_or_service_hook<T, U>(
     match lock_if_exists()? {
         ReadLock::Acquired(_lock) => return use_snapshot(read(false)?),
         ReadLock::ServiceHook => return use_snapshot(read(true)?),
+        ReadLock::Unreadable(error) => return use_snapshot(read_if_lock_unreadable(error)?),
         ReadLock::Missing => {}
     }
     let result = read(false);
@@ -252,6 +262,7 @@ pub(crate) fn read_with_existing_lock_or_service_hook<T, U>(
     match lock_if_exists()? {
         ReadLock::Acquired(_lock) => use_snapshot(read(false)?),
         ReadLock::ServiceHook => use_snapshot(read(true)?),
+        ReadLock::Unreadable(error) => use_snapshot(read_if_lock_unreadable(error)?),
         ReadLock::Missing => use_snapshot(result?),
     }
 }

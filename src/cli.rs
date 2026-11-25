@@ -779,7 +779,11 @@ pub(crate) async fn run_with_export_paths(
             read_profile_snapshot(
                 state_path,
                 lock_path,
-                config::socks5_secure::read_export_state,
+                if output.is_some() {
+                    config::socks5_secure::read_file_export_state
+                } else {
+                    config::socks5_secure::read_export_state
+                },
                 |state| {
                     let content = client::export(
                         &state.profiles,
@@ -1824,6 +1828,14 @@ async fn read_profile_snapshot<T>(
         lock_path,
         service::is_shoes_service_hook().await,
         |service_hook| read(state_path, service_hook),
+        |_lock_error| {
+            #[cfg(target_os = "linux")]
+            return config::socks5_secure::read_unlocked_snapshot(state_path, || {
+                read(state_path, false)
+            });
+            #[cfg(not(target_os = "linux"))]
+            Err(_lock_error)
+        },
         use_snapshot,
     )
 }
