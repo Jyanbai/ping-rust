@@ -1841,6 +1841,13 @@ async fn read_profile_snapshot<T>(
         is_service_hook,
         |access| match access {
             #[cfg(target_os = "linux")]
+            SnapshotAccess::Unreadable(_)
+                if is_service_hook && config::socks5_secure::pending_exists(state_path)? =>
+            {
+                // 非 root 同步钩子可从回滚事务锁定的 inode 读取已恢复的状态。
+                Ok((read(state_path, true)?, None))
+            }
+            #[cfg(target_os = "linux")]
             SnapshotAccess::Missing | SnapshotAccess::Unreadable(_) if file_export => {
                 config::socks5_secure::read_unlocked_snapshot(state_path, || {
                     let guard = config::socks5_secure::lock_state_for_file_export(state_path)?;
@@ -1850,10 +1857,6 @@ async fn read_profile_snapshot<T>(
             SnapshotAccess::Unreadable(_error) => {
                 #[cfg(target_os = "linux")]
                 {
-                    // 回滚时同步钩子可读取已恢复状态，根用户的写锁仍不可读。
-                    if is_service_hook && config::socks5_secure::pending_exists(state_path)? {
-                        return Ok((read(state_path, true)?, None));
-                    }
                     config::socks5_secure::read_unlocked_snapshot(state_path, || {
                         Ok((read(state_path, false)?, None))
                     })

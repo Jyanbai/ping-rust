@@ -304,6 +304,23 @@ ss -H -ltn 'sport = :24436' | grep -F '0.0.0.0:24436' >/dev/null
 "$NEW" socks5 secure compat-socks5-legacy --auth --dry-run >"$WORK/socks5-secure-preview.txt"
 grep -q '^--- profile' "$WORK/socks5-secure-preview.txt"
 
+write_failing_socks5_iptables() {
+  cat >"$1/iptables" <<'SH'
+#!/bin/sh
+set -eu
+case "$*" in
+  --version) echo 'iptables v1.8.9 (legacy)' ;;
+  '-w -S INPUT') echo '-A INPUT -p tcp --dport 24436 -j ACCEPT' ;;
+  '-w -D INPUT -p tcp --dport 24436 -j ACCEPT')
+    touch "$SOCKS5_ROLLBACK/firewall-reached"
+    exit 1
+    ;;
+  *) exit 2 ;;
+esac
+SH
+  chmod 0755 "$1/iptables"
+}
+
 # The running unit can still be using a configuration with a narrower listener.
 (
   scenario="$(mktemp -d /usr/local/lib/socks5-listener-drift.XXXXXX)"
@@ -328,35 +345,45 @@ EOF
   systemctl daemon-reload
   before_pid="$(systemctl show --property=MainPID --value shoes.service)"
   find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/before"
-  if "$NEW" socks5 secure "$legacy_socks5_id" --auth --yes >"$scenario/result" 2>&1; then
-    echo 'Expected SOCKS5 authentication hardening to reject listener drift' >&2
-    exit 1
-  fi
-  grep -Fq '实际监听地址不符合预期' "$scenario/result"
-  test "$(systemctl show --property=MainPID --value shoes.service)" = "$before_pid"
-  ss -H -ltn 'sport = :24436' | grep -Fq '127.0.0.1:24436'
-  find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/after"
-  diff -u "$scenario/before" "$scenario/after"
+  write_failing_socks5_iptables "$scenario"
+  for mode in --auth --local; do
+    if PATH="$scenario:$PATH" SOCKS5_ROLLBACK="$scenario" \
+      "$NEW" socks5 secure "$legacy_socks5_id" "$mode" --yes >"$scenario/result" 2>&1; then
+      echo "Expected SOCKS5 $mode hardening to reject listener drift" >&2
+      exit 1
+    fi
+    grep -Fq '实际监听地址不符合预期' "$scenario/result"
+    test ! -e "$scenario/firewall-reached"
+    test "$(systemctl show --property=MainPID --value shoes.service)" = "$before_pid"
+    ss -H -ltn 'sport = :24436' | grep -Fq '127.0.0.1:24436'
+    find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/after"
+    diff -u "$scenario/before" "$scenario/after"
+  done
 )
-echo 'SOCKS5 authentication: rejects drift between the running and managed listener: PASS'
+echo 'SOCKS5 auth and local: reject drift between the running and managed listener: PASS'
 
 # Exercise signal cancellation and an unattended timeout with the same substitute.
 (
   shoes=/usr/local/bin/shoes
   scenario="$(mktemp -d /usr/local/lib/socks5-preflight.XXXXXX)"
   find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/before"
-  mv "$shoes" "$scenario/shoes"
-  trap 'mv -f "$scenario/shoes" "$shoes"; rm -rf "$scenario"' EXIT
-  cat >"$shoes" <<'PY'
+  ln "$shoes" "$scenario/shoes"
+  cat >"$scenario/dry-run.py" <<'PY'
 #!/usr/bin/python3
 import json
 import os
 import pathlib
 import sys
 import time
+
+preflight = os.environ.get('SOCKS5_PREFLIGHT')
+if sys.argv[1:2] != ['--dry-run'] or not preflight:
+    shoes = pathlib.Path(__file__).resolve().with_name('shoes')
+    os.execv(shoes, [str(shoes), *sys.argv[1:]])
+
 import yaml
 
-marker = pathlib.Path(os.environ['SOCKS5_PREFLIGHT'])
+marker = pathlib.Path(preflight)
 marker.with_suffix('.entered').touch()
 candidate = pathlib.Path(sys.argv[2])
 assert sys.argv[1] == '--dry-run'
@@ -369,7 +396,17 @@ marker.with_suffix('.tmp').replace(marker)
 time.sleep(60)
 marker.with_suffix('.finished').touch()
 PY
-  chmod 0755 "$shoes"
+  chmod 0755 "$scenario/dry-run.py"
+  ln -s "$scenario/dry-run.py" "$scenario/substitute"
+  mv -fT "$scenario/substitute" "$shoes"
+  trap 'mv -fT "$scenario/shoes" "$shoes"; rm -rf "$scenario"' EXIT
+  # A normal start while the substitute is installed must still run real shoes.
+  systemctl restart shoes.service
+  for _ in {1..50}; do
+    if ss -H -ltn 'sport = :24436' | grep -Fq '0.0.0.0:24436'; then break; fi
+    sleep 0.1
+  done
+  ss -H -ltn 'sport = :24436' | grep -Fq '0.0.0.0:24436'
   python3 - "$NEW" "$scenario" <<'PY'
 import fcntl
 import json
@@ -448,10 +485,11 @@ echo 'SOCKS5 preflight: PID signals, process-group SIGINT and timeout clean up d
   target=/run/systemd/system/compat-socks5-slow-stop.target
   reader=/run/systemd/system/compat-socks5-start-reader.service
   reader_unit="${reader##*/}"
+  companion=/run/systemd/system/compat-socks5-start-companion.service
   timer=/run/systemd/system/compat-socks5-timer-export.timer
   exporter="${timer%.timer}.service"
   mkdir -p "$dropin"
-  trap '"$systemctl_bin" stop "${target##*/}" "${reader##*/}" "${timer##*/}" "${exporter##*/}" || true; rm -f "$dropin/90-compat-socks5-rollback.conf" "$target" "$reader" "$timer" "$exporter"; "$systemctl_bin" daemon-reload; rm -rf "$scenario"' EXIT
+  trap '"$systemctl_bin" stop "${target##*/}" "${reader##*/}" "${companion##*/}" "${timer##*/}" "${exporter##*/}" || true; rm -f "$dropin/90-compat-socks5-rollback.conf" "$target" "$reader" "$companion" "$timer" "$exporter"; "$systemctl_bin" daemon-reload; rm -rf "$scenario"' EXIT
   cat >"$scenario/systemctl" <<'SH'
 #!/bin/sh
 case "$1" in
@@ -509,9 +547,9 @@ SH
   cat >"$scenario/start-oneshot" <<'SH'
 #!/bin/sh
 set -eu
-"$1" --quiet start "$2"
+"$1" --quiet start "$2" "$3"
 # Keep the shell as ControlPID while systemctl waits.
-echo ok >>"$3/oneshot-wrapper-runs"
+echo ok >>"$4/oneshot-wrapper-runs"
 SH
   cat >"$scenario/reader" <<'SH'
 #!/bin/sh
@@ -551,6 +589,11 @@ Type=oneshot
 TimeoutStartSec=5s
 ExecStart=$scenario/reader $NEW $scenario $legacy_socks5_id
 EOF
+  cat >"$companion" <<'EOF'
+[Service]
+Type=oneshot
+ExecStart=/bin/true
+EOF
   cat >"$exporter" <<EOF
 [Service]
 Type=oneshot
@@ -578,7 +621,7 @@ TimeoutStartSec=10s
 TimeoutStopSec=150s
 ReadWritePaths=$scenario
 ExecStartPre=$scenario/exec-start-pre $NEW $scenario
-ExecStartPre=+$scenario/start-oneshot $systemctl_bin ${reader_unit%.service} $scenario
+ExecStartPre=+$scenario/start-oneshot $systemctl_bin ${reader_unit%.service} ${companion##*/} $scenario
 ExecStop=$scenario/exec-stop $scenario
 EOF
   "$systemctl_bin" daemon-reload
@@ -641,20 +684,7 @@ EOF
 StartLimitIntervalSec=10min
 StartLimitBurst=1
 EOF
-  cat >"$scenario/iptables" <<'SH'
-#!/bin/sh
-set -eu
-case "$*" in
-  --version) echo 'iptables v1.8.9 (legacy)' ;;
-  '-w -S INPUT') echo '-A INPUT -p tcp --dport 24436 -j ACCEPT' ;;
-  '-w -D INPUT -p tcp --dport 24436 -j ACCEPT')
-    touch "$SOCKS5_ROLLBACK/firewall-reached"
-    exit 1
-    ;;
-  *) exit 2 ;;
-esac
-SH
-  chmod 0755 "$scenario/iptables"
+  write_failing_socks5_iptables "$scenario"
   systemctl daemon-reload
   systemctl start "${target##*/}"
   systemctl is-active --quiet "${target##*/}"
@@ -791,20 +821,25 @@ acl = struct.pack('<I', 2) + b''.join(
 os.setxattr(sys.argv[1], 'system.posix_acl_access', acl, os.XATTR_CREATE)
 PY
   test "$(stat -c %a:%U /run/lock/ping-rust.lock)" = '600:root'
+  mkdir "$scenario/exports"
+  chown nobody:nogroup "$scenario/exports"
   cat >"$scenario/start-reader" <<'SH'
 #!/bin/sh
 set -eu
 info="$("$1" info "$2")"
 printf '%s\n' "$info" | grep -Eq 'socks5://example\.com:24436#'
+"$1" export sing-box --profile "$3" --server example.com --output "$4" >/dev/null
 SH
   chmod 0755 "$scenario/start-reader"
   chmod 0711 "$scenario"
   cat >>"$dropin" <<EOF
 TimeoutStartSec=10s
-ExecStartPost=$scenario/start-reader $NEW $legacy_socks5_id
+ReadWritePaths=$scenario/exports
+ExecStartPost=$scenario/start-reader $NEW $legacy_socks5_id ${ids[1]} $scenario/exports/client.json
 EOF
   "$systemctl_bin" daemon-reload
   "$systemctl_bin" restart shoes.service
+  mv "$scenario/exports/client.json" "$scenario/expected.json"
   if "$NEW" socks5 secure "$legacy_socks5_id" --auth --yes >"$scenario/acl-rollback" 2>&1; then
     echo 'Expected the hook requiring the original URL to reject the candidate' >&2
     exit 1
@@ -813,7 +848,8 @@ EOF
   "$systemctl_bin" is-active --quiet shoes.service
   test ! -e /etc/shoes/.ping-rust-socks5-secure.pending
   cmp -s "$state" "$scenario/original-state"
-  echo 'SOCKS5 rollback: required non-root ExecStartPost reads restored state via ACL: PASS'
+  cmp -s "$scenario/exports/client.json" "$scenario/expected.json"
+  echo 'SOCKS5 rollback: required non-root ExecStartPost reads and exports restored state via ACL: PASS'
 )
 echo 'SOCKS5 rollback: post-commit SIGHUP restores configuration and the non-root service: PASS'
 
@@ -896,6 +932,54 @@ with TemporaryDirectory() as work:
         assert '请在 SOCKS5 加固结束后重试读取' in result.stderr.decode()
         assert output.read_bytes() == original
 
+    def assert_menus_work():
+        commands = r'''
+set timeout 10
+log_user 0
+proc expect_pattern {pattern} {
+    expect {
+        -re $pattern { return $expect_out(0,string) }
+        eof { error "delegated menu exited before $pattern" }
+        timeout { error "delegated menu timed out before $pattern" }
+    }
+}
+proc choose_socks5 {} {
+    expect_pattern {请选择配置:}
+    regexp {^([0-9]+)} [expect_pattern {[0-9]+\) SOCKS5-24436\.yaml}] unused index
+    expect_pattern {请选择 \[0-[0-9]+\]: }
+    send -- "$index\r"
+}
+spawn $env(COMPAT_MENU_BINARY)
+expect_pattern {请选择 \[0-10\]: }
+send -- "3\r"
+choose_socks5
+expect_pattern {二维码 \(QR\)}
+expect_pattern {按回车返回主菜单}
+send -- "\r"
+expect_pattern {请选择 \[0-10\]: }
+send -- "9\r"
+expect_pattern {1\) 导出客户端配置}
+expect_pattern {请选择 \[0-[0-9]+\]: }
+send -- "1\r"
+choose_socks5
+expect_pattern {客户端格式:}
+expect_pattern {请选择 \[0-3\]: }
+send -- "2\r"
+expect_pattern {VPS 公网域名或 IP}
+send -- "example.com\r"
+expect_pattern {"outbounds"}
+expect_pattern {按回车返回主菜单}
+send -- "\r"
+expect_pattern {请选择 \[0-10\]: }
+send -- "0\r"
+expect_pattern {已退出}
+expect eof
+if {[lindex [wait] 3] != 0} { exit 1 }
+'''
+        subprocess.run(['expect', '-f', '-'], input=commands.encode(), check=True, timeout=35,
+                       user=reader.pw_uid, group=reader.pw_gid, extra_groups=[],
+                       env={**os.environ, 'LC_ALL': 'C.UTF-8', 'COMPAT_MENU_BINARY': binary})
+
     os.setxattr(state, acl_name, acl, os.XATTR_CREATE)
     try:
         os.chmod(directory, 0o711)
@@ -906,6 +990,7 @@ with TemporaryDirectory() as work:
         for command in [['info', profile], ['url', profile], ['qr', profile], export]:
             result = as_reader(command)
             assert result.returncode == 0, (command[0], result.returncode)
+        assert_menus_work()
         original = output.read_bytes()
         socks = next(item for item in json.loads(original)['outbounds']
                      if item['type'] == 'socks')

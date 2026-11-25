@@ -197,14 +197,6 @@ impl Drop for ExclusiveLock {
 }
 
 pub(crate) fn read_with_existing_lock<T>(path: &Path, read: impl Fn() -> Result<T>) -> Result<T> {
-    read_with_existing_lock_then(path, read, Ok)
-}
-
-pub(crate) fn read_with_existing_lock_then<T, U>(
-    path: &Path,
-    read: impl Fn() -> Result<T>,
-    use_snapshot: impl FnOnce(T) -> Result<U>,
-) -> Result<U> {
     read_with_existing_lock_or_service_hook(
         path,
         false,
@@ -212,7 +204,7 @@ pub(crate) fn read_with_existing_lock_then<T, U>(
             SnapshotAccess::Unreadable(error) => Err(error),
             _ => read(),
         },
-        use_snapshot,
+        Ok,
     )
 }
 

@@ -1170,8 +1170,7 @@ pub(crate) fn view_config_with(
     select: impl FnOnce(&[config::ManagedProfile]) -> Result<Option<usize>>,
     render: impl FnOnce(&config::ManagedProfile, Option<&str>, Option<&str>) -> Result<()>,
 ) -> Result<bool> {
-    let load_state = || config::load_state_from(state_path);
-    let state = utils::read_with_existing_lock(lock_path, load_state)?;
+    let state = read_menu_state(state_path, lock_path, Ok)?;
     if state.profiles.is_empty() {
         println!("没有配置。");
         return Ok(false);
@@ -1180,7 +1179,7 @@ pub(crate) fn view_config_with(
         return Ok(false);
     };
     let id = state.profiles[selected].id;
-    utils::read_with_existing_lock_then(lock_path, load_state, |state| {
+    read_menu_state(state_path, lock_path, |state| {
         let profile = state
             .profiles
             .iter()
@@ -1190,6 +1189,29 @@ pub(crate) fn view_config_with(
         render(profile, uri.as_deref(), warning.as_deref())?;
         Ok(true)
     })
+}
+
+fn read_menu_state<T>(
+    state_path: &Path,
+    lock_path: &Path,
+    use_state: impl FnOnce(config::ManagedState) -> Result<T>,
+) -> Result<T> {
+    use utils::SnapshotAccess;
+
+    let load_state = || config::load_state_from(state_path);
+    utils::read_with_existing_lock_or_service_hook(
+        lock_path,
+        false,
+        |access| match access {
+            #[cfg(target_os = "linux")]
+            SnapshotAccess::Missing | SnapshotAccess::Unreadable(_) => {
+                config::socks5_secure::read_unlocked_snapshot(state_path, load_state)
+            }
+            SnapshotAccess::Unreadable(error) => Err(error),
+            _ => load_state(),
+        },
+        use_state,
+    )
 }
 
 fn print_menu_profile_details(profile: &config::ManagedProfile) {
@@ -1506,8 +1528,7 @@ pub(crate) fn export_menu_with(
     options: impl FnOnce() -> Result<Option<(ClientFormat, String)>>,
     emit: impl FnOnce(&str),
 ) -> Result<()> {
-    let load_state = || config::load_state_from(state_path);
-    let state = utils::read_with_existing_lock(lock_path, load_state)?;
+    let state = read_menu_state(state_path, lock_path, Ok)?;
     if state.profiles.is_empty() {
         emit("没有可导出的配置。");
         return Ok(());
@@ -1519,7 +1540,7 @@ pub(crate) fn export_menu_with(
     let Some((format, server)) = options()? else {
         return Ok(());
     };
-    utils::read_with_existing_lock_then(lock_path, load_state, |state| {
+    read_menu_state(state_path, lock_path, |state| {
         let profile = state
             .profiles
             .iter()

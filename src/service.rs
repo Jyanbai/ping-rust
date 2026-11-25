@@ -631,7 +631,8 @@ fn systemctl_starts_unit(command_line: &[u8], unit: &str) -> bool {
         return false;
     };
     let mut args = command_line.split(|byte| *byte == 0).skip(1);
-    let mut expected = [b"start".as_slice(), unit.as_bytes()].into_iter();
+    let mut starts = false;
+    let mut matches_unit = false;
     let mut parse_options = true;
     while let Some(arg) = args.next() {
         if parse_options && arg.starts_with(b"-") {
@@ -647,16 +648,17 @@ fn systemctl_starts_unit(command_line: &[u8], unit: &str) -> bool {
                 mode if mode.starts_with(b"--job-mode=") && mode.len() > b"--job-mode=".len() => {}
                 _ => return false,
             }
+        } else if starts {
+            matches_unit |=
+                arg == unit.as_bytes() || systemctl_service_shorthand(arg, unit.as_bytes());
         } else {
-            match expected.next() {
-                Some(word) if word == arg => {}
-                Some(word) if word == unit.as_bytes() && systemctl_service_shorthand(arg, word) => {
-                }
-                _ => return false,
+            if arg != b"start" {
+                return false;
             }
+            starts = true;
         }
     }
-    expected.next().is_none()
+    matches_unit
 }
 
 #[cfg(target_os = "linux")]
@@ -948,6 +950,8 @@ mod tests {
             "systemctl\0start\0-q\0--no-ask-password\0--\0helper.service\0",
             "systemctl\0--job-mode=replace\0start\0helper.service\0",
             "systemctl\0start\0--job-mode\0replace\0helper.service\0",
+            "systemctl\0--quiet\0start\0companion.service\0helper\0",
+            "systemctl\0start\0--\0helper.service\0companion.service\0",
         ] {
             assert!(waits(command), "{command:?}");
         }
@@ -961,6 +965,9 @@ mod tests {
             "systemctl\0start\0other.service\0",
             "systemctl\0start\0other\0",
             "systemctl\0start\0helper\0--no-block\0",
+            "systemctl\0start\0helper\0companion.service\0--no-block\0",
+            "systemctl\0start\0other.service\0companion.service\0",
+            "systemctl\0show\0other.service\0helper.service\0",
         ] {
             assert!(!waits(command), "{command:?}");
         }

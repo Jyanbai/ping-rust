@@ -229,61 +229,19 @@ pub(crate) struct SecurePlan {
 
 struct SecureRollback {
     config: FileSnapshot,
-    #[cfg(unix)]
-    config_link: Option<ConfigLink>,
     state: FileSnapshot,
     profiles: ProfileDirectorySnapshot,
 }
 
-impl SecureRollback {
-    fn restore_config(&self, path: &Path, contents: &[u8]) -> Result<()> {
-        #[cfg(unix)]
-        if let Some(link) = &self.config_link {
-            if self.config_restored(path) {
-                return Ok(());
-            }
-            link.restore(path)?;
-            if !self.config_restored(path) {
-                bail!("聚合配置软链接已恢复，但目标文件已变更，请检查 config.yaml");
-            }
-            return Ok(());
-        }
-        self.config.write(path, contents)
-    }
-
-    fn config_restored(&self, path: &Path) -> bool {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-
-            let Ok(metadata) = fs::symlink_metadata(path) else {
-                return false;
-            };
-            let entry_restored = match &self.config_link {
-                Some(link) => {
-                    metadata.is_symlink()
-                        && (metadata.uid(), metadata.gid()) == (link.uid, link.gid)
-                        && fs::read_link(path).is_ok_and(|target| target == link.target)
-                }
-                None => metadata.is_file(),
-            };
-            if !entry_restored {
-                return false;
-            }
-        }
-        self.config.restored(path)
-    }
-}
-
 #[cfg(unix)]
-struct ConfigLink {
+struct FileLink {
     target: PathBuf,
     uid: u32,
     gid: u32,
 }
 
 #[cfg(unix)]
-impl ConfigLink {
+impl FileLink {
     fn capture(path: &Path) -> Result<Option<Self>> {
         use std::os::unix::fs::MetadataExt;
 
@@ -301,34 +259,58 @@ impl ConfigLink {
     fn restore(&self, path: &Path) -> Result<()> {
         use std::os::unix::fs::{lchown, symlink, MetadataExt};
 
-        let temporary = tempfile::tempdir_in(path.parent().context("聚合配置没有父目录")?)?;
-        let link = temporary.path().join("config.yaml");
+        let temporary = tempfile::tempdir_in(path.parent().context("受管文件没有父目录")?)?;
+        let link = temporary.path().join("link");
         symlink(&self.target, &link)?;
         let metadata = fs::symlink_metadata(&link)?;
         if (metadata.uid(), metadata.gid()) != (self.uid, self.gid) {
             lchown(&link, Some(self.uid), Some(self.gid))?;
         }
-        fs::rename(&link, path).context("无法原子恢复聚合配置软链接")
+        fs::rename(&link, path).with_context(|| format!("无法原子恢复软链接 {}", path.display()))
     }
 }
 
 struct FileSnapshot {
     contents: Vec<u8>,
     metadata: fs::Metadata,
+    #[cfg(unix)]
+    link: Option<FileLink>,
     #[cfg(target_os = "linux")]
     acl: Option<Vec<u8>>,
 }
 
 impl FileSnapshot {
-    fn capture(mut file: &fs::File) -> Result<Self> {
+    fn capture(path: &Path, mut file: &fs::File) -> Result<Self> {
+        #[cfg(not(unix))]
+        let _ = path;
         let mut contents = Vec::new();
         file.read_to_end(&mut contents)?;
         Ok(Self {
             contents,
             metadata: file.metadata()?,
+            #[cfg(unix)]
+            link: FileLink::capture(path).context("无法备份软链接")?,
             #[cfg(target_os = "linux")]
             acl: access_acl(file).context("无法读取文件 ACL")?,
         })
+    }
+
+    fn restore(&self, path: &Path, contents: &[u8]) -> Result<()> {
+        #[cfg(unix)]
+        if let Some(link) = &self.link {
+            if self.restored(path) {
+                return Ok(());
+            }
+            link.restore(path)?;
+            if !self.restored(path) {
+                bail!(
+                    "软链接 {} 已恢复，但目标文件已变更，请检查目标文件",
+                    path.display()
+                );
+            }
+            return Ok(());
+        }
+        self.write(path, contents)
     }
 
     fn write(&self, path: &Path, contents: &[u8]) -> Result<()> {
@@ -373,6 +355,20 @@ impl FileSnapshot {
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
+            let Ok(entry) = fs::symlink_metadata(path) else {
+                return false;
+            };
+            let entry_restored = match &self.link {
+                Some(link) => {
+                    entry.is_symlink()
+                        && (entry.uid(), entry.gid()) == (link.uid, link.gid)
+                        && fs::read_link(path).is_ok_and(|target| target == link.target)
+                }
+                None => entry.is_file(),
+            };
+            if !entry_restored {
+                return false;
+            }
             if (metadata.uid(), metadata.gid(), metadata.mode())
                 != (
                     self.metadata.uid(),
@@ -566,10 +562,10 @@ impl SecurePlan {
             Err(error) => return Err(error).context("无法锁定原管理状态"),
         }
         let rollback = SecureRollback {
-            config: FileSnapshot::capture(&original_config).context("无法备份原聚合配置")?,
-            #[cfg(unix)]
-            config_link: ConfigLink::capture(&config).context("无法备份聚合配置软链接")?,
-            state: FileSnapshot::capture(&original_state_file).context("无法备份原管理状态")?,
+            config: FileSnapshot::capture(&config, &original_config)
+                .context("无法备份原聚合配置")?,
+            state: FileSnapshot::capture(&state, &original_state_file)
+                .context("无法备份原管理状态")?,
             profiles: ProfileDirectorySnapshot::capture(&profiles)?,
         };
         let original_state = if socks5::listen_migration_pending(&state)? {
@@ -617,16 +613,16 @@ impl SecurePlan {
             |path, write| match write {
                 commit::ManagedWrite::Config(contents) => rollback.config.write(path, contents),
                 commit::ManagedWrite::RestoreConfig(contents) => {
-                    rollback.restore_config(path, contents)
+                    rollback.config.restore(path, contents)
                 }
                 commit::ManagedWrite::RestoreState(contents) => {
-                    rollback.state.write(path, contents)
+                    rollback.state.restore(path, contents)
                 }
             },
         );
         if let Err(error) = commit {
             // 提交函数已尝试回滚。确认原文件都在，再允许后续读写。
-            let restored = rollback.config_restored(&config)
+            let restored = rollback.config.restored(&config)
                 && rollback.state.restored(&state)
                 && ProfileDirectorySnapshot::capture(&profiles).is_ok_and(|snapshot| {
                     snapshot.existed == rollback.profiles.existed
@@ -677,12 +673,12 @@ impl SecurePlan {
             .context("没有已提交的 SOCKS5 加固事务")?;
         let mut failures = Vec::new();
         // 先还原聚合配置，再恢复可能缺少显式 listen 的旧状态。
-        match rollback.restore_config(
+        match rollback.config.restore(
             &self.directory.join("config.yaml"),
             &rollback.config.contents,
         ) {
             Ok(()) => {
-                if let Err(error) = rollback.state.write(
+                if let Err(error) = rollback.state.restore(
                     &self.directory.join("ping-rust-state.json"),
                     &rollback.state.contents,
                 ) {

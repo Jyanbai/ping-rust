@@ -490,6 +490,49 @@ fn socks5_secure_rollback_restores_aggregate_symlink() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn socks5_secure_rollback_restores_state_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempfile::tempdir().unwrap();
+    let profile = legacy(directory.path());
+    let state = directory.path().join("ping-rust-state.json");
+    let managed = Path::new("managed/state.json");
+    let target = directory.path().join(managed);
+    fs::create_dir(target.parent().unwrap()).unwrap();
+    fs::rename(&state, &target).unwrap();
+    symlink(managed, &state).unwrap();
+    let original = fs::read(&target).unwrap();
+
+    let profiles = directory.path().join("profiles");
+    fs::create_dir(&profiles).unwrap();
+    let unmanaged = profiles.join("manual.yaml");
+    fs::write(&unmanaged, b"# unmanaged file\n").unwrap();
+    let mut plan = SecurePlan::prepare(directory.path(), profile.id, SecureMode::Auth)
+        .unwrap()
+        .unwrap();
+    assert!(format!("{:#}", plan.commit_files().unwrap_err()).contains("非 ping-rust 文件"));
+    assert_eq!(fs::read_link(&state).unwrap(), managed);
+    assert_eq!(fs::read(&state).unwrap(), original);
+    fs::remove_file(unmanaged).unwrap();
+
+    plan.commit_files().unwrap();
+    assert_eq!(fs::read(&target).unwrap(), original);
+    plan.rollback_files().unwrap();
+    plan.finish_pending().unwrap();
+
+    assert_eq!(fs::read_link(&state).unwrap(), managed);
+    assert_eq!(fs::read(&state).unwrap(), original);
+    let mut updated = load_state_from(&state).unwrap();
+    updated.profiles[0].name = "updated-legacy-socks".into();
+    save_state_to(&target, &updated).unwrap();
+    assert_eq!(
+        load_state_from(&state).unwrap().profiles[0].name,
+        "updated-legacy-socks"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn socks5_secure_preserves_aggregate_owner_group_and_mode_through_rollback() {
     use std::os::unix::fs::MetadataExt;
 
