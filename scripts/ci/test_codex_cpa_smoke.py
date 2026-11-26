@@ -4,6 +4,7 @@
 """
 
 import os
+import shutil
 import subprocess
 import tempfile
 import textwrap
@@ -211,8 +212,15 @@ class AdmissionTest(unittest.TestCase):
         self.assertIn("只允许仓库所有者启动或重跑此自检", result.stdout)
 
 
+COMPLETE_OK_EVENTS = """{"type":"thread.started","thread_id":"t1"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"OK"}}
+{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":1,"reasoning_output_tokens":0}}
+"""
+
+
 class ReplyAndFailureTest(unittest.TestCase):
-    def run_smoke(self, last_message, *, exit_code=0, stderr="", events="", key="test-cpa-key-not-real"):
+    def run_smoke(self, last_message, *, exit_code=0, stderr="", events="", key="test-cpa-key-not-real", git_status_fail=False):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         work = Path(temporary.name)
@@ -231,6 +239,26 @@ class ReplyAndFailureTest(unittest.TestCase):
         codex = bin_dir / "codex"
         codex.write_text(FAKE_CODEX, encoding="utf-8")
         codex.chmod(0o755)
+        if git_status_fail:
+            real_git = shutil.which("git")
+            if not real_git:
+                self.fail("test host has no git")
+            git_wrapper = bin_dir / "git"
+            git_wrapper.write_text(
+                "#!/usr/bin/env bash\n"
+                "set -euo pipefail\n"
+                'if [ "${FAKE_GIT_STATUS_FAIL:-}" = 1 ]; then\n'
+                '  for arg in "$@"; do\n'
+                '    if [ "$arg" = status ]; then\n'
+                '      echo "fatal: index file corrupt" >&2\n'
+                "      exit 1\n"
+                "    fi\n"
+                "  done\n"
+                "fi\n"
+                "exec %s \"$@\"\n" % real_git,
+                encoding="utf-8",
+            )
+            git_wrapper.chmod(0o755)
         summary = runner_temp / "summary.md"
         summary.touch()
         env = {
@@ -247,6 +275,7 @@ class ReplyAndFailureTest(unittest.TestCase):
             "FAKE_CODEX_EVENTS": str(events_file),
             "FAKE_CODEX_STDERR": str(stderr_file),
             "FAKE_CODEX_EXIT": str(exit_code),
+            "FAKE_GIT_STATUS_FAIL": "1" if git_status_fail else "0",
         }
         result = subprocess.run(
             ["bash", "-o", "pipefail", "-c", step_script("Run CPA smoke")],
@@ -263,13 +292,13 @@ class ReplyAndFailureTest(unittest.TestCase):
     def test_single_line_ok_succeeds(self):
         for payload in (b"OK", b"OK\n", b"OK\r\n"):
             with self.subTest(payload=payload):
-                result, summary = self.run_smoke(payload)
+                result, summary = self.run_smoke(payload, events=COMPLETE_OK_EVENTS)
                 self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
                 self.assertTrue(any("CPA 认证" in line for line in result.stdout.splitlines()))
                 self.assertIn("CPA 自检通过", summary)
 
     def test_success_reports_requested_model_without_claiming_availability(self):
-        result, summary = self.run_smoke(b"OK\n")
+        result, summary = self.run_smoke(b"OK\n", events=COMPLETE_OK_EVENTS)
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         for text in (result.stdout, summary):
             with self.subTest(text=text[:30]):
@@ -312,14 +341,39 @@ class ReplyAndFailureTest(unittest.TestCase):
             self.assertNotIn("/workspace/cpa-smoke", text)
 
     def test_ok_reply_with_agent_message_events_succeeds(self):
-        events = """{"type":"thread.started","thread_id":"t1"}
-{"type":"turn.started"}
-{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"OK"}}
-{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":1,"reasoning_output_tokens":0}}
-"""
-        result, summary = self.run_smoke(b"OK\n", events=events)
+        result, summary = self.run_smoke(b"OK\n", events=COMPLETE_OK_EVENTS)
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         self.assertIn("CPA 自检通过", summary)
+
+    def test_ok_reply_with_empty_event_stream_fails(self):
+        result, summary = self.run_smoke(b"OK\n", events="")
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        errors = "\n".join(self.error_lines(result))
+        self.assertIn("事件流为空", errors)
+        self.assertNotIn("CPA 自检通过", summary)
+        self.assertFalse(any("CPA 认证与 Responses 调用成功" in line for line in result.stdout.splitlines()))
+
+    def test_ok_reply_with_incomplete_event_stream_fails(self):
+        events = """{"type":"thread.started","thread_id":"t1"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_2","type":"agent_message","text":"OK"}}
+"""
+        result, summary = self.run_smoke(b"OK\n", events=events)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        errors = "\n".join(self.error_lines(result))
+        self.assertIn("缺少完成事件", errors)
+        self.assertNotIn("CPA 自检通过", summary)
+        self.assertFalse(any("CPA 认证与 Responses 调用成功" in line for line in result.stdout.splitlines()))
+
+    def test_git_status_failure_is_not_reported_as_success(self):
+        result, summary = self.run_smoke(b"OK\n", events=COMPLETE_OK_EVENTS, git_status_fail=True)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        errors = "\n".join(self.error_lines(result))
+        self.assertIn("无法确认自检工作区状态", errors)
+        self.assertNotIn("CPA 自检通过", summary)
+        self.assertFalse(any("CPA 认证与 Responses 调用成功" in line for line in result.stdout.splitlines()))
+        for text in (result.stdout, summary):
+            self.assertNotIn("index file corrupt", text)
 
     def test_http_401_reports_key_category(self):
         raw = (

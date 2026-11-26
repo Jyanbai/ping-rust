@@ -322,23 +322,30 @@ jobs:
             echo '::error::CPA 调用已返回，但最终回复不是单独一行 OK（回复全文不打印）。'
             exit 1
           fi
-          # 最终回复是 OK 仍不够：事件流里只要出现命令执行，自检就失败。不打印命令或输出。
-          if [ ! -f "$RUNNER_TEMP/cpa-events.jsonl" ]; then
-            echo '::error::缺少 Codex 事件流，无法确认自检过程没有执行命令。'
+          # 最终回复是 OK 仍不够：必须有完整事件流（含完成事件），且不能出现命令执行。不打印命令或输出。
+          if [ ! -f "$RUNNER_TEMP/cpa-events.jsonl" ] || [ ! -s "$RUNNER_TEMP/cpa-events.jsonl" ]; then
+            echo '::error::Codex 事件流为空，无法确认自检过程没有执行命令。'
             exit 1
           fi
-          if [ -s "$RUNNER_TEMP/cpa-events.jsonl" ]; then
-            if ! jq -s -e 'type == "array"' "$RUNNER_TEMP/cpa-events.jsonl" >/dev/null 2>&1; then
-              echo '::error::Codex 事件流无法解析，无法确认自检过程没有执行命令。'
-              exit 1
-            fi
-            if jq -s -e 'any(.[]; .item.type? == "command_execution")' "$RUNNER_TEMP/cpa-events.jsonl" >/dev/null 2>&1; then
-              echo '::error::事件流显示 Codex 执行了命令；自检要求只回复 OK、不执行命令（不打印命令内容）。'
-              exit 1
-            fi
+          if ! jq -s -e 'type == "array"' "$RUNNER_TEMP/cpa-events.jsonl" >/dev/null 2>&1; then
+            echo '::error::Codex 事件流无法解析，无法确认自检过程没有执行命令。'
+            exit 1
           fi
-          # 确认自检工作区没有被改动；本 job 不检出 ping-rust。
-          if [ -n "$(git -C "$work" status --porcelain)" ]; then
+          if jq -s -e 'any(.[]; .item.type? == "command_execution")' "$RUNNER_TEMP/cpa-events.jsonl" >/dev/null 2>&1; then
+            echo '::error::事件流显示 Codex 执行了命令；自检要求只回复 OK、不执行命令（不打印命令内容）。'
+            exit 1
+          fi
+          if ! jq -s -e 'any(.[]; .type? == "turn.completed") and any(.[]; .type? == "item.completed" and .item.type? == "agent_message")' "$RUNNER_TEMP/cpa-events.jsonl" >/dev/null 2>&1; then
+            echo '::error::Codex 事件流不完整（缺少完成事件），无法确认自检过程没有执行命令。'
+            exit 1
+          fi
+          # 先检查 git status 退出码，再看是否有改动；命令失败不得当成工作区干净。
+          status_file="$RUNNER_TEMP/cpa-git-status.txt"
+          if ! git -C "$work" status --porcelain >"$status_file" 2>/dev/null; then
+            echo '::error::无法确认自检工作区状态，不报告成功。'
+            exit 1
+          fi
+          if [ -s "$status_file" ]; then
             echo '::error::自检过程改动了工作区文件，预期是只读回复。'
             exit 1
           fi
@@ -360,4 +367,5 @@ jobs:
             "$RUNNER_TEMP/cpa-expected-ok" \
             "$RUNNER_TEMP/cpa-expected-ok-lf" \
             "$RUNNER_TEMP/cpa-expected-ok-crlf" \
+            "$RUNNER_TEMP/cpa-git-status.txt" \
             "$GITHUB_WORKSPACE/cpa-smoke"
