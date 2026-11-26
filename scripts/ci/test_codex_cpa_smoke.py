@@ -161,6 +161,12 @@ class WorkflowPolicyTest(unittest.TestCase):
         self.assertIn("secrets.CODEX_CPA_API_KEY", self.text)
         self.assertNotIn("secrets.CODEX_API_KEY", self.text)
         self.assertEqual(self.text.count("secrets.CODEX_CPA_API_KEY"), 3)
+        hint = "CODEX_CPA_API_KEY 必须只在 environment codex 中设置；不要在仓库或组织级创建同名 secret"
+        self.assertIn(hint, self.text)
+        docs = (ROOT / "docs" / "CODEX_DISPATCH.md").read_text(encoding="utf-8")
+        self.assertIn("请**只**在 environment `codex` 里设置", docs)
+        self.assertIn("不要在仓库或组织级创建同名 secret", docs)
+        self.assertIn("工作流无法分辨来源", docs)
 
 
 class CiWiringTest(unittest.TestCase):
@@ -512,7 +518,19 @@ class ReplyAndFailureTest(unittest.TestCase):
         self.assertNotIn("CPA 自检通过", summary)
         self.assertFalse(any("Responses 调用成功" in line for line in result.stdout.splitlines()))
 
+    def test_ok_reply_with_completion_only_truncated_stream_fails(self):
+        events = """{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"OK"}}
+{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":1,"reasoning_output_tokens":0}}
+"""
+        result, summary = self.run_smoke(b"OK\n", events=events)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        errors = "\n".join(self.error_lines(result))
+        self.assertIn("缺少起始事件", errors)
+        self.assertNotIn("CPA 自检通过", summary)
+        self.assertFalse(any("Responses 调用成功" in line for line in result.stdout.splitlines()))
+
     def test_http_401_reports_key_category(self):
+
 
         raw = (
             'api error 401 Unauthorized: invalid_api_key raw payload={"error":"nope","token":"secret-token-value"}\n'
@@ -522,7 +540,8 @@ class ReplyAndFailureTest(unittest.TestCase):
         errors = "\n".join(self.error_lines(result))
         self.assertIn("密钥无效或被拒绝", errors)
         self.assertIn("HTTP 状态：401", errors)
-        self.assertIn("CODEX_API_KEY", errors)
+        self.assertIn("CODEX_CPA_API_KEY", errors)
+        self.assertNotIn("的 CODEX_API_KEY", errors)
         self.assertNotIn("接口不存在", errors)
         self.assertNotIn("secret-token-value", errors)
         self.assertNotIn("invalid_api_key", errors)
@@ -569,7 +588,7 @@ class ReplyAndFailureTest(unittest.TestCase):
     def test_unexpected_status_form_is_classified(self):
         cases = (
             ("unexpected status 401 Unauthorized: {\"error\":\"bad key\",\"token\":\"leak-me-401\"}\n",
-             "401", "密钥无效或被拒绝", "CODEX_API_KEY", "leak-me-401"),
+             "401", "密钥无效或被拒绝", "CODEX_CPA_API_KEY", "leak-me-401"),
             ("unexpected status 404 Not Found: <html>route /v1/responses missing leak-me-404</html>\n",
              "404", "接口不存在", "CODEX_API_BASE_URL", "leak-me-404"),
         )

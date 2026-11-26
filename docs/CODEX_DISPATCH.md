@@ -199,7 +199,7 @@ Remove-Item Env:CODEX_HOME
 
 ### 设置 `CODEX_CPA_API_KEY`
 
-本自检**只**读取 environment `codex` 的专名密钥 `CODEX_CPA_API_KEY`，不会使用仓库或组织级的 `CODEX_API_KEY`（避免同名上层凭据被误当成 CPA 密钥发往第三方主机）。请只在 environment `codex` 里设置，不要在仓库或组织级创建同名 secret。
+本自检**只**读取名为 `CODEX_CPA_API_KEY` 的 secret。请**只**在 environment `codex` 里设置它，不要在仓库或组织级创建同名 secret。GitHub Actions 会按名称把环境、仓库、组织的 secret 合并到同一个 `secrets` 上下文，工作流无法分辨来源：如果环境里没有这项、但仓库或组织有同名 secret，缺失检查会通过，上层凭据会被发给 CPA。仓库或组织级的 `CODEX_API_KEY` 不会被本自检使用。
 
 在本机 PowerShell 里写入（运行后按提示把密钥粘贴给 `gh`，不要发到聊天或写进仓库、PR 描述）：
 
