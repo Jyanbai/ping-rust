@@ -22,7 +22,7 @@ name: Codex Dispatch
 #   3. Codex 的命令在沙箱里运行（权限配置 ci）：只能写工作区和 ~/.cargo、不能联网，
 #      读不到 $RUNNER_TEMP（Codex 凭据、token 列表、.git 副本都在这里），运行前先实测；
 #      推送用的 token 不在这个 job 的 Codex 步骤里；
-#   4. Codex 的完整输出只写文件不打日志；diff 和最终总结里出现任何 token 就中止；
+#   4. Codex 的完整输出只写文件；失败时只把脱敏后的 stderr 末尾打到日志。diff 和最终总结里出现任何 token 就中止；
 #   5. 用 Codex 运行前保存的 .git 副本生成 diff，不受工作区里被改动的 git 配置影响；
 #   6. CODEX_BOT_TOKEN 不给 Workflows 权限，改动 .github/workflows 或 .github/actions 的 diff
 #      直接拒绝；
@@ -501,7 +501,67 @@ jobs:
           echo "codex exit code: $rc"
           if [ "$rc" -ne 0 ]; then
             echo "::error::Codex 运行失败"
-            tail -n 20 "$RUNNER_TEMP/codex-stderr.log" || true
+            # begin-codex-stderr-tail
+            log="$RUNNER_TEMP/codex-stderr.log"
+            echo '::group::Codex 标准错误（脱敏，最后 30 行）'
+            if [ ! -f "$log" ]; then
+              echo '（未找到 stderr 日志）'
+            else
+              python3 - "$log" <<'PY' || echo '（脱敏输出失败）'
+          import re, sys
+          from pathlib import Path
+          MAX_LINE, TAIL_LINES = 240, 30
+          ANSI = re.compile(r"\x1b(?:\[[0-9;?]*[ -/]*[@-~]|].*?(?:\x07|\x1b\\))")
+          AUTH_HEADER = re.compile(r"(?i)\b(authorization|cookie|set-cookie)\s*[:=]\s*.+$", re.M)
+          BEARER = re.compile(r"(?i)\bbearer\s+\S+")
+          PAT_RE = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)\b")
+          SK = re.compile(r"\bsk-[A-Za-z0-9_-]+\b")
+          JWT = re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b")
+          EMAIL = re.compile(r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b")
+          ACCOUNT_ID = re.compile(
+              r"(?i)\b(account[_-]?id|user[_-]?id|userid|accountid|acct[_-]?id)\b"
+              r"(\s*[:=]\s*)(\"[^\"]*\"|'[^']*'|[^\s,;}&]+)"
+          )
+          URL_QUERY = re.compile(r"(https?://[^\s?#]+)\?[^\s]*")
+          HEX = re.compile(r"(?<![A-Za-z0-9+/=_-])[A-Fa-f0-9]{24,}(?![A-Za-z0-9+/=_-])")
+          B64 = re.compile(r"(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{24,}={0,2}(?![A-Za-z0-9+/=])")
+          def strip_controls(text):
+              text = ANSI.sub("", text)
+              out = []
+              for ch in text:
+                  o = ord(ch)
+                  if ch in "\t\n" or (o >= 32 and o != 127 and not (0x80 <= o <= 0x9F)):
+                      out.append(ch)
+                  else:
+                      out.append(" ")
+              return "".join(out)
+          def redact(s):
+              s = AUTH_HEADER.sub(lambda m: m.group(1) + ": [redacted]", s)
+              s = BEARER.sub("Bearer [redacted]", s)
+              s = PAT_RE.sub("[redacted-token]", s)
+              s = SK.sub("[redacted-token]", s)
+              s = JWT.sub("[redacted-jwt]", s)
+              s = EMAIL.sub("[redacted-email]", s)
+              s = ACCOUNT_ID.sub(r"\1\2[redacted-id]", s)
+              s = URL_QUERY.sub(r"\1?[redacted]", s)
+              s = HEX.sub("[redacted-secret]", s)
+              s = B64.sub("[redacted-secret]", s)
+              return s
+          def escape_workflow(s):
+              return s.replace("::", "∶∶").replace("##[", "##［")
+          def cap(s):
+              return s if len(s) <= MAX_LINE else s[:MAX_LINE] + "…"
+          data = Path(sys.argv[1]).read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+          lines = strip_controls(data.decode("utf-8", "replace")).splitlines()
+          tail = lines[-TAIL_LINES:]
+          if len(lines) > TAIL_LINES:
+              print(f"（共 {len(lines)} 行，显示最后 {TAIL_LINES} 行）")
+          for line in tail:
+              print(cap(escape_workflow(redact(line))))
+          PY
+            fi
+            echo '::endgroup::'
+            # end-codex-stderr-tail
             exit "$rc"
           fi
 

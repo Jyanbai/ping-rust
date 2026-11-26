@@ -70,6 +70,46 @@ def step_script(name, workflow=WORKFLOW):
         body.append(line)
     return textwrap.dedent("\n".join(body)) + "\n"
 
+PLAN_WORKFLOW = ROOT / ".github/workflows/codex-plan.yml"
+DISPATCH_WORKFLOW = ROOT / ".github/workflows/codex-dispatch.yml"
+OLD_REVIEW_FAILURE = textwrap.dedent("""\
+    echo "codex exit code: $rc"
+    [ "$rc" -eq 0 ] || { echo '::error::Codex 审查失败，请检查登录状态或额度后手动重试'; exit "$rc"; }
+""")
+STDERR_JWT = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0In0.dGVzdHNpZ25hdHVyZQ"
+STDERR_EMAIL = "alice@example.com"
+STDERR_FIXTURE = textwrap.dedent(f"""\
+    stream disconnected
+    got sk-xxx and Bearer xxx for user {STDERR_EMAIL}
+    jwt {STDERR_JWT} and ghp_exampletoken
+    429 Too Many Requests
+""")
+STDERR_LEAKS = (
+    "sk-xxx", STDERR_EMAIL, STDERR_JWT, "ghp_exampletoken", "Bearer xxx",
+)
+
+
+def stderr_tail_script(workflow=WORKFLOW):
+    text = workflow.read_text(encoding="utf-8")
+    start = text.index("# begin-codex-stderr-tail")
+    end = text.index("\n            # end-codex-stderr-tail", start)
+    raw = text[text.rfind("\n", 0, start) + 1:end]
+    return textwrap.dedent(raw) + "\n"
+
+
+def artifact_blocks(workflow):
+    lines = workflow.read_text(encoding="utf-8").splitlines()
+    blocks = []
+    for index, line in enumerate(lines):
+        if "actions/upload-artifact@" in line:
+            block = []
+            for body in lines[index:index + 16]:
+                block.append(body)
+                if body.strip() and not body.startswith(" ") and index != lines.index(body):
+                    break
+            blocks.append("\n".join(block))
+    return blocks
+
 
 class WorkflowMigrationTest(unittest.TestCase):
     def test_codex_replaces_claude(self):
@@ -546,6 +586,107 @@ cp "$FAKE_CODEX_ARCHIVE" "$output"
         self.assertIn("人工", posted)
         self.assertIn(HEAD, posted)
         self.assertNotIn(secret, posted + result.stdout + result.stderr)
+
+    def test_old_review_failure_path_prints_nothing_from_stderr(self):
+        (self.work / "codex-stderr.log").write_text(STDERR_FIXTURE, encoding="utf-8")
+        result = subprocess.run(
+            ["bash", "-e", "-o", "pipefail", "-c", "rc=1\n" + OLD_REVIEW_FAILURE],
+            env=self.env, text=True, capture_output=True, check=False,
+        )
+        out = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Codex 审查失败", out)
+        self.assertNotIn("429 Too Many Requests", out)
+        self.assertNotIn("stream disconnected", out)
+
+    def run_stderr_tail(self, workflow=WORKFLOW, fixture=STDERR_FIXTURE):
+        (self.work / "codex-stderr.log").write_text(fixture, encoding="utf-8")
+        return subprocess.run(
+            ["bash", "-e", "-o", "pipefail", "-c", stderr_tail_script(workflow)],
+            env=self.env, text=True, capture_output=True, check=False,
+        )
+
+    def test_failed_review_prints_redacted_stderr_tail(self):
+        policy = self.work / "policy"
+        policy.mkdir()
+        (policy / "AGENTS.md").write_text((ROOT / "AGENTS.md").read_text(encoding="utf-8"), encoding="utf-8")
+        (self.work / "review-pr.json").write_text(json.dumps(PR), encoding="utf-8")
+        self.mock_command("git", "exit 0\n")
+        self.mock_command("codex", textwrap.dedent(f"""\
+            cat >/dev/null
+            printf '%s' {json.dumps(STDERR_FIXTURE)} >&2
+            exit 1
+        """))
+        result = subprocess.run(
+            ["bash", "-e", "-o", "pipefail", "-c", step_script("Run Codex review")],
+            cwd=self.work, env={**self.env, "CODEX_MODEL": "", "CODEX_REASONING_EFFORT": ""},
+            text=True, capture_output=True, check=False,
+        )
+        out = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0, out)
+        self.assertIn("::error::Codex 审查失败", out)
+        self.assertIn("::group::Codex 标准错误（脱敏，最后 30 行）", out)
+        self.assertIn("::endgroup::", out)
+        self.assertIn("stream disconnected", out)
+        self.assertIn("429 Too Many Requests", out)
+        for secret in STDERR_LEAKS:
+            self.assertNotIn(secret, out)
+        self.assertIn("[redacted-token]", out)
+        self.assertIn("[redacted-email]", out)
+        self.assertIn("[redacted-jwt]", out)
+
+    def test_stderr_tail_redacts_secrets_and_preserves_plain_errors(self):
+        result = self.run_stderr_tail()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        out = result.stdout
+        self.assertIn("stream disconnected", out)
+        self.assertIn("429 Too Many Requests", out)
+        for secret in STDERR_LEAKS:
+            self.assertNotIn(secret, out)
+
+    def test_stderr_tail_strips_ansi_escapes_commands_and_long_lines(self):
+        long_plain = "error detail: " + ("failed again " * 30)
+        (self.work / "codex-stderr.log").write_bytes(
+            b"\x1b[31m429 Too Many Requests\x1b[0m\n"
+            b"::add-mask::sk-xxx should not stay a command\n"
+            + long_plain.encode() + b"\n"
+        )
+        result = subprocess.run(
+            ["bash", "-e", "-o", "pipefail", "-c", stderr_tail_script()],
+            env=self.env, text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        out = result.stdout
+        self.assertIn("429 Too Many Requests", out)
+        self.assertNotIn("\x1b", out)
+        self.assertNotIn("sk-xxx", out)
+        self.assertNotIn("::add-mask::", out)
+        self.assertIn("∶∶add-mask∶∶[redacted-token] should not stay a command", out)
+        capped = [line for line in out.splitlines() if line.endswith("…")]
+        self.assertEqual(capped, [long_plain[:240] + "…"])
+
+    def test_stderr_tail_blocks_match_across_codex_workflows(self):
+        blocks = [stderr_tail_script(item) for item in (WORKFLOW, PLAN_WORKFLOW, DISPATCH_WORKFLOW)]
+        self.assertEqual(blocks[0], blocks[1])
+        self.assertEqual(blocks[0], blocks[2])
+        dispatch = DISPATCH_WORKFLOW.read_text(encoding="utf-8")
+        self.assertNotIn('tail -n 20 "$RUNNER_TEMP/codex-stderr.log"', dispatch)
+        self.assertIn("# begin-codex-stderr-tail", PLAN_WORKFLOW.read_text(encoding="utf-8"))
+
+    def test_stderr_log_is_not_uploaded_as_artifact(self):
+        for workflow in (WORKFLOW, PLAN_WORKFLOW, DISPATCH_WORKFLOW):
+            with self.subTest(workflow=workflow.name):
+                for block in artifact_blocks(workflow):
+                    self.assertNotIn("codex-stderr.log", block)
+                    self.assertNotIn("codex-events.jsonl", block)
+        review_blocks = artifact_blocks(WORKFLOW)
+        self.assertEqual(len(review_blocks), 1)
+        self.assertIn("review-attestation.json", review_blocks[0])
+        self.assertEqual(artifact_blocks(PLAN_WORKFLOW), [])
+        dispatch_blocks = artifact_blocks(DISPATCH_WORKFLOW)
+        self.assertEqual(len(dispatch_blocks), 1)
+        self.assertIn("codex-result", dispatch_blocks[0])
+        self.assertNotIn("codex-stderr.log", DISPATCH_WORKFLOW.read_text(encoding="utf-8").split("Upload result")[1].split("Self-check")[0])
 
 
 if __name__ == "__main__":
