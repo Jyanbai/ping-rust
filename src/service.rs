@@ -729,7 +729,11 @@ async fn detect_shoes_service_hook(state_path: &Path) -> Option<ShoesServiceHook
                 && !command.ignore_ordering
                 && matches!(
                     command.verb,
-                    b"start" | b"restart" | b"try-restart" | b"reload-or-restart"
+                    b"start"
+                        | b"restart"
+                        | b"try-restart"
+                        | b"reload-or-restart"
+                        | b"try-reload-or-restart"
                 )
             {
                 delegated_starts.extend(command.units.into_iter().filter_map(|name| {
@@ -969,7 +973,13 @@ impl<'a> BlockingSystemctl<'a> {
                 units.push(arg);
             } else if matches!(
                 arg,
-                b"start" | b"restart" | b"try-restart" | b"reload" | b"reload-or-restart" | b"stop"
+                b"start"
+                    | b"restart"
+                    | b"try-restart"
+                    | b"reload"
+                    | b"reload-or-restart"
+                    | b"try-reload-or-restart"
+                    | b"stop"
             ) {
                 verb = Some(arg);
             } else {
@@ -1480,6 +1490,7 @@ mod tests {
             "systemctl\0--quiet\0try-restart\0helper.service\0",
             "systemctl\0--quiet\0reload\0helper.service\0",
             "systemctl\0--quiet\0reload-or-restart\0helper.service\0",
+            "systemctl\0--quiet\0try-reload-or-restart\0helper.service\0",
             "systemctl\0stop\0helper.service\0",
             "systemctl\0--quiet\0stop\0--\0helper\0",
         ] {
@@ -1507,6 +1518,8 @@ mod tests {
             "systemctl\0reload\0other.service\0",
             "systemctl\0--no-block\0reload-or-restart\0helper.service\0",
             "systemctl\0reload-or-restart\0other.service\0",
+            "systemctl\0--no-block\0try-reload-or-restart\0helper.service\0",
+            "systemctl\0try-reload-or-restart\0other.service\0",
             "systemctl\0stop\0helper.service\0--no-block\0",
             "systemctl\0--user\0stop\0helper.service\0",
             "systemctl\0stop\0other.service\0",

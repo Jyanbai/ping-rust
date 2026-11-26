@@ -92,8 +92,12 @@ pub(crate) fn lock_state_for_file_export(state_path: &Path) -> Result<fs::File> 
 }
 
 pub(crate) fn load_for_plan(state_path: &Path) -> Result<ManagedState> {
+    load_plan_state(state_path).map(|(state, _)| state)
+}
+
+fn load_plan_state(state_path: &Path) -> Result<(ManagedState, String)> {
     require_finished(state_path)?;
-    load_state_file(state_path).map_err(|_| {
+    load_state_file_snapshot(state_path).map_err(|_| {
         anyhow::anyhow!("无法读取 SOCKS5 管理状态，请检查 ping-rust-state.json 和 config.yaml")
     })
 }
@@ -227,8 +231,11 @@ fn read_pending_hook_state(
         ShoesServiceHook::Stop(invocation) => {
             let invocation = invocation.context("无法确认停止钩子对应的 shoes.service 实例")?;
             match stop.view {
-                StopView::Activating { original } => invocation != original,
-                StopView::RollingBack { candidate } => candidate == Some(invocation),
+                // 同一实例可能已热重载磁盘上的候选配置。
+                StopView::Activating { .. } => true,
+                StopView::RollingBack { candidate } => {
+                    !stop.config_restored || candidate == Some(invocation)
+                }
                 StopView::Unavailable => bail!("无法确认停止钩子对应的 shoes.service 实例"),
             }
         }
@@ -276,6 +283,7 @@ pub(crate) struct SecurePlan {
     directory: PathBuf,
     servers: Vec<ServerConfig>,
     original_yaml: String,
+    original_state_json: String,
     candidate_yaml: String,
     documents: BTreeMap<String, Vec<u8>>,
     state: ManagedState,
@@ -458,8 +466,8 @@ impl SecurePlan {
     fn load_checked(
         directory: &Path,
         id: Uuid,
-    ) -> Result<(ManagedState, Vec<ServerConfig>, usize, String)> {
-        let state = load_for_plan(&directory.join("ping-rust-state.json"))?;
+    ) -> Result<(ManagedState, Vec<ServerConfig>, usize, String, String)> {
+        let (state, json) = load_plan_state(&directory.join("ping-rust-state.json"))?;
         let index = state
             .profiles
             .iter()
@@ -555,7 +563,7 @@ impl SecurePlan {
                 );
             }
         }
-        Ok((state, servers, index, yaml))
+        Ok((state, servers, index, yaml, json))
     }
 
     pub(crate) fn already_secure(directory: &Path, id: Uuid) -> Result<bool> {
@@ -563,13 +571,13 @@ impl SecurePlan {
     }
 
     pub(crate) fn secure_profile(directory: &Path, id: Uuid) -> Result<Option<ManagedProfile>> {
-        let (state, _, index, _) = Self::load_checked(directory, id)?;
+        let (state, _, index, _, _) = Self::load_checked(directory, id)?;
         let profile = state.profiles.into_iter().nth(index).unwrap();
         Ok(profile.socks5_risk_warning().is_none().then_some(profile))
     }
 
     pub(crate) fn prepare(directory: &Path, id: Uuid, mode: SecureMode) -> Result<Option<Self>> {
-        let (mut state, mut servers, index, yaml) = Self::load_checked(directory, id)?;
+        let (mut state, mut servers, index, yaml, json) = Self::load_checked(directory, id)?;
         let original = state.profiles[index].clone();
         if original.socks5_risk_warning().is_none() {
             return Ok(None);
@@ -629,6 +637,7 @@ impl SecurePlan {
             directory: directory.to_path_buf(),
             servers,
             original_yaml: yaml,
+            original_state_json: json,
             candidate_yaml,
             documents,
             state,
@@ -744,10 +753,14 @@ impl SecurePlan {
         if original_config.contents != self.original_yaml.as_bytes() {
             bail!("加固预检期间聚合配置已变更，请检查 config.yaml 后重试");
         }
+        let original_state_snapshot =
+            FileSnapshot::capture(&state, &original_state_file).context("无法备份原管理状态")?;
+        if original_state_snapshot.contents != self.original_state_json.as_bytes() {
+            bail!("加固预检期间管理状态已变更，请检查 ping-rust-state.json 后重试");
+        }
         let rollback = SecureRollback {
             config: original_config,
-            state: FileSnapshot::capture(&state, &original_state_file)
-                .context("无法备份原管理状态")?,
+            state: original_state_snapshot,
             profiles: ProfileDirectorySnapshot::capture(&profiles)?,
         };
         let original_state = if socks5::listen_migration_pending(&state)? {
@@ -913,9 +926,7 @@ impl SecurePlan {
 
     pub(crate) fn capture_rollback_stop(&self, invocation: Result<Option<Uuid>>) -> Result<()> {
         let view = match invocation {
-            Ok(current) => StopView::RollingBack {
-                candidate: current.filter(|id| Some(*id) != self.original_invocation),
-            },
+            Ok(candidate) => StopView::RollingBack { candidate },
             Err(_) => StopView::Unavailable,
         };
         self.write_pending_stop(view)

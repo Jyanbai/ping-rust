@@ -13,6 +13,12 @@ EXPECT_SCRIPT="${EXPECT_SCRIPT:-/workspace/tests/chain_menu.exp}"
 export NO_COLOR=1 TERM=dumb
 mkdir -p "$WORK/new" "$WORK/old" "$WORK/dl"
 
+# Fixture restarts must leave each scenario independent of the previous starts.
+# Rate-limit scenarios exercise the real hardening and rollback commands.
+restart_fixture_shoes() {
+  systemctl reset-failed shoes.service && systemctl restart shoes.service
+}
+
 echo "== install pinned shoes via new build"
 "$NEW" install --method release
 
@@ -295,7 +301,7 @@ for path in [directory / 'config.yaml', directory / 'profiles/SOCKS5-24436.yaml'
     path.write_bytes(contents)
 PY
 legacy_socks5_id="$(jq -er '.profiles[] | select(.name == "compat-socks5-legacy") | .id' /etc/shoes/ping-rust-state.json)"
-systemctl restart shoes.service
+restart_fixture_shoes
 for _ in {1..50}; do
   if ss -H -ltn 'sport = :24436' | grep -F '0.0.0.0:24436' >/dev/null; then break; fi
   sleep 0.1
@@ -341,7 +347,7 @@ SH
   scenario="$(mktemp -d /usr/local/lib/socks5-listener-drift.XXXXXX)"
   dropin=/etc/systemd/system/shoes.service.d/90-compat-socks5-listener.conf
   mkdir -p "${dropin%/*}"
-  trap 'rm -f "$dropin"; systemctl daemon-reload; systemctl restart shoes.service; rm -rf "$scenario"' EXIT
+  trap 'rm -f "$dropin"; systemctl daemon-reload; restart_fixture_shoes; rm -rf "$scenario"' EXIT
   sed 's/0\.0\.0\.0:24436/127.0.0.1:24436/' /etc/shoes/config.yaml >"$scenario/config.yaml"
   chmod 0600 "$scenario/config.yaml"
   cat >"$dropin" <<EOF
@@ -350,7 +356,7 @@ ExecStart=
 ExecStart=/usr/local/bin/shoes $scenario/config.yaml
 EOF
   systemctl daemon-reload
-  systemctl restart shoes.service
+  restart_fixture_shoes
   for _ in {1..50}; do
     if ss -H -ltn 'sport = :24436' | grep -Fq '127.0.0.1:24436'; then break; fi
     sleep 0.1
@@ -381,7 +387,7 @@ check_other_reality_drift() (
   kind="$1"
   scenario="$(mktemp -d /usr/local/lib/socks5-other-reality.XXXXXX)"
   dropin=/etc/systemd/system/shoes.service.d/90-compat-socks5-other-reality.conf
-  trap 'rm -f "$dropin"; systemctl daemon-reload; systemctl restart shoes.service; rm -rf "$scenario"' EXIT
+  trap 'rm -f "$dropin"; systemctl daemon-reload; restart_fixture_shoes; rm -rf "$scenario"' EXIT
   umask 077
   reality_port=24431
   if [[ "$kind" == port ]]; then reality_port=24437; fi
@@ -410,7 +416,7 @@ ExecStart=
 ExecStart=/usr/local/bin/shoes $scenario/config.yaml
 EOF
   systemctl daemon-reload
-  systemctl restart shoes.service
+  restart_fixture_shoes
   # The target is loaded after the drifted Reality listener.
   for _ in {1..50}; do
     if ss -H -ltn "sport = :$reality_port" | grep -Fq "0.0.0.0:$reality_port" &&
@@ -453,7 +459,7 @@ echo 'SOCKS5 auth: reject a different Reality UUID on the same running listener:
   scenario="$(mktemp -d /usr/local/lib/socks5-reality-uuid.XXXXXX)"
   umask 077
   cp -a /etc/shoes "$scenario/original"
-  trap 'cp -a "$scenario/original/." /etc/shoes/; systemctl restart shoes.service; rm -rf "$scenario"' EXIT
+  trap 'cp -a "$scenario/original/." /etc/shoes/; restart_fixture_shoes; rm -rf "$scenario"' EXIT
   for _ in {1..50}; do
     if ss -H -ltn 'sport = :24436' | grep -Fq '0.0.0.0:24436'; then break; fi
     sleep 0.1
@@ -500,7 +506,7 @@ echo 'SOCKS5 auth: reject Reality UUID drift in the managed file without restart
   scenario="$(mktemp -d /usr/local/lib/socks5-reality-live-uuid.XXXXXX)"
   umask 077
   cp -a /etc/shoes "$scenario/original"
-  trap 'cp -a "$scenario/original/." /etc/shoes/; systemctl restart shoes.service; rm -rf "$scenario"' EXIT
+  trap 'cp -a "$scenario/original/." /etc/shoes/; restart_fixture_shoes; rm -rf "$scenario"' EXIT
   python3 - "$NEW" "$legacy_socks5_id" <<'PY'
 import json
 import mmap
@@ -520,6 +526,7 @@ def main_pid():
     ).strip()
 
 with config.open('r+b') as source, mmap.mmap(source.fileno(), 0) as mapped:
+    subprocess.run(['systemctl', 'reset-failed', 'shoes.service'], check=True)
     subprocess.run(['systemctl', 'restart', 'shoes.service'], check=True)
     for _ in range(50):
         listeners = subprocess.check_output(['ss', '-H', '-ltn'], text=True)
@@ -561,7 +568,7 @@ echo 'SOCKS5 auth: reject matching on-disk Reality UUID changes while the same r
   state=/etc/shoes/ping-rust-state.json
   umask 077
   cp -a "$config" "$state" "$scenario/"
-  trap 'rm -f "$config"; cp -a "$scenario/config.yaml" "$config"; cp -a "$scenario/ping-rust-state.json" "$state"; systemctl restart shoes.service; rm -rf "$scenario"' EXIT
+  trap 'rm -f "$config"; cp -a "$scenario/config.yaml" "$config"; cp -a "$scenario/ping-rust-state.json" "$state"; restart_fixture_shoes; rm -rf "$scenario"' EXIT
   python3 - "$scenario" <<'PY'
 import json
 from pathlib import Path
@@ -580,7 +587,7 @@ assert config.read_bytes().count(original) == state.count(original) == 1
 PY
   ln -sfn "$scenario/config.yaml" "$config"
   sleep 0.1
-  systemctl restart shoes.service
+  restart_fixture_shoes
   for _ in {1..50}; do
     if ss -H -ltn 'sport = :24436' | grep -Fq '0.0.0.0:24436'; then break; fi
     sleep 0.1
@@ -612,7 +619,7 @@ echo 'SOCKS5 auth: reject a configuration link switched to a pre-existing Realit
   scenario="$(mktemp -d /usr/local/lib/socks5-shadowsocks-password.XXXXXX)"
   umask 077
   cp -a /etc/shoes "$scenario/original"
-  trap 'rm -f /etc/shoes/profiles/SHADOWSOCKS-24438.yaml; cp -a "$scenario/original/." /etc/shoes/; systemctl restart shoes.service; rm -rf "$scenario"' EXIT
+  trap 'rm -f /etc/shoes/profiles/SHADOWSOCKS-24438.yaml; cp -a "$scenario/original/." /etc/shoes/; restart_fixture_shoes; rm -rf "$scenario"' EXIT
   "$NEW" add shadowsocks --port 24438 --name compat-shadowsocks --server-address "$SERVER" --yes >/dev/null
   for _ in {1..50}; do
     if ss -H -ltn 'sport = :24438' | grep -Fq '0.0.0.0:24438'; then break; fi
@@ -664,7 +671,7 @@ echo 'SOCKS5 auth: reject same-path native Shadowsocks password drift before res
   scenario="$(mktemp -d /usr/local/lib/socks5-snell-password.XXXXXX)"
   umask 077
   cp -a /etc/shoes "$scenario/original"
-  trap 'rm -f /etc/shoes/profiles/SNELL-24439.yaml; cp -a "$scenario/original/." /etc/shoes/; systemctl restart shoes.service; rm -rf "$scenario"' EXIT
+  trap 'rm -f /etc/shoes/profiles/SNELL-24439.yaml; cp -a "$scenario/original/." /etc/shoes/; restart_fixture_shoes; rm -rf "$scenario"' EXIT
   "$NEW" add snell --port 24439 --name compat-snell --server-address "$SERVER" --yes >/dev/null
   for _ in {1..50}; do
     if ss -H -ltn 'sport = :24439' | grep -Fq '0.0.0.0:24439'; then break; fi
@@ -716,7 +723,7 @@ echo 'SOCKS5 auth: reject Snell PSK drift before restart or writes: PASS'
   scenario="$(mktemp -d /usr/local/lib/socks5-auth-drift.XXXXXX)"
   dropin=/etc/systemd/system/shoes.service.d/90-compat-socks5-auth-drift.conf
   mkdir -p "${dropin%/*}"
-  trap 'rm -f "$dropin"; systemctl daemon-reload; systemctl restart shoes.service; rm -rf "$scenario"' EXIT
+  trap 'rm -f "$dropin"; systemctl daemon-reload; restart_fixture_shoes; rm -rf "$scenario"' EXIT
   python3 - /etc/shoes/config.yaml "$scenario/config.yaml" <<'PY'
 import os
 import sys
@@ -737,7 +744,7 @@ ExecStart=
 ExecStart=/usr/local/bin/shoes $scenario/config.yaml
 EOF
   systemctl daemon-reload
-  systemctl restart shoes.service
+  restart_fixture_shoes
   for _ in {1..50}; do
     if ss -H -ltn 'sport = :24436' | grep -Fq '0.0.0.0:24436'; then break; fi
     sleep 0.1
@@ -783,7 +790,7 @@ echo 'SOCKS5 local: reject authentication drift on the same listener before roll
 (
   scenario="$(mktemp -d /usr/local/lib/socks5-other-auth.XXXXXX)"
   dropin=/etc/systemd/system/shoes.service.d/90-compat-socks5-other-auth.conf
-  trap 'rm -f "$dropin"; systemctl daemon-reload; systemctl restart shoes.service; rm -rf "$scenario"' EXIT
+  trap 'rm -f "$dropin"; systemctl daemon-reload; restart_fixture_shoes; rm -rf "$scenario"' EXIT
   umask 077
   python3 - /etc/shoes/config.yaml "$scenario/config.yaml" <<'PY'
 import sys
@@ -805,7 +812,7 @@ ExecStart=
 ExecStart=/usr/local/bin/shoes $scenario/config.yaml
 EOF
   systemctl daemon-reload
-  systemctl restart shoes.service
+  restart_fixture_shoes
   for _ in {1..50}; do
     if ss -H -ltn 'sport = :24436' | grep -Fq '0.0.0.0:24436'; then break; fi
     sleep 0.1
@@ -851,7 +858,7 @@ echo 'SOCKS5 auth: reject password drift on another SOCKS5 listener: PASS'
   scenario="$(mktemp -d /usr/local/lib/socks5-udp-drift.XXXXXX)"
   dropin=/etc/systemd/system/shoes.service.d/90-compat-socks5-udp-drift.conf
   cp -a /etc/shoes "$scenario/original"
-  trap 'rm -f "$dropin"; cp -a "$scenario/original/." /etc/shoes/; systemctl daemon-reload; systemctl restart shoes.service; rm -rf "$scenario"' EXIT
+  trap 'rm -f "$dropin"; cp -a "$scenario/original/." /etc/shoes/; systemctl daemon-reload; restart_fixture_shoes; rm -rf "$scenario"' EXIT
   umask 077
   state=/etc/shoes/ping-rust-state.json
   jq '.profiles |= map(select(.port == 24432 or .port == 24436)) |
@@ -879,7 +886,7 @@ ExecStart=
 ExecStart=/usr/local/bin/shoes $scenario/live.yaml
 EOF
   systemctl daemon-reload
-  systemctl restart shoes.service
+  restart_fixture_shoes
   for _ in {1..50}; do
     if ss -H -ltn 'sport = :24436' | grep -Fq '0.0.0.0:24436'; then break; fi
     sleep 0.1
@@ -940,6 +947,7 @@ def require_udp_disabled(protocol):
         assert reply.read(4) == bytes([5, 7, 0, 1]), 'live UDP must still be disabled'
 
 with config.open('r+b') as file, mmap.mmap(file.fileno(), 0) as mapped:
+    subprocess.run(['systemctl', 'reset-failed', 'shoes.service'], check=True)
     subprocess.run(['systemctl', 'restart', 'shoes.service'], check=True)
     other, = (entry['protocol'] for entry in yaml.safe_load(mapped[:])
               if entry['address'] == '0.0.0.0:24432')
@@ -975,7 +983,7 @@ echo 'SOCKS5-only auth: reject same-path live UDP drift before restarting or wri
 (
   scenario="$(mktemp -d /usr/local/lib/socks5-next-start.XXXXXX)"
   dropin=/etc/systemd/system/shoes.service.d/90-compat-socks5-next-start.conf
-  trap 'rm -f "$dropin"; systemctl daemon-reload; systemctl restart shoes.service; rm -rf "$scenario"' EXIT
+  trap 'rm -f "$dropin"; systemctl daemon-reload; restart_fixture_shoes; rm -rf "$scenario"' EXIT
   umask 077
   sed 's/0\.0\.0\.0:24431/0.0.0.0:24437/' /etc/shoes/config.yaml >"$scenario/config.yaml"
   before_pid="$(systemctl show --property=MainPID --value shoes.service)"
@@ -1224,7 +1232,7 @@ PY
   mv -fT "$scenario/substitute" "$shoes"
   trap 'mv -fT "$scenario/shoes" "$shoes"; rm -rf "$scenario"' EXIT
   # A normal start while the substitute is installed must still run real shoes.
-  systemctl restart shoes.service
+  restart_fixture_shoes
   for _ in {1..50}; do
     if ss -H -ltn 'sport = :24436' | grep -Fq '0.0.0.0:24436'; then break; fi
     sleep 0.1
@@ -1714,9 +1722,18 @@ SH
 set -eu
 test -e /etc/shoes/.ping-rust-socks5-secure.pending || exit 0
 if [ ! -s "$3/notify-reads" ]; then
-  "$1" url "$2" --server-address example.com >"$3/stop-url"
-  cmp -s "$3/stop-expected-url" "$3/stop-url"
-  "$1" export sing-box --profile "$2" --server example.com --output "$3/stop-client.json" >/dev/null
+  if "$1" url "$2" --server-address example.com >"$3/stop-url" 2>"$3/stop-url-error"; then
+    exit 1
+  fi
+  grep -Fq '请在加固结束后重试读取' "$3/stop-url-error"
+  test ! -s "$3/stop-url"
+  if "$1" export sing-box --profile "$2" --server example.com --output "$3/stop-client.json" \
+      >/dev/null 2>"$3/stop-export-error"; then
+    exit 1
+  fi
+  grep -Fq '请在 SOCKS5 加固结束后重试文件导出' "$3/stop-export-error"
+  test ! -e "$3/stop-client.json"
+  touch "$3/stop-original-checked"
 else
   "$1" url "$4" >"$3/stop-other-url"
   cmp -s "$3/stop-other-expected-url" "$3/stop-other-url"
@@ -1774,8 +1791,6 @@ EOF
   before_pid="$(systemctl show --property=MainPID --value shoes.service)"
   "$NEW" url "$legacy_socks5_id" --server-address example.com >"$scenario/stop-expected-url"
   "$NEW" url "${ids[1]}" >"$scenario/stop-other-expected-url"
-  "$NEW" export sing-box --profile "$legacy_socks5_id" --server example.com \
-    --output "$scenario/stop-expected-client.json" >/dev/null
   : >"$scenario/notify-reads"
   find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/before"
   if PATH="$scenario:$PATH" SOCKS5_ROLLBACK="$scenario" \
@@ -1785,8 +1800,9 @@ EOF
     exit 1
   fi
   test -f "$scenario/firewall-reached"
-  cmp -s "$scenario/stop-expected-url" "$scenario/stop-url"
-  cmp -s "$scenario/stop-expected-client.json" "$scenario/stop-client.json"
+  test -f "$scenario/stop-original-checked"
+  test ! -s "$scenario/stop-url"
+  test ! -e "$scenario/stop-client.json"
   test "$(cat "$scenario/delegated-stop-reads")" = $'ok\nok'
   test -f "$scenario/stop-candidate-checked"
   test "$(cat "$scenario/notify-reads")" = $'deferred\noriginal'
@@ -1798,7 +1814,7 @@ EOF
   diff -u "$scenario/before" "$scenario/after"
 )
 echo 'SOCKS5 rollback: Type=notify reads before READY=1 and restarts with StartLimitBurst=1: PASS'
-echo 'SOCKS5 local: ExecStop exports the original public URL before the candidate starts: PASS'
+echo 'SOCKS5 local: ExecStop defers the changed profile after the candidate reaches disk: PASS'
 echo 'SOCKS5 rollback: candidate ExecStop defers the changed URL, QR, info and file export: PASS'
 echo 'SOCKS5 rollback: ExecStop synchronously stops a root unit that exports unchanged state: PASS'
 
@@ -1820,7 +1836,7 @@ echo 'SOCKS5 rollback: ExecStop synchronously stops a root unit that exports unc
   cp -p "$config" "$scenario/original-config"
   cp -p "$state" "$scenario/original-state"
   cp -p "$readable_profile" "$scenario/original-profile"
-  trap 'rm -f "$dropin" "$delegated"; cp -p "$scenario/original-state" "$state"; chown --reference="$scenario/original-config" "$config"; chmod "$original_directory_mode" /etc/shoes; chown "$original_profiles_owner" "$profiles"; chmod "$original_profiles_mode" "$profiles"; cp -p "$scenario/original-profile" "$readable_profile"; "$systemctl_bin" daemon-reload; "$systemctl_bin" restart shoes.service; rm -rf "$scenario"' EXIT
+  trap 'rm -f "$dropin" "$delegated"; cp -p "$scenario/original-state" "$state"; chown --reference="$scenario/original-config" "$config"; chmod "$original_directory_mode" /etc/shoes; chown "$original_profiles_owner" "$profiles"; chmod "$original_profiles_mode" "$profiles"; cp -p "$scenario/original-profile" "$readable_profile"; "$systemctl_bin" daemon-reload; restart_fixture_shoes; rm -rf "$scenario"' EXIT
   mkdir -p "${dropin%/*}"
   chmod 0711 /etc/shoes
   chmod 0711 "$scenario"
@@ -1916,7 +1932,7 @@ exec "$SOCKS5_SYSTEMCTL" "$@"
 SH
   chmod 0755 "$scenario/systemctl"
   "$systemctl_bin" daemon-reload
-  "$systemctl_bin" restart shoes.service
+  restart_fixture_shoes
   before_pid="$("$systemctl_bin" show --property=MainPID --value shoes.service)"
   test "$(stat -c %a:%U:%G "$config")" = '600:nobody:nogroup'
   cmp -s "$scenario/exports/unchanged.json" "$scenario/unchanged-expected.json"
@@ -2019,7 +2035,7 @@ ExecStartPre=/usr/bin/test -r $readable_profile
 ExecStartPost=$scenario/start-reader $NEW $legacy_socks5_id ${ids[1]} $scenario/exports/client.json
 EOF
   "$systemctl_bin" daemon-reload
-  "$systemctl_bin" restart shoes.service
+  restart_fixture_shoes
   mv "$scenario/exports/client.json" "$scenario/expected.json"
   if "$NEW" socks5 secure "$legacy_socks5_id" --auth --yes >"$scenario/acl-rollback" 2>&1; then
     echo 'Expected the hook requiring the original URL to reject the candidate' >&2
@@ -2090,7 +2106,7 @@ SH
   "$NEW" qr "${ids[1]}" >"$scenario/query-expected-qr"
   test "$(stat -c %a:%U:%G "$config")" = '600:root:root'
   "$systemctl_bin" daemon-reload
-  "$systemctl_bin" restart shoes.service
+  restart_fixture_shoes
   cmp -s "$scenario/delegated/unchanged.json" "$scenario/unchanged-expected.json"
   rm "$scenario/delegated/unchanged.json"
   if "$NEW" socks5 secure "$legacy_socks5_id" --auth --yes >"$scenario/state-only-rollback" 2>&1; then
@@ -2121,7 +2137,7 @@ echo 'SOCKS5 rollback: root startup hook can synchronously delegate an ACL-backe
   apt-get install -y --no-install-recommends iptables nftables
   scenario="$(mktemp -d /usr/local/lib/socks5-mixed-firewall.XXXXXX)"
   cp -a /etc/shoes "$scenario/original"
-  trap 'iptables-legacy -w -D INPUT -p tcp --dport 24436 -j DROP 2>/dev/null || true; iptables-legacy -w -D INPUT -d 127.0.0.1/32 -p tcp --dport 24436 -j ACCEPT 2>/dev/null || true; iptables-legacy -w -D INPUT -d 203.0.113.8/32 -p tcp --dport 24436 -j ACCEPT 2>/dev/null || true; iptables-legacy -w -D INPUT -p tcp --dport 24436 -j ACCEPT 2>/dev/null || true; iptables-legacy -w -D INPUT -p tcp --dport 24436 -m comment --comment "SOCKS5 compat" -j ACCEPT 2>/dev/null || true; iptables-legacy -w -D INPUT -p tcp --dport 24437 -j ACCEPT 2>/dev/null || true; nft delete table ip compat_socks5 2>/dev/null || true; cp -a "$scenario/original/." /etc/shoes/; systemctl restart shoes.service; rm -rf "$scenario"' EXIT
+  trap 'iptables-legacy -w -D INPUT -p tcp --dport 24436 -j DROP 2>/dev/null || true; iptables-legacy -w -D INPUT -d 127.0.0.1/32 -p tcp --dport 24436 -j ACCEPT 2>/dev/null || true; iptables-legacy -w -D INPUT -d 203.0.113.8/32 -p tcp --dport 24436 -j ACCEPT 2>/dev/null || true; iptables-legacy -w -D INPUT -p tcp --dport 24436 -j ACCEPT 2>/dev/null || true; iptables-legacy -w -D INPUT -p tcp --dport 24436 -m comment --comment "SOCKS5 compat" -j ACCEPT 2>/dev/null || true; iptables-legacy -w -D INPUT -p tcp --dport 24437 -j ACCEPT 2>/dev/null || true; nft delete table ip compat_socks5 2>/dev/null || true; cp -a "$scenario/original/." /etc/shoes/; restart_fixture_shoes; rm -rf "$scenario"' EXIT
   iptables-legacy -w -A INPUT -p tcp --dport 24436 -j ACCEPT
   iptables-legacy -w -A INPUT -p tcp --dport 24436 -m comment --comment "SOCKS5 compat" -j ACCEPT
   iptables-legacy -w -A INPUT -d 203.0.113.8/32 -p tcp --dport 24436 -j ACCEPT
@@ -2169,7 +2185,7 @@ echo 'SOCKS5 local: keep the loopback allow when other traffic on the port is de
   umask 077
   cp -a /etc/shoes "$scenario/original"
   enc_profile=/etc/shoes/profiles/VLESS-ENC-24440.yaml
-  trap 'rm -f "$dropin" "$enc_profile"; cp -a "$scenario/original/." /etc/shoes/; chmod --reference="$scenario/original" /etc/shoes; systemctl daemon-reload; systemctl restart shoes.service; rm -rf "$scenario"' EXIT
+  trap 'rm -f "$dropin" "$enc_profile"; cp -a "$scenario/original/." /etc/shoes/; chmod --reference="$scenario/original" /etc/shoes; systemctl daemon-reload; restart_fixture_shoes; rm -rf "$scenario"' EXIT
   chmod 0711 "$scenario"
   install -d -m 0700 -o nobody -g nogroup "$scenario/export"
   "$NEW" add vless-enc --port 24440 --name compat-menu-vless-enc --server-address "$SERVER" \
@@ -2210,7 +2226,7 @@ ExecStartPost=+$(command -v runuser) -u nobody -- $NEW export sing-box --profile
 EOF
   "$NEW" export sing-box --profile "${ids[1]}" --server example.com --output "$scenario/expected.json" >/dev/null
   systemctl daemon-reload
-  systemctl restart shoes.service
+  restart_fixture_shoes
   cmp -s "$scenario/expected.json" "$scenario/export/client.json"
   rm "$scenario/export/client.json"
   "$NEW" socks5 secure "$legacy_socks5_id" --auth --yes >"$scenario/result" 2>&1
@@ -2229,7 +2245,7 @@ EOF
   diff -u "$scenario/before-menu" "$scenario/after-menu"
   test "$(stat -c %a:%U:%G "$config")" = '640:root:nogroup'
   rm "$scenario/export/client.json"
-  systemctl restart shoes.service
+  restart_fixture_shoes
   systemctl is-active --quiet shoes.service
   cmp -s "$scenario/expected.json" "$scenario/export/client.json"
   test "$(stat -c %a:%U:%G "$state")" = '640:root:nogroup'
@@ -2254,8 +2270,49 @@ echo 'Backup restore: hardened aggregate and profile retain shoes extension fiel
   dropin=/etc/systemd/system/shoes.service.d/90-compat-socks5-start-export.conf
   stop_reader=/run/systemd/system/compat-socks5-ordered-stop-auth.service
   trap 'systemctl stop "${stop_reader##*/}" || true; rm -f "$dropin" "$stop_reader"; systemctl daemon-reload; rm -rf "$scenario"' EXIT
-  "$NEW" export sing-box --profile "$legacy_socks5_id" --server example.com \
-    --output "$scenario/stop-expected.json" >/dev/null
+  cat >"$scenario/stop-reader" <<'SH'
+#!/bin/sh
+set -eu
+test -e /etc/shoes/.ping-rust-socks5-secure.pending || exit 0
+test -f "$2/reloaded"
+if "$1" url "$3" >"$2/stop-url" 2>"$2/stop-url-error"; then exit 1; fi
+grep -Fq '请在加固结束后重试读取' "$2/stop-url-error"
+test ! -s "$2/stop-url"
+if "$1" export sing-box --profile "$3" --server example.com \
+  --output "$2/stop-client.json" >/dev/null 2>"$2/stop-export-error"; then exit 1; fi
+grep -Fq '请在 SOCKS5 加固结束后重试文件导出' "$2/stop-export-error"
+test ! -e "$2/stop-client.json"
+"$1" export sing-box --profile "$4" --server example.com --output "$2/stop-unchanged.json" >/dev/null
+touch "$2/stop-deferred"
+SH
+  cat >"$scenario/systemctl" <<'SH'
+#!/bin/sh
+set -eu
+if [ "$1" = restart ] && [ ! -e "$SOCKS5_RELOAD_SCENARIO/reloaded" ]; then
+  # Wait for the old process to read the candidate before issuing the restart job.
+  python3 - <<'PY'
+import socket
+import time
+
+deadline = time.monotonic() + 12
+while time.monotonic() < deadline:
+    try:
+        with socket.create_connection(('127.0.0.1', 24436), timeout=0.5) as sock:
+            sock.sendall(bytes([5, 1, 2]))
+            if sock.makefile('rb').read(2) == bytes([5, 2]):
+                break
+    except OSError:
+        pass
+    time.sleep(0.1)
+else:
+    raise SystemExit('The original shoes invocation did not reload SOCKS5 authentication')
+PY
+  test "$("$SOCKS5_SYSTEMCTL" show --property=InvocationID --value shoes.service)" = "$SOCKS5_ORIGINAL_INVOCATION"
+  touch "$SOCKS5_RELOAD_SCENARIO/reloaded"
+fi
+exec "$SOCKS5_SYSTEMCTL" "$@"
+SH
+  chmod 0755 "$scenario/stop-reader" "$scenario/systemctl"
   cat >"$stop_reader" <<EOF
 [Unit]
 After=shoes.service
@@ -2265,7 +2322,7 @@ Type=oneshot
 RemainAfterExit=yes
 TimeoutStopSec=5s
 ExecStart=/bin/true
-ExecStop=$NEW export sing-box --profile $legacy_socks5_id --server example.com --output $scenario/stop-client.json
+ExecStop=$scenario/stop-reader $NEW $scenario $legacy_socks5_id ${ids[1]}
 EOF
   cat >"$scenario/start-reader" <<'SH'
 #!/bin/sh
@@ -2307,7 +2364,9 @@ EOF
   "$NEW" export sing-box --profile "${ids[1]}" --server example.com \
     --output "$scenario/unchanged-expected.json" >/dev/null
   # Delegate state access before hardening, while keeping the writer lock private.
-  python3 - "$NEW" "$legacy_socks5_id" "$WORK/socks5-start-export.txt" <<'PY'
+  SOCKS5_RELOAD_SCENARIO="$scenario" SOCKS5_SYSTEMCTL="$(command -v systemctl)" \
+    SOCKS5_ORIGINAL_INVOCATION="$(systemctl show --property=InvocationID --value shoes.service)" \
+    python3 - "$NEW" "$legacy_socks5_id" "$WORK/socks5-start-export.txt" <<'PY'
 import errno
 import fcntl
 import json
@@ -2404,9 +2463,11 @@ if {[lindex [wait] 3] != 0} { exit 1 }
     os.setxattr(state, acl_name, acl, os.XATTR_CREATE)
     try:
         os.chmod(directory, 0o711)
+        secure_env = {**os.environ, 'PATH': os.pathsep.join(
+            (os.environ['SOCKS5_RELOAD_SCENARIO'], os.environ['PATH']))}
         with open(secure_log, 'wb') as log:
             subprocess.run([binary, 'socks5', 'secure', 'compat-socks5-legacy', '--auth', '--yes'],
-                           stdout=log, stderr=subprocess.STDOUT, check=True)
+                           stdout=log, stderr=subprocess.STDOUT, check=True, env=secure_env)
         assert os.getxattr(state, acl_name) == acl
         for command in [['info', profile], ['url', profile], ['qr', profile], export]:
             result = as_reader(command)
@@ -2440,7 +2501,11 @@ if {[lindex [wait] 3] != 0} { exit 1 }
 PY
   echo 'SOCKS5 readers: delegated state ACL survives hardening with a private lock and respects a pending transaction: PASS'
   systemctl is-active --quiet shoes.service
-  cmp -s "$scenario/stop-expected.json" "$scenario/stop-client.json"
+  test -f "$scenario/reloaded"
+  test -f "$scenario/stop-deferred"
+  test ! -s "$scenario/stop-url"
+  test ! -e "$scenario/stop-client.json"
+  cmp -s "$scenario/stop-unchanged.json" "$scenario/unchanged-expected.json"
   cmp -s "$scenario/unchanged-client.json" "$scenario/unchanged-expected.json"
   test -f "$scenario/deferred-export"
   test ! -e "$scenario/client.json"
@@ -2450,7 +2515,7 @@ PY
   "$OLD" url "$legacy_socks5_id" >"$scenario/v0.2.1-url"
   cmp -s "$scenario/v0.2.1-url" "$scenario/expected-url"
   # Once the state is published, a normal restart lets the same hook write it.
-  systemctl restart shoes.service
+  restart_fixture_shoes
   systemctl is-active --quiet shoes.service
   cmp -s "$scenario/url" "$scenario/expected-url"
   jq -e '[.outbounds[] | select(.type == "socks")] | length == 1 and
@@ -2458,7 +2523,7 @@ PY
   cmp -s "$scenario/client.json" "$scenario/expected.json"
 )
 echo 'SOCKS5 authentication: clean-environment ExecStartPost info, URL and export agree with published credentials: PASS'
-echo 'SOCKS5 auth: ordered ExecStop exports the original state before the shoes restart: PASS'
+echo 'SOCKS5 auth: ordered ExecStop defers changed exports after the original invocation reloads: PASS'
 
 # Backup restore holds the writer lock across restart. Its startup hook waits
 # for a root unit started by alias to export the restored state, then restarts
@@ -2522,6 +2587,8 @@ RemainAfterExit=yes
 TimeoutStartSec=5s
 ExecStart=/bin/true
 ExecReload=$NEW export sing-box --profile $legacy_socks5_id --server example.com --output $scenario/reload-client.json
+ExecReload=/usr/bin/cmp -s $scenario/expected.json $scenario/reload-client.json
+ExecReload=/bin/sh -c 'echo ok >>$scenario/reload-runs'
 EOF
   cat >"$nested" <<EOF
 [Service]
@@ -2562,6 +2629,7 @@ ExecStartPre=$systemctl_bin --quiet restart ${helper##*/}
 ExecStartPre=$systemctl_bin --quiet try-restart ${helper##*/}
 ExecStartPre=$systemctl_bin --quiet reload-or-restart ${helper##*/}
 ExecStartPre=$systemctl_bin --quiet reload ${reload_helper##*/}
+ExecStartPre=$systemctl_bin --quiet try-reload-or-restart ${reload_helper##*/}
 ExecStartPre=$systemctl_bin --quiet start ${delegated##*/}
 EOF
   "$systemctl_bin" daemon-reload
@@ -2571,6 +2639,7 @@ EOF
   test ! -e "$pending"
   cmp -s "$scenario/expected.json" "$scenario/client.json"
   cmp -s "$scenario/expected.json" "$scenario/reload-client.json"
+  test "$(grep -cx ok "$scenario/reload-runs")" -eq 2
   cmp -s "$scenario/expected.json" "$scenario/nested-client.json"
   cmp -s "$scenario/expected.json" "$scenario/delegated-client.json"
   cmp -s "$scenario/expected.json" "$scenario/stop-client.json"
@@ -2578,7 +2647,7 @@ EOF
   "$systemctl_bin" is-active --quiet shoes.service
 )
 echo 'Backup: refuse an unfinished SOCKS5 transaction and recover from the previous archive: PASS'
-echo 'Backup restore: synchronous alias start, restart, try-restart, reload-or-restart and ExecReload helpers can export restored state: PASS'
+echo 'Backup restore: synchronous start, restart and reload variants can export restored state: PASS'
 echo 'Backup restore: a two-level ordered startup dependency can export restored state: PASS'
 echo 'Backup restore: a synchronous startup hook waits for a helper whose ordered dependency exports restored state: PASS'
 echo 'Backup restore: ordered ExecStop can export restored state before shoes restarts: PASS'

@@ -1615,6 +1615,47 @@ fn socks5_secure_info_url_qr_and_file_export_wait_for_publish_or_rollback() {
 }
 
 #[cfg(unix)]
+#[test]
+fn socks5_secure_stop_defers_changed_exports_for_the_original_invocation() {
+    use super::socks5_secure::{read_client_export_state, read_export_state};
+    use crate::service::ShoesServiceHook;
+
+    let directory = tempfile::tempdir().unwrap();
+    let profile = legacy(directory.path());
+    let state_path = directory.path().join("ping-rust-state.json");
+    let invocation = Uuid::new_v4();
+    let hook = Some(ShoesServiceHook::Stop(Some(invocation)));
+    let mut plan = SecurePlan::prepare(directory.path(), profile.id, SecureMode::Auth)
+        .unwrap()
+        .unwrap();
+    plan.original_invocation = Some(invocation);
+    plan.commit_files().unwrap();
+
+    let assert_deferred = || {
+        let error = read_export_state(&state_path, hook, Some(&profile.name))
+            .err()
+            .expect("停止钩子可能已加载候选配置，应暂缓读取");
+        assert!(error.to_string().contains("请在加固结束后重试读取"));
+        let error = read_client_export_state(&state_path, hook, Some(profile.id))
+            .err()
+            .expect("停止钩子可能已加载候选配置，应暂缓文件导出");
+        assert!(error
+            .to_string()
+            .contains("请在 SOCKS5 加固结束后重试文件导出"));
+    };
+    assert_deferred();
+
+    // 停止作业失败时，即使已经恢复文件，原实例仍可能在使用候选配置。
+    plan.capture_rollback_stop(Ok(Some(invocation))).unwrap();
+    plan.rollback_files().unwrap();
+    plan.mark_config_restored().unwrap();
+    assert_deferred();
+    let restored = read_export_state(&state_path, Some(ShoesServiceHook::Start), None).unwrap();
+    assert!(restored.profiles[0].socks5_risk_warning().is_some());
+    plan.finish_pending().unwrap();
+}
+
+#[cfg(unix)]
 #[tokio::test]
 async fn socks5_secure_sigkill_after_commit_refuses_retry_and_stale_exports() {
     use crate::service::ShoesServiceHook;
@@ -1890,6 +1931,12 @@ impl crate::socks5_secure::Runtime for InterruptedRuntime<'_> {
             servers[1]["protocol"]["encryption_limits"]["max_sessions"] = 128.into();
             fs::write(path, crate::yaml::to_string(&servers)?)?;
         }
+        if self.stop_at == "state-drift" {
+            let path = self.directory.join("ping-rust-state.json");
+            let mut state = load_state_from(&path)?;
+            state.profiles[1].server_address = Some("updated.example.com".into());
+            save_state_to(&path, &state)?;
+        }
         Ok(None)
     }
 
@@ -2022,6 +2069,50 @@ async fn socks5_secure_rejects_config_changes_during_preflight() {
         fs::read_to_string(config_path).unwrap(),
         crate::yaml::to_string(expected.as_array().unwrap()).unwrap()
     );
+}
+
+#[tokio::test]
+async fn socks5_secure_rejects_state_changes_during_preflight() {
+    let directory = tempfile::tempdir().unwrap();
+    let target = legacy(directory.path());
+    let config_path = directory.path().join("config.yaml");
+    let state_path = directory.path().join("ping-rust-state.json");
+    let mut state = load_state_from(&state_path).unwrap();
+    let mut servers = load_servers(&config_path).unwrap();
+    let (server, other) = vless_encryption_tests::sample(false);
+    servers.push(server);
+    state.profiles.push(other);
+    save_state_to(&state_path, &state).unwrap();
+    let original_config = crate::yaml::to_string(&servers).unwrap();
+    fs::write(&config_path, &original_config).unwrap();
+
+    let mut plan = SecurePlan::prepare(directory.path(), target.id, SecureMode::Auth)
+        .unwrap()
+        .unwrap();
+    let interrupt = crate::socks5_secure::Interrupt::default();
+    let mut runtime = InterruptedRuntime {
+        interrupt: &interrupt,
+        directory: directory.path(),
+        has_ss: true,
+        stop_at: "state-drift",
+        events: vec![],
+        service_active: true,
+    };
+    let error = crate::socks5_secure::apply(&mut plan, &mut runtime, &interrupt)
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("加固预检期间管理状态已变更"));
+    assert!(runtime.events.is_empty());
+    assert!(runtime.service_active);
+    assert_eq!(fs::read_to_string(config_path).unwrap(), original_config);
+    let current = load_state_from(&state_path).unwrap();
+    assert_eq!(
+        current.profiles[1].server_address.as_deref(),
+        Some("updated.example.com")
+    );
+    assert!(current.profiles[0].socks5_risk_warning().is_some());
+    assert!(!directory.path().join("profiles").exists());
+    assert!(!super::socks5_secure::pending_exists(&state_path).unwrap());
 }
 
 #[tokio::test]

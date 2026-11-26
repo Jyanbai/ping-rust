@@ -2737,6 +2737,10 @@ pub(crate) fn load_state_from(path: &Path) -> Result<ManagedState> {
 }
 
 fn load_state_file(path: &Path) -> Result<ManagedState> {
+    load_state_file_snapshot(path).map(|(state, _)| state)
+}
+
+fn load_state_file_snapshot(path: &Path) -> Result<(ManagedState, String)> {
     let json = fs::read_to_string(path)
         .with_context(|| format!("读取管理状态 {} 失败", path.display()))?;
     let mut state: ManagedState = serde_json::from_str(&json).context("管理状态 JSON 已损坏")?;
@@ -2775,7 +2779,7 @@ fn load_state_file(path: &Path) -> Result<ManagedState> {
             .validate_h2mux()
             .with_context(|| format!("配置 {} 的 H2MUX 状态无效", profile.name))?;
     }
-    Ok(state)
+    Ok((state, json))
 }
 
 fn save_state_to(path: &Path, state: &ManagedState) -> Result<()> {
