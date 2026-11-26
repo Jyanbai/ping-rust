@@ -103,6 +103,108 @@ fn socks5_secure_rejects_other_reality_credentials_drift() {
 }
 
 #[test]
+fn socks5_secure_preserves_other_shoes_fields() {
+    for mode in [SecureMode::Auth, SecureMode::Local] {
+        let directory = tempfile::tempdir().unwrap();
+        let target = legacy(directory.path());
+        let config = directory.path().join("config.yaml");
+        let state_path = directory.path().join("ping-rust-state.json");
+        let profiles = directory.path().join("profiles");
+        let mut state = load_state_from(&state_path).unwrap();
+        let mut servers: Vec<serde_json::Value> =
+            crate::yaml::from_slice(&fs::read(&config).unwrap()).unwrap();
+        let (server, other) = vless_encryption_tests::sample(false);
+        let mut server = crate::yaml::to_value(server).unwrap();
+        server["protocol"]["encryption_limits"] = serde_json::json!({"max_sessions": 128});
+        servers.push(server.clone());
+        state.profiles.push(other.clone());
+        fs::write(&config, crate::yaml::to_string(&servers).unwrap()).unwrap();
+        save_state_to(&state_path, &state).unwrap();
+
+        let other_path = profiles.join(other.config_file_name());
+        let other_yaml = crate::yaml::to_string(&server).unwrap();
+        if mode == SecureMode::Auth {
+            fs::create_dir(&profiles).unwrap();
+            fs::write(
+                &other_path,
+                format!("# Existing shoes profile\n{other_yaml}"),
+            )
+            .unwrap();
+        }
+        let existing = fs::read(&other_path).ok();
+
+        let mut plan = SecurePlan::prepare(directory.path(), target.id, mode)
+            .unwrap()
+            .unwrap();
+        plan.commit_files().unwrap();
+        plan.publish_state().unwrap();
+
+        let committed: Vec<serde_json::Value> =
+            crate::yaml::from_slice(&fs::read(&config).unwrap()).unwrap();
+        assert_eq!(committed[1], server);
+        assert_ne!(committed[0], servers[0]);
+        let document = fs::read(other_path).unwrap();
+        assert_eq!(
+            crate::yaml::from_slice::<serde_json::Value>(&document).unwrap(),
+            server
+        );
+        if let Some(existing) = existing {
+            assert_eq!(document, existing);
+        }
+    }
+}
+
+#[test]
+fn socks5_secure_rejects_native_shadowsocks_drift() {
+    let directory = tempfile::tempdir().unwrap();
+    let target = legacy(directory.path());
+    let config = directory.path().join("config.yaml");
+    let state_path = directory.path().join("ping-rust-state.json");
+    let mut request = tests::request(Protocol::Shadowsocks, config.clone());
+    request.port = 8443;
+    let generated = presets::generate(&request, directory.path(), Uuid::new_v4()).unwrap();
+    let mut other = target.clone();
+    other.id = Uuid::new_v4();
+    other.name = "fixture-shadowsocks".into();
+    other.port = request.port;
+    other.credentials = generated.credentials;
+    let mut state = load_state_from(&state_path).unwrap();
+    state.profiles.push(other);
+    save_state_to(&state_path, &state).unwrap();
+    let mut servers = load_servers(&config).unwrap();
+    servers.push(generated.server);
+    fs::write(&config, crate::yaml::to_string(&servers).unwrap()).unwrap();
+    assert!(SecurePlan::prepare(directory.path(), target.id, SecureMode::Auth).is_ok());
+
+    let other_password = STANDARD.encode([0; 32]);
+    for field in ["cipher", "password", "udp_enabled"] {
+        let mut candidate = servers.clone();
+        let ServerProtocol::Shadowsocks {
+            cipher,
+            password,
+            udp_enabled,
+        } = &mut candidate[1].protocol
+        else {
+            panic!("expected native Shadowsocks server");
+        };
+        match field {
+            "cipher" => *cipher = "aes-128-gcm".into(),
+            "password" => *password = other_password.clone(),
+            "udp_enabled" => *udp_enabled = !*udp_enabled,
+            _ => unreachable!(),
+        }
+        fs::write(&config, crate::yaml::to_string(&candidate).unwrap()).unwrap();
+        let error = SecurePlan::prepare(directory.path(), target.id, SecureMode::Auth)
+            .err()
+            .expect("must reject Shadowsocks drift");
+        assert!(error
+            .to_string()
+            .contains("端口 8443 的 Shadowsocks 配置与管理状态不一致"));
+        assert!(!error.to_string().contains(&other_password));
+    }
+}
+
+#[test]
 fn socks5_secure_preview_hides_original_public_ipv4_and_ipv6() {
     for (host, loopback) in [("203.0.113.8", "127.0.0.1"), ("[2001:db8::8]", "[::1]")] {
         let directory = tempfile::tempdir().unwrap();
@@ -314,7 +416,7 @@ fn socks5_secure_dry_run_hides_other_listeners_chain_exits_and_tls_targets() {
     let state_path = directory.path().join("ping-rust-state.json");
     let mut state = load_state_from(&state_path).unwrap();
     let mut servers = load_servers(&config_path).unwrap();
-    let (mut reality, reality_profile) = tests::reality_server_and_profile(53459);
+    let (mut reality, mut reality_profile) = tests::reality_server_and_profile(53459);
     let ServerProtocol::Tls {
         reality_targets,
         tls_targets,
@@ -325,7 +427,11 @@ fn socks5_secure_dry_run_hides_other_listeners_chain_exits_and_tls_targets() {
     };
     let (_, mut target) = reality_targets.pop_first().unwrap();
     target.dest = "backend.example.com:35443".into();
-    reality_targets.insert("sni.example.com".into(), target);
+    let Credentials::Reality { server_name, .. } = &mut reality_profile.credentials else {
+        panic!("需要 Reality 凭据");
+    };
+    *server_name = "sni.example.com".into();
+    reality_targets.insert(server_name.clone(), target);
     tls_targets.insert(
         "tls.example.com".into(),
         TlsTarget {

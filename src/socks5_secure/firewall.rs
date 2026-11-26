@@ -261,7 +261,13 @@ impl UfwScope {
     }
 
     fn tuple_matches(self, tuple: &str) -> bool {
-        let fields = tuple.split_whitespace().collect::<Vec<_>>();
+        let mut fields = tuple.split_whitespace().collect::<Vec<_>>();
+        if fields
+            .last()
+            .is_some_and(|field| field.starts_with("comment="))
+        {
+            fields.pop();
+        }
         let ["allow", "tcp", port, destination, "any", source, "in"] = fields.as_slice() else {
             return false;
         };
@@ -1303,7 +1309,7 @@ fn ufw_entry(line: &str) -> Option<(u32, &str)> {
 }
 
 fn ufw_inbound_scope(text: &str) -> Option<(&str, &str)> {
-    let text = text.split_once(" #").map_or(text, |(rule, _)| rule);
+    let text = ufw_without_comment(text);
     let (destination, source) = ["ALLOW IN", "DENY IN", "REJECT IN", "LIMIT IN"]
         .iter()
         .find_map(|&action| text.split_once(action))?;
@@ -1313,6 +1319,10 @@ fn ufw_inbound_scope(text: &str) -> Option<(&str, &str)> {
         .or_else(|| source.strip_suffix(" (log-all)"))
         .unwrap_or(source);
     Some((destination.trim(), source.trim_end()))
+}
+
+fn ufw_without_comment(text: &str) -> &str {
+    text.split_once(" #").map_or(text, |(rule, _)| rule)
 }
 
 fn ufw_is_v6(text: &str) -> bool {
@@ -1445,11 +1455,12 @@ pub(super) fn ufw_rule_number(line: &str, listener: SocketAddr) -> Option<u32> {
 
 fn ufw_allow(line: &str, listener: SocketAddr) -> Option<(u32, &str, UfwScope)> {
     let (number, rule) = ufw_entry(line)?;
-    let (destination, source) = rule.split_once("ALLOW IN")?;
+    let conditions = ufw_without_comment(rule);
+    let (destination, source) = conditions.split_once("ALLOW IN")?;
     let ip = listener.ip();
     let destination = destination.trim();
     let source = source.trim();
-    if ufw_is_v6(rule) != ip.is_ipv6() {
+    if ufw_is_v6(conditions) != ip.is_ipv6() {
         return None;
     }
     let destination = destination.strip_suffix(" (v6)").unwrap_or(destination);
@@ -1514,7 +1525,7 @@ fn iptables_delete_args_in_chain(
     for [name, value] in options {
         match (name.as_str(), value.as_str()) {
             ("-p", "tcp") => tcp = true,
-            ("-m", "tcp") => {}
+            ("-m", "tcp" | "comment") | ("--comment", _) => {}
             ("--dport", value) if value == port => dport = true,
             ("-j", "ACCEPT") => accept = true,
             ("-s", value) if unrestricted(address_scope(value), ip) => {}
@@ -1619,27 +1630,32 @@ fn shell_words(line: &str) -> Vec<String> {
     let mut word = String::new();
     let mut quote = None;
     let mut escape = false;
+    let mut word_started = false;
     for c in line.chars() {
         if escape {
             word.push(c);
             escape = false;
         } else if c == '\\' && quote != Some('\'') {
             escape = true;
+            word_started = true;
         } else if Some(c) == quote {
             quote = None;
         } else if quote.is_some() {
             word.push(c);
         } else if c == '\'' || c == '"' {
             quote = Some(c);
+            word_started = true;
         } else if c.is_whitespace() {
-            if !word.is_empty() {
+            if word_started {
                 words.push(std::mem::take(&mut word));
+                word_started = false;
             }
         } else {
             word.push(c);
+            word_started = true;
         }
     }
-    if !word.is_empty() {
+    if word_started {
         words.push(word);
     }
     words
@@ -1669,9 +1685,6 @@ fn nft_input_port_allow(
 }
 
 fn nft_port_allow(rule: &serde_json::Value, listener: SocketAddr) -> bool {
-    if rule.get("comment").is_some() {
-        return false;
-    }
     let Some(expressions) = rule["expr"].as_array() else {
         return false;
     };
@@ -2103,6 +2116,15 @@ mod tests {
     const TAIL: &str = "8443/tcp ALLOW IN Anywhere";
     const DENY_V6: &str = "1080/tcp DENY IN 2001:db8::/32";
     const TAIL_V6: &str = "8443/tcp (v6) ALLOW IN Anywhere (v6)";
+
+    #[test]
+    fn socks5_secure_ufw_matches_commented_persistent_rule() {
+        let listener = "0.0.0.0:1080".parse().unwrap();
+        let (_, _, scope) =
+            ufw_allow("[ 1] 1080/tcp ALLOW IN Anywhere # SOCKS5", listener).unwrap();
+        assert!(scope.tuple_matches("allow tcp 1080 0.0.0.0/0 any 0.0.0.0/0 in comment=SOCKS5"));
+        assert!(!scope.tuple_matches("allow tcp 22 0.0.0.0/0 any 0.0.0.0/0 in comment=1080"));
+    }
 
     #[cfg(target_os = "linux")]
     #[test]
@@ -3102,6 +3124,34 @@ mod tests {
         next_handle: u64,
         concurrent_insertions: Vec<Value>,
         replace_before_delete: Option<Value>,
+    }
+
+    #[tokio::test]
+    async fn socks5_secure_nft_closes_and_restores_commented_allow() {
+        let mut rule = json!({
+            "family": "ip", "table": "filter", "chain": "input", "handle": 2,
+            "comment": "SOCKS5",
+            "expr": [
+                {"match": {"op": "==", "left": {"payload": {"protocol": "tcp", "field": "dport"}}, "right": 1080}},
+                {"accept": null}
+            ]
+        });
+        let mut backend = FakeNft {
+            rules: vec![rule.clone()],
+            iptables_nft: false,
+            chain: "input",
+            next_handle: 3,
+            concurrent_insertions: Vec::new(),
+            replace_before_delete: None,
+        };
+        let mut plan = FirewallPlan::capture_with("0.0.0.0:1080".parse().unwrap(), &mut backend)
+            .await
+            .unwrap();
+        plan.close_with(&mut backend).await.unwrap();
+        assert!(backend.rules.is_empty());
+        plan.restore_with(&mut backend).await.unwrap();
+        rule["handle"] = 3.into();
+        assert_eq!(backend.rules, [rule]);
     }
 
     #[tokio::test]

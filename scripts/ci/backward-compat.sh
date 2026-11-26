@@ -495,6 +495,55 @@ PY
 )
 echo 'SOCKS5 auth: reject Reality UUID drift in the managed file without restarting shoes: PASS'
 
+# Keep the native Shadowsocks listener on its original password while changing the managed file.
+(
+  scenario="$(mktemp -d /usr/local/lib/socks5-shadowsocks-password.XXXXXX)"
+  umask 077
+  cp -a /etc/shoes "$scenario/original"
+  trap 'rm -f /etc/shoes/profiles/SHADOWSOCKS-24438.yaml; cp -a "$scenario/original/." /etc/shoes/; systemctl restart shoes.service; rm -rf "$scenario"' EXIT
+  "$NEW" add shadowsocks --port 24438 --name compat-shadowsocks --server-address "$SERVER" --yes >/dev/null
+  for _ in {1..50}; do
+    if ss -H -ltn 'sport = :24438' | grep -Fq '0.0.0.0:24438'; then break; fi
+    sleep 0.1
+  done
+  ss -H -ltn 'sport = :24438' | grep -Fq '0.0.0.0:24438'
+  before_pid="$(systemctl show --property=MainPID --value shoes.service)"
+  "$NEW" url compat-shadowsocks >"$scenario/before-url"
+  "$NEW" export sing-box --profile compat-shadowsocks --server "$SERVER" >"$scenario/before-export"
+  python3 - <<'PY'
+import base64
+import json
+import mmap
+
+with open('/etc/shoes/ping-rust-state.json') as source:
+    state = json.load(source)
+profile, = (profile for profile in state['profiles'] if profile['port'] == 24438)
+original = profile['credentials']['Shadowsocks']['password'].encode()
+replacement = base64.b64encode(bytes(32))
+assert len(original) == len(replacement) and original != replacement
+with open('/etc/shoes/config.yaml', 'r+b') as source, mmap.mmap(source.fileno(), 0) as config:
+    offset = config.find(original)
+    assert offset >= 0 and config.find(original, offset + len(original)) < 0
+    config[offset:offset + len(original)] = replacement
+    config.flush()
+PY
+  find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/before"
+  if "$NEW" socks5 secure "$legacy_socks5_id" --auth --yes >"$scenario/result" 2>&1; then
+    echo 'Expected SOCKS5 hardening to reject native Shadowsocks password drift' >&2
+    exit 1
+  fi
+  grep -Fq '端口 24438 的 Shadowsocks 配置与管理状态不一致' "$scenario/result"
+  test "$(systemctl show --property=MainPID --value shoes.service)" = "$before_pid"
+  ss -H -ltn 'sport = :24438' | grep -Fq '0.0.0.0:24438'
+  "$NEW" url compat-shadowsocks >"$scenario/after-url"
+  "$NEW" export sing-box --profile compat-shadowsocks --server "$SERVER" >"$scenario/after-export"
+  cmp -s "$scenario/before-url" "$scenario/after-url"
+  cmp -s "$scenario/before-export" "$scenario/after-export"
+  find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/after"
+  diff -u "$scenario/before" "$scenario/after"
+)
+echo 'SOCKS5 auth: reject same-path native Shadowsocks password drift before restart or writes: PASS'
+
 # Reload the default ExecStart while the authenticated process still owns the
 # same wildcard listener that the managed configuration would start anonymously.
 (
@@ -979,6 +1028,8 @@ echo 'SOCKS5 preflight: PID signals, process-group SIGINT and timeout clean up d
   target=/run/systemd/system/compat-socks5-slow-stop.target
   reader=/run/systemd/system/compat-socks5-start-reader.service
   reader_unit="${reader##*/}"
+  reload_helper=/run/systemd/system/compat-socks5-reload-reader.service
+  reload_unit="${reload_helper##*/}"
   dependency=/run/systemd/system/compat-socks5-required-export.service
   dependency_unit="${dependency##*/}"
   notify=/run/systemd/system/compat-socks5-required-notify.service
@@ -992,7 +1043,7 @@ echo 'SOCKS5 preflight: PID signals, process-group SIGINT and timeout clean up d
   timer=/run/systemd/system/compat-socks5-timer-export.timer
   exporter="${timer%.timer}.service"
   mkdir -p "$dropin"
-  trap '"$systemctl_bin" stop "${target##*/}" "$reader_unit" "$dependency_unit" "$notify_unit" "$forking_unit" "$simple_unit" "${companion##*/}" "${timer##*/}" "${exporter##*/}" || true; rm -f "$dropin/90-compat-socks5-rollback.conf" "$dependency_dropin" "$target" "$reader" "$dependency" "$notify" "$forking" "$simple" "$companion" "$timer" "$exporter"; "$systemctl_bin" daemon-reload; rm -rf "$scenario"' EXIT
+  trap '"$systemctl_bin" stop "${target##*/}" "$reader_unit" "$reload_unit" "$dependency_unit" "$notify_unit" "$forking_unit" "$simple_unit" "${companion##*/}" "${timer##*/}" "${exporter##*/}" || true; rm -f "$dropin/90-compat-socks5-rollback.conf" "$dependency_dropin" "$target" "$reader" "$reload_helper" "$dependency" "$notify" "$forking" "$simple" "$companion" "$timer" "$exporter"; "$systemctl_bin" daemon-reload; rm -rf "$scenario"' EXIT
   cat >"$scenario/systemctl" <<'SH'
 #!/bin/sh
 case "$1" in
@@ -1102,6 +1153,15 @@ Type=oneshot
 TimeoutStartSec=5s
 ExecStart=$scenario/reader $NEW $scenario $legacy_socks5_id
 EOF
+  cat >"$reload_helper" <<EOF
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=5s
+ExecStart=/bin/true
+ExecReload=$NEW export sing-box --profile ${ids[1]} --server example.com --output $scenario/reload-client.json
+ExecReload=/bin/sh -c 'echo ok >>$scenario/reload-runs'
+EOF
   "$NEW" export sing-box --profile "${ids[1]}" --server example.com \
     --output "$scenario/dependency-expected.json" >/dev/null
   cat >"$dependency" <<EOF
@@ -1199,6 +1259,7 @@ ExecStartPre=+$scenario/start-oneshot $systemctl_bin ${reader_unit%.service} ${c
 ExecStop=$scenario/exec-stop $NEW $scenario $legacy_socks5_id
 EOF
   "$systemctl_bin" daemon-reload
+  "$systemctl_bin" start "$reload_unit"
   "$systemctl_bin" start "${target##*/}"
   "$systemctl_bin" is-active --quiet "${target##*/}"
   "$systemctl_bin" is-active --quiet shoes.service
@@ -1207,6 +1268,9 @@ EOF
 [Unit]
 Requires=$dependency_unit $notify_unit $forking_unit $simple_unit
 After=$dependency_unit $notify_unit $forking_unit $simple_unit
+
+[Service]
+ExecStartPre=+$systemctl_bin --quiet reload $reload_unit
 EOF
   "$systemctl_bin" daemon-reload
   before_pid="$("$systemctl_bin" show --property=MainPID --value shoes.service)"
@@ -1222,6 +1286,8 @@ EOF
   test "$(grep -c '^ok$' "$scenario/forking-dependency-runs")" -eq 2
   test "$(grep -c '^ok$' "$scenario/simple-dependency-runs")" -eq 2
   test "$(grep -c '^ok$' "$scenario/start-pre-runs")" -eq 2
+  test "$(grep -cx ok "$scenario/reload-runs")" -eq 2
+  cmp -s "$scenario/dependency-expected.json" "$scenario/reload-client.json"
   test "$(grep -c '^ok$' "$scenario/oneshot-runs")" -eq 2
   test "$(grep -c '^ok$' "$scenario/oneshot-wrapper-runs")" -eq 2
   test "$(cat "$scenario/start-pre-auth")" = $'deferred\noriginal'
@@ -1253,6 +1319,7 @@ EOF
   diff -u "$scenario/before" "$scenario/after"
 )
 echo 'SOCKS5 rollback: synchronous readers finish and timer export waits for rollback: PASS'
+echo 'SOCKS5 rollback: synchronous ExecReload exports during candidate and restored starts: PASS'
 echo 'SOCKS5 rollback: ordered startup dependency exports during candidate and restored starts: PASS'
 echo 'SOCKS5 rollback: ordered Type=notify dependency exports before READY=1 on both starts: PASS'
 echo 'SOCKS5 rollback: ordered Type=forking dependency exports before forking on both starts: PASS'
@@ -1716,8 +1783,9 @@ echo 'SOCKS5 rollback: root startup hook can synchronously delegate an ACL-backe
   apt-get install -y --no-install-recommends iptables nftables
   scenario="$(mktemp -d /usr/local/lib/socks5-mixed-firewall.XXXXXX)"
   cp -a /etc/shoes "$scenario/original"
-  trap 'iptables-legacy -w -D INPUT -p tcp --dport 24436 -j DROP 2>/dev/null || true; iptables-legacy -w -D INPUT -d 127.0.0.1/32 -p tcp --dport 24436 -j ACCEPT 2>/dev/null || true; iptables-legacy -w -D INPUT -d 203.0.113.8/32 -p tcp --dport 24436 -j ACCEPT 2>/dev/null || true; iptables-legacy -w -D INPUT -p tcp --dport 24436 -j ACCEPT 2>/dev/null || true; iptables-legacy -w -D INPUT -p tcp --dport 24437 -j ACCEPT 2>/dev/null || true; nft delete table ip compat_socks5 2>/dev/null || true; cp -a "$scenario/original/." /etc/shoes/; systemctl restart shoes.service; rm -rf "$scenario"' EXIT
+  trap 'iptables-legacy -w -D INPUT -p tcp --dport 24436 -j DROP 2>/dev/null || true; iptables-legacy -w -D INPUT -d 127.0.0.1/32 -p tcp --dport 24436 -j ACCEPT 2>/dev/null || true; iptables-legacy -w -D INPUT -d 203.0.113.8/32 -p tcp --dport 24436 -j ACCEPT 2>/dev/null || true; iptables-legacy -w -D INPUT -p tcp --dport 24436 -j ACCEPT 2>/dev/null || true; iptables-legacy -w -D INPUT -p tcp --dport 24436 -m comment --comment "SOCKS5 compat" -j ACCEPT 2>/dev/null || true; iptables-legacy -w -D INPUT -p tcp --dport 24437 -j ACCEPT 2>/dev/null || true; nft delete table ip compat_socks5 2>/dev/null || true; cp -a "$scenario/original/." /etc/shoes/; systemctl restart shoes.service; rm -rf "$scenario"' EXIT
   iptables-legacy -w -A INPUT -p tcp --dport 24436 -j ACCEPT
+  iptables-legacy -w -A INPUT -p tcp --dport 24436 -m comment --comment "SOCKS5 compat" -j ACCEPT
   iptables-legacy -w -A INPUT -d 203.0.113.8/32 -p tcp --dport 24436 -j ACCEPT
   iptables-legacy -w -A INPUT -d 127.0.0.1/32 -p tcp --dport 24436 -j ACCEPT
   iptables-legacy -w -A INPUT -p tcp --dport 24436 -j DROP
@@ -1729,6 +1797,7 @@ table ip compat_socks5 {
   chain input {
     type filter hook input priority 0; policy accept;
     tcp dport 24436 accept
+    tcp dport 24436 accept comment "SOCKS5 compat"
   }
 }
 NFT
@@ -1738,6 +1807,10 @@ NFT
   grep -Fxq -- "$loopback_rule" "$scenario/legacy-after"
   grep -Fq -- '--dport 24436 -j DROP' "$scenario/legacy-after"
   grep -Fq -- '--dport 24437 -j ACCEPT' "$scenario/legacy-after"
+  if grep -Fq 'SOCKS5 compat' "$scenario/legacy-after"; then
+    echo 'SOCKS5 commented legacy INPUT allow survived' >&2
+    exit 1
+  fi
   if grep -Fvx -- "$loopback_rule" "$scenario/legacy-after" | grep -F -- '--dport 24436 -j ACCEPT'; then
     echo 'SOCKS5 legacy INPUT allow survived with iptables-nft selected' >&2
     exit 1
@@ -1953,10 +2026,11 @@ echo 'SOCKS5 authentication: clean-environment ExecStartPost info, URL and expor
   scenario="$(mktemp -d /usr/local/lib/socks5-restart-export.XXXXXX)"
   dropin=/etc/systemd/system/shoes.service.d/90-compat-socks5-restart-export.conf
   helper=/run/systemd/system/compat-socks5-restart-export.service
+  reload_helper=/run/systemd/system/compat-socks5-restore-reload.service
   pending=/etc/shoes/.ping-rust-socks5-secure.pending
   systemctl_bin="$(command -v systemctl)"
   umask 077
-  trap '"$systemctl_bin" stop "${helper##*/}" || true; rm -f "$dropin" "$helper" "$pending"; "$systemctl_bin" daemon-reload; rm -rf "$scenario"' EXIT
+  trap '"$systemctl_bin" stop "${helper##*/}" "${reload_helper##*/}" || true; rm -f "$dropin" "$helper" "$reload_helper" "$pending"; "$systemctl_bin" daemon-reload; rm -rf "$scenario"' EXIT
   "$NEW" backup "$scenario/backup.tar.gz" >/dev/null
   "$NEW" export sing-box --profile "$legacy_socks5_id" --server example.com \
     --output "$scenario/expected.json" >/dev/null
@@ -1980,19 +2054,30 @@ TimeoutStartSec=5s
 ExecStart=$NEW export sing-box --profile $legacy_socks5_id --server example.com --output $scenario/client.json
 ExecStartPost=/bin/sh -c 'echo ok >>$scenario/helper-runs'
 EOF
+  cat >"$reload_helper" <<EOF
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=5s
+ExecStart=/bin/true
+ExecReload=$NEW export sing-box --profile $legacy_socks5_id --server example.com --output $scenario/reload-client.json
+EOF
   cat >"$dropin" <<EOF
 [Service]
 TimeoutStartSec=10s
 ExecStartPre=$systemctl_bin --quiet restart ${helper##*/}
 ExecStartPre=$systemctl_bin --quiet try-restart ${helper##*/}
 ExecStartPre=$systemctl_bin --quiet reload-or-restart ${helper##*/}
+ExecStartPre=$systemctl_bin --quiet reload ${reload_helper##*/}
 EOF
   "$systemctl_bin" daemon-reload
+  "$systemctl_bin" start "${reload_helper##*/}"
   "$NEW" restore "$scenario/backup.tar.gz" >"$scenario/result" 2>&1
   test ! -e "$pending"
   cmp -s "$scenario/expected.json" "$scenario/client.json"
+  cmp -s "$scenario/expected.json" "$scenario/reload-client.json"
   test "$(grep -cx ok "$scenario/helper-runs")" -eq 3
   "$systemctl_bin" is-active --quiet shoes.service
 )
 echo 'Backup: refuse an unfinished SOCKS5 transaction and recover from the previous archive: PASS'
-echo 'Backup restore: synchronous restart, try-restart and reload-or-restart helpers can export restored state: PASS'
+echo 'Backup restore: synchronous restart, try-restart, reload-or-restart and ExecReload helpers can export restored state: PASS'

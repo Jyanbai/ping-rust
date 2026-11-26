@@ -1,5 +1,5 @@
 //! SOCKS5 加固的只读计划与现有受管文件事务。
-use std::{io::Read, net::SocketAddr, time::Duration};
+use std::{collections::BTreeMap, io::Read, net::SocketAddr, time::Duration};
 
 use fs2::FileExt;
 
@@ -270,6 +270,8 @@ pub(crate) struct SecurePlan {
     mode: SecureMode,
     directory: PathBuf,
     servers: Vec<ServerConfig>,
+    candidate_yaml: String,
+    documents: BTreeMap<String, Vec<u8>>,
     state: ManagedState,
     pub(crate) original: ManagedProfile,
     pub(crate) profile: ManagedProfile,
@@ -450,7 +452,7 @@ impl SecurePlan {
     fn load_checked(
         directory: &Path,
         id: Uuid,
-    ) -> Result<(ManagedState, Vec<ServerConfig>, usize)> {
+    ) -> Result<(ManagedState, Vec<ServerConfig>, usize, String)> {
         let state = load_for_plan(&directory.join("ping-rust-state.json"))?;
         let index = state
             .profiles
@@ -460,13 +462,42 @@ impl SecurePlan {
         if state.profiles[index].protocol() != Protocol::Socks5 {
             bail!("只有 SOCKS5 节点支持 secure");
         }
-        let servers = load_servers(&directory.join("config.yaml"))
-            .map_err(|_| anyhow::anyhow!("无法读取 SOCKS5 的聚合配置，请检查 config.yaml"))?;
+        let config_error = || anyhow::anyhow!("无法读取 SOCKS5 的聚合配置，请检查 config.yaml");
+        let yaml = fs::read_to_string(directory.join("config.yaml")).map_err(|_| config_error())?;
+        let servers: Vec<ServerConfig> =
+            crate::yaml::from_str(&yaml).map_err(|_| config_error())?;
         ensure_servers_match_state(&servers, &state.profiles).map_err(|_| {
             anyhow::anyhow!("聚合配置与管理状态不一致，请检查 config.yaml 和 ping-rust-state.json")
         })?;
-        // 本次加固会重启所有节点，按导出使用的 SNI 核对将加载的 Reality 凭据。
+        // 本次加固会重启所有节点，核对服务端将加载的配置与客户端导出是否一致。
         for (server, profile) in servers.iter().zip(&state.profiles) {
+            if let Credentials::Shadowsocks {
+                cipher,
+                password,
+                udp_enabled,
+                shadowtls,
+            } = &profile.credentials
+            {
+                let consistent = match &server.protocol {
+                    ServerProtocol::Shadowsocks {
+                        cipher: server_cipher,
+                        password: server_password,
+                        udp_enabled: server_udp,
+                    } => {
+                        shadowtls.is_none()
+                            && server_cipher == cipher.as_str()
+                            && server_password == password
+                            && server_udp == udp_enabled
+                    }
+                    _ => shadowtls.is_some(),
+                };
+                if !consistent {
+                    bail!(
+                        "端口 {} 的 Shadowsocks 配置与管理状态不一致，请检查 config.yaml 和 ping-rust-state.json",
+                        profile.port
+                    );
+                }
+            }
             let Credentials::Reality {
                 user_id,
                 private_key,
@@ -495,7 +526,7 @@ impl SecurePlan {
                 );
             }
         }
-        Ok((state, servers, index))
+        Ok((state, servers, index, yaml))
     }
 
     pub(crate) fn already_secure(directory: &Path, id: Uuid) -> Result<bool> {
@@ -503,13 +534,13 @@ impl SecurePlan {
     }
 
     pub(crate) fn secure_profile(directory: &Path, id: Uuid) -> Result<Option<ManagedProfile>> {
-        let (state, _, index) = Self::load_checked(directory, id)?;
+        let (state, _, index, _) = Self::load_checked(directory, id)?;
         let profile = state.profiles.into_iter().nth(index).unwrap();
         Ok(profile.socks5_risk_warning().is_none().then_some(profile))
     }
 
     pub(crate) fn prepare(directory: &Path, id: Uuid, mode: SecureMode) -> Result<Option<Self>> {
-        let (mut state, mut servers, index) = Self::load_checked(directory, id)?;
+        let (mut state, mut servers, index, yaml) = Self::load_checked(directory, id)?;
         let original = state.profiles[index].clone();
         if original.socks5_risk_warning().is_none() {
             return Ok(None);
@@ -543,11 +574,33 @@ impl SecurePlan {
             }
         }
         ensure_servers_match_state(&servers, &state.profiles)?;
+        // 只替换目标字段，保留 shoes 支持但管理模型未表示的配置。
+        let mut candidate: Vec<serde_json::Value> = crate::yaml::from_str(&yaml)
+            .context("无法保留聚合配置中的 shoes 字段，请检查 config.yaml")?;
+        match mode {
+            SecureMode::Auth => {
+                let Credentials::Socks5 {
+                    username, password, ..
+                } = &state.profiles[index].credentials
+                else {
+                    unreachable!()
+                };
+                candidate[index]["protocol"]["username"] = serde_json::json!(username);
+                candidate[index]["protocol"]["password"] = serde_json::json!(password);
+            }
+            SecureMode::Local => {
+                candidate[index]["address"] = servers[index].address.clone().into()
+            }
+        }
+        let candidate_yaml = crate::yaml::to_string(&candidate)?;
+        let documents = commit::serialize_profile_documents(&candidate, &state.profiles)?;
         let profile = state.profiles[index].clone();
         Ok(Some(Self {
             mode,
             directory: directory.to_path_buf(),
             servers,
+            candidate_yaml,
+            documents,
             state,
             original,
             profile,
@@ -618,8 +671,7 @@ impl SecurePlan {
         if !utils::command_exists(utils::SHOES_BIN) {
             bail!("未找到可执行的 shoes，请先安装 shoes 后重试");
         }
-        let yaml = crate::yaml::to_string(&self.servers)?;
-        validate_yaml(&yaml)?;
+        validate_yaml(&self.candidate_yaml)?;
         let deadline_or_signal = async {
             tokio::select! {
                 biased;
@@ -628,7 +680,12 @@ impl SecurePlan {
                     anyhow::anyhow!("shoes 配置校验超时，请检查 shoes 后重试"),
             }
         };
-        validate_candidate_with_shoes_until(&yaml, &self.directory, Some(deadline_or_signal)).await
+        validate_candidate_with_shoes_until(
+            &self.candidate_yaml,
+            &self.directory,
+            Some(deadline_or_signal),
+        )
+        .await
     }
 
     pub(crate) fn commit_files(&mut self) -> Result<()> {
@@ -696,14 +753,14 @@ impl SecurePlan {
         #[cfg(not(target_os = "linux"))]
         drop(original_state_file);
         let protect_credentials = self.mode == SecureMode::Auth;
-        let private_profile = protect_credentials.then(|| self.profile.config_file_name());
+        let changed_profile = self.profile.config_file_name();
         let commit = commit::commit_managed_with_writers(
             &config,
             &state,
             &profiles,
-            &self.servers,
-            &self.state,
-            |path, _| match original_state {
+            &self.documents,
+            &self.candidate_yaml,
+            |path| match original_state {
                 Some(original_state) => {
                     rollback.state.save_state(path, &original_state, false)?;
                     #[cfg(target_os = "linux")]
@@ -722,7 +779,8 @@ impl SecurePlan {
                         path,
                         documents,
                         &rollback.profiles,
-                        private_profile.as_deref(),
+                        &changed_profile,
+                        protect_credentials,
                     )
                 }
                 commit::ManagedWrite::Config(contents) => {

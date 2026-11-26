@@ -37,13 +37,15 @@ pub(super) fn commit_managed_with_state_writer<F>(
 where
     F: FnOnce(&Path, &ManagedState) -> Result<()>,
 {
+    let documents = profile_documents(servers, &state.profiles)?;
+    let aggregate_yaml = aggregate_profile_documents(&documents, &state.profiles)?;
     commit_managed_with_writers(
         config_path,
         state_path,
         profiles_path,
-        servers,
-        state,
-        write_state,
+        &documents,
+        &aggregate_yaml,
+        |path| write_state(path, state),
         |path, write| match write {
             ManagedWrite::Profiles(documents) => write_profile_documents(path, documents),
             ManagedWrite::Config(contents)
@@ -64,21 +66,19 @@ pub(super) fn commit_managed_with_writers(
     config_path: &Path,
     state_path: &Path,
     profiles_path: &Path,
-    servers: &[ServerConfig],
-    state: &ManagedState,
-    write_state: impl FnOnce(&Path, &ManagedState) -> Result<()>,
+    documents: &BTreeMap<String, Vec<u8>>,
+    aggregate_yaml: &str,
+    write_state: impl FnOnce(&Path) -> Result<()>,
     write_snapshot: impl Fn(&Path, ManagedWrite<'_>) -> Result<()>,
 ) -> Result<()> {
     let _timer = performance::stage("config_commit");
     let old_config = read_optional(config_path)?;
     let old_state = read_optional(state_path)?;
     let old_profiles = ProfileDirectorySnapshot::capture(profiles_path)?;
-    let documents = profile_documents(servers, &state.profiles)?;
-    let aggregate_yaml = aggregate_profile_documents(&documents, &state.profiles)?;
     let runtime_unchanged = old_config.as_deref() == Some(aggregate_yaml.as_bytes());
     let commit = (|| {
-        write_snapshot(profiles_path, ManagedWrite::Profiles(&documents))?;
-        write_state(state_path, state)?;
+        write_snapshot(profiles_path, ManagedWrite::Profiles(documents))?;
+        write_state(state_path)?;
         if !runtime_unchanged {
             write_snapshot(config_path, ManagedWrite::Config(aggregate_yaml.as_bytes()))?;
         }
@@ -120,6 +120,13 @@ pub(super) fn profile_documents(
     profiles: &[ManagedProfile],
 ) -> Result<BTreeMap<String, Vec<u8>>> {
     ensure_servers_match_state(servers, profiles)?;
+    serialize_profile_documents(servers, profiles)
+}
+
+pub(super) fn serialize_profile_documents(
+    servers: &[impl serde::Serialize],
+    profiles: &[ManagedProfile],
+) -> Result<BTreeMap<String, Vec<u8>>> {
     let mut documents = BTreeMap::new();
     for (server, profile) in servers.iter().zip(profiles) {
         let name = profile.config_file_name();
@@ -154,25 +161,29 @@ pub(super) fn write_profile_documents(
     path: &Path,
     documents: &BTreeMap<String, Vec<u8>>,
 ) -> Result<()> {
-    write_profile_documents_inner(path, documents, None, None)
+    write_profile_documents_inner(path, documents, None)
 }
 
 pub(super) fn write_profile_documents_with_access(
     path: &Path,
     documents: &BTreeMap<String, Vec<u8>>,
     snapshot: &ProfileDirectorySnapshot,
-    private_profile: Option<&str>,
+    changed_profile: &str,
+    protect_credentials: bool,
 ) -> Result<()> {
-    write_profile_documents_inner(path, documents, Some(snapshot), private_profile)
+    write_profile_documents_inner(
+        path,
+        documents,
+        Some((snapshot, changed_profile, protect_credentials)),
+    )
 }
 
 fn write_profile_documents_inner(
     path: &Path,
     documents: &BTreeMap<String, Vec<u8>>,
-    snapshot: Option<&ProfileDirectorySnapshot>,
-    private_profile: Option<&str>,
+    snapshot: Option<(&ProfileDirectorySnapshot, &str, bool)>,
 ) -> Result<()> {
-    if !snapshot.is_some_and(ProfileDirectorySnapshot::existed) {
+    if !snapshot.is_some_and(|(snapshot, ..)| snapshot.existed()) {
         utils::ensure_directory(path, 0o700)?;
     }
     let mut existing = Vec::new();
@@ -194,8 +205,12 @@ fn write_profile_documents_inner(
         existing.push(name);
     }
     for (name, contents) in documents {
-        if let Some(snapshot) = snapshot {
-            snapshot.write_profile(path, name, contents, private_profile == Some(name.as_str()))?;
+        if let Some((snapshot, changed_profile, protect_credentials)) = snapshot {
+            let changed = name == changed_profile;
+            // 加固只更新目标节点，缺失文件从聚合配置补齐。
+            if changed || !snapshot.has_profile(name) {
+                snapshot.write_profile(path, name, contents, changed && protect_credentials)?;
+            }
         } else {
             utils::atomic_write(&path.join(name), contents, 0o600)?;
         }

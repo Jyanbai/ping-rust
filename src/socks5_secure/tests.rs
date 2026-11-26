@@ -84,7 +84,7 @@ fn socks5_secure_local_preserves_other_rules_on_the_same_port() {
         "-A INPUT -d 203.0.113.9/32 -p tcp -m tcp --dport 1080 -j ACCEPT",
         "-A INPUT -p tcp -m tcp --dport 1080 -j ACCEPT",
         "-A INPUT -s 192.0.2.0/24 -d 203.0.113.8/32 -p tcp --dport 1080 -j ACCEPT",
-        "-A INPUT -d 203.0.113.8/32 -p tcp --dport 1080 -m comment --comment other-service -j ACCEPT",
+        "-A INPUT -s 192.0.2.0/24 -d 203.0.113.8/32 -p tcp --dport 1080 -m comment --comment other-service -j ACCEPT",
     ];
     let remaining = rules
         .into_iter()
@@ -202,8 +202,38 @@ fn socks5_secure_firewall_does_not_parse_comment_text_as_rule_options() {
         "[ 9] 1080/tcp ALLOW OUT Anywhere",
         "[ 9] 203.0.113.9 1080/tcp ALLOW IN Anywhere",
         "[ 9] 203.0.113.8 1080/tcp ALLOW IN 192.0.2.0/24",
-        "[ 9] 203.0.113.8 1080/tcp ALLOW IN Anywhere # other service",
+        "[ 9] 203.0.113.8 1081/tcp ALLOW IN Anywhere # 1080/tcp ALLOW IN Anywhere",
     ] {
         assert_eq!(firewall::ufw_rule_number(line, listener), None, "{line}");
     }
+}
+
+#[test]
+fn socks5_secure_firewall_matches_dedicated_rules_with_comments() {
+    let listener = "0.0.0.0:1080".parse().unwrap();
+    for comment in ["SOCKS5 -j DROP", ""] {
+        let rule =
+            format!(r#"-A INPUT -p tcp --dport 1080 -m comment --comment "{comment}" -j ACCEPT"#);
+        assert_eq!(
+            firewall::iptables_delete_args(&rule, listener).unwrap(),
+            [
+                "-D",
+                "INPUT",
+                "-p",
+                "tcp",
+                "--dport",
+                "1080",
+                "-m",
+                "comment",
+                "--comment",
+                comment,
+                "-j",
+                "ACCEPT"
+            ]
+        );
+    }
+    assert_eq!(
+        firewall::ufw_rule_number("[ 2] 1080/tcp ALLOW IN Anywhere # SOCKS5 (v6)", listener),
+        Some(2)
+    );
 }

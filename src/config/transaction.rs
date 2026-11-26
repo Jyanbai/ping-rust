@@ -315,6 +315,10 @@ impl ProfileDirectorySnapshot {
         self.directory.is_some()
     }
 
+    pub(super) fn has_profile(&self, name: &str) -> bool {
+        self.files.contains_key(name)
+    }
+
     pub(super) fn matches_documents(&self, documents: &BTreeMap<String, Vec<u8>>) -> bool {
         self.files
             .iter()
