@@ -667,6 +667,7 @@ async fn detect_shoes_service_hook(state_path: &Path) -> Option<ShoesServiceHook
         .timed(
             &[
                 "show",
+                "--property=Names",
                 "--property=MainPID",
                 "--property=ControlPID",
                 "--property=ActiveState",
@@ -690,12 +691,14 @@ async fn detect_shoes_service_hook(state_path: &Path) -> Option<ShoesServiceHook
     // 同步 systemctl 可以是控制进程本身，也可以由钩子脚本派生。
     if control_pid.is_some() || main_pid.is_some() {
         let systemctl_path = utils::command_path("systemctl")?;
+        // systemd 的 Names 包含 cgroup 使用的主名称及其已解析的别名。
+        let unit_names = unit_property(&target, "Names").unwrap_or(unit);
         let delegated = fs::read_dir("/proc")
             .ok()?
             .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse::<u32>().ok())
             .find_map(|pid| {
                 let phase = waited_phase(pid)?;
-                waits_for_unit(pid, &systemctl_path, unit).then_some(phase)
+                waits_for_unit(pid, &systemctl_path, unit_names).then_some(phase)
             });
         if delegated.is_some() {
             return delegated;
@@ -850,7 +853,7 @@ fn unit_pid(properties: &str, key: &str) -> Option<u32> {
 }
 
 #[cfg(target_os = "linux")]
-fn waits_for_unit(pid: u32, executable: &Path, unit: &str) -> bool {
+fn waits_for_unit(pid: u32, executable: &Path, unit_names: &str) -> bool {
     let process = Path::new("/proc").join(pid.to_string());
     let matches_executable = match same_executable(&process.join("exe"), executable) {
         Ok(matches) => matches,
@@ -874,11 +877,12 @@ fn waits_for_unit(pid: u32, executable: &Path, unit: &str) -> bool {
         Err(_) => false,
     };
     matches_executable
-        && fs::read(process.join("cmdline")).is_ok_and(|line| systemctl_waits_for_unit(&line, unit))
+        && fs::read(process.join("cmdline"))
+            .is_ok_and(|line| systemctl_waits_for_unit(&line, unit_names))
 }
 
 #[cfg(target_os = "linux")]
-fn systemctl_waits_for_unit(command_line: &[u8], unit: &str) -> bool {
+fn systemctl_waits_for_unit(command_line: &[u8], unit_names: &str) -> bool {
     let Some(command_line) = command_line.strip_suffix(b"\0") else {
         return false;
     };
@@ -901,8 +905,9 @@ fn systemctl_waits_for_unit(command_line: &[u8], unit: &str) -> bool {
                 _ => return false,
             }
         } else if has_verb {
-            matches_unit |=
-                arg == unit.as_bytes() || systemctl_service_shorthand(arg, unit.as_bytes());
+            matches_unit |= unit_names.split_ascii_whitespace().any(|name| {
+                arg == name.as_bytes() || systemctl_service_shorthand(arg, name.as_bytes())
+            });
         } else {
             if !matches!(
                 arg,
@@ -1138,6 +1143,7 @@ impl Systemctl {
                         "show",
                         "--property=ConsistsOf",
                         "--property=BoundBy",
+                        "--property=PropagatesStopTo",
                         "--value",
                         "--",
                         &unit,
@@ -1437,6 +1443,27 @@ mod tests {
             b"systemctl\0start\0helper.timer\0",
             "helper.timer.service"
         ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn socks5_secure_recognizes_blocking_systemctl_unit_aliases() {
+        let names = "helper.service export-alias.service export.timer.service";
+        let waits = |command: &str| systemctl_waits_for_unit(command.as_bytes(), names);
+        for command in [
+            "systemctl\0start\0export-alias.service\0",
+            "systemctl\0start\0export-alias\0",
+            "systemctl\0start\0helper.service\0",
+        ] {
+            assert!(waits(command), "{command:?}");
+        }
+        for command in [
+            "systemctl\0start\0export-alias.service\0--no-block\0",
+            "systemctl\0start\0export.timer\0",
+            "systemctl\0start\0unrelated.service\0",
+        ] {
+            assert!(!waits(command), "{command:?}");
+        }
     }
 
     #[cfg(unix)]
