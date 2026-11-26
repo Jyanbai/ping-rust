@@ -7,8 +7,8 @@ import os
 import shutil
 import subprocess
 import tempfile
+import re
 import textwrap
-import tomllib
 import unittest
 from pathlib import Path
 
@@ -433,9 +433,10 @@ class ReplyAndFailureTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         raw = (runner_temp / "codex-home" / "config.toml").read_text(encoding="utf-8")
-        config = tomllib.loads(raw)
-        self.assertIs(config["features"]["shell_tool"], False)
-        self.assertEqual(config["model_provider"], "cpa")
+        # CI 的 Ubuntu 22.04 是 Python 3.10，没有 tomllib；features 表是生成文件末尾的独立表。
+        self.assertRegex(raw, r"(?m)^\[features\]\nshell_tool = false$")
+        self.assertNotRegex(raw, r"(?m)^shell_tool = true")
+        self.assertRegex(raw, r'(?m)^model_provider = "cpa"$')
         self.assertNotIn("test-cpa-key-not-real", raw)
 
     def test_http_401_reports_key_category(self):
