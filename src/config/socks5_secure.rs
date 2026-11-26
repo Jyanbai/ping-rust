@@ -352,7 +352,9 @@ fn socks5_secure_preserves_aggregate_label_on_atomic_commit_and_rollback() {
         let len = getxattr(&path, attribute, value.as_mut_slice()).unwrap();
         assert_eq!(&value[..len], label);
     };
-    original.write(&path, b"candidate", false).unwrap();
+    original
+        .write(&path, b"candidate", FileAccess::apply)
+        .unwrap();
     assert_file(b"candidate");
     original.restore(&path, &original.contents).unwrap();
     assert_file(b"original");
@@ -388,17 +390,16 @@ impl FileSnapshot {
             }
             return Ok(());
         }
-        self.write(path, contents, false)
+        self.write(path, contents, FileAccess::apply)
     }
 
-    fn write(&self, path: &Path, contents: &[u8], protect_credentials: bool) -> Result<()> {
-        utils::atomic_write_with(path, contents, |file| {
-            if protect_credentials {
-                self.access.apply_without_public_access(file)
-            } else {
-                self.access.apply(file)
-            }
-        })
+    fn write(
+        &self,
+        path: &Path,
+        contents: &[u8],
+        apply: fn(&FileAccess, &fs::File) -> std::io::Result<()>,
+    ) -> Result<()> {
+        utils::atomic_write_with(path, contents, |file| apply(&self.access, file))
     }
 
     fn restored(&self, path: &Path) -> bool {
@@ -436,7 +437,12 @@ impl FileSnapshot {
         protect_credentials: bool,
     ) -> Result<()> {
         let contents = serde_json::to_vec_pretty(state).context("序列化管理状态失败")?;
-        self.write(path, &contents, protect_credentials)
+        let apply = if protect_credentials {
+            FileAccess::apply_private
+        } else {
+            FileAccess::apply
+        };
+        self.write(path, &contents, apply)
     }
 }
 
@@ -459,6 +465,36 @@ impl SecurePlan {
         ensure_servers_match_state(&servers, &state.profiles).map_err(|_| {
             anyhow::anyhow!("聚合配置与管理状态不一致，请检查 config.yaml 和 ping-rust-state.json")
         })?;
+        // 本次加固会重启所有节点，按导出使用的 SNI 核对将加载的 Reality 凭据。
+        for (server, profile) in servers.iter().zip(&state.profiles) {
+            let Credentials::Reality {
+                user_id,
+                private_key,
+                short_id,
+                server_name,
+                ..
+            } = &profile.credentials
+            else {
+                continue;
+            };
+            let target = match &server.protocol {
+                ServerProtocol::Tls {
+                    reality_targets, ..
+                } => reality_targets.get(server_name),
+                _ => None,
+            };
+            if !target.is_some_and(|target| {
+                target.vision
+                    && &target.private_key == private_key
+                    && target.short_ids.contains(short_id)
+                    && matches!(&target.protocol, InnerProtocol::Vless { user_id: id, .. } if id == user_id)
+            }) {
+                bail!(
+                    "端口 {} 的 Reality 凭据与管理状态不一致，请检查 config.yaml 和 ping-rust-state.json",
+                    profile.port
+                );
+            }
+        }
         Ok((state, servers, index))
     }
 
@@ -690,7 +726,12 @@ impl SecurePlan {
                     )
                 }
                 commit::ManagedWrite::Config(contents) => {
-                    rollback.config.write(path, contents, protect_credentials)
+                    let apply = if protect_credentials {
+                        FileAccess::apply_without_public_access
+                    } else {
+                        FileAccess::apply
+                    };
+                    rollback.config.write(path, contents, apply)
                 }
                 commit::ManagedWrite::RestoreConfig(contents) => {
                     rollback.config.restore(path, contents)

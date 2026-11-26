@@ -720,6 +720,23 @@ async fn run_command(
     input: Option<&[u8]>,
     xtables_lock_file: Option<&Path>,
 ) -> Result<String> {
+    let output = run_command_output(program, args, input, xtables_lock_file, Stdio::null()).await?;
+    if !output.status.success() {
+        bail!(
+            "{program} 执行失败（{}），请检查该工具的配置",
+            output.status
+        );
+    }
+    String::from_utf8(output.stdout).context("命令输出不是 UTF-8")
+}
+
+async fn run_command_output(
+    program: &str,
+    args: &[String],
+    input: Option<&[u8]>,
+    xtables_lock_file: Option<&Path>,
+    stderr: Stdio,
+) -> Result<std::process::Output> {
     use std::io::Write;
     let mut file = input.map(|_| tempfile::tempfile()).transpose()?;
     if let (Some(file), Some(input)) = (&mut file, input) {
@@ -736,18 +753,12 @@ async fn run_command(
         .env("LC_ALL", "C")
         .stdin(file.map(Stdio::from).unwrap_or_else(Stdio::null))
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(stderr)
         .kill_on_drop(true)
         .spawn()
         .with_context(|| format!("无法执行 {program}，请安装对应工具后重试"))?;
-    let output = tokio::time::timeout(Duration::from_secs(15), child.wait_with_output())
+    tokio::time::timeout(Duration::from_secs(15), child.wait_with_output())
         .await
-        .with_context(|| format!("{program} 执行超时"))??;
-    if !output.status.success() {
-        bail!(
-            "{program} 执行失败（{}），请检查该工具的配置",
-            output.status
-        );
-    }
-    String::from_utf8(output.stdout).context("命令输出不是 UTF-8")
+        .with_context(|| format!("{program} 执行超时"))?
+        .with_context(|| format!("无法读取 {program} 的执行结果"))
 }

@@ -448,6 +448,53 @@ echo 'SOCKS5 auth: reject drift on the Reality listener with an unchanged target
 check_other_reality_drift uuid
 echo 'SOCKS5 auth: reject a different Reality UUID on the same running listener: PASS'
 
+# Keep shoes on the original credentials while changing only the managed file.
+(
+  scenario="$(mktemp -d /usr/local/lib/socks5-reality-uuid.XXXXXX)"
+  umask 077
+  cp -a /etc/shoes "$scenario/original"
+  trap 'cp -a "$scenario/original/." /etc/shoes/; systemctl restart shoes.service; rm -rf "$scenario"' EXIT
+  for _ in {1..50}; do
+    if ss -H -ltn 'sport = :24436' | grep -Fq '0.0.0.0:24436'; then break; fi
+    sleep 0.1
+  done
+  ss -H -ltn 'sport = :24436' | grep -Fq '0.0.0.0:24436'
+  before_pid="$(systemctl show --property=MainPID --value shoes.service)"
+  ss -H -ltn 'sport = :24431' | grep -Fq '0.0.0.0:24431'
+  "$NEW" url compat-reality >"$scenario/before-url"
+  python3 - <<'PY'
+import json
+import mmap
+import uuid
+
+with open('/etc/shoes/ping-rust-state.json') as source:
+    state = json.load(source)
+profile, = (profile for profile in state['profiles'] if profile['port'] == 24431)
+original = profile['credentials']['Reality']['user_id'].encode()
+replacement = str(uuid.uuid4()).encode()
+assert len(original) == len(replacement) and original != replacement
+# Mapped writes keep the inode and let the running listener retain its loaded config.
+with open('/etc/shoes/config.yaml', 'r+b') as source, mmap.mmap(source.fileno(), 0) as config:
+    offset = config.find(original)
+    assert offset >= 0 and config.find(original, offset + len(original)) < 0
+    config[offset:offset + len(original)] = replacement
+    config.flush()
+PY
+  find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/before"
+  if "$NEW" socks5 secure "$legacy_socks5_id" --auth --yes >"$scenario/result" 2>&1; then
+    echo 'Expected SOCKS5 hardening to reject Reality UUID drift in the managed file' >&2
+    exit 1
+  fi
+  grep -Fq '端口 24431 的 Reality 凭据与管理状态不一致' "$scenario/result"
+  test "$(systemctl show --property=MainPID --value shoes.service)" = "$before_pid"
+  ss -H -ltn 'sport = :24431' | grep -Fq '0.0.0.0:24431'
+  "$NEW" url compat-reality >"$scenario/after-url"
+  cmp -s "$scenario/before-url" "$scenario/after-url"
+  find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/after"
+  diff -u "$scenario/before" "$scenario/after"
+)
+echo 'SOCKS5 auth: reject Reality UUID drift in the managed file without restarting shoes: PASS'
+
 # Reload the default ExecStart while the authenticated process still owns the
 # same wildcard listener that the managed configuration would start anonymously.
 (
@@ -1901,6 +1948,7 @@ echo 'SOCKS5 authentication: clean-environment ExecStartPost info, URL and expor
 
 # Backup restore holds the writer lock across restart. Its startup hook waits
 # for a root unit to export the restored state, then restarts the active unit.
+# The helper has no ExecReload, so reload-or-restart also starts it again.
 (
   scenario="$(mktemp -d /usr/local/lib/socks5-restart-export.XXXXXX)"
   dropin=/etc/systemd/system/shoes.service.d/90-compat-socks5-restart-export.conf
@@ -1937,13 +1985,14 @@ EOF
 TimeoutStartSec=10s
 ExecStartPre=$systemctl_bin --quiet restart ${helper##*/}
 ExecStartPre=$systemctl_bin --quiet try-restart ${helper##*/}
+ExecStartPre=$systemctl_bin --quiet reload-or-restart ${helper##*/}
 EOF
   "$systemctl_bin" daemon-reload
   "$NEW" restore "$scenario/backup.tar.gz" >"$scenario/result" 2>&1
   test ! -e "$pending"
   cmp -s "$scenario/expected.json" "$scenario/client.json"
-  test "$(grep -cx ok "$scenario/helper-runs")" -eq 2
+  test "$(grep -cx ok "$scenario/helper-runs")" -eq 3
   "$systemctl_bin" is-active --quiet shoes.service
 )
 echo 'Backup: refuse an unfinished SOCKS5 transaction and recover from the previous archive: PASS'
-echo 'Backup restore: synchronous systemctl restart and try-restart helpers can export restored state: PASS'
+echo 'Backup restore: synchronous restart, try-restart and reload-or-restart helpers can export restored state: PASS'

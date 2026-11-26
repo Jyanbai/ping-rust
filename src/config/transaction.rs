@@ -33,7 +33,7 @@ struct ProfileDocumentSnapshot {
 }
 
 #[derive(Clone, PartialEq, Eq)]
-pub(super) struct FileAccess {
+pub(crate) struct FileAccess {
     permissions: fs::Permissions,
     #[cfg(unix)]
     uid: u32,
@@ -48,7 +48,7 @@ pub(super) struct FileAccess {
 }
 
 impl FileAccess {
-    pub(super) fn capture(file: &fs::File) -> io::Result<Self> {
+    pub(crate) fn capture(file: &fs::File) -> io::Result<Self> {
         #[cfg(unix)]
         use std::os::unix::fs::MetadataExt;
 
@@ -72,7 +72,7 @@ impl FileAccess {
         })
     }
 
-    pub(super) fn apply(&self, file: &fs::File) -> io::Result<()> {
+    pub(crate) fn apply(&self, file: &fs::File) -> io::Result<()> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::{fchown, MetadataExt};
@@ -103,12 +103,24 @@ impl FileAccess {
     }
 
     pub(super) fn apply_without_public_access(&self, file: &fs::File) -> io::Result<()> {
+        self.apply_restricted(file, true)
+    }
+
+    pub(super) fn apply_private(&self, file: &fs::File) -> io::Result<()> {
+        self.apply_restricted(file, false)
+    }
+
+    fn apply_restricted(&self, file: &fs::File, preserve_group: bool) -> io::Result<()> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
 
             let mut access = self.clone();
-            let mode = access.permissions.mode() & !0o007;
+            // 有 ACL 时，mode 的组权限表示 ACL 掩码，清零会禁用具名委派。
+            #[cfg(target_os = "linux")]
+            let preserve_group = preserve_group || access.acl.is_some();
+            let remove = if preserve_group { 0o007 } else { 0o077 };
+            let mode = access.permissions.mode() & !remove;
             access.permissions.set_mode(mode);
             #[cfg(target_os = "linux")]
             if let Some(acl) = &mut access.acl {
@@ -122,7 +134,10 @@ impl FileAccess {
             access.apply(file)
         }
         #[cfg(not(unix))]
-        self.apply(file)
+        {
+            let _ = preserve_group;
+            self.apply(file)
+        }
     }
 }
 
@@ -374,7 +389,7 @@ impl ProfileDirectorySnapshot {
         if let Some(snapshot) = self.files.get(name) {
             utils::atomic_write_with(&path, contents, |file| {
                 if protect_credentials {
-                    snapshot.access.apply_without_public_access(file)
+                    snapshot.access.apply_private(file)
                 } else {
                     snapshot.access.apply(file)
                 }

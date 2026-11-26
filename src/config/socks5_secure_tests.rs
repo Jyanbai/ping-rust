@@ -53,6 +53,56 @@ fn legacy_bound_to(directory: &Path, port: u16, host: &str) -> ManagedProfile {
 }
 
 #[test]
+fn socks5_secure_rejects_other_reality_credentials_drift() {
+    let directory = tempfile::tempdir().unwrap();
+    let profile = legacy(directory.path());
+    let config = directory.path().join("config.yaml");
+    let state_path = directory.path().join("ping-rust-state.json");
+    let mut servers = load_servers(&config).unwrap();
+    let mut state = load_state_from(&state_path).unwrap();
+    let (reality, reality_profile) = tests::reality_server_and_profile(8443);
+    servers.push(reality);
+    state.profiles.push(reality_profile);
+    save_state_to(&state_path, &state).unwrap();
+    fs::write(&config, crate::yaml::to_string(&servers).unwrap()).unwrap();
+    assert!(SecurePlan::prepare(directory.path(), profile.id, SecureMode::Auth).is_ok());
+
+    for change in ["uuid", "private-key", "short-id", "sni", "vision"] {
+        let mut candidate = servers.clone();
+        let ServerProtocol::Tls {
+            reality_targets, ..
+        } = &mut candidate[1].protocol
+        else {
+            panic!("expected Reality server");
+        };
+        let (mut sni, mut target) = reality_targets.pop_first().unwrap();
+        match change {
+            "uuid" => {
+                let InnerProtocol::Vless { user_id, .. } = &mut target.protocol else {
+                    panic!("expected VLESS protocol");
+                };
+                *user_id = Uuid::nil();
+            }
+            "private-key" => target.private_key = generate_reality_keypair().private_key,
+            "short-id" => target.short_ids.clear(),
+            "sni" => sni = "different.example.com".into(),
+            "vision" => target.vision = false,
+            _ => unreachable!(),
+        }
+        reality_targets.insert(sni, target);
+        fs::write(&config, crate::yaml::to_string(&candidate).unwrap()).unwrap();
+        for mode in [SecureMode::Auth, SecureMode::Local] {
+            let error = SecurePlan::prepare(directory.path(), profile.id, mode)
+                .err()
+                .expect("expected Reality credential drift rejection");
+            assert!(error
+                .to_string()
+                .contains("端口 8443 的 Reality 凭据与管理状态不一致"));
+        }
+    }
+}
+
+#[test]
 fn socks5_secure_preview_hides_original_public_ipv4_and_ipv6() {
     for (host, loopback) in [("203.0.113.8", "127.0.0.1"), ("[2001:db8::8]", "[::1]")] {
         let directory = tempfile::tempdir().unwrap();

@@ -42,6 +42,8 @@ pub use socks5::Socks5Listen;
 use socks5::{socks5_address, socks5_is_loopback};
 mod state;
 mod transaction;
+#[cfg(target_os = "linux")]
+pub(crate) use transaction::FileAccess;
 mod validation;
 
 #[cfg(test)]

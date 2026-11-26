@@ -44,6 +44,9 @@ trait FirewallExecutor {
         args: &[String],
         input: Option<&[u8]>,
     ) -> Result<String>;
+    async fn remove_rich_rule(&mut self, _args: &[String]) -> Result<bool> {
+        bail!("无法删除 firewalld 持久规则")
+    }
     fn nft_generation(&self) -> Result<u32> {
         bail!("无法读取 nftables 规则集代数")
     }
@@ -54,12 +57,9 @@ trait FirewallExecutor {
 
 #[cfg(target_os = "linux")]
 fn replace_ufw_rules_file(path: &Path, lock_path: &Path, before: &str, after: &str) -> Result<()> {
+    use crate::config::FileAccess;
     use rustix::fs::{fcntl_lock, open, FlockOperation, Mode, OFlags};
-    use std::{
-        fs,
-        io::Write,
-        os::unix::fs::{fchown, MetadataExt},
-    };
+    use std::{fs, io::Write};
 
     // ufw 使用 lockf 锁定 /run/ufw.lock。进程级 flock 与这个 POSIX 记录锁互不协调。
     let lock = open(
@@ -71,27 +71,27 @@ fn replace_ufw_rules_file(path: &Path, lock_path: &Path, before: &str, after: &s
     fcntl_lock(&lock, FlockOperation::NonBlockingLockExclusive)
         .context("无法取得 UFW 写锁，请等待其他防火墙操作完成后重试")?;
 
-    let metadata = fs::symlink_metadata(path)
-        .with_context(|| format!("无法读取 UFW 持久规则 {} 的元数据", path.display()))?;
-    if !metadata.is_file() {
+    let original = fs::File::from(
+        open(
+            path,
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+            Mode::empty(),
+        )
+        .with_context(|| format!("无法打开 UFW 持久规则 {}", path.display()))?,
+    );
+    if !original.metadata()?.is_file() {
         bail!("UFW 持久规则 {} 不是普通文件，请检查防火墙", path.display());
     }
+    let access = FileAccess::capture(&original).context("无法读取 UFW 持久规则访问权限")?;
     let mut candidate =
         tempfile::NamedTempFile::new_in(path.parent().context("UFW 规则路径没有父目录")?)
             .context("无法创建 UFW 持久规则候选文件")?;
     candidate
         .write_all(after.as_bytes())
         .context("无法写入 UFW 持久规则候选文件")?;
-    fchown(
-        candidate.as_file(),
-        Some(metadata.uid()),
-        Some(metadata.gid()),
-    )
-    .context("无法保留 UFW 持久规则的所有者和组")?;
-    candidate
-        .as_file()
-        .set_permissions(metadata.permissions())
-        .context("无法保留 UFW 持久规则权限")?;
+    access
+        .apply(candidate.as_file())
+        .context("无法保留 UFW 持久规则访问权限")?;
     candidate
         .as_file()
         .sync_all()
@@ -181,6 +181,12 @@ impl FirewallExecutor for SystemFirewall {
         run_command(program, args, input, self.xtables_lock_file.as_deref()).await
     }
 
+    async fn remove_rich_rule(&mut self, args: &[String]) -> Result<bool> {
+        let output = run_command_output("firewall-cmd", args, None, None, Stdio::piped()).await?;
+        firewalld_rich_rule_removed(output.status.code(), &output.stderr)
+            .with_context(|| format!("firewall-cmd 持久规则删除失败（{}）", output.status))
+    }
+
     #[cfg(target_os = "linux")]
     fn nft_generation(&self) -> Result<u32> {
         nft_netlink::generation()
@@ -225,6 +231,7 @@ struct Attempt {
     before: Vec<LiveRule>,
     position: usize,
     ufw: Option<UfwAttempt>,
+    rich_deleted: bool,
 }
 
 struct UfwAttempt {
@@ -476,6 +483,7 @@ impl FirewallPlan {
             before,
             position,
             ufw,
+            rich_deleted: false,
         });
         if let Rule::Nft { spec, .. } = rule {
             let handle = spec["handle"].as_u64().context("nft rule 缺少 handle")?;
@@ -483,6 +491,17 @@ impl FirewallPlan {
                 // 内核明确拒绝了整笔操作。这个 handle 可能已经属于管理员的新规则。
                 attempted.pop();
                 bail!("nftables 规则集已并发修改，本次规则未删除，请检查防火墙后重试");
+            }
+            return Ok(());
+        }
+        if let Rule::Rich { base, text } = rule {
+            let mut args = base.clone();
+            args.push(format!("--remove-rich-rule={text}"));
+            if backend.remove_rich_rule(&args).await? {
+                attempted.last_mut().unwrap().rich_deleted = true;
+            } else {
+                // firewalld 确认规则已不存在，无需在回滚时补回。
+                attempted.pop();
             }
             return Ok(());
         }
@@ -648,15 +667,10 @@ impl Rule {
                 let ufw = attempt.ufw.as_mut().context("缺少 UFW 规则快照")?;
                 ufw.delete(backend, *scope).await?;
             }
-            Rule::Rich { base, text } => {
-                let mut args = base.clone();
-                args.push(format!("--remove-rich-rule={text}"));
-                backend.execute("firewall-cmd", &args, None).await?;
-            }
             Rule::Iptables { program, text } => {
                 delete_iptables_rule(backend, program, text).await?;
             }
-            Rule::Nft { .. } => unreachable!(),
+            Rule::Rich { .. } | Rule::Nft { .. } => unreachable!(),
         }
         Ok(())
     }
@@ -705,6 +719,9 @@ impl Rule {
             return Ok(());
         }
         if let Rule::Rich { base, text } = self {
+            if !attempt.rich_deleted {
+                bail!("无法确认本次操作删除了 firewalld 持久放行，请检查防火墙");
+            }
             let mut args = base.clone();
             args.push(format!("--add-rich-rule={text}"));
             backend.execute("firewall-cmd", &args, None).await?;
@@ -1398,6 +1415,17 @@ async fn list_rich_rules(backend: &mut impl FirewallExecutor, base: &[String]) -
     backend.execute("firewall-cmd", &args, None).await
 }
 
+fn firewalld_rich_rule_removed(code: Option<i32>, stderr: &[u8]) -> Result<bool> {
+    // firewall-cmd 对不存在的规则可能返回 0，并将 NOT_ENABLED 写入 stderr。
+    match code {
+        Some(12) => Ok(false),
+        Some(0) => Ok(!stderr.split(|&byte| byte == b'\n').any(|line| {
+            line == b"Warning: NOT_ENABLED" || line.starts_with(b"Warning: NOT_ENABLED:")
+        })),
+        _ => bail!("无法确认 firewalld 持久规则删除结果，请检查防火墙"),
+    }
+}
+
 fn firewalld_rules(output: &str, listener: SocketAddr, base: &[String]) -> Vec<Rule> {
     output
         .lines()
@@ -1747,11 +1775,15 @@ mod tests {
 
     const SHARED: &str = r#"rule port port="1080" protocol="tcp" accept"#;
     const SCOPED: &str = r#"rule family="ipv4" port port="1080" protocol="tcp" accept"#;
+    const SCOPED_ALL_SOURCES: &str =
+        r#"rule family="ipv4" source address="0.0.0.0/0" port port="1080" protocol="tcp" accept"#;
 
+    #[derive(Default)]
     struct FakeFirewalld {
         rules: [Vec<&'static str>; 2],
         runtime_timeout: Option<u32>,
-        fail_permanent_removal: bool,
+        revoke_before_permanent_removal: bool,
+        fail_permanent_removal: Option<&'static str>,
         fail_permanent_restore: bool,
     }
 
@@ -1786,16 +1818,28 @@ mod tests {
                     self.rules[permanent].push(SCOPED);
                     Ok(String::new())
                 }
-                _ => {
-                    assert_eq!(option, &format!("--remove-rich-rule={SCOPED}"));
-                    assert_eq!(permanent, 1);
-                    if self.fail_permanent_removal {
-                        bail!("模拟持久规则删除失败");
-                    }
-                    assert_eq!(self.rules[permanent].pop(), Some(SCOPED));
-                    Ok(String::new())
-                }
+                _ => panic!("unexpected firewall-cmd arguments: {args:?}"),
             }
+        }
+
+        async fn remove_rich_rule(&mut self, args: &[String]) -> Result<bool> {
+            assert_eq!(args[0], "--permanent");
+            let text = args
+                .last()
+                .unwrap()
+                .strip_prefix("--remove-rich-rule=")
+                .unwrap();
+            if self.fail_permanent_removal == Some(text) {
+                bail!("模拟持久规则删除失败");
+            }
+            let position = self.rules[1].iter().position(|rule| *rule == text).unwrap();
+            self.rules[1].remove(position);
+            if std::mem::take(&mut self.revoke_before_permanent_removal) {
+                // 管理员先完成删除，firewall-cmd 仍返回成功状态。
+                let warning = format!("Warning: NOT_ENABLED: {text}\n");
+                return firewalld_rich_rule_removed(Some(0), warning.as_bytes());
+            }
+            firewalld_rich_rule_removed(Some(0), b"")
         }
     }
 
@@ -1803,9 +1847,7 @@ mod tests {
     async fn socks5_secure_firewalld_keeps_shared_runtime_and_permanent_rules() {
         let mut backend = FakeFirewalld {
             rules: [vec![SHARED], vec![SHARED, SCOPED]],
-            runtime_timeout: None,
-            fail_permanent_removal: false,
-            fail_permanent_restore: false,
+            ..Default::default()
         };
         let mut plan = FirewallPlan::capture_with("0.0.0.0:1080".parse().unwrap(), &mut backend)
             .await
@@ -1827,8 +1869,7 @@ mod tests {
             let mut backend = FakeFirewalld {
                 rules: rules.clone(),
                 runtime_timeout,
-                fail_permanent_removal: false,
-                fail_permanent_restore: false,
+                ..Default::default()
             };
             let result =
                 FirewallPlan::capture_with("0.0.0.0:1080".parse().unwrap(), &mut backend).await;
@@ -1845,8 +1886,7 @@ mod tests {
             let mut backend = FakeFirewalld {
                 rules: original.clone(),
                 runtime_timeout,
-                fail_permanent_removal: false,
-                fail_permanent_restore: false,
+                ..Default::default()
             };
             let error = FirewallPlan::capture_with("0.0.0.0:1080".parse().unwrap(), &mut backend)
                 .await
@@ -1863,9 +1903,8 @@ mod tests {
         for fail_permanent_restore in [false, true] {
             let mut backend = FakeFirewalld {
                 rules: [vec![SHARED], vec![SHARED, SCOPED]],
-                runtime_timeout: None,
-                fail_permanent_removal: false,
                 fail_permanent_restore,
+                ..Default::default()
             };
             let mut plan =
                 FirewallPlan::capture_with("0.0.0.0:1080".parse().unwrap(), &mut backend)
@@ -1890,13 +1929,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn socks5_secure_firewalld_does_not_restore_an_allow_revoked_before_removal() {
+        let mut backend = FakeFirewalld {
+            rules: [vec![SHARED], vec![SHARED, SCOPED, SCOPED_ALL_SOURCES]],
+            revoke_before_permanent_removal: true,
+            fail_permanent_removal: Some(SCOPED_ALL_SOURCES),
+            ..Default::default()
+        };
+        let mut plan = FirewallPlan::capture_with("0.0.0.0:1080".parse().unwrap(), &mut backend)
+            .await
+            .unwrap();
+        let error = plan.close_with(&mut backend).await.unwrap_err();
+        assert!(format!("{error:#}").contains("持久规则删除失败"));
+        let remaining = [vec![SHARED], vec![SHARED, SCOPED_ALL_SOURCES]];
+        assert_eq!(backend.rules, remaining);
+        plan.restore_with(&mut backend).await.unwrap();
+        assert_eq!(backend.rules, remaining);
+    }
+
+    #[tokio::test]
     async fn socks5_secure_firewalld_failed_permanent_removal_leaves_rules_unchanged() {
         let original = [vec![SHARED], vec![SHARED, SCOPED]];
         let mut backend = FakeFirewalld {
             rules: original.clone(),
-            runtime_timeout: None,
-            fail_permanent_removal: true,
-            fail_permanent_restore: false,
+            fail_permanent_removal: Some(SCOPED),
+            ..Default::default()
         };
         let mut plan = FirewallPlan::capture_with("0.0.0.0:1080".parse().unwrap(), &mut backend)
             .await
@@ -2050,8 +2107,9 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn socks5_secure_ufw_preserves_an_admin_write_during_rule_replacement() {
-        use rustix::fs::{fcntl_lock, FlockOperation};
+        use rustix::fs::{fcntl_lock, getxattr, setxattr, FlockOperation, XattrFlags};
         use std::io::{BufRead, BufReader};
+        use std::os::unix::fs::MetadataExt;
         use std::process::{Command, Stdio};
 
         const ADMIN_DIRECTORY: &str = "PING_RUST_TEST_UFW_ADMIN_DIRECTORY";
@@ -2081,6 +2139,27 @@ mod tests {
         let lock = directory.path().join("ufw.lock");
         let before = "-A ufw-user-input -p tcp --dport 1080 -j ACCEPT\n";
         std::fs::write(&rules, before).unwrap();
+        let owner = std::fs::metadata(&rules).unwrap().uid();
+        let reader = if owner == 65534 { 65533 } else { 65534 };
+        let mut acl = 2_u32.to_le_bytes().to_vec();
+        for (tag, access, id) in [
+            (1_u16, 6_u16, u32::MAX),
+            (2, 4, reader),
+            (4, 0, u32::MAX),
+            (16, 4, u32::MAX),
+            (32, 0, u32::MAX),
+        ] {
+            acl.extend(tag.to_le_bytes());
+            acl.extend(access.to_le_bytes());
+            acl.extend(id.to_le_bytes());
+        }
+        let attribute = "system.posix_acl_access";
+        setxattr(&rules, attribute, &acl, XattrFlags::empty()).unwrap();
+        let assert_acl = || {
+            let mut value = [0_u8; 44];
+            let len = getxattr(&rules, attribute, value.as_mut_slice()).unwrap();
+            assert_eq!(&value[..len], acl.as_slice());
+        };
         let (_, module) = module_path!().split_once("::").unwrap();
         let test =
             format!("{module}::socks5_secure_ufw_preserves_an_admin_write_during_rule_replacement");
@@ -2108,6 +2187,10 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&rules).unwrap(), current);
         replace_ufw_rules_file(&rules, &lock, &current, deny).unwrap();
         assert_eq!(std::fs::read_to_string(&rules).unwrap(), deny);
+        assert_acl();
+        replace_ufw_rules_file(&rules, &lock, deny, &current).unwrap();
+        assert_eq!(std::fs::read_to_string(&rules).unwrap(), current);
+        assert_acl();
     }
 
     struct FakeUfw {
