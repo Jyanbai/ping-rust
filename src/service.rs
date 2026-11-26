@@ -724,9 +724,10 @@ async fn detect_shoes_service_hook(state_path: &Path) -> Option<ShoesServiceHook
     // 有序依赖先于 shoes 启动钩子执行，此时可能还没有 shoes ControlPID。
     let activating = unit_property(&target, "ActiveState") == Some("activating");
     let waiting_oneshot = activating && unit_property(&target, "Type") == Some("oneshot");
-    // 有序依赖的 ExecStartPre 和 ExecStartPost 均阻塞启动作业，包括 Type=simple。
-    let waiting_start_hook =
-        activating && control_reader && matches!(substate, Some("start-pre" | "start-post"));
+    // 有序依赖的 ExecCondition、ExecStartPre 和 ExecStartPost 均阻塞启动作业。
+    let waiting_start_hook = activating
+        && control_reader
+        && matches!(substate, Some("condition" | "start-pre" | "start-post"));
     // Type=forking 使用 ControlPID 执行 ExecStart，退出后才完成启动。
     let waiting_forking = activating
         && control_reader
@@ -744,10 +745,10 @@ async fn detect_shoes_service_hook(state_path: &Path) -> Option<ShoesServiceHook
         if !crate::config::socks5_secure::has_live_restored_state(state_path)? {
             return Ok(false);
         }
-        // 回滚显式启动此前活跃的 PartOf 单元，即使 shoes 的启动作业已经完成。
+        // 回滚显式启动此前活跃的伴随单元，此时 shoes 的启动作业可能已完成。
         let starting = service_jobs(systemctl, "start").await?;
         Ok::<_, anyhow::Error>(
-            starting.contains(unit) && systemctl.secure_part_of_units().await?.contains(unit),
+            starting.contains(unit) && systemctl.secure_companion_units().await?.contains(unit),
         )
     })
     .await
@@ -1128,11 +1129,23 @@ impl Systemctl {
         Ok(())
     }
 
-    async fn secure_part_of_units(self) -> Result<BTreeSet<String>> {
+    async fn secure_companion_units(self) -> Result<BTreeSet<String>> {
         let mut units = BTreeSet::new();
         let mut pending = vec![SERVICE_NAME.to_owned()];
         while let Some(unit) = pending.pop() {
-            let members = self.timed_unit_show(&unit, "ConsistsOf").await?;
+            let members = self
+                .timed(
+                    &[
+                        "show",
+                        "--property=ConsistsOf",
+                        "--property=BoundBy",
+                        "--value",
+                        "--",
+                        &unit,
+                    ],
+                    SECURE_QUERY_TIMEOUT,
+                )
+                .await?;
             for member in members.split_whitespace() {
                 if member != SERVICE_NAME && units.insert(member.to_owned()) {
                     pending.push(member.to_owned());
@@ -1142,10 +1155,10 @@ impl Systemctl {
         Ok(units)
     }
 
-    pub(crate) async fn secure_active_part_of_units(self) -> Result<Vec<String>> {
+    pub(crate) async fn secure_active_companion_units(self) -> Result<Vec<String>> {
         tokio::time::timeout(SECURE_QUERY_TIMEOUT, async {
             let mut active = Vec::new();
-            for unit in self.secure_part_of_units().await? {
+            for unit in self.secure_companion_units().await? {
                 if self.secure_unit_is_active(&unit).await? {
                     active.push(unit);
                 }
@@ -1153,10 +1166,10 @@ impl Systemctl {
             Ok(active)
         })
         .await
-        .context("查询 shoes 的 PartOf 伴随单元超时")?
+        .context("查询 shoes 的伴随单元超时")?
     }
 
-    pub(crate) async fn restore_secure_part_of_units(self, units: &[String]) -> Result<()> {
+    pub(crate) async fn restore_secure_companion_units(self, units: &[String]) -> Result<()> {
         let stopped = self.secure_inactive_units(units).await?;
         if !stopped.is_empty() {
             let mut args = vec!["reset-failed", "--"];
@@ -1168,18 +1181,15 @@ impl Systemctl {
                 .await
                 .with_context(|| {
                     if let Err(error) = reset {
-                        format!("恢复 PartOf 伴随单元失败，重置启动限流也失败：{error:#}")
+                        format!("恢复伴随单元失败，重置启动限流也失败：{error:#}")
                     } else {
-                        "恢复 PartOf 伴随单元失败".to_owned()
+                        "恢复伴随单元失败".to_owned()
                     }
                 })?;
         }
         let stopped = self.secure_inactive_units(units).await?;
         if !stopped.is_empty() {
-            bail!(
-                "回滚后以下 PartOf 伴随单元未恢复为 active：{}",
-                stopped.join("、")
-            );
+            bail!("回滚后以下伴随单元未恢复为 active：{}", stopped.join("、"));
         }
         Ok(())
     }
@@ -1195,7 +1205,7 @@ impl Systemctl {
             Ok(stopped)
         })
         .await
-        .context("复查 shoes 的 PartOf 伴随单元超时")?
+        .context("复查 shoes 的伴随单元超时")?
     }
 
     async fn secure_unit_is_active(self, unit: &str) -> Result<bool> {

@@ -2371,10 +2371,13 @@ fn default_profile_name(protocol: Protocol, id: Uuid) -> String {
     format!("{}-{}", protocol.slug(), &id.simple().to_string()[..8])
 }
 
+fn read_server_yaml(path: &Path) -> Result<String> {
+    fs::read_to_string(path).with_context(|| format!("读取配置 {} 失败", path.display()))
+}
+
 fn load_servers(path: &Path) -> Result<Vec<ServerConfig>> {
-    let yaml =
-        fs::read_to_string(path).with_context(|| format!("读取配置 {} 失败", path.display()))?;
-    crate::yaml::from_str(&yaml).context("现有 shoes 配置不是 ping-rust 可管理的格式")
+    crate::yaml::from_str(&read_server_yaml(path)?)
+        .context("现有 shoes 配置不是 ping-rust 可管理的格式")
 }
 
 pub async fn ensure_profile_files() -> Result<bool> {
@@ -2386,15 +2389,27 @@ pub async fn ensure_profile_files() -> Result<bool> {
         return Ok(false);
     }
     let state = load_state_for_update()?;
-    let servers = load_servers(config_path)?;
+    let yaml = read_server_yaml(config_path)?;
+    let servers: Vec<ServerConfig> =
+        crate::yaml::from_str(&yaml).context("现有 shoes 配置不是 ping-rust 可管理的格式")?;
     ensure_servers_match_state(&servers, &state.profiles)
         .context("旧版聚合配置与管理状态不一致，无法安全迁移节点文件")?;
     ensure_chain_proxy_matches_state(&servers, &state)?;
-    let documents = profile_documents(&servers, &state.profiles)?;
-    if profile_documents_are_current(Path::new(utils::PROFILES_DIR), &documents)?
-        && !socks5::listen_migration_pending(state_path)?
-    {
-        return Ok(false);
+    if !socks5::listen_migration_pending(state_path)? {
+        // 加固保留 shoes 的原始字段和文件访问权限。补齐节点文件时以聚合 YAML 为准。
+        let raw_servers: Vec<serde_json::Value> =
+            crate::yaml::from_str(&yaml).context("无法保留聚合配置中的 shoes 字段")?;
+        let documents = commit::serialize_profile_documents(&raw_servers, &state.profiles)?;
+        let profiles_path = Path::new(utils::PROFILES_DIR);
+        let snapshot = ProfileDirectorySnapshot::capture(profiles_path)?;
+        if snapshot.matches_yaml_documents(&documents) {
+            return Ok(false);
+        }
+        if !servers.is_empty() {
+            validate_candidate_with_shoes(&yaml, Path::new(utils::CONFIG_DIR)).await?;
+        }
+        commit::repair_profile_documents(profiles_path, &documents, snapshot)?;
+        return Ok(true);
     }
     let yaml = crate::yaml::to_string(&servers).context("序列化迁移聚合配置失败")?;
     if !servers.is_empty() {

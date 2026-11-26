@@ -264,6 +264,7 @@ pub(crate) async fn apply(
             .verify(&plan.profile)
             .await
             .context("验证监听或认证失败")?;
+        plan.verify_config(false)?;
         interrupt.check()?;
         runtime
             .close_firewall()
@@ -274,6 +275,7 @@ pub(crate) async fn apply(
             .verify(&plan.profile)
             .await
             .context("防火墙变更后验证失败")?;
+        plan.verify_config(false)?;
         interrupt.finish(|| plan.publish_state())
     }
     .await;
@@ -322,7 +324,11 @@ pub(crate) async fn apply(
             if let Err(error) = plan.mark_config_restored() {
                 failures.push(format!("回滚启动钩子状态={error:#}"));
             }
-            if let Err(error) = runtime.restore_service(&plan.original).await {
+            if let Err(error) = runtime
+                .restore_service(&plan.original)
+                .await
+                .and_then(|_| plan.verify_config(true))
+            {
                 failures.push(format!("服务及原监听验证={error:#}"));
             }
         }
@@ -458,7 +464,7 @@ impl Runtime for SystemRuntime {
         systemctl
             .require_managed_shoes_exec_start(&self.managed_config)
             .await?;
-        self.active_companions = systemctl.secure_active_part_of_units().await?;
+        self.active_companions = systemctl.secure_active_companion_units().await?;
         // 监听探测无法确认非 SOCKS5 节点加载的凭据。还原磁盘也无法恢复旧进程内的配置。
         if plan.has_non_socks5_profiles() {
             systemctl
@@ -514,7 +520,7 @@ impl Runtime for SystemRuntime {
         let systemctl = Systemctl::SecureTransaction;
         systemctl.restart_secure_transaction(Some(stop)).await?;
         systemctl
-            .restore_secure_part_of_units(&self.active_companions)
+            .restore_secure_companion_units(&self.active_companions)
             .await?;
         self.verify(original).await
     }

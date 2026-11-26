@@ -955,8 +955,9 @@ check_other_auth_after_restart() (
   scenario="$(mktemp -d /usr/local/lib/socks5-restart-auth.XXXXXX)"
   dropin=/etc/systemd/system/shoes.service.d/90-compat-socks5-restart-auth.conf
   companion=/run/systemd/system/compat-socks5-partof-only.service
+  bound=/run/systemd/system/compat-socks5-bound-only.service
   inactive=/run/systemd/system/compat-socks5-partof-inactive.service
-  trap 'systemctl stop "${companion##*/}" "${inactive##*/}" || true; rm -f "$dropin" "$companion" "$inactive"; systemctl daemon-reload; rm -rf "$scenario"' EXIT
+  trap 'systemctl stop "${companion##*/}" "${bound##*/}" "${inactive##*/}" || true; rm -f "$dropin" "$companion" "$bound" "$inactive"; systemctl daemon-reload; rm -rf "$scenario"' EXIT
   umask 077
   cat >"$scenario/start-companion" <<'SH'
 #!/bin/sh
@@ -977,10 +978,47 @@ ExecStart=$scenario/start-companion $NEW ${ids[1]} $scenario/companion.json
 ExecStop=/bin/rm -f $scenario/companion.json
 EOF
   cp "$companion" "$inactive"
+  cat >"$bound" <<EOF
+[Unit]
+BindsTo=shoes.service
+After=shoes.service
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=5s
+ExecStart=$scenario/start-companion $NEW ${ids[1]} $scenario/bound.json
+ExecStop=/bin/rm -f $scenario/bound.json
+EOF
   systemctl daemon-reload
-  systemctl start "${companion##*/}"
+  systemctl start "${companion##*/}" "${bound##*/}"
   test -s "$scenario/companion.json"
-  python3 - /etc/shoes/config.yaml "$scenario/config.yaml" "$kind" <<'PY'
+  test -s "$scenario/bound.json"
+  if [[ "$kind" == managed-reality ]]; then
+    cat >"$scenario/change-uuid.py" <<'PY'
+from pathlib import Path
+import sys
+import uuid
+
+import yaml
+
+config = Path('/etc/shoes/config.yaml')
+contents = config.read_bytes()
+servers = yaml.safe_load(contents)
+if any(entry['address'] == '127.0.0.1:24436' for entry in servers):
+    other, = (entry for entry in servers if entry['address'] == '0.0.0.0:24431')
+    reality, = other['protocol']['reality_targets'].values()
+    user_id = reality['protocol']['user_id'].encode()
+    assert contents.count(user_id) == 1
+    # Edit the same inode, keeping the service's ExecStart and all listeners intact.
+    config.write_bytes(contents.replace(user_id, str(uuid.uuid4()).encode(), 1))
+    Path(sys.argv[1]).touch()
+PY
+    cat >"$scenario/restart.conf" <<EOF
+[Service]
+ExecStartPre=+/usr/bin/python3 $scenario/change-uuid.py $scenario/uuid-changed
+EOF
+  else
+    python3 - /etc/shoes/config.yaml "$scenario/config.yaml" "$kind" <<'PY'
 import sys
 import uuid
 
@@ -1002,7 +1040,7 @@ else:
 with open(sys.argv[2], 'w') as output:
     yaml.safe_dump(servers, output)
 PY
-  cat >"$scenario/start" <<'SH'
+    cat >"$scenario/start" <<'SH'
 #!/bin/sh
 set -eu
 config=/etc/shoes/config.yaml
@@ -1011,12 +1049,13 @@ if grep -Fq '127.0.0.1:24436' "$config"; then
 fi
 exec /usr/local/bin/shoes "$config"
 SH
-  chmod 0700 "$scenario/start"
-  cat >"$scenario/restart.conf" <<EOF
+    chmod 0700 "$scenario/start"
+    cat >"$scenario/restart.conf" <<EOF
 [Service]
 ExecStart=
 ExecStart=$scenario/start $scenario/config.yaml
 EOF
+  fi
   write_socks5_restart_override "$scenario"
   before_pid="$(systemctl show --property=MainPID --value shoes.service)"
   find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/before"
@@ -1027,16 +1066,21 @@ EOF
   fi
   if [[ "$kind" == socks5 ]]; then
     grep -Fq '端口 24432 的运行态认证与受管配置不一致' "$scenario/result"
+  elif [[ "$kind" == managed-reality ]]; then
+    test -f "$scenario/uuid-changed"
+    grep -Fq '重启后受管聚合配置已变更' "$scenario/result"
   else
     grep -Fq '重启后的 shoes 进程未使用受管聚合配置' "$scenario/result"
   fi
   grep -Fq '原配置、防火墙及服务已恢复并再次验证' "$scenario/result"
   systemctl is-active --quiet shoes.service
   systemctl is-active --quiet "${companion##*/}"
+  systemctl is-active --quiet "${bound##*/}"
   test "$(systemctl show --property=ActiveState --value "${inactive##*/}")" = inactive
   "$NEW" export sing-box --profile "${ids[1]}" --server example.com \
     --output "$scenario/companion-expected.json" >/dev/null
   cmp -s "$scenario/companion.json" "$scenario/companion-expected.json"
+  cmp -s "$scenario/bound.json" "$scenario/companion-expected.json"
   test "$(systemctl show --property=MainPID --value shoes.service)" != "$before_pid"
   ss -H -ltn 'sport = :24436' | grep -Fq '0.0.0.0:24436'
   find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/after"
@@ -1046,7 +1090,10 @@ check_other_auth_after_restart socks5
 echo 'SOCKS5 local: reject authentication drift on another node after restart and roll back: PASS'
 check_other_auth_after_restart reality
 echo 'SOCKS5 local: reject a different Reality UUID after restart and roll back: PASS'
+check_other_auth_after_restart managed-reality
+echo 'SOCKS5 local: reject a changed Reality UUID in the managed config after restart and roll back: PASS'
 echo 'SOCKS5 rollback: restore the active PartOf-only companion and keep the inactive unit stopped: PASS'
+echo 'SOCKS5 rollback: restore the active BindsTo-only companion and its client export: PASS'
 
 # Exercise signal cancellation and an unattended timeout with the same substitute.
 (
@@ -1361,6 +1408,9 @@ PartOf=shoes.service
 [Service]
 Type=simple
 TimeoutStartSec=5s
+ExecCondition=$NEW export sing-box --profile ${ids[1]} --server example.com --output $scenario/condition-export.json
+ExecCondition=/usr/bin/cmp -s $scenario/dependency-expected.json $scenario/condition-export.json
+ExecCondition=/bin/sh -c 'echo ok >>$scenario/condition-dependency-runs'
 ExecStartPre=$NEW export sing-box --profile ${ids[1]} --server example.com --output $scenario/simple-export.json
 ExecStartPre=/usr/bin/cmp -s $scenario/dependency-expected.json $scenario/simple-export.json
 ExecStartPre=/bin/sh -c 'echo ok >>$scenario/simple-dependency-runs'
@@ -1427,6 +1477,7 @@ EOF
   test "$(grep -c '^ok$' "$scenario/dependency-runs")" -eq 2
   test "$(grep -c '^ok$' "$scenario/notify-dependency-runs")" -eq 2
   test "$(grep -c '^ok$' "$scenario/forking-dependency-runs")" -eq 2
+  test "$(grep -c '^ok$' "$scenario/condition-dependency-runs")" -eq 2
   test "$(grep -c '^ok$' "$scenario/simple-dependency-runs")" -eq 2
   test "$(grep -c '^ok$' "$scenario/start-pre-runs")" -eq 2
   test "$(grep -cx ok "$scenario/reload-runs")" -eq 2
@@ -1466,6 +1517,7 @@ echo 'SOCKS5 rollback: synchronous ExecReload exports during candidate and resto
 echo 'SOCKS5 rollback: ordered startup dependency exports during candidate and restored starts: PASS'
 echo 'SOCKS5 rollback: ordered Type=notify dependency exports before READY=1 on both starts: PASS'
 echo 'SOCKS5 rollback: ordered Type=forking dependency exports before forking on both starts: PASS'
+echo 'SOCKS5 rollback: ordered Type=simple dependency exports in ExecCondition on both starts: PASS'
 echo 'SOCKS5 rollback: ordered Type=simple dependency exports in ExecStartPre on both starts: PASS'
 echo 'SOCKS5 rollback: candidate credentials are withheld from redirected export stdout: PASS'
 
@@ -1973,9 +2025,30 @@ echo 'SOCKS5 local: keep the loopback allow when other traffic on the port is de
   dropin=/etc/systemd/system/shoes.service.d/90-compat-socks5-group-export.conf
   umask 077
   cp -a /etc/shoes "$scenario/original"
-  trap 'rm -f "$dropin"; cp -a "$scenario/original/." /etc/shoes/; chmod --reference="$scenario/original" /etc/shoes; systemctl daemon-reload; systemctl restart shoes.service; rm -rf "$scenario"' EXIT
+  enc_profile=/etc/shoes/profiles/VLESS-ENC-24440.yaml
+  trap 'rm -f "$dropin" "$enc_profile"; cp -a "$scenario/original/." /etc/shoes/; chmod --reference="$scenario/original" /etc/shoes; systemctl daemon-reload; systemctl restart shoes.service; rm -rf "$scenario"' EXIT
   chmod 0711 "$scenario" /etc/shoes
   install -d -m 0700 -o nobody -g nogroup "$scenario/export"
+  "$NEW" add vless-enc --port 24440 --name compat-menu-vless-enc --server-address "$SERVER" \
+    --yes >"$scenario/add-vless-enc" 2>&1
+  config=/etc/shoes/config.yaml
+  python3 - "$config" "$enc_profile" <<'PY'
+import sys
+from pathlib import Path
+
+import yaml
+
+config, profile = map(Path, sys.argv[1:])
+servers = yaml.safe_load(config.read_text())
+server, = (entry for entry in servers if entry['address'] == '0.0.0.0:24440')
+document = yaml.safe_load(profile.read_text())
+for entry in (server, document):
+    entry['protocol']['encryption_limits'] = {'max_sessions': 128}
+config.write_text(yaml.safe_dump(servers))
+profile.write_text(yaml.safe_dump(document))
+PY
+  chown root:nogroup "$config"
+  chmod 0640 "$config"
   state=/etc/shoes/ping-rust-state.json
   jq '(.profiles[] | select(.name == "compat-socks5-legacy") |
     .credentials.Socks5.listen) = {"address": "0.0.0.0", "legacy_public_address": "0.0.0.0"}' \
@@ -1996,6 +2069,19 @@ EOF
   rm "$scenario/export/client.json"
   "$NEW" socks5 secure "$legacy_socks5_id" --auth --yes >"$scenario/result" 2>&1
   cmp -s "$scenario/expected.json" "$scenario/export/client.json"
+  grep -Fq 'encryption_limits:' "$config"
+  grep -Fq 'encryption_limits:' "$enc_profile"
+  find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/before-menu"
+  printf '0\n' | timeout 20 "$NEW" menu >"$scenario/menu" 2>&1
+  grep -Fq '请选择 [0-10]:' "$scenario/menu"
+  grep -Fq '已退出。' "$scenario/menu"
+  if grep -Fq '检查受管配置失败' "$scenario/menu"; then
+    echo 'Opening the main menu reported an error checking the hardened config' >&2
+    exit 1
+  fi
+  find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/after-menu"
+  diff -u "$scenario/before-menu" "$scenario/after-menu"
+  test "$(stat -c %a:%U:%G "$config")" = '640:root:nogroup'
   rm "$scenario/export/client.json"
   systemctl restart shoes.service
   systemctl is-active --quiet shoes.service
@@ -2003,6 +2089,7 @@ EOF
   test "$(stat -c %a:%U:%G "$state")" = '640:root:nogroup'
 )
 echo 'SOCKS5 auth: owning-group state access survives publication and a subsequent restart: PASS'
+echo 'SOCKS5 auth: opening the main menu preserves shoes fields and delegated access: PASS'
 
 (
   scenario="$(mktemp -d /usr/local/lib/socks5-start-export.XXXXXX)"

@@ -5,7 +5,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use super::{
     ensure_servers_match_state, save_state_to,
     schema::ServerConfig,
-    transaction::{read_optional, restore_snapshot, ProfileDirectorySnapshot},
+    transaction::{read_optional, restore_snapshot, FileAccess, ProfileDirectorySnapshot},
     ManagedProfile, ManagedState,
 };
 use crate::{performance, utils};
@@ -161,7 +161,9 @@ pub(super) fn write_profile_documents(
     path: &Path,
     documents: &BTreeMap<String, Vec<u8>>,
 ) -> Result<()> {
-    write_profile_documents_inner(path, documents, None)
+    write_profile_documents_inner(path, documents, false, |name, contents| {
+        utils::atomic_write(&path.join(name), contents, 0o600)
+    })
 }
 
 pub(super) fn write_profile_documents_with_access(
@@ -171,19 +173,56 @@ pub(super) fn write_profile_documents_with_access(
     changed_profile: &str,
     protect_credentials: bool,
 ) -> Result<()> {
-    write_profile_documents_inner(
-        path,
-        documents,
-        Some((snapshot, changed_profile, protect_credentials)),
-    )
+    write_profile_documents_inner(path, documents, snapshot.existed(), |name, contents| {
+        let changed = name == changed_profile;
+        // 加固只更新目标节点，缺失文件从聚合配置补齐。
+        if changed || !snapshot.has_profile(name) {
+            let access = if changed && protect_credentials {
+                FileAccess::apply_private
+            } else {
+                FileAccess::apply
+            };
+            snapshot.write_profile(path, name, contents, access)?;
+        }
+        Ok(())
+    })
+}
+
+pub(super) fn repair_profile_documents(
+    path: &Path,
+    documents: &BTreeMap<String, Vec<u8>>,
+    snapshot: ProfileDirectorySnapshot,
+) -> Result<()> {
+    let repair =
+        write_profile_documents_inner(path, documents, snapshot.existed(), |name, contents| {
+            if !snapshot.profile_yaml_is_current(name, contents) {
+                snapshot.write_profile(
+                    path,
+                    name,
+                    contents,
+                    FileAccess::apply_without_public_access,
+                )?;
+            }
+            Ok(())
+        });
+    if let Err(error) = repair {
+        if !ProfileDirectorySnapshot::capture(path).is_ok_and(|current| current == snapshot) {
+            if let Err(rollback) = snapshot.restore(path) {
+                return Err(error.context(format!("恢复节点文件失败：{rollback:#}")));
+            }
+        }
+        return Err(error);
+    }
+    Ok(())
 }
 
 fn write_profile_documents_inner(
     path: &Path,
     documents: &BTreeMap<String, Vec<u8>>,
-    snapshot: Option<(&ProfileDirectorySnapshot, &str, bool)>,
+    directory_exists: bool,
+    write_profile: impl Fn(&str, &[u8]) -> Result<()>,
 ) -> Result<()> {
-    if !snapshot.is_some_and(|(snapshot, ..)| snapshot.existed()) {
+    if !directory_exists {
         utils::ensure_directory(path, 0o700)?;
     }
     let mut existing = Vec::new();
@@ -205,15 +244,7 @@ fn write_profile_documents_inner(
         existing.push(name);
     }
     for (name, contents) in documents {
-        if let Some((snapshot, changed_profile, protect_credentials)) = snapshot {
-            let changed = name == changed_profile;
-            // 加固只更新目标节点，缺失文件从聚合配置补齐。
-            if changed || !snapshot.has_profile(name) {
-                snapshot.write_profile(path, name, contents, changed && protect_credentials)?;
-            }
-        } else {
-            utils::atomic_write(&path.join(name), contents, 0o600)?;
-        }
+        write_profile(name, contents)?;
     }
     for name in existing {
         if !documents.contains_key(&name) {

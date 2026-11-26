@@ -861,6 +861,20 @@ impl SecurePlan {
         Ok(())
     }
 
+    pub(crate) fn verify_config(&self, restored: bool) -> Result<()> {
+        let (phase, expected) = if restored {
+            ("回滚重启后", &self.original_yaml)
+        } else {
+            ("重启后", &self.candidate_yaml)
+        };
+        let contents = fs::read(self.directory.join("config.yaml"))
+            .with_context(|| format!("无法读取{phase}的受管聚合配置"))?;
+        if contents != expected.as_bytes() {
+            bail!("{phase}受管聚合配置已变更，请检查修改 config.yaml 的服务钩子");
+        }
+        Ok(())
+    }
+
     pub(crate) fn publish_state(&mut self) -> Result<()> {
         let rollback = self
             .rollback

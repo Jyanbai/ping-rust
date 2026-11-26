@@ -339,6 +339,23 @@ impl ProfileDirectorySnapshot {
             .eq(documents)
     }
 
+    pub(super) fn matches_yaml_documents(&self, documents: &BTreeMap<String, Vec<u8>>) -> bool {
+        self.files.len() == documents.len()
+            && documents
+                .iter()
+                .all(|(name, contents)| self.profile_yaml_is_current(name, contents))
+    }
+
+    pub(super) fn profile_yaml_is_current(&self, name: &str, contents: &[u8]) -> bool {
+        self.files.get(name).is_some_and(|snapshot| {
+            snapshot.contents == contents
+                || crate::yaml::from_slice::<serde_json::Value>(contents).is_ok_and(|expected| {
+                    crate::yaml::from_slice::<serde_json::Value>(&snapshot.contents)
+                        .is_ok_and(|current| current == expected)
+                })
+        })
+    }
+
     pub(super) fn capture(path: &Path) -> Result<Self> {
         let metadata = match fs::symlink_metadata(path) {
             Ok(metadata) => Some(metadata),
@@ -400,17 +417,11 @@ impl ProfileDirectorySnapshot {
         directory: &Path,
         name: &str,
         contents: &[u8],
-        protect_credentials: bool,
+        apply: fn(&FileAccess, &fs::File) -> io::Result<()>,
     ) -> Result<()> {
         let path = directory.join(name);
         if let Some(snapshot) = self.files.get(name) {
-            utils::atomic_write_with(&path, contents, |file| {
-                if protect_credentials {
-                    snapshot.access.apply_private(file)
-                } else {
-                    snapshot.access.apply(file)
-                }
-            })
+            utils::atomic_write_with(&path, contents, |file| apply(&snapshot.access, file))
         } else {
             utils::atomic_write(&path, contents, 0o600)
         }
