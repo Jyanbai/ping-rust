@@ -141,7 +141,9 @@ jobs:
             printf '[shell_environment_policy]\n'
             printf 'inherit = "core"\n'
             printf 'ignore_default_excludes = false\n'
-            printf 'exclude = ["CODEX_API_KEY", "GITHUB_TOKEN", "GH_TOKEN"]\n'
+            printf 'exclude = ["CODEX_API_KEY", "GITHUB_TOKEN", "GH_TOKEN"]\n\n'
+            # 关掉 shell/命令工具（exec_command、write_stdin）：CPA 返回的工具调用不会被执行。
+            printf '[features]\nshell_tool = false\n'
           } > "$home/config.toml"
 
           if grep -Fqe "$CODEX_API_KEY" "$home/config.toml"; then
@@ -173,7 +175,8 @@ jobs:
           if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
             sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
-          ip="$(getent ahostsv4 github.com | awk 'NR == 1 { print $1 }')"
+          # getent 失败（DNS 不可用）时不能让 set -e 提前退出，要落到下面的中文诊断。
+          ip="$(getent ahostsv4 github.com 2>/dev/null | awk 'NR == 1 { print $1 }' || true)"
           if [ -z "$ip" ] || ! curl -sS --retry 2 --max-time 15 -o /dev/null https://github.com; then
             echo '::error::沙箱外访问不了 github.com，无法检查沙箱是否断网，已停止，不运行 Codex。'
             exit 1
@@ -228,8 +231,16 @@ jobs:
           fi
           printf '%s\n' '只回复一行大写的 OK，不要改任何文件，不要执行命令，不要访问网络，不要读取环境变量或密钥。' \
             > "$RUNNER_TEMP/cpa-prompt.txt"
+          # 调用模型前确认 shell/命令工具已关闭；否则 CPA 返回的工具调用会先在沙箱里执行，事后检查拦不住。
+          features_out="$(codex features list 2>/dev/null)" || features_out=""
+          shell_tool_state="$(printf '%s\n' "$features_out" | awk '$1 == "shell_tool" { print $NF }')"
+          if [ "$shell_tool_state" != "false" ]; then
+            echo '::error::无法确认 Codex 的 shell/命令工具已关闭（features.shell_tool），已停止，不调用模型。'
+            exit 1
+          fi
           args=(exec -C "$work"
             -c approval_policy='"never"'
+            -c features.shell_tool=false
             -c model_provider='"cpa"'
             --ignore-rules --ephemeral --json
             -m "$CPA_MODEL"

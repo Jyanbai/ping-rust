@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import tempfile
 import textwrap
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -18,6 +19,13 @@ COLLABORATOR = "collaborator"
 
 FAKE_CODEX = r"""#!/usr/bin/env bash
 set -euo pipefail
+if [ "${1:-}" = features ]; then
+  printf 'shell_tool                               stable             %s\n' "${FAKE_CODEX_SHELL_TOOL:-false}"
+  exit 0
+fi
+if [ -n "${FAKE_CODEX_ARGS:-}" ]; then
+  printf '%s\n' "$*" >> "${FAKE_CODEX_ARGS}"
+fi
 out=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -220,7 +228,7 @@ COMPLETE_OK_EVENTS = """{"type":"thread.started","thread_id":"t1"}
 
 
 class ReplyAndFailureTest(unittest.TestCase):
-    def run_smoke(self, last_message, *, exit_code=0, stderr="", events="", key="test-cpa-key-not-real", git_status_fail=False):
+    def run_smoke(self, last_message, *, exit_code=0, stderr="", events="", key="test-cpa-key-not-real", git_status_fail=False, shell_tool_state="false"):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         work = Path(temporary.name)
@@ -261,6 +269,7 @@ class ReplyAndFailureTest(unittest.TestCase):
             git_wrapper.chmod(0o755)
         summary = runner_temp / "summary.md"
         summary.touch()
+        args_file = runner_temp / "fake-codex-args.log"
         env = {
             **os.environ,
             "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
@@ -276,6 +285,8 @@ class ReplyAndFailureTest(unittest.TestCase):
             "FAKE_CODEX_STDERR": str(stderr_file),
             "FAKE_CODEX_EXIT": str(exit_code),
             "FAKE_GIT_STATUS_FAIL": "1" if git_status_fail else "0",
+            "FAKE_CODEX_SHELL_TOOL": shell_tool_state,
+            "FAKE_CODEX_ARGS": str(args_file),
         }
         result = subprocess.run(
             ["bash", "-o", "pipefail", "-c", step_script("Run CPA smoke")],
@@ -284,6 +295,7 @@ class ReplyAndFailureTest(unittest.TestCase):
             text=True,
             check=False,
         )
+        result.codex_calls = args_file.read_text(encoding="utf-8").splitlines() if args_file.exists() else []
         return result, summary.read_text(encoding="utf-8")
 
     def error_lines(self, result):
@@ -375,6 +387,57 @@ class ReplyAndFailureTest(unittest.TestCase):
         for text in (result.stdout, summary):
             self.assertNotIn("index file corrupt", text)
 
+    def test_exec_call_disables_shell_tool(self):
+        result, _ = self.run_smoke(b"OK\n", events=COMPLETE_OK_EVENTS)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        exec_calls = [call for call in result.codex_calls if call.startswith("exec ")]
+        self.assertEqual(len(exec_calls), 1, result.codex_calls)
+        self.assertIn("features.shell_tool=false", exec_calls[0])
+
+    def test_shell_tool_not_confirmed_off_stops_before_model_call(self):
+        for state in ("true", "unknown"):
+            with self.subTest(state=state):
+                result, summary = self.run_smoke(b"OK\n", events=COMPLETE_OK_EVENTS, shell_tool_state=state)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                errors = "\n".join(self.error_lines(result))
+                self.assertIn("shell/命令工具", errors)
+                self.assertEqual([c for c in result.codex_calls if c.startswith("exec ")], [])
+                self.assertNotIn("CPA 自检通过", summary)
+
+    def test_generated_config_disables_shell_tool(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        work = Path(temporary.name)
+        runner_temp = work / "runner-temp"
+        runner_temp.mkdir()
+        files = {name: work / name for name in ("env", "output", "summary")}
+        for path in files.values():
+            path.touch()
+        env = {
+            **os.environ,
+            "RUNNER_TEMP": str(runner_temp),
+            "GITHUB_ENV": str(files["env"]),
+            "GITHUB_OUTPUT": str(files["output"]),
+            "GITHUB_STEP_SUMMARY": str(files["summary"]),
+            "CODEX_API_KEY": "test-cpa-key-not-real",
+            "CODEX_API_BASE_URL": "",
+            "CODEX_MODEL": "",
+            "CODEX_REASONING_EFFORT": "",
+        }
+        result = subprocess.run(
+            ["bash", "-o", "pipefail", "-c", step_script("Prepare CPA config")],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        raw = (runner_temp / "codex-home" / "config.toml").read_text(encoding="utf-8")
+        config = tomllib.loads(raw)
+        self.assertIs(config["features"]["shell_tool"], False)
+        self.assertEqual(config["model_provider"], "cpa")
+        self.assertNotIn("test-cpa-key-not-real", raw)
+
     def test_http_401_reports_key_category(self):
         raw = (
             'api error 401 Unauthorized: invalid_api_key raw payload={"error":"nope","token":"secret-token-value"}\n'
@@ -454,6 +517,73 @@ class ReplyAndFailureTest(unittest.TestCase):
             "\n".join(self.error_lines(unauthorized)),
             "\n".join(self.error_lines(missing)),
         )
+
+
+class SandboxProbeDnsTest(unittest.TestCase):
+    """沙箱探测步骤：沙箱外 DNS/出网失败必须给出可定位的中文诊断。"""
+
+    def run_probe(self, getent_script):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        work = Path(temporary.name)
+        bin_dir = work / "bin"
+        bin_dir.mkdir()
+        workspace = work / "workspace"
+        runner_temp = work / "runner-temp"
+        codex_home = runner_temp / "codex-home"
+        for path in (workspace, runner_temp, codex_home):
+            path.mkdir()
+        (codex_home / "config.toml").write_text("", encoding="utf-8")
+        calls = work / "calls.log"
+        output = work / "output"
+        output.touch()
+        fakes = {
+            "getent": getent_script,
+            "sudo": "exit 0",
+            "curl": "exit 0",
+            "codex": f'echo "codex $1" >> "{calls}"\nexit 0',
+        }
+        for name, body in fakes.items():
+            path = bin_dir / name
+            path.write_text("#!/usr/bin/env bash\n" + body + "\n", encoding="utf-8")
+            path.chmod(0o755)
+        env = {
+            **os.environ,
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            "GITHUB_WORKSPACE": str(workspace),
+            "RUNNER_TEMP": str(runner_temp),
+            "GITHUB_OUTPUT": str(output),
+            "CODEX_HOME": str(codex_home),
+            "CODEX_API_KEY": "test-cpa-key-not-real",
+        }
+        result = subprocess.run(
+            ["bash", "-o", "pipefail", "-c", step_script("Verify read-only sandbox")],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        sandbox_ran = calls.exists() and "codex sandbox" in calls.read_text(encoding="utf-8")
+        return result, output.read_text(encoding="utf-8"), sandbox_ran
+
+    def test_dns_failure_reports_outside_sandbox_diagnostic(self):
+        cases = {
+            "getent 非零退出": "exit 2",
+            "getent 零退出但无输出": "exit 0",
+        }
+        for label, script in cases.items():
+            with self.subTest(label):
+                result, output, sandbox_ran = self.run_probe(script)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("沙箱外访问不了 github.com", result.stdout)
+                self.assertNotIn("ok=true", output)
+                self.assertFalse(sandbox_ran)
+
+    def test_resolvable_host_reaches_sandbox_probe(self):
+        result, output, sandbox_ran = self.run_probe('echo "192.0.2.1 STREAM github.com"')
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertTrue(sandbox_ran)
+        self.assertIn("ok=true", output)
 
 
 if __name__ == "__main__":
