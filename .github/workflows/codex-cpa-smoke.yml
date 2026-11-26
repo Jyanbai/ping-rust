@@ -1,0 +1,259 @@
+name: Codex CPA Smoke
+
+# 可选的手动通道：验证 CI 里的 Codex CLI 能否通过第三方 CPA（Responses API）调用模型。
+# 现有 /codex、独立审查、CI 回修、规划仍走 ChatGPT 登录（CODEX_AUTH_JSON），本文件不改动那些工作流。
+# 只接受仓库所有者的 workflow_dispatch，不会在打开的 PR 上自动运行。
+#
+# CI 在 runner 上生成自己的 $CODEX_HOME/config.toml，供应商名只用 cpa（与本机 Codex 配置无关）。
+# 不写、不读、不回写 CODEX_AUTH_JSON。命令沙箱不能联网；模型请求在沙箱外发往 CPA。
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  NO_COLOR: '1'
+
+concurrency:
+  group: codex-cpa-smoke
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    if: github.event_name == 'workflow_dispatch' && github.actor == github.repository_owner
+    runs-on: ubuntu-latest
+    environment: codex
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Install pinned Codex CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          directory="$RUNNER_TEMP/codex-cli"
+          runtime="$HOME/.local/lib/codex-cpa-0.166.0"
+          mkdir -p "$directory" "$runtime"
+          curl --fail --location --retry 2 --connect-timeout 15 --max-time 180 \
+            --proto '=https' --tlsv1.2 --output "$directory/codex.tar.gz" \
+            https://github.com/openai/codex/releases/download/rust-v0.166.0/codex-package-x86_64-unknown-linux-musl.tar.gz
+          echo "1d44b28bc4ac9937d7d3532264baa68a507ce364956a0d4ebb856f331cdee254  $directory/codex.tar.gz" \
+            | sha256sum --check --strict
+          tar -xzf "$directory/codex.tar.gz" -C "$runtime"
+          test -f "$runtime/codex-package.json"
+          chmod 0755 "$runtime/bin/codex" "$runtime/bin/codex-code-mode-host" "$runtime/codex-path/rg"
+          if [ -f "$runtime/codex-resources/bwrap" ]; then chmod 0755 "$runtime/codex-resources/bwrap"; fi
+          "$runtime/bin/codex" --version
+          echo "$runtime/bin" >> "$GITHUB_PATH"
+
+      - name: Prepare CPA config
+        id: prep
+        shell: bash
+        env:
+          CODEX_API_KEY: ${{ secrets.CODEX_API_KEY }}
+          CODEX_API_BASE_URL: ${{ vars.CODEX_API_BASE_URL }}
+          CODEX_MODEL: ${{ vars.CODEX_MODEL }}
+          CODEX_REASONING_EFFORT: ${{ vars.CODEX_REASONING_EFFORT }}
+          GITHUB_TOKEN: ''
+          GH_TOKEN: ''
+        run: |
+          set -euo pipefail
+          umask 077
+          if [ -z "${CODEX_API_KEY}" ]; then
+            echo '::error::environment codex 里没有 CODEX_API_KEY。请按 docs/CODEX_DISPATCH.md 在本机 PowerShell 设置：gh secret set CODEX_API_KEY --env codex --repo Jyanbai/ping-rust（密钥粘贴给 gh，不要发到聊天里）。'
+            exit 1
+          fi
+          printf '::add-mask::%s\n' "$CODEX_API_KEY"
+
+          base="${CODEX_API_BASE_URL:-https://api.moio.cn/v1}"
+          base="${base%"${base##*[![:space:]]}"}"
+          base="${base#"${base%%[![:space:]]*}"}"
+          if [ -z "$base" ]; then
+            base='https://api.moio.cn/v1'
+          fi
+          # 只接受 https 基址，避免写入 config.toml 时注入其他配置。
+          base_re='^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._~/-]*)?$'
+          if ! [[ "$base" =~ $base_re ]]; then
+            echo '::error::CODEX_API_BASE_URL 必须是 https 基址（主机名、可选端口和路径），例如 https://api.moio.cn/v1'
+            exit 1
+          fi
+
+          model="${CODEX_MODEL:-gpt-6.2-sol}"
+          model_re='^[A-Za-z0-9][A-Za-z0-9._+-]*$'
+          if ! [[ "$model" =~ $model_re ]]; then
+            echo '::error::CODEX_MODEL 不是合法的模型名'
+            exit 1
+          fi
+
+          effort="${CODEX_REASONING_EFFORT:-high}"
+          effort_re='^[a-z]+$'
+          if ! [[ "$effort" =~ $effort_re ]]; then
+            echo '::error::CODEX_REASONING_EFFORT 只能是小写字母（如 high），当前值无效'
+            exit 1
+          fi
+
+          home="$RUNNER_TEMP/codex-home"
+          mkdir -p "$home"
+          # 密钥只通过 env_key 从环境变量读取，不写入任何会进日志的文件，也不写 auth.json。
+          {
+            printf 'model = "%s"\n' "$model"
+            printf 'model_provider = "cpa"\n'
+            printf 'model_reasoning_effort = "%s"\n' "$effort"
+            printf 'approval_policy = "never"\n'
+            printf 'web_search = "disabled"\n'
+            printf 'project_doc_max_bytes = 0\n'
+            printf 'default_permissions = "cpa-smoke"\n\n'
+            printf '[model_providers.cpa]\n'
+            printf 'name = "CPA"\n'
+            printf 'base_url = "%s"\n' "$base"
+            printf 'env_key = "CODEX_API_KEY"\n'
+            printf 'wire_api = "responses"\n\n'
+            printf '[permissions.cpa-smoke]\n'
+            printf 'extends = ":read-only"\n\n'
+            printf '[permissions.cpa-smoke.filesystem]\n'
+            printf '"%s" = "deny"\n\n' "$RUNNER_TEMP"
+            printf '[permissions.cpa-smoke.network]\nenabled = false\n\n'
+            # 默认 ignore_default_excludes = true，沙箱会继承 *KEY* 变量；这里必须关掉。
+            printf '[shell_environment_policy]\n'
+            printf 'inherit = "core"\n'
+            printf 'ignore_default_excludes = false\n'
+            printf 'exclude = ["CODEX_API_KEY", "GITHUB_TOKEN", "GH_TOKEN"]\n'
+          } > "$home/config.toml"
+
+          if grep -Fqe "$CODEX_API_KEY" "$home/config.toml"; then
+            echo '::error::生成的 config.toml 含有 API 密钥，已停止。'
+            rm -f "$home/config.toml"
+            exit 1
+          fi
+
+          echo "CODEX_HOME=$home" >> "$GITHUB_ENV"
+          echo "CPA_MODEL=$model" >> "$GITHUB_ENV"
+          echo "CPA_EFFORT=$effort" >> "$GITHUB_ENV"
+          echo "CPA_BASE_URL=$base" >> "$GITHUB_ENV"
+          echo "ok=true" >> "$GITHUB_OUTPUT"
+          echo "已生成 CI 专用 config.toml：provider=cpa，model=$model，reasoning=$effort，base_url=$base"
+          echo "CPA 设置（请求值）：provider=cpa；模型=$model；推理强度=$effort；base_url=$base" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify read-only sandbox
+        id: sandbox
+        if: steps.prep.outputs.ok == 'true'
+        shell: bash
+        env:
+          CODEX_API_KEY: ${{ secrets.CODEX_API_KEY }}
+          GITHUB_TOKEN: ''
+          GH_TOKEN: ''
+        run: |
+          set -euo pipefail
+          printf '::add-mask::%s\n' "$CODEX_API_KEY"
+          # Ubuntu 24.04 默认限制非特权 user namespace，与现有 Codex 工作流相同，一次性 runner 上放开即可。
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          ip="$(getent ahostsv4 github.com | awk 'NR == 1 { print $1 }')"
+          if [ -z "$ip" ] || ! curl -sS --retry 2 --max-time 15 -o /dev/null https://github.com; then
+            echo '::error::沙箱外访问不了 github.com，无法检查沙箱是否断网，已停止，不运行 Codex。'
+            exit 1
+          fi
+          printf 'probe\n' > "$RUNNER_TEMP/cpa-sandbox-probe"
+          chmod 600 "$RUNNER_TEMP/cpa-sandbox-probe"
+          work="$GITHUB_WORKSPACE/cpa-smoke"
+          mkdir -p "$work"
+          rc=0
+          # shellcheck disable=SC2016 # 单引号里的 $1… 由沙箱内的 bash 展开
+          codex sandbox -P cpa-smoke -C "$work" -- bash -c '
+            fail=0
+            if [ -n "${CODEX_API_KEY:-}" ]; then echo "沙箱里能读到 CODEX_API_KEY"; fail=1; fi
+            if [ -n "${GITHUB_TOKEN:-}" ]; then echo "沙箱里能读到 GITHUB_TOKEN"; fail=1; fi
+            if [ -n "${GH_TOKEN:-}" ]; then echo "沙箱里能读到 GH_TOKEN"; fail=1; fi
+            if cat "$1" >/dev/null 2>&1; then echo "CODEX_HOME 配置可读"; fail=1; fi
+            if cat "$2" >/dev/null 2>&1; then echo "RUNNER_TEMP 探测文件可读"; fail=1; fi
+            if ls "$3" >/dev/null 2>&1; then echo "RUNNER_TEMP 可列出"; fail=1; fi
+            if curl -s --max-time 10 -o /dev/null https://github.com; then
+              echo "沙箱里能访问外网（域名）"; fail=1
+            fi
+            if curl -s --max-time 10 -o /dev/null --resolve "github.com:443:$4" https://github.com; then
+              echo "沙箱里能访问外网（直连 IP）"; fail=1
+            fi
+            if touch "$5/.cpa-smoke-write-probe" 2>/dev/null; then echo "工作区可写"; fail=1; fi
+            exit "$fail"
+          ' probe "$CODEX_HOME/config.toml" "$RUNNER_TEMP/cpa-sandbox-probe" "$RUNNER_TEMP" "$ip" "$work" || rc=$?
+          rm -f "$RUNNER_TEMP/cpa-sandbox-probe"
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::Codex 沙箱没有按权限配置 cpa-smoke 生效（exit $rc），已停止，不运行 Codex。"
+            exit 1
+          fi
+          echo '✅ 沙箱内读不到 CPA 密钥、CODEX_HOME 和 RUNNER_TEMP，访问不了外网，工作区只读。'
+          echo "ok=true" >> "$GITHUB_OUTPUT"
+
+      - name: Run CPA smoke
+        id: run
+        if: steps.sandbox.outputs.ok == 'true'
+        shell: bash
+        env:
+          CODEX_API_KEY: ${{ secrets.CODEX_API_KEY }}
+          GITHUB_TOKEN: ''
+          GH_TOKEN: ''
+        run: |
+          set -uo pipefail
+          printf '::add-mask::%s\n' "$CODEX_API_KEY"
+          work="$GITHUB_WORKSPACE/cpa-smoke"
+          mkdir -p "$work"
+          # 空的本地 git 仓库，避免 Codex 依赖仓库状态；不添加 remote，也不检出 ping-rust。
+          if [ ! -d "$work/.git" ]; then
+            git -c init.defaultBranch=main init --quiet "$work"
+          fi
+          printf '%s\n' '只回复一行大写的 OK，不要改任何文件，不要执行命令，不要访问网络，不要读取环境变量或密钥。' \
+            > "$RUNNER_TEMP/cpa-prompt.txt"
+          args=(exec -C "$work"
+            -c approval_policy='"never"'
+            -c model_provider='"cpa"'
+            --ignore-rules --ephemeral --json
+            -m "$CPA_MODEL"
+            -c "model_reasoning_effort=\"$CPA_EFFORT\""
+            -o "$RUNNER_TEMP/cpa-last-message.md")
+          echo "Codex 设置（请求值）：provider=cpa；模型=$CPA_MODEL；推理强度=$CPA_EFFORT；base_url=$CPA_BASE_URL"
+          rc=0
+          # `shell: bash` 实际是 bash -eo pipefail：失败时必须用 || rc=$? 接住。
+          codex "${args[@]}" - < "$RUNNER_TEMP/cpa-prompt.txt" \
+            > "$RUNNER_TEMP/cpa-events.jsonl" 2> "$RUNNER_TEMP/cpa-stderr.log" || rc=$?
+          printf '::add-mask::%s\n' "$CODEX_API_KEY"
+          echo "codex exit code: $rc"
+          if [ "$rc" -ne 0 ]; then
+            echo '::error::Codex CPA 自检失败（模型调用未成功）。完整输出只写在 runner 临时文件，不进公开日志。'
+            exit "$rc"
+          fi
+          if [ ! -s "$RUNNER_TEMP/cpa-last-message.md" ]; then
+            echo '::error::Codex 没有写出最后回复，无法确认 CPA 连通。'
+            exit 1
+          fi
+          if grep -Fqe "$CODEX_API_KEY" "$RUNNER_TEMP/cpa-last-message.md" \
+            "$RUNNER_TEMP/cpa-events.jsonl" "$RUNNER_TEMP/cpa-stderr.log"; then
+            echo '::error::Codex 输出里出现了 API 密钥，已停止。'
+            exit 1
+          fi
+          if ! grep -Eq '(^|[^A-Za-z0-9])OK([^A-Za-z0-9]|$)' "$RUNNER_TEMP/cpa-last-message.md"; then
+            echo '::error::CPA 调用已返回，但最后回复里没有 OK，请查看本次运行结论（回复全文不打印）。'
+            exit 1
+          fi
+          # 确认自检工作区没有被改动；本 job 不检出 ping-rust。
+          if [ -n "$(git -C "$work" status --porcelain)" ]; then
+            echo '::error::自检过程改动了工作区文件，预期是只读回复。'
+            exit 1
+          fi
+          echo '✅ CPA 认证、Responses 接口与请求的模型已跑通（模型回复了 OK）。现有 ChatGPT 自动流程未在本次运行中使用。'
+          echo '✅ CPA 自检通过：认证、Responses 与请求的模型可用。现有 ChatGPT 自动流程未切换。' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove local credentials
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf "$RUNNER_TEMP/codex-home" \
+            "$RUNNER_TEMP/cpa-prompt.txt" \
+            "$RUNNER_TEMP/cpa-last-message.md" \
+            "$RUNNER_TEMP/cpa-events.jsonl" \
+            "$RUNNER_TEMP/cpa-stderr.log" \
+            "$RUNNER_TEMP/cpa-sandbox-probe" \
+            "$GITHUB_WORKSPACE/cpa-smoke"

@@ -16,6 +16,7 @@
 - 收到命令后，workflow 会给评论加 👀，再回一条带 Codex 任务链接的评论，完成后更新为结果（推送的 commit 或新 PR 的链接）。
 - 同一个 PR / issue 的任务会排队，一次只跑一个。注意 GitHub 只保留一个排队中的任务：排队时再发一条，前一条排队中的会被取消。
 - 每个任务消耗 ChatGPT 套餐里 Codex 的本地消息额度（和在电脑上用 Codex 是同一个池子）。GitHub Actions 分钟数对公开仓库免费。
+- 另有一条仅手动触发的第三方 CPA 自检，见下文「可选：第三方 CPA 手动自检」。它不会切换 `/codex`、审查、回修或规划的 ChatGPT 登录路径。
 - Codex 在沙箱里不能联网，也不能创建 TCP/UDP socket（连 127.0.0.1 也不行，见下文"沙箱里能跑哪些测试"）。Rust 依赖会预先下载，所以它能跑 `cargo build/test --offline`；监听或连接端口的测试、依赖 shoes / Xray / Mihomo 的测试跑不了，推送后由 CI 完整测试。prompt 要求 Codex 在最终回复里把这些测试单独列出、标"未验证"，不算作通过。
 
 ## Codex 接管实现、审查与回修
@@ -183,6 +184,42 @@ Remove-Item Env:CODEX_HOME
 | `CODEX_REASONING_EFFORT` | 空（用模型默认强度） | 推理强度，如 `medium`、`high`，可选值取决于模型；只能是小写字母 |
 
 两个变量的请求值会打印在运行日志和 job summary 里。`codex exec --json` 不会报告实际使用的模型，所以这里记录的是请求值。Codex CLI 不在本地校验这两个值（不认识的强度会原样发给服务端），写错时会不会报错由服务端决定，改完后看一次运行结果确认。
+
+## 可选：第三方 CPA 手动自检
+
+`.github/workflows/codex-cpa-smoke.yml` 是一条**仅手动触发**的可选通路，用来验证 CI 里的 Codex CLI 能否通过第三方 CPA（Responses API）调用模型。
+
+- 现有 `/codex`、独立审查、CI 回修、规划仍然使用 ChatGPT 登录（`CODEX_AUTH_JSON`），和本机 Codex 同一套餐额度。这条工作流**不会**切换那些自动流程。
+- 只有仓库所有者可以在 Actions 页面手动运行（`workflow_dispatch`）。没有 `pull_request` / `push` / `issue_comment` 触发器，不会在已打开的 PR 上自动跑。
+- environment `codex` 只允许 `main` 部署，所以要等合并到 `main` 之后才能真正跑通（合并前的 PR 分支读不到这个 environment 的 secret）。
+- CI 在 runner 上生成自己的 `$CODEX_HOME/config.toml`，供应商名是 `cpa`，与本机 Codex 的自定义供应商配置无关。不要为了迁就 CI 去改本机供应商标识。
+- 不读写、不回写 `CODEX_AUTH_JSON`。命令沙箱不能联网，也读不到 API 密钥；模型请求在沙箱外发往 CPA。自检只要求模型回复一句 OK，不改仓库文件、不评论、不推送。
+
+这条通路走的是 CPA 的 API Key。它是否仍消耗 ChatGPT / Codex 套餐额度，取决于 CPA 账号背后接的是哪一套服务；如果还是同一个 ChatGPT 账号，额度仍可能被用掉。
+
+### 设置 `CODEX_API_KEY`
+
+在本机 PowerShell 里把密钥写入 environment `codex`（运行后按提示把密钥粘贴给 `gh`，不要发到聊天或写进仓库、PR 描述）：
+
+```powershell
+gh secret set CODEX_API_KEY --env codex --repo Jyanbai/ping-rust
+```
+
+没装 `gh` 的话：到 Settings → Environments → codex → Add environment secret，名字填 `CODEX_API_KEY`，把密钥粘进去。
+
+### 可选变量与模型
+
+| 变量 | 默认 | 作用 |
+|---|---|---|
+| `CODEX_API_BASE_URL` | `https://api.moio.cn/v1` | CPA 的 HTTPS 基址。可在 environment `codex` 里设置同名变量覆盖。 |
+| `CODEX_MODEL` | 若未设置，本自检使用 `gpt-6.2-sol` | 与现有 ChatGPT 通路共用的模型变量 |
+| `CODEX_REASONING_EFFORT` | 若未设置，本自检使用 `high` | 与现有通路共用的推理强度变量；只能是小写字母 |
+
+Codex CLI 0.166.0 会把 `/responses` 拼到 `base_url` 后面，因此基址应包含 `/v1`（与本机已在用的地址一致）。不要把 API Key 写进配置文件或文档。
+
+### 怎么跑
+
+合并到 `main` 并写好 `CODEX_API_KEY` 之后：Actions → Codex CPA Smoke → Run workflow。只有仓库所有者能触发。成功时会确认 CPA 认证、Responses 接口和请求的模型可用；缺密钥或沙箱检查失败会直接报错并停止，不调用模型。
 
 ## 凭据怎么保持有效
 
