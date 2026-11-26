@@ -266,7 +266,7 @@ jobs:
             fi
             # 404 可能是接口不存在，也可能是路由已通但模型未部署；有模型类证据时不要指向基址。
             local model_missing=0
-            if [ "${#files[@]}" -gt 0 ] && grep -qiE 'model[_ ]not[_ ]found|model_not_available|unknown model|model.{0,80}does not exist|model.{0,80}is not deployed|model.{0,80}not deployed' "${files[@]}" 2>/dev/null; then
+            if [ "${#files[@]}" -gt 0 ] && grep -qiE 'model[_ ]not[_ ]found|model_not_available|unknown model|model.{0,80}does not exist|model.{0,80}is not deployed|model.{0,80}not deployed|model.{0,80}was not found|model.{0,80}not found' "${files[@]}" 2>/dev/null; then
               model_missing=1
             fi
             case "$status" in
@@ -361,8 +361,8 @@ jobs:
             exit 1
           fi
           # CPA 可能把请求的模型静默路由到别的模型；没有实际模型证据，只记录请求值和 CPA 返回了 OK。
-          echo "✅ CPA 认证与 Responses 调用成功，CPA 返回了单独一行 OK。请求的模型：$CPA_MODEL（实际处理请求的模型未核实）。现有 ChatGPT 自动流程未在本次运行中使用。"
-          echo "✅ CPA 自检通过：认证与 Responses 调用成功，CPA 返回了 OK。请求的模型：$CPA_MODEL（实际处理请求的模型未核实）。现有 ChatGPT 自动流程未切换。" >> "$GITHUB_STEP_SUMMARY"
+          echo "✅ CPA Responses 调用成功，CPA 返回了单独一行 OK。请求的模型：$CPA_MODEL（实际处理请求的模型未核实）。现有 ChatGPT 自动流程未在本次运行中使用。"
+          echo "✅ CPA 自检通过：Responses 调用成功，CPA 返回了 OK。请求的模型：$CPA_MODEL（实际处理请求的模型未核实）。现有 ChatGPT 自动流程未切换。" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Remove local credentials
         if: always()

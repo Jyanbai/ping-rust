@@ -306,7 +306,7 @@ class ReplyAndFailureTest(unittest.TestCase):
             with self.subTest(payload=payload):
                 result, summary = self.run_smoke(payload, events=COMPLETE_OK_EVENTS)
                 self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
-                self.assertTrue(any("CPA 认证" in line for line in result.stdout.splitlines()))
+                self.assertTrue(any("Responses 调用成功" in line for line in result.stdout.splitlines()))
                 self.assertIn("CPA 自检通过", summary)
 
     def test_success_reports_requested_model_without_claiming_availability(self):
@@ -320,6 +320,19 @@ class ReplyAndFailureTest(unittest.TestCase):
                 self.assertNotIn("请求的模型已跑通", text)
                 self.assertNotIn("请求的模型可用", text)
                 self.assertNotIn("模型可用", text)
+
+    def test_success_does_not_claim_authentication(self):
+        result, summary = self.run_smoke(b"OK\n", events=COMPLETE_OK_EVENTS)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        for text in (result.stdout, summary):
+            with self.subTest(text=text[:40]):
+                self.assertIn("Responses 调用成功", text)
+                self.assertIn("请求的模型：gpt-6.2-sol", text)
+                self.assertIn("实际处理请求的模型未核实", text)
+                self.assertNotIn("认证成功", text)
+                self.assertNotIn("认证与", text)
+                self.assertNotIn("CPA 认证", text)
+                self.assertNotRegex(text, r"(?i)authentication")
 
     def test_rejection_text_containing_ok_fails(self):
         result, _ = self.run_smoke("无法按要求回复 OK。\n")
@@ -347,7 +360,8 @@ class ReplyAndFailureTest(unittest.TestCase):
         errors = "\n".join(self.error_lines(result))
         self.assertIn("执行了命令", errors)
         self.assertNotIn("CPA 自检通过", summary)
-        self.assertFalse(any("CPA 认证与 Responses 调用成功" in line for line in result.stdout.splitlines()))
+        self.assertFalse(any("Responses 调用成功" in line for line in result.stdout.splitlines()))
+        self.assertNotIn("认证成功", result.stdout + summary)
         for text in (result.stdout, result.stderr, summary):
             self.assertNotIn("pwd", text)
             self.assertNotIn("/workspace/cpa-smoke", text)
@@ -363,7 +377,8 @@ class ReplyAndFailureTest(unittest.TestCase):
         errors = "\n".join(self.error_lines(result))
         self.assertIn("事件流为空", errors)
         self.assertNotIn("CPA 自检通过", summary)
-        self.assertFalse(any("CPA 认证与 Responses 调用成功" in line for line in result.stdout.splitlines()))
+        self.assertFalse(any("Responses 调用成功" in line for line in result.stdout.splitlines()))
+        self.assertNotIn("认证成功", result.stdout + summary)
 
     def test_ok_reply_with_incomplete_event_stream_fails(self):
         events = """{"type":"thread.started","thread_id":"t1"}
@@ -375,7 +390,8 @@ class ReplyAndFailureTest(unittest.TestCase):
         errors = "\n".join(self.error_lines(result))
         self.assertIn("缺少完成事件", errors)
         self.assertNotIn("CPA 自检通过", summary)
-        self.assertFalse(any("CPA 认证与 Responses 调用成功" in line for line in result.stdout.splitlines()))
+        self.assertFalse(any("Responses 调用成功" in line for line in result.stdout.splitlines()))
+        self.assertNotIn("认证成功", result.stdout + summary)
 
     def test_git_status_failure_is_not_reported_as_success(self):
         result, summary = self.run_smoke(b"OK\n", events=COMPLETE_OK_EVENTS, git_status_fail=True)
@@ -383,7 +399,8 @@ class ReplyAndFailureTest(unittest.TestCase):
         errors = "\n".join(self.error_lines(result))
         self.assertIn("无法确认自检工作区状态", errors)
         self.assertNotIn("CPA 自检通过", summary)
-        self.assertFalse(any("CPA 认证与 Responses 调用成功" in line for line in result.stdout.splitlines()))
+        self.assertFalse(any("Responses 调用成功" in line for line in result.stdout.splitlines()))
+        self.assertNotIn("认证成功", result.stdout + summary)
         for text in (result.stdout, summary):
             self.assertNotIn("index file corrupt", text)
 
@@ -473,6 +490,7 @@ class ReplyAndFailureTest(unittest.TestCase):
         cases = (
             'api error 404: model_not_found raw={"error":{"code":"model_not_found","message":"gpt-6.2-sol is not deployed","leak":"leak-me-model"}}\n',
             'unexpected status 404 Not Found: The model gpt-6.2-sol does not exist leak-me-model\n',
+            "unexpected status 404 Not Found: The model 'gpt-6.2-sol' was not found leak-me-model\n",
         )
         for raw in cases:
             with self.subTest(raw=raw[:40]):
@@ -488,6 +506,8 @@ class ReplyAndFailureTest(unittest.TestCase):
                 for text in (result.stdout, result.stderr, summary):
                     self.assertNotIn("leak-me-model", text)
                     self.assertNotIn("is not deployed", text)
+                    self.assertNotIn("was not found", text)
+                    self.assertNotIn("does not exist", text)
 
     def test_unexpected_status_form_is_classified(self):
         cases = (
