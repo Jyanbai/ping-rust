@@ -77,6 +77,103 @@ where
     Ok(())
 }
 
+pub(super) fn commit_profile_with_activation(
+    directory: &Path,
+    documents: &BTreeMap<String, Vec<u8>>,
+    target: &str,
+    runtime: &str,
+    state: &ManagedState,
+    mut activate: impl FnMut(bool) -> Result<()>,
+) -> Result<()> {
+    let profiles = directory.join("profiles");
+    let had_profiles = managed_profile_directory_exists(&profiles)?;
+    let state_json = serde_json::to_vec_pretty(state).context("序列化管理状态失败")?;
+    let mut files = Vec::new();
+    for (name, bytes) in documents {
+        let path = profiles.join(name);
+        let original = read_managed_file(&path)?;
+        if name == target || original.is_none() {
+            files.push((path, bytes.as_slice(), original));
+        }
+    }
+    for (name, bytes) in [
+        ("ping-rust-state.json", state_json.as_slice()),
+        ("config.yaml", runtime.as_bytes()),
+    ] {
+        let path = directory.join(name);
+        let original = read_managed_file(&path)?
+            .with_context(|| format!("受管文件 {} 已不存在", path.display()))?;
+        files.push((path, bytes, Some(original)));
+    }
+
+    let mut committed = 0;
+    let mut created_profiles = false;
+    let update = (|| {
+        if !had_profiles {
+            fs::create_dir(&profiles).context("创建节点配置目录失败")?;
+            created_profiles = true;
+            utils::set_mode(&profiles, 0o700).context("设置节点配置目录权限失败")?;
+        }
+        let staged = files
+            .iter()
+            .map(|(path, bytes, _)| utils::stage_atomic_write(path, bytes, 0o600))
+            .collect::<Result<Vec<_>>>()?;
+        for ((path, _, _), temp) in files.iter().zip(staged) {
+            utils::persist_replace(temp, path)?;
+            committed += 1;
+        }
+        activate(false)
+    })();
+    let Err(error) = update else {
+        return Ok(());
+    };
+
+    let mut recovery_errors = Vec::new();
+    for (path, _, original) in files.iter().take(committed).rev() {
+        if let Err(error) = restore_snapshot(path, original.as_deref(), 0o600) {
+            recovery_errors.push(format!("恢复 {} 失败：{error:#}", path.display()));
+        }
+    }
+    if created_profiles {
+        if let Err(error) = fs::remove_dir(&profiles) {
+            recovery_errors.push(format!("恢复节点目录失败：{error}"));
+        }
+    }
+    if committed != 0 {
+        if let Err(error) = activate(true) {
+            recovery_errors.push(format!("重启或验证原服务失败：{error:#}"));
+        }
+    }
+    if !recovery_errors.is_empty() {
+        return Err(error.context(format!(
+            "SOCKS5 加固失败，回滚不完整：{}",
+            recovery_errors.join("；")
+        )));
+    }
+    if committed == 0 {
+        return Err(error.context("SOCKS5 加固失败，配置未提交"));
+    }
+    Err(error.context("SOCKS5 加固失败；原配置已恢复，服务已重启并验证"))
+}
+
+pub(super) fn managed_profile_directory_exists(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() => Ok(true),
+        Ok(_) => bail!("节点目录不是普通目录：{}", path.display()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).with_context(|| format!("读取节点目录 {} 失败", path.display())),
+    }
+}
+
+pub(super) fn read_managed_file(path: &Path) -> Result<Option<Vec<u8>>> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() => read_optional(path),
+        Ok(_) => bail!("受管文件不是普通文件：{}", path.display()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("读取文件 {} 失败", path.display())),
+    }
+}
+
 pub(super) fn profile_documents(
     servers: &[ServerConfig],
     profiles: &[ManagedProfile],

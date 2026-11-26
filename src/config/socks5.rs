@@ -2,6 +2,9 @@ use std::net::{IpAddr, SocketAddr};
 
 use super::*;
 
+mod secure;
+pub(crate) use secure::{secure, SecureMode};
+
 /// SOCKS5 的监听策略随 profile 存储。旧版例外绑定原地址，启用认证后撤销。
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Socks5Listen {
@@ -117,7 +120,7 @@ impl ManagedProfile {
             return None;
         }
         Some(format!(
-            "警告：旧节点 {}（端口 {}）为无认证非回环 SOCKS5，有开放代理风险；修复：运行 `sudo prs menu` → 2) 更改配置 → 选择该节点 → 更改认证模式 → 启用用户名 + 密码认证（输入 y）",
+            "警告：旧节点 {}（端口 {}）为无认证非回环 SOCKS5，有开放代理风险；修复：运行 `sudo prs menu` → 2) 更改配置 → 选择该节点 → 更改认证模式 → 启用用户名 + 密码认证（输入 y）。也可运行 `sudo prs socks5 secure <节点>`。",
             self.name, self.port
         ))
     }

@@ -219,6 +219,54 @@ pub fn restart_and_verify() -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn check_socks5_restart_scope() -> Result<()> {
+    ensure_systemctl()?;
+    if fs::read(utils::SERVICE_FILE).context("无法读取受管 shoes.service unit")?
+        != unit_contents().as_bytes()
+        || systemctl_show_value("FragmentPath")? != utils::SERVICE_FILE
+        || !systemctl_show_value("DropInPaths")?.is_empty()
+        || systemctl_show_value("NeedDaemonReload")? != "no"
+    {
+        bail!("SOCKS5 加固要求已加载的标准受管 shoes.service；请检查 unit、自定义 drop-in 或待重载配置");
+    }
+    check_restart_dependencies(systemctl_show_value)
+}
+
+fn check_restart_dependencies(
+    mut property_value: impl FnMut(&str) -> Result<String>,
+) -> Result<()> {
+    // systemd 可在 unit 文件和 drop-in 之外添加 .requires / .wants 依赖。
+    // 允许标准 unit 的网络和 PrivateTmp 依赖，以及 systemd 的默认依赖。
+    let mounts = ["-.mount", "tmp.mount", "var.mount", "var-tmp.mount"];
+    let requires = [mounts.as_slice(), &["sysinit.target", "system.slice"]].concat();
+    let wants = [mounts.as_slice(), &["network-online.target"]].concat();
+    for (property, allowed) in [
+        ("Requires", requires.as_slice()),
+        ("Wants", wants.as_slice()),
+        ("Conflicts", &["shutdown.target"]),
+        ("ConflictedBy", &["shutdown.target"]),
+        ("RequiredBy", &[]),
+        ("RequisiteOf", &[]),
+        ("BindsTo", &[]),
+        ("BoundBy", &[]),
+        ("ConsistsOf", &[]),
+        ("PropagatesStopTo", &[]),
+        ("OnFailure", &[]),
+        ("OnSuccess", &[]),
+        ("TriggeredBy", &[]),
+        ("Upholds", &[]),
+        ("UpheldBy", &[]),
+    ] {
+        if property_value(property)?
+            .split_whitespace()
+            .any(|unit| !allowed.contains(&unit))
+        {
+            bail!("shoes.service 存在伴随服务或依赖关系（{property}），无法单独安全重启");
+        }
+    }
+    Ok(())
+}
+
 fn verify_active_stable(
     mut probe: impl FnMut() -> Result<bool>,
     mut pause: impl FnMut(),
@@ -798,5 +846,27 @@ mod tests {
         let table = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n  0: 0100007F:1F90 00000000:0000 0A 00000000:0000 00:00000000 00000000   0        0 7001 1 0000000000000000 100 0 0 10 0\n  1: 0100007F:1F91 00000000:0000 01 00000000:0000 00:00000000 00000000   0        0 7002 1 0000000000000000 100 0 0 10 0\n";
         let ports = parse_proc_net_ports(table, &BTreeSet::from([7001, 7002]), true);
         assert_eq!(ports, BTreeSet::from([8080]));
+    }
+
+    #[test]
+    fn socks5_restart_allows_default_dependencies_and_rejects_companion_units() {
+        let defaults = |property: &str| match property {
+            "Requires" => "sysinit.target system.slice -.mount",
+            "Wants" => "network-online.target tmp.mount",
+            "Conflicts" => "shutdown.target",
+            _ => "",
+        };
+        check_restart_dependencies(|property| Ok(defaults(property).to_owned())).unwrap();
+        for property in ["RequiredBy", "PropagatesStopTo", "OnFailure", "Wants"] {
+            let error = check_restart_dependencies(|queried| {
+                if queried == property {
+                    Ok(format!("{} companion.service", defaults(queried)))
+                } else {
+                    Ok(defaults(queried).to_owned())
+                }
+            })
+            .unwrap_err();
+            assert!(error.to_string().contains(property));
+        }
     }
 }
