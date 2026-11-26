@@ -599,29 +599,158 @@ cp "$FAKE_CODEX_ARCHIVE" "$output"
         self.assertNotIn("429 Too Many Requests", out)
         self.assertNotIn("stream disconnected", out)
 
+    AUTH_SEED = {
+        "auth_mode": "chatgpt",
+        "tokens": {"refresh_token": "seed" + "r" * 28, "id_token": "seed" + "i" * 28},
+    }
+
+    def write_auth(self, data=None):
+        (self.work / "codex-home/auth.json").write_text(
+            json.dumps(self.AUTH_SEED if data is None else data), encoding="utf-8")
+
     def run_stderr_tail(self, workflow=WORKFLOW, fixture=STDERR_FIXTURE):
-        (self.work / "codex-stderr.log").write_text(fixture, encoding="utf-8")
+        if isinstance(fixture, str):
+            fixture = fixture.encode("utf-8")
+        (self.work / "codex-stderr.log").write_bytes(fixture)
         return subprocess.run(
             ["bash", "-e", "-o", "pipefail", "-c", stderr_tail_script(workflow)],
             env=self.env, text=True, capture_output=True, check=False,
         )
 
-    def test_failed_review_prints_redacted_stderr_tail(self):
+    def tail_summary(self, fixture, workflow=WORKFLOW):
+        self.write_auth()
+        result = self.run_stderr_tail(workflow, fixture)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        out = result.stdout
+        self.assertIn("::group::Codex 标准错误（脱敏，最后 30 行）", out)
+        return out.split("::group::", 1)[1]
+
+    def assert_form_redacted(self, line, secret):
+        plain = "stream disconnected\n429 Too Many Requests\n"
+        for workflow in (WORKFLOW, PLAN_WORKFLOW, DISPATCH_WORKFLOW):
+            with self.subTest(workflow=workflow.name):
+                summary = self.tail_summary(plain + line + "\n", workflow)
+                self.assertNotIn(secret, summary)
+                self.assertIn("stream disconnected", summary)
+                self.assertIn("429 Too Many Requests", summary)
+
+    def test_key_value_equals_form_is_redacted(self):
+        self.assert_form_redacted("refresh_token=abc123", "abc123")
+        self.assert_form_redacted("OPENAI_API_KEY=short", "short")
+        self.assert_form_redacted("password=hunter2", "hunter2")
+
+    def test_key_colon_value_form_is_redacted(self):
+        self.assert_form_redacted("access_token: abc123", "abc123")
+        self.assert_form_redacted("Secret: s3cr3t", "s3cr3t")
+
+    def test_json_form_with_spaces_is_redacted(self):
+        self.assert_form_redacted('{"refresh_token": "abc123", "n": 1}', "abc123")
+        self.assert_form_redacted('{"password": "two words here"}', "two words")
+        self.assert_form_redacted('{"account_id": "acct-xyz"}', "acct-xyz")
+
+    def test_json_form_without_spaces_is_redacted(self):
+        self.assert_form_redacted('{"refresh_token":"abc123","n":1}', "abc123")
+        self.assert_form_redacted('{"api_key":"k-short"}', "k-short")
+        self.assert_form_redacted(r'{\"id_token\":\"abc123\"}', "abc123")
+
+    def test_single_quoted_form_is_redacted(self):
+        self.assert_form_redacted("{'refresh_token': 'abc123'}", "abc123")
+        self.assert_form_redacted("{'password':'two words'}", "two words")
+
+    def test_quoted_value_with_spaces_is_redacted(self):
+        self.assert_form_redacted('secret="some long phrase" ok', "long phrase")
+        self.assert_form_redacted("auth: 'two words'", "two words")
+
+    def test_short_basic_credentials_are_redacted(self):
+        self.assert_form_redacted("Authorization: Basic YTpi", "YTpi")
+        self.assert_form_redacted('{"Authorization":"Basic YTpi"}', "YTpi")
+        self.assert_form_redacted("sent Basic dTpw to proxy", "dTpw")
+
+    def test_uuid_user_id_is_redacted(self):
+        uuid = "123e4567-e89b-12d3-a456-426614174000"
+        self.assert_form_redacted(f"user_id={uuid}", uuid)
+        self.assert_form_redacted(f'{{"user_id": "{uuid}"}}', uuid)
+        self.assert_form_redacted(f"request for {uuid} failed", uuid)
+
+    def test_email_is_redacted_in_every_form(self):
+        self.assert_form_redacted("email=alice@example.com", "alice@example.com")
+        self.assert_form_redacted('{"email": "alice@example.com"}', "alice@example.com")
+        self.assert_form_redacted("failed for alice@example.com today", "alice@example.com")
+
+    def test_redaction_keeps_unrelated_text_next_to_secrets(self):
+        summary = self.tail_summary('{"refresh_token":"abc123","error":"stream disconnected"}\n')
+        self.assertNotIn("abc123", summary)
+        self.assertIn("stream disconnected", summary)
+
+    def run_failing_review(self, stderr_text, rotated_auth):
         policy = self.work / "policy"
-        policy.mkdir()
+        policy.mkdir(exist_ok=True)
         (policy / "AGENTS.md").write_text((ROOT / "AGENTS.md").read_text(encoding="utf-8"), encoding="utf-8")
         (self.work / "review-pr.json").write_text(json.dumps(PR), encoding="utf-8")
+        self.write_auth()
         self.mock_command("git", "exit 0\n")
         self.mock_command("codex", textwrap.dedent(f"""\
             cat >/dev/null
-            printf '%s' {json.dumps(STDERR_FIXTURE)} >&2
+            printf '%s' {json.dumps(json.dumps(rotated_auth))} > "$CODEX_HOME/auth.json"
+            printf '%s' {json.dumps(stderr_text)} >&2
             exit 1
         """))
-        result = subprocess.run(
+        return subprocess.run(
             ["bash", "-e", "-o", "pipefail", "-c", step_script("Run Codex review")],
             cwd=self.work, env={**self.env, "CODEX_MODEL": "", "CODEX_REASONING_EFFORT": ""},
             text=True, capture_output=True, check=False,
         )
+
+    def test_rotated_auth_values_are_masked_before_summary_is_printed(self):
+        rotated = {
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "refresh_token": "rotated" + "R" * 25,
+                "id_token": "rotated" + "I" * 25,
+                "nested": {"deep": "deep" + "D" * 28, "empty": ""},
+                "multi": "first" + "L" * 20 + "\nsecond" + "M" * 20,
+            },
+            "last_refresh": "2026-11-27T00:00:00Z",
+            "OPENAI_API_KEY": None,
+        }
+        stderr = ("stream disconnected\n429 Too Many Requests\n"
+                  f"refresh_token={rotated['tokens']['refresh_token']}\n"
+                  f"saw {rotated['tokens']['nested']['deep']} in response\n")
+        result = self.run_failing_review(stderr, rotated)
+        out = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0, out)
+        lines = out.splitlines()
+        group = next(i for i, line in enumerate(lines) if line.startswith("::group::Codex 标准错误"))
+        masks = [(i, line[len("::add-mask::"):]) for i, line in enumerate(lines) if line.startswith("::add-mask::")]
+        expected = {
+            rotated["tokens"]["refresh_token"], rotated["tokens"]["id_token"],
+            rotated["tokens"]["nested"]["deep"], "first" + "L" * 20, "second" + "M" * 20,
+            rotated["auth_mode"], rotated["last_refresh"],
+        }
+        self.assertTrue(expected <= {value for _, value in masks}, masks)
+        self.assertNotIn("", {value for _, value in masks})
+        self.assertTrue(all(i < group for i, _ in masks), "遮蔽必须先于摘要输出")
+        rest = "\n".join(line for line in lines if not line.startswith("::add-mask::"))
+        for secret in (rotated["tokens"]["refresh_token"], rotated["tokens"]["id_token"],
+                       rotated["tokens"]["nested"]["deep"], "L" * 20, "M" * 20):
+            self.assertNotIn(secret, rest)
+        self.assertIn("stream disconnected", rest)
+        self.assertIn("429 Too Many Requests", rest)
+        self.assertIn("refresh_token=[redacted]", rest)
+
+    def test_summary_is_not_printed_when_auth_json_cannot_be_read(self):
+        (self.work / "codex-stderr.log").write_text("stream disconnected\n", encoding="utf-8")
+        (self.work / "codex-home/auth.json").unlink(missing_ok=True)
+        result = subprocess.run(
+            ["bash", "-e", "-o", "pipefail", "-c", stderr_tail_script()],
+            env=self.env, text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("stream disconnected", result.stdout)
+        self.assertIn("不打印 stderr 摘要", result.stdout)
+
+    def test_failed_review_prints_redacted_stderr_tail(self):
+        result = self.run_failing_review(STDERR_FIXTURE, self.AUTH_SEED)
         out = result.stdout + result.stderr
         self.assertNotEqual(result.returncode, 0, out)
         self.assertIn("::error::Codex 审查失败", out)
@@ -636,6 +765,7 @@ cp "$FAKE_CODEX_ARCHIVE" "$output"
         self.assertIn("[redacted-jwt]", out)
 
     def test_stderr_tail_redacts_secrets_and_preserves_plain_errors(self):
+        self.write_auth()
         result = self.run_stderr_tail()
         self.assertEqual(result.returncode, 0, result.stderr)
         out = result.stdout
@@ -645,22 +775,18 @@ cp "$FAKE_CODEX_ARCHIVE" "$output"
             self.assertNotIn(secret, out)
 
     def test_stderr_tail_strips_ansi_escapes_commands_and_long_lines(self):
+        self.write_auth()
         long_plain = "error detail: " + ("failed again " * 30)
-        (self.work / "codex-stderr.log").write_bytes(
+        result = self.run_stderr_tail(fixture=(
             b"\x1b[31m429 Too Many Requests\x1b[0m\n"
             b"::add-mask::sk-xxx should not stay a command\n"
-            + long_plain.encode() + b"\n"
-        )
-        result = subprocess.run(
-            ["bash", "-e", "-o", "pipefail", "-c", stderr_tail_script()],
-            env=self.env, text=True, capture_output=True, check=False,
-        )
+            + long_plain.encode() + b"\n"))
         self.assertEqual(result.returncode, 0, result.stderr)
         out = result.stdout
         self.assertIn("429 Too Many Requests", out)
         self.assertNotIn("\x1b", out)
         self.assertNotIn("sk-xxx", out)
-        self.assertNotIn("::add-mask::", out)
+        self.assertNotIn("::add-mask::sk", out)
         self.assertIn("∶∶add-mask∶∶[redacted-token] should not stay a command", out)
         capped = [line for line in out.splitlines() if line.endswith("…")]
         self.assertEqual(capped, [long_plain[:240] + "…"])

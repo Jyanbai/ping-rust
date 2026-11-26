@@ -304,22 +304,53 @@ jobs:
           if [ "$rc" -ne 0 ]; then
             echo '::error::Codex 规划失败，请检查登录状态或额度后手动重试'
             # begin-codex-stderr-tail
+            # 止损线：如果下一轮独立审查又报告了新的脱敏绕过写法，就换方案，不再打印 stderr 原文，
+            # 只按关键词归类输出：rate_limit、401/403、stream_disconnected、context_window、unknown。现在不实现。
             log="$RUNNER_TEMP/codex-stderr.log"
+            auth_file="${CODEX_HOME:-}/auth.json"
+            have_masks=false
+            # 先重新读运行后的 auth.json（令牌可能已刷新），把所有字符串值登记为遮蔽，多行值逐行登记；
+            # 值只通过 ::add-mask:: 输出，之后才打印摘要。读不到就不打印。
+            if masks="$(jq -r '.. | strings | gsub("\r"; "") | split("\n")[] | select(test("\\S"))' "$auth_file" 2>/dev/null)"; then
+              while IFS= read -r mask; do
+                [ -z "$mask" ] || printf '::add-mask::%s\n' "$mask"
+              done <<< "$masks"
+              have_masks=true
+            fi
             echo '::group::Codex 标准错误（脱敏，最后 30 行）'
             if [ ! -f "$log" ]; then
               echo '（未找到 stderr 日志）'
+            elif [ "$have_masks" != true ]; then
+              echo '（无法读取运行后的 auth.json，不打印 stderr 摘要）'
             else
               python3 - "$log" <<'PY' || echo '（脱敏输出失败）'
           import re, sys
           from pathlib import Path
-          MAX_LINE, TAIL_LINES = 240, 30
+          MAX_LINE, TAIL_LINES, PRE_CAP = 240, 30, 2000
           ANSI = re.compile(r"\x1b(?:\[[0-9;?]*[ -/]*[@-~]|].*?(?:\x07|\x1b\\))")
-          AUTH_HEADER = re.compile(r"(?i)\b(authorization|cookie|set-cookie)\s*[:=]\s*.+$", re.M)
-          BEARER = re.compile(r"(?i)\bbearer\s+\S+")
+          OQ = r"(?:\\*[\"'])?"
+          DQ = r'"(?:[^"\\]|\\.)*"'
+          SQ = r"'(?:[^'\\]|\\.)*'"
+          EDQ = r'\\+"(?:(?!\\+").)*\\+"'
+          OPEN = r"\\*[\"'].*$"
+          BARE = r"[^\s,;}&]+"
+          VALUE = "|".join((EDQ, DQ, SQ, OPEN, BARE))
+          SEP = r"\s*(?:=>|[:=])\s*"
+          WORDS = (r"(?:token|secret|key|auth|passw(?:or)?d|credential|user[_-]?id|account[_-]?id"
+                   r"|acct[_-]?id|email|cookie|bearer)")
+          HEADER = re.compile(
+              r"(?i)(?<![A-Za-z0-9_-])(?P<k>" + OQ + r"(?:proxy-)?(?:authorization|cookie|set-cookie)" + OQ + r")"
+              r"(?P<sep>" + SEP + r")(?:" + "|".join((EDQ, DQ, SQ)) + r"|.*$)")
+          KEYVAL = re.compile(
+              r"(?i)(?P<k>" + OQ + r"[A-Za-z0-9_.\-]{0,64}" + WORDS + r"[A-Za-z0-9_.\-]*" + OQ + r")"
+              r"(?P<sep>" + SEP + r")(?:" + VALUE + r")")
+          BEARER = re.compile(r"(?i)\bbearer\s+[^\s,;\"'\\]+")
+          BASIC = re.compile(r"(?i)\bbasic\s+[^\s,;\"'\\]+")
           PAT_RE = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)\b")
           SK = re.compile(r"\bsk-[A-Za-z0-9_-]+\b")
           JWT = re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b")
           EMAIL = re.compile(r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b")
+          UUID = re.compile(r"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b")
           ACCOUNT_ID = re.compile(
               r"(?i)\b(account[_-]?id|user[_-]?id|userid|accountid|acct[_-]?id)\b"
               r"(\s*[:=]\s*)(\"[^\"]*\"|'[^']*'|[^\s,;}&]+)"
@@ -337,14 +368,19 @@ jobs:
                   else:
                       out.append(" ")
               return "".join(out)
+          def keep_key(m):
+              return m.group("k") + m.group("sep") + "[redacted]"
           def redact(s):
-              s = AUTH_HEADER.sub(lambda m: m.group(1) + ": [redacted]", s)
+              s = HEADER.sub(keep_key, s)
               s = BEARER.sub("Bearer [redacted]", s)
+              s = BASIC.sub("Basic [redacted]", s)
               s = PAT_RE.sub("[redacted-token]", s)
               s = SK.sub("[redacted-token]", s)
               s = JWT.sub("[redacted-jwt]", s)
               s = EMAIL.sub("[redacted-email]", s)
+              s = UUID.sub("[redacted-id]", s)
               s = ACCOUNT_ID.sub(r"\1\2[redacted-id]", s)
+              s = KEYVAL.sub(keep_key, s)
               s = URL_QUERY.sub(r"\1?[redacted]", s)
               s = HEX.sub("[redacted-secret]", s)
               s = B64.sub("[redacted-secret]", s)
@@ -359,7 +395,7 @@ jobs:
           if len(lines) > TAIL_LINES:
               print(f"（共 {len(lines)} 行，显示最后 {TAIL_LINES} 行）")
           for line in tail:
-              print(cap(escape_workflow(redact(line))))
+              print(cap(escape_workflow(redact(line[:PRE_CAP]))))
           PY
             fi
             echo '::endgroup::'
