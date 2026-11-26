@@ -219,7 +219,7 @@ Codex CLI 0.166.0 会把 `/responses` 拼到 `base_url` 后面，因此基址应
 
 ### 怎么跑
 
-合并到 `main` 并写好 `CODEX_API_KEY` 之后：Actions → Codex CPA Smoke → Run workflow。只有仓库所有者能触发。成功时会确认 CPA 认证、Responses 接口和请求的模型可用；缺密钥或沙箱检查失败会直接报错并停止，不调用模型。
+合并到 `main` 并写好 `CODEX_API_KEY` 之后：Actions → Codex CPA Smoke → Run workflow。只有仓库所有者能启动和重跑。成功时模型的最终回复必须是单独一行 `OK`。调用失败时日志会给出白名单类别或 HTTP 状态（例如 401 请检查密钥，404 请检查基址），不会打印原始响应或密钥。缺密钥或沙箱检查失败会直接报错并停止，不调用模型。
 
 ## 凭据怎么保持有效
 

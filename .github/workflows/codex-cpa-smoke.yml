@@ -2,7 +2,7 @@ name: Codex CPA Smoke
 
 # 可选的手动通道：验证 CI 里的 Codex CLI 能否通过第三方 CPA（Responses API）调用模型。
 # 现有 /codex、独立审查、CI 回修、规划仍走 ChatGPT 登录（CODEX_AUTH_JSON），本文件不改动那些工作流。
-# 只接受仓库所有者的 workflow_dispatch，不会在打开的 PR 上自动运行。
+# 只接受仓库所有者本人的 workflow_dispatch；重跑时还要校验 triggering_actor，不会在打开的 PR 上自动运行。
 #
 # CI 在 runner 上生成自己的 $CODEX_HOME/config.toml，供应商名只用 cpa（与本机 Codex 配置无关）。
 # 不写、不读、不回写 CODEX_AUTH_JSON。命令沙箱不能联网；模型请求在沙箱外发往 CPA。
@@ -22,13 +22,35 @@ concurrency:
 
 jobs:
   smoke:
-    if: github.event_name == 'workflow_dispatch' && github.actor == github.repository_owner
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.actor == github.repository_owner &&
+      github.triggering_actor == github.repository_owner
     runs-on: ubuntu-latest
     environment: codex
     timeout-minutes: 20
     permissions:
       contents: read
     steps:
+      - name: Admit owner operator
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          ACTOR: ${{ github.actor }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          # 作业级 if 已要求发起人和重跑者都是所有者；这里再校验一次当前操作者。
+          if [ "${EVENT_NAME}" != workflow_dispatch ]; then
+            echo '::error::只接受手动触发。'
+            exit 1
+          fi
+          if [ -z "${OWNER}" ] || [ "${ACTOR}" != "${OWNER}" ] || [ "${TRIGGERING_ACTOR}" != "${OWNER}" ]; then
+            echo '::error::只允许仓库所有者启动或重跑此自检。'
+            exit 1
+          fi
+
       - name: Install pinned Codex CLI
         shell: bash
         run: |
@@ -220,8 +242,44 @@ jobs:
             > "$RUNNER_TEMP/cpa-events.jsonl" 2> "$RUNNER_TEMP/cpa-stderr.log" || rc=$?
           printf '::add-mask::%s\n' "$CODEX_API_KEY"
           echo "codex exit code: $rc"
+          # 在清理删除事件流和 stderr 之前，只输出白名单类别或 HTTP 状态，不打印原始响应或密钥。
+          report_cpa_call_failure() {
+            local status="" category="其他调用失败" hint=""
+            local files=()
+            [ -f "$RUNNER_TEMP/cpa-stderr.log" ] && files+=("$RUNNER_TEMP/cpa-stderr.log")
+            [ -f "$RUNNER_TEMP/cpa-events.jsonl" ] && files+=("$RUNNER_TEMP/cpa-events.jsonl")
+            if [ "${#files[@]}" -gt 0 ]; then
+              status="$(grep -h -oE 'api error (401|403|404|408|409|413|422|429|500|502|503|504)|HTTP[/ ](401|403|404|408|409|413|422|429|500|502|503|504)|"status": *?(401|403|404|408|409|413|422|429|500|502|503|504)' "${files[@]}" 2>/dev/null \
+                | grep -oE '401|403|404|408|409|413|422|429|500|502|503|504' \
+                | head -n 1 || true)"
+            fi
+            case "$status" in
+              401) category="密钥无效或被拒绝"; hint="请检查 environment codex 的 CODEX_API_KEY" ;;
+              403) category="访问被拒绝"; hint="请检查 API 密钥权限" ;;
+              404) category="接口不存在"; hint="请检查 CODEX_API_BASE_URL 是否指向可用的 /responses 端点" ;;
+              408) category="请求超时"; hint="" ;;
+              409) category="请求冲突"; hint="" ;;
+              413) category="请求过大"; hint="" ;;
+              422) category="请求无法处理"; hint="" ;;
+              429) category="速率或额度限制"; hint="" ;;
+              500|502|503|504) category="CPA 服务端错误"; hint="" ;;
+              *)
+                status=""
+                if [ "${#files[@]}" -gt 0 ] && grep -qiE 'timed out|timeout|connection refused|connection reset|could not resolve|network is unreachable' "${files[@]}" 2>/dev/null; then
+                  category="连接或超时"
+                fi
+                ;;
+            esac
+            local detail="类别：${category}"
+            [ -n "$status" ] && detail="${detail}；HTTP 状态：${status}"
+            [ -n "$hint" ] && detail="${detail}。${hint}"
+            echo "::error::Codex CPA 自检失败（模型调用未成功）。${detail}。完整输出不进公开日志。"
+            if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+              echo "CPA 自检失败：${detail}。完整输出不进公开日志。" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          }
           if [ "$rc" -ne 0 ]; then
-            echo '::error::Codex CPA 自检失败（模型调用未成功）。完整输出只写在 runner 临时文件，不进公开日志。'
+            report_cpa_call_failure
             exit "$rc"
           fi
           if [ ! -s "$RUNNER_TEMP/cpa-last-message.md" ]; then
@@ -233,8 +291,16 @@ jobs:
             echo '::error::Codex 输出里出现了 API 密钥，已停止。'
             exit 1
           fi
-          if ! grep -Eq '(^|[^A-Za-z0-9])OK([^A-Za-z0-9]|$)' "$RUNNER_TEMP/cpa-last-message.md"; then
-            echo '::error::CPA 调用已返回，但最后回复里没有 OK，请查看本次运行结论（回复全文不打印）。'
+          # 提示要求只回复一行大写 OK：比较整个最终回复，而不是匹配其中出现的 OK。
+          printf 'OK' > "$RUNNER_TEMP/cpa-expected-ok"
+          printf 'OK\n' > "$RUNNER_TEMP/cpa-expected-ok-lf"
+          printf 'OK\r\n' > "$RUNNER_TEMP/cpa-expected-ok-crlf"
+          if cmp -s "$RUNNER_TEMP/cpa-last-message.md" "$RUNNER_TEMP/cpa-expected-ok" \
+            || cmp -s "$RUNNER_TEMP/cpa-last-message.md" "$RUNNER_TEMP/cpa-expected-ok-lf" \
+            || cmp -s "$RUNNER_TEMP/cpa-last-message.md" "$RUNNER_TEMP/cpa-expected-ok-crlf"; then
+            :
+          else
+            echo '::error::CPA 调用已返回，但最终回复不是单独一行 OK（回复全文不打印）。'
             exit 1
           fi
           # 确认自检工作区没有被改动；本 job 不检出 ping-rust。
@@ -256,4 +322,7 @@ jobs:
             "$RUNNER_TEMP/cpa-events.jsonl" \
             "$RUNNER_TEMP/cpa-stderr.log" \
             "$RUNNER_TEMP/cpa-sandbox-probe" \
+            "$RUNNER_TEMP/cpa-expected-ok" \
+            "$RUNNER_TEMP/cpa-expected-ok-lf" \
+            "$RUNNER_TEMP/cpa-expected-ok-crlf" \
             "$GITHUB_WORKSPACE/cpa-smoke"
