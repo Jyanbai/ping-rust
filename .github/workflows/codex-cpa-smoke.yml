@@ -253,10 +253,29 @@ jobs:
                 | grep -oE '401|403|404|408|409|413|422|429|500|502|503|504' \
                 | head -n 1 || true)"
             fi
+            # 404 可能是接口不存在，也可能是路由已通但模型未部署；有模型类证据时不要指向基址。
+            local model_missing=0
+            if [ "${#files[@]}" -gt 0 ] && grep -qiE 'model[_ ]not[_ ]found|model_not_available|unknown model|model.{0,80}does not exist|model.{0,80}is not deployed|model.{0,80}not deployed' "${files[@]}" 2>/dev/null; then
+              model_missing=1
+            fi
             case "$status" in
               401) category="密钥无效或被拒绝"; hint="请检查 environment codex 的 CODEX_API_KEY" ;;
-              403) category="访问被拒绝"; hint="请检查 API 密钥权限" ;;
-              404) category="接口不存在"; hint="请检查 CODEX_API_BASE_URL 是否指向可用的 /responses 端点" ;;
+              403)
+                if [ "$model_missing" -eq 1 ]; then
+                  category="请求的模型不可用"
+                  hint="请检查 vars.CODEX_MODEL（本次请求的模型：${CPA_MODEL:-未设置}）"
+                else
+                  category="访问被拒绝"; hint="请检查 API 密钥权限"
+                fi
+                ;;
+              404)
+                if [ "$model_missing" -eq 1 ]; then
+                  category="请求的模型不可用"
+                  hint="请检查 vars.CODEX_MODEL（本次请求的模型：${CPA_MODEL:-未设置}）"
+                else
+                  category="接口不存在"; hint="请检查 CODEX_API_BASE_URL 是否指向可用的 /responses 端点"
+                fi
+                ;;
               408) category="请求超时"; hint="" ;;
               409) category="请求冲突"; hint="" ;;
               413) category="请求过大"; hint="" ;;
@@ -302,6 +321,21 @@ jobs:
           else
             echo '::error::CPA 调用已返回，但最终回复不是单独一行 OK（回复全文不打印）。'
             exit 1
+          fi
+          # 最终回复是 OK 仍不够：事件流里只要出现命令执行，自检就失败。不打印命令或输出。
+          if [ ! -f "$RUNNER_TEMP/cpa-events.jsonl" ]; then
+            echo '::error::缺少 Codex 事件流，无法确认自检过程没有执行命令。'
+            exit 1
+          fi
+          if [ -s "$RUNNER_TEMP/cpa-events.jsonl" ]; then
+            if ! jq -s -e 'type == "array"' "$RUNNER_TEMP/cpa-events.jsonl" >/dev/null 2>&1; then
+              echo '::error::Codex 事件流无法解析，无法确认自检过程没有执行命令。'
+              exit 1
+            fi
+            if jq -s -e 'any(.[]; .item.type? == "command_execution")' "$RUNNER_TEMP/cpa-events.jsonl" >/dev/null 2>&1; then
+              echo '::error::事件流显示 Codex 执行了命令；自检要求只回复 OK、不执行命令（不打印命令内容）。'
+              exit 1
+            fi
           fi
           # 确认自检工作区没有被改动；本 job 不检出 ping-rust。
           if [ -n "$(git -C "$work" status --porcelain)" ]; then

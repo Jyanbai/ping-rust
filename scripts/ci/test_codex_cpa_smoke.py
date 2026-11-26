@@ -293,6 +293,34 @@ class ReplyAndFailureTest(unittest.TestCase):
         errors = self.error_lines(result)
         self.assertTrue(any("不是单独一行 OK" in line for line in errors), result.stdout)
 
+    def test_ok_reply_still_fails_if_event_stream_ran_a_command(self):
+        events = """{"type":"thread.started","thread_id":"t1"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"pwd","aggregated_output":"","status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"pwd","aggregated_output":"/workspace/cpa-smoke\\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"OK"}}
+{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":1,"reasoning_output_tokens":0}}
+"""
+        result, summary = self.run_smoke(b"OK\n", events=events)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        errors = "\n".join(self.error_lines(result))
+        self.assertIn("执行了命令", errors)
+        self.assertNotIn("CPA 自检通过", summary)
+        self.assertFalse(any("CPA 认证与 Responses 调用成功" in line for line in result.stdout.splitlines()))
+        for text in (result.stdout, result.stderr, summary):
+            self.assertNotIn("pwd", text)
+            self.assertNotIn("/workspace/cpa-smoke", text)
+
+    def test_ok_reply_with_agent_message_events_succeeds(self):
+        events = """{"type":"thread.started","thread_id":"t1"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"OK"}}
+{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":1,"reasoning_output_tokens":0}}
+"""
+        result, summary = self.run_smoke(b"OK\n", events=events)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("CPA 自检通过", summary)
+
     def test_http_401_reports_key_category(self):
         raw = (
             'api error 401 Unauthorized: invalid_api_key raw payload={"error":"nope","token":"secret-token-value"}\n'
@@ -322,6 +350,26 @@ class ReplyAndFailureTest(unittest.TestCase):
         self.assertNotIn("/v1/responses was not found", errors)
         self.assertNotIn("raw=", errors)
         self.assertNotIn("was not found", summary)
+
+    def test_http_404_model_not_found_points_at_model_not_base_url(self):
+        cases = (
+            'api error 404: model_not_found raw={"error":{"code":"model_not_found","message":"gpt-6.2-sol is not deployed","leak":"leak-me-model"}}\n',
+            'unexpected status 404 Not Found: The model gpt-6.2-sol does not exist leak-me-model\n',
+        )
+        for raw in cases:
+            with self.subTest(raw=raw[:40]):
+                result, summary = self.run_smoke("x", exit_code=1, stderr=raw)
+                self.assertEqual(result.returncode, 1)
+                errors = "\n".join(self.error_lines(result))
+                self.assertIn("请求的模型不可用", errors)
+                self.assertIn("HTTP 状态：404", errors)
+                self.assertIn("CODEX_MODEL", errors)
+                self.assertIn("gpt-6.2-sol", errors)
+                self.assertNotIn("接口不存在", errors)
+                self.assertNotIn("CODEX_API_BASE_URL", errors)
+                for text in (result.stdout, result.stderr, summary):
+                    self.assertNotIn("leak-me-model", text)
+                    self.assertNotIn("is not deployed", text)
 
     def test_unexpected_status_form_is_classified(self):
         cases = (
