@@ -1209,6 +1209,10 @@ PY
 )
 echo 'SOCKS5 preflight: PID signals, process-group SIGINT and timeout clean up dry-run: PASS'
 
+# Root systemctl can use systemd's private socket. Type=dbus and delegated readers need the system bus.
+apt-get install -y --no-install-recommends dbus python3-dbus
+systemctl start dbus.service
+
 # Exercise an actual slow stop with an exhausted start limit on a referenced unit.
 (
   systemctl_bin="$(command -v systemctl)"
@@ -1224,6 +1228,10 @@ echo 'SOCKS5 preflight: PID signals, process-group SIGINT and timeout clean up d
   dependency_unit="${dependency##*/}"
   notify=/run/systemd/system/compat-socks5-required-notify.service
   notify_unit="${notify##*/}"
+  dbus=/run/systemd/system/compat-socks5-required-dbus.service
+  dbus_unit="${dbus##*/}"
+  dbus_policy=/etc/dbus-1/system.d/compat-socks5-required-dbus.conf
+  bus_name=org.example.PingRustCompat
   forking=/run/systemd/system/compat-socks5-required-forking.service
   forking_unit="${forking##*/}"
   simple=/run/systemd/system/compat-socks5-required-simple.service
@@ -1233,7 +1241,7 @@ echo 'SOCKS5 preflight: PID signals, process-group SIGINT and timeout clean up d
   timer=/run/systemd/system/compat-socks5-timer-export.timer
   exporter="${timer%.timer}.service"
   mkdir -p "$dropin"
-  trap '"$systemctl_bin" stop "${target##*/}" "$reader_unit" "$reload_unit" "$dependency_unit" "$notify_unit" "$forking_unit" "$simple_unit" "${companion##*/}" "${timer##*/}" "${exporter##*/}" || true; rm -f "$dropin/90-compat-socks5-rollback.conf" "$dependency_dropin" "$target" "$reader" "$reload_helper" "$dependency" "$notify" "$forking" "$simple" "$companion" "$timer" "$exporter"; "$systemctl_bin" daemon-reload; rm -rf "$scenario"' EXIT
+  trap '"$systemctl_bin" stop "${target##*/}" "$reader_unit" "$reload_unit" "$dependency_unit" "$notify_unit" "$dbus_unit" "$forking_unit" "$simple_unit" "${companion##*/}" "${timer##*/}" "${exporter##*/}" || true; rm -f "$dropin/90-compat-socks5-rollback.conf" "$dependency_dropin" "$target" "$reader" "$reload_helper" "$dependency" "$notify" "$dbus" "$dbus_policy" "$forking" "$simple" "$companion" "$timer" "$exporter"; "$systemctl_bin" daemon-reload; "$systemctl_bin" reload dbus.service; rm -rf "$scenario"' EXIT
   cat >"$scenario/systemctl" <<'SH'
 #!/bin/sh
 case "$1" in
@@ -1382,6 +1390,53 @@ NotifyAccess=all
 TimeoutStartSec=5s
 ExecStart=$scenario/notify-dependency $NEW ${ids[1]} $scenario $notify_unit
 EOF
+  cat >"$dbus_policy" <<EOF
+<busconfig>
+  <policy user="root">
+    <allow own="$bus_name"/>
+  </policy>
+</busconfig>
+EOF
+  "$systemctl_bin" reload dbus.service
+  cat >"$scenario/dbus-dependency.py" <<'PY'
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+
+import dbus
+
+binary, profile, directory, unit, name = sys.argv[1:]
+scenario = Path(directory)
+assert subprocess.check_output(
+    ['systemctl', 'show', '--property=ControlPID', '--value', unit], text=True
+).strip() == '0'
+assert subprocess.check_output(
+    ['systemctl', 'show', '--property=MainPID', '--value', unit], text=True
+).strip() == str(os.getpid())
+bus = dbus.SystemBus()
+assert not bus.name_has_owner(name)
+output = scenario / 'dbus-export.json'
+subprocess.run(
+    [binary, 'export', 'sing-box', '--profile', profile, '--server', 'example.com',
+     '--output', output], check=True, stdout=subprocess.DEVNULL
+)
+assert output.read_bytes() == (scenario / 'dependency-expected.json').read_bytes()
+with (scenario / 'dbus-dependency-runs').open('a') as runs:
+    runs.write('ok\n')
+assert bus.request_name(name, dbus.bus.NAME_FLAG_DO_NOT_QUEUE) == dbus.bus.REQUEST_NAME_REPLY_PRIMARY_OWNER
+signal.pause()
+PY
+  cat >"$dbus" <<EOF
+[Unit]
+PartOf=shoes.service
+[Service]
+Type=dbus
+BusName=$bus_name
+TimeoutStartSec=5s
+ExecStart=/usr/bin/python3 $scenario/dbus-dependency.py $NEW ${ids[1]} $scenario $dbus_unit $bus_name
+EOF
   cat >"$scenario/forking-dependency" <<'SH'
 #!/bin/sh
 set -eu
@@ -1459,8 +1514,8 @@ EOF
   # Install the ordered dependency after the initial start. Both restarts must run it.
   cat >"$dependency_dropin" <<EOF
 [Unit]
-Requires=$dependency_unit $notify_unit $forking_unit $simple_unit
-After=$dependency_unit $notify_unit $forking_unit $simple_unit
+Requires=$dependency_unit $notify_unit $dbus_unit $forking_unit $simple_unit
+After=$dependency_unit $notify_unit $dbus_unit $forking_unit $simple_unit
 
 [Service]
 ExecStartPre=+$systemctl_bin --quiet reload $reload_unit
@@ -1476,6 +1531,7 @@ EOF
   test -f "$scenario/activation-failed" || { echo 'SOCKS5 rollback did not reach the injected activation failure' >&2; exit 1; }
   test "$(grep -c '^ok$' "$scenario/dependency-runs")" -eq 2
   test "$(grep -c '^ok$' "$scenario/notify-dependency-runs")" -eq 2
+  test "$(grep -c '^ok$' "$scenario/dbus-dependency-runs")" -eq 2
   test "$(grep -c '^ok$' "$scenario/forking-dependency-runs")" -eq 2
   test "$(grep -c '^ok$' "$scenario/condition-dependency-runs")" -eq 2
   test "$(grep -c '^ok$' "$scenario/simple-dependency-runs")" -eq 2
@@ -1516,6 +1572,7 @@ echo 'SOCKS5 rollback: synchronous readers finish and timer export waits for rol
 echo 'SOCKS5 rollback: synchronous ExecReload exports during candidate and restored starts: PASS'
 echo 'SOCKS5 rollback: ordered startup dependency exports during candidate and restored starts: PASS'
 echo 'SOCKS5 rollback: ordered Type=notify dependency exports before READY=1 on both starts: PASS'
+echo 'SOCKS5 rollback: ordered Type=dbus dependency exports before acquiring BusName on both starts: PASS'
 echo 'SOCKS5 rollback: ordered Type=forking dependency exports before forking on both starts: PASS'
 echo 'SOCKS5 rollback: ordered Type=simple dependency exports in ExecCondition on both starts: PASS'
 echo 'SOCKS5 rollback: ordered Type=simple dependency exports in ExecStartPre on both starts: PASS'
@@ -1654,10 +1711,6 @@ echo 'SOCKS5 rollback: Type=notify reads before READY=1 and restarts with StartL
 echo 'SOCKS5 local: ExecStop exports the original public URL before the candidate starts: PASS'
 echo 'SOCKS5 rollback: candidate ExecStop defers the changed URL, QR, info and file export: PASS'
 echo 'SOCKS5 rollback: ExecStop synchronously stops a root unit that exports unchanged state: PASS'
-
-# Root systemctl can use systemd's private socket. Delegated readers need the system bus.
-apt-get install -y --no-install-recommends dbus
-systemctl start dbus.service
 
 # Confirm a non-root shoes can start with the candidate and again after a
 # post-commit SIGHUP. The wrapper exposes the transition without logging credentials.
@@ -2027,10 +2080,13 @@ echo 'SOCKS5 local: keep the loopback allow when other traffic on the port is de
   cp -a /etc/shoes "$scenario/original"
   enc_profile=/etc/shoes/profiles/VLESS-ENC-24440.yaml
   trap 'rm -f "$dropin" "$enc_profile"; cp -a "$scenario/original/." /etc/shoes/; chmod --reference="$scenario/original" /etc/shoes; systemctl daemon-reload; systemctl restart shoes.service; rm -rf "$scenario"' EXIT
-  chmod 0711 "$scenario" /etc/shoes
+  chmod 0711 "$scenario"
   install -d -m 0700 -o nobody -g nogroup "$scenario/export"
   "$NEW" add vless-enc --port 24440 --name compat-menu-vless-enc --server-address "$SERVER" \
     --yes >"$scenario/add-vless-enc" 2>&1
+  # Managed add sets the directory to 0700. Grant traversal for the delegated hook after it.
+  chmod 0711 /etc/shoes
+  runuser -u nobody -- test -x /etc/shoes
   config=/etc/shoes/config.yaml
   python3 - "$config" "$enc_profile" <<'PY'
 import sys
@@ -2087,9 +2143,21 @@ EOF
   systemctl is-active --quiet shoes.service
   cmp -s "$scenario/expected.json" "$scenario/export/client.json"
   test "$(stat -c %a:%U:%G "$state")" = '640:root:nogroup'
+
+  # Restore uses private access modes by design. Remove the delegated hook first.
+  rm -f "$dropin"
+  systemctl daemon-reload
+  cp "$config" "$scenario/hardened-config"
+  cp "$enc_profile" "$scenario/hardened-profile"
+  "$NEW" backup "$scenario/backup.tar.gz" >/dev/null
+  "$NEW" restore "$scenario/backup.tar.gz" >"$scenario/restore" 2>&1
+  systemctl is-active --quiet shoes.service
+  cmp -s "$config" "$scenario/hardened-config"
+  cmp -s "$enc_profile" "$scenario/hardened-profile"
 )
 echo 'SOCKS5 auth: owning-group state access survives publication and a subsequent restart: PASS'
 echo 'SOCKS5 auth: opening the main menu preserves shoes fields and delegated access: PASS'
+echo 'Backup restore: hardened aggregate and profile retain shoes extension fields: PASS'
 
 (
   scenario="$(mktemp -d /usr/local/lib/socks5-start-export.XXXXXX)"

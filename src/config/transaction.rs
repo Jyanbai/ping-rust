@@ -332,13 +332,6 @@ impl ProfileDirectorySnapshot {
         self.files.contains_key(name)
     }
 
-    pub(super) fn matches_documents(&self, documents: &BTreeMap<String, Vec<u8>>) -> bool {
-        self.files
-            .iter()
-            .map(|(name, snapshot)| (name, &snapshot.contents))
-            .eq(documents)
-    }
-
     pub(super) fn matches_yaml_documents(&self, documents: &BTreeMap<String, Vec<u8>>) -> bool {
         self.files.len() == documents.len()
             && documents

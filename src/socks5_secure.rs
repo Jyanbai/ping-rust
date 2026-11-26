@@ -292,9 +292,7 @@ pub(crate) async fn apply(
             match runtime.stop_service().await {
                 Ok(()) => true,
                 Err(error) => {
-                    failures.push(format!(
-                        "停止 shoes={error:#}；为避免重新暴露原监听，暂保留加固配置"
-                    ));
+                    failures.push(format!("停止 shoes={error:#}"));
                     false
                 }
             }
@@ -314,9 +312,11 @@ pub(crate) async fn apply(
                 true
             }
         } else {
-            // 聚合配置和节点文件保留回环监听，写锁释放前同步导出使用的状态。
-            if let Err(error) = plan.publish_state() {
-                failures.push(format!("保存保留的加固状态={error:#}"));
+            // 停止钩子也可能修改聚合配置。只在候选配置仍一致时发布状态。
+            if let Err(error) = plan.verify_config(false).and_then(|_| plan.publish_state()) {
+                failures.push(format!("确认并保存保留的加固状态={error:#}"));
+            } else {
+                failures.push("为避免重新暴露原监听，暂保留加固配置".to_owned());
             }
             false
         };

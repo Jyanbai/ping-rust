@@ -255,13 +255,6 @@ fn write_profile_documents_inner(
     Ok(())
 }
 
-pub(super) fn profile_documents_are_current(
-    path: &Path,
-    documents: &BTreeMap<String, Vec<u8>>,
-) -> Result<bool> {
-    Ok(ProfileDirectorySnapshot::capture(path)?.matches_documents(documents))
-}
-
 pub(super) fn is_managed_profile_file_name(name: &str) -> bool {
     let Some(stem) = name.strip_suffix(".yaml") else {
         return false;

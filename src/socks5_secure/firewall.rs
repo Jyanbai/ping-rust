@@ -1592,6 +1592,13 @@ fn firewalld_rich_port_allow(rule: &str, listener: SocketAddr) -> bool {
                 family_scoped = true;
                 rest
             }
+            [attribute, rest @ ..]
+                if attribute
+                    .strip_prefix("priority=")
+                    .is_some_and(|priority| priority.parse::<i16>().is_ok()) =>
+            {
+                rest
+            }
             [element, address, rest @ ..] if element == "source" || element == "destination" => {
                 let scope = address.strip_prefix("address=").and_then(address_scope);
                 if element == "source" && unrestricted(scope, ip) {
@@ -1948,6 +1955,29 @@ mod tests {
             assert!(format!("{:#}", result.err().unwrap()).contains("剩余超时"));
             assert_eq!(backend.rules, rules);
             assert_eq!(backend.runtime_timeout, runtime_timeout);
+        }
+    }
+
+    #[tokio::test]
+    async fn socks5_secure_firewalld_detects_prioritized_runtime_rules() {
+        let listener = "0.0.0.0:1080".parse().unwrap();
+        for rule in [
+            r#"rule family="ipv4" priority="10" port port="1080" protocol="tcp" accept"#,
+            r#"rule priority="-10" family="ipv4" port port="1080" protocol="tcp" accept"#,
+        ] {
+            let mut backend = FakeFirewalld::default();
+            let mut plan = FirewallPlan::capture_with(listener, &mut backend)
+                .await
+                .unwrap();
+            backend.rules[0].push(rule);
+            let error = plan.close_with(&mut backend).await.unwrap_err();
+            assert!(format!("{error:#}").contains("剩余超时"));
+            let error = FirewallPlan::capture_with(listener, &mut backend)
+                .await
+                .err()
+                .expect("预检必须报告带优先级的运行时规则");
+            assert!(format!("{error:#}").contains("剩余超时"));
+            assert_eq!(backend.rules[0], [rule]);
         }
     }
 

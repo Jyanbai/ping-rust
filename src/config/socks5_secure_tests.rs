@@ -195,7 +195,7 @@ fn socks5_secure_preserves_other_shoes_fields() {
             crate::yaml::from_slice(&fs::read(&config).unwrap()).unwrap();
         assert_eq!(committed[1], server);
         assert_ne!(committed[0], servers[0]);
-        let document = fs::read(other_path).unwrap();
+        let document = fs::read(&other_path).unwrap();
         assert_eq!(
             crate::yaml::from_slice::<serde_json::Value>(&document).unwrap(),
             server
@@ -203,6 +203,29 @@ fn socks5_secure_preserves_other_shoes_fields() {
         if let Some(existing) = existing {
             assert_eq!(document, existing);
         }
+        // 恢复阶段应直接接受备份中的一致文件，包含注释和 shoes 扩展字段。
+        assert!(!prepare_managed_snapshot(directory.path()).unwrap());
+        validate_managed_snapshot(&config, &state_path).unwrap();
+        assert_eq!(fs::read(&other_path).unwrap(), document);
+
+        // 旧状态迁移时也从聚合配置补齐缺失的节点文件，保留扩展字段。
+        let aggregate = fs::read(&config).unwrap();
+        let mut state: serde_json::Value =
+            serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+        state["profiles"][0]["credentials"]["Socks5"]
+            .as_object_mut()
+            .unwrap()
+            .remove("listen");
+        fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+        fs::remove_file(&other_path).unwrap();
+        assert!(prepare_managed_snapshot(directory.path()).unwrap());
+        validate_managed_snapshot(&config, &state_path).unwrap();
+        assert!(!socks5::listen_migration_pending(&state_path).unwrap());
+        assert_eq!(fs::read(&config).unwrap(), aggregate);
+        assert_eq!(
+            crate::yaml::from_slice::<serde_json::Value>(&fs::read(&other_path).unwrap()).unwrap(),
+            server
+        );
     }
 }
 
@@ -1135,6 +1158,7 @@ async fn socks5_secure_restart_and_late_failures_restore_config_firewall_and_ser
         fail_at: usize,
         fail_firewall_restore: bool,
         fail_service_stop: bool,
+        rewrite_config_on_stop: bool,
         step: usize,
         events: Vec<&'static str>,
         directory: PathBuf,
@@ -1181,6 +1205,9 @@ async fn socks5_secure_restart_and_late_failures_restore_config_firewall_and_ser
                 "127.0.0.1:443"
             );
             self.events.push("stop-with-candidate-config");
+            if self.rewrite_config_on_stop {
+                fs::write(self.directory.join("config.yaml"), &self.original)?;
+            }
             if self.fail_service_stop {
                 bail!("模拟停止服务失败");
             }
@@ -1195,18 +1222,23 @@ async fn socks5_secure_restart_and_late_failures_restore_config_firewall_and_ser
             Ok(())
         }
     }
-    for (fail_at, fail_firewall_restore, fail_service_stop) in [
-        (1, false, false),
-        (2, false, false),
-        (3, false, false),
-        (4, false, false),
-        (3, true, false),
-        (3, true, true),
+    for (fail_at, fail_firewall_restore, fail_service_stop, rewrite_config_on_stop) in [
+        (1, false, false, false),
+        (2, false, false, false),
+        (3, false, false, false),
+        (4, false, false, false),
+        (3, true, false, false),
+        (3, true, true, false),
+        (4, true, true, true),
     ] {
         let directory = tempfile::tempdir().unwrap();
         let profile = legacy(directory.path());
         let config = fs::read(directory.path().join("config.yaml")).unwrap();
-        let state = fs::read(directory.path().join("ping-rust-state.json")).unwrap();
+        let state_path = directory.path().join("ping-rust-state.json");
+        if rewrite_config_on_stop {
+            save_state_to(&state_path, &load_state_from(&state_path).unwrap()).unwrap();
+        }
+        let state = fs::read(&state_path).unwrap();
         let mut plan = SecurePlan::prepare(directory.path(), profile.id, SecureMode::Local)
             .unwrap()
             .unwrap();
@@ -1214,6 +1246,7 @@ async fn socks5_secure_restart_and_late_failures_restore_config_firewall_and_ser
             fail_at,
             fail_firewall_restore,
             fail_service_stop,
+            rewrite_config_on_stop,
             step: 0,
             events: vec![],
             directory: directory.path().into(),
@@ -1225,6 +1258,7 @@ async fn socks5_secure_restart_and_late_failures_restore_config_firewall_and_ser
         let error = crate::socks5_secure::apply(&mut plan, &mut fake, &interrupt)
             .await
             .unwrap_err();
+        drop(plan);
         drop(lock);
         let final_event = if fail_firewall_restore {
             assert!(error.to_string().contains("回滚不完整"));
@@ -1238,6 +1272,42 @@ async fn socks5_secure_restart_and_late_failures_restore_config_firewall_and_ser
             &fake.events[fake.events.len() - 2..],
             ["restore-firewall", final_event]
         );
+        if rewrite_config_on_stop {
+            assert!(format!("{error:#}").contains("受管聚合配置已变更"));
+            assert_eq!(
+                fs::read(directory.path().join("config.yaml")).unwrap(),
+                config
+            );
+            assert_eq!(fs::read(&state_path).unwrap(), state);
+            assert!(socks5_secure::pending_exists(&state_path).unwrap());
+            let error = socks5_secure::require_finished(&state_path).unwrap_err();
+            assert!(format!("{error:#}").contains("上次 SOCKS5 加固未完成"));
+
+            let id = profile.id.to_string();
+            let output_path = directory.path().join("client.json");
+            for args in [
+                vec!["prs", "url", &id],
+                vec![
+                    "prs",
+                    "export",
+                    "sing-box",
+                    "--profile",
+                    &id,
+                    "--server",
+                    "example.com",
+                    "--output",
+                    output_path.to_str().unwrap(),
+                ],
+            ] {
+                let cli = crate::cli::Cli::try_parse_from(args).unwrap();
+                let error = crate::cli::run_with_export_paths(cli, &state_path, &lock_path)
+                    .await
+                    .unwrap_err();
+                assert!(format!("{error:#}").contains("上次 SOCKS5 加固未完成"));
+            }
+            assert!(!output_path.exists());
+            continue;
+        }
         if fail_service_stop {
             assert!(error.to_string().contains("暂保留加固配置"));
             assert_eq!(

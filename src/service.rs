@@ -649,7 +649,7 @@ async fn detect_shoes_service_hook(state_path: &Path) -> Option<ShoesServiceHook
     } else {
         ShoesServiceHook::Start
     };
-    let main_pid = waiting_notify_main(&shoes);
+    let main_pid = waiting_start_main(&shoes);
     let waited_phase = |pid| {
         [
             (control_pid, control_phase),
@@ -733,9 +733,8 @@ async fn detect_shoes_service_hook(state_path: &Path) -> Option<ShoesServiceHook
         && control_reader
         && unit_property(&target, "Type") == Some("forking")
         && substate == Some("start");
-    let waiting_notify =
-        waiting_notify_main(&target).is_some_and(|pid| descends_from(process, pid));
-    if !(waiting_oneshot || waiting_start_hook || waiting_forking || waiting_notify) {
+    let waiting_main = waiting_start_main(&target).is_some_and(|pid| descends_from(process, pid));
+    if !(waiting_oneshot || waiting_start_hook || waiting_forking || waiting_main) {
         return None;
     }
     let waiting = tokio::time::timeout(SECURE_QUERY_TIMEOUT, async {
@@ -820,11 +819,11 @@ async fn ordered_service_job(
 }
 
 #[cfg(target_os = "linux")]
-fn waiting_notify_main(properties: &str) -> Option<u32> {
-    // READY=1 之前由 MainPID 阻塞启动作业，即使没有 ControlPID。
+fn waiting_start_main(properties: &str) -> Option<u32> {
+    // READY=1 或 BusName 注册之前由 MainPID 阻塞启动作业。
     if matches!(
         unit_property(properties, "Type"),
-        Some("notify" | "notify-reload")
+        Some("notify" | "notify-reload" | "dbus")
     ) && unit_property(properties, "ActiveState") == Some("activating")
         && unit_property(properties, "SubState") == Some("start")
     {

@@ -1,6 +1,5 @@
-#[cfg(test)]
-use std::collections::BTreeMap;
 use std::{
+    collections::BTreeMap,
     fs,
     future::Future,
     io::Write,
@@ -59,12 +58,11 @@ mod xhttp_reality_tests;
 #[cfg(test)]
 mod yaml_fixture_tests;
 
+use commit::commit_managed;
 #[cfg(test)]
 use commit::{
     aggregate_profile_documents, commit_managed_with_state_writer, is_managed_profile_file_name,
-};
-use commit::{
-    commit_managed, profile_documents, profile_documents_are_current, write_profile_documents,
+    profile_documents, write_profile_documents,
 };
 pub(crate) use routing::chain_value;
 use routing::{render_legacy_rules, render_rules};
@@ -2426,30 +2424,19 @@ pub(crate) fn prepare_managed_snapshot(directory: &Path) -> Result<bool> {
     if !state_path.exists() {
         return Ok(false);
     }
-    let state = load_state_from(&state_path)?;
-    let servers = load_servers(&config_path)?;
-    ensure_servers_match_state(&servers, &state.profiles).context("备份内容不一致")?;
-    ensure_chain_proxy_matches_state(&servers, &state).context("备份内容不一致")?;
-    ensure_chain_proxy_has_no_direct_udp_path(&state).context("备份内容不安全")?;
-    let documents = profile_documents(&servers, &state.profiles)?;
+    let (state, documents) = read_managed_snapshot(&config_path, &state_path)?;
     let profiles_path = directory.join("profiles");
     let migrate_listen = socks5::listen_migration_pending(&state_path)?;
-    if profile_documents_are_current(&profiles_path, &documents)? && !migrate_listen {
-        return Ok(false);
+    let snapshot = ProfileDirectorySnapshot::capture(&profiles_path)?;
+    let repair_profiles = !snapshot.matches_yaml_documents(&documents);
+    if repair_profiles {
+        commit::repair_profile_documents(&profiles_path, &documents, snapshot)?;
     }
     if migrate_listen {
-        commit::commit_managed_with_state_writer(
-            &config_path,
-            &state_path,
-            &profiles_path,
-            &servers,
-            &state,
-            save_state_to,
-        )?;
-    } else {
-        write_profile_documents(&profiles_path, &documents)?;
+        // 旧监听已从聚合配置验证并补入状态，暂存备份只需持久化状态。
+        save_state_to(&state_path, &state)?;
     }
-    Ok(true)
+    Ok(repair_profiles || migrate_listen)
 }
 
 fn ensure_servers_match_state(servers: &[ServerConfig], profiles: &[ManagedProfile]) -> Result<()> {
@@ -3314,21 +3301,34 @@ async fn validate_candidate_with_binary_until(
     validate_with_binary_until(binary, candidate.path(), cancelled).await
 }
 
-pub(crate) fn validate_managed_snapshot(config_path: &Path, state_path: &Path) -> Result<()> {
-    let servers = load_servers(config_path)?;
+fn read_managed_snapshot(
+    config_path: &Path,
+    state_path: &Path,
+) -> Result<(ManagedState, BTreeMap<String, Vec<u8>>)> {
+    let yaml = read_server_yaml(config_path)?;
+    let servers: Vec<ServerConfig> =
+        crate::yaml::from_str(&yaml).context("现有 shoes 配置不是 ping-rust 可管理的格式")?;
     let state = load_state_from(state_path)?;
     ensure_servers_match_state(&servers, &state.profiles).context("备份内容不一致")?;
     ensure_chain_proxy_matches_state(&servers, &state).context("备份内容不一致")?;
     ensure_chain_proxy_has_no_direct_udp_path(&state).context("备份内容不安全")?;
+    // 类型化配置用于校验，节点文件保留聚合 YAML 中的 shoes 扩展字段。
+    let raw_servers: Vec<serde_json::Value> =
+        crate::yaml::from_str(&yaml).context("无法保留备份中的 shoes 字段")?;
+    let documents = commit::serialize_profile_documents(&raw_servers, &state.profiles)?;
+    Ok((state, documents))
+}
+
+pub(crate) fn validate_managed_snapshot(config_path: &Path, state_path: &Path) -> Result<()> {
+    let (_, documents) = read_managed_snapshot(config_path, state_path)?;
     let profiles_path = config_path
         .parent()
         .context("备份配置没有父目录")?
         .join("profiles");
-    if profiles_path.exists() {
-        let documents = profile_documents(&servers, &state.profiles)?;
-        if !profile_documents_are_current(&profiles_path, &documents)? {
-            bail!("备份中的节点文件与聚合配置不一致");
-        }
+    if profiles_path.exists()
+        && !ProfileDirectorySnapshot::capture(&profiles_path)?.matches_yaml_documents(&documents)
+    {
+        bail!("备份中的节点文件与聚合配置不一致");
     }
     Ok(())
 }
