@@ -152,6 +152,11 @@ impl PendingStop {
     }
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) fn has_live_restored_state(state_path: &Path) -> Result<bool> {
+    Ok(has_live_pending(state_path)? && PendingStop::read(state_path)?.config_restored)
+}
+
 #[derive(Serialize, Deserialize)]
 enum StopView {
     Activating { original: Uuid },
@@ -441,7 +446,7 @@ impl FileSnapshot {
     ) -> Result<()> {
         let contents = serde_json::to_vec_pretty(state).context("序列化管理状态失败")?;
         let apply = if protect_credentials {
-            FileAccess::apply_private
+            FileAccess::apply_state_credentials
         } else {
             FileAccess::apply
         };
@@ -687,6 +692,13 @@ impl SecurePlan {
         self.state.profiles.iter().filter(|profile| {
             profile.id != self.profile.id && profile.protocol() == Protocol::Socks5
         })
+    }
+
+    pub(crate) fn has_non_socks5_profiles(&self) -> bool {
+        self.state
+            .profiles
+            .iter()
+            .any(|profile| profile.protocol() != Protocol::Socks5)
     }
 
     pub(crate) async fn validate(

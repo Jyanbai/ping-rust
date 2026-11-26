@@ -202,6 +202,7 @@ pub(crate) async fn run(
         listeners: OtherListeners::default(),
         other_socks5_profiles: plan.other_socks5_profiles().cloned().collect(),
         managed_config: directory.join("config.yaml"),
+        active_companions: Vec::new(),
         rollback_stop: None,
     };
     apply(&mut plan, &mut runtime, &INTERRUPT).await?;
@@ -357,6 +358,7 @@ struct SystemRuntime {
     listeners: OtherListeners,
     other_socks5_profiles: Vec<ManagedProfile>,
     managed_config: PathBuf,
+    active_companions: Vec<String>,
     rollback_stop: Option<Result<()>>,
 }
 
@@ -456,6 +458,13 @@ impl Runtime for SystemRuntime {
         systemctl
             .require_managed_shoes_exec_start(&self.managed_config)
             .await?;
+        self.active_companions = systemctl.secure_active_part_of_units().await?;
+        // 监听探测无法确认非 SOCKS5 节点加载的凭据。还原磁盘也无法恢复旧进程内的配置。
+        if plan.has_non_socks5_profiles() {
+            systemctl
+                .require_config_predates_shoes(&self.managed_config)
+                .await?;
+        }
         if systemctl.secure_invocation_id().await? != Some(invocation) {
             bail!("预检期间 shoes.service 实例已改变，请重试");
         }
@@ -501,10 +510,11 @@ impl Runtime for SystemRuntime {
         plan.capture_rollback_stop(invocation)
     }
     async fn restore_service(&mut self, original: &ManagedProfile) -> Result<()> {
-        // 加固只重启现有 unit。恢复配置后重启同一个 unit 即可，无需重建或启用。
         let stop = self.rollback_stop.take().context("缺少回滚停止作业结果")?;
-        Systemctl::SecureTransaction
-            .restart_secure_transaction(Some(stop))
+        let systemctl = Systemctl::SecureTransaction;
+        systemctl.restart_secure_transaction(Some(stop)).await?;
+        systemctl
+            .restore_secure_part_of_units(&self.active_companions)
             .await?;
         self.verify(original).await
     }

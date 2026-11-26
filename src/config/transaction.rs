@@ -110,6 +110,18 @@ impl FileAccess {
         self.apply_restricted(file, false)
     }
 
+    pub(super) fn apply_state_credentials(&self, file: &fs::File) -> io::Result<()> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            // 状态原先只向属组开放时，发布新凭据仍保留这项委派。
+            self.apply_restricted(file, self.permissions.mode() & 0o007 == 0)
+        }
+        #[cfg(not(unix))]
+        self.apply_private(file)
+    }
+
     fn apply_restricted(&self, file: &fs::File, preserve_group: bool) -> io::Result<()> {
         #[cfg(unix)]
         {

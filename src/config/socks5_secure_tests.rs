@@ -920,6 +920,32 @@ fn delegate_access<'a>(
 
 #[cfg(target_os = "linux")]
 #[test]
+fn socks5_secure_preserves_group_only_state_access_on_publish() {
+    use std::os::unix::fs::MetadataExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let profile = legacy(directory.path());
+    let state = directory.path().join("ping-rust-state.json");
+    utils::set_mode(&state, 0o640).unwrap();
+    let original = fs::metadata(&state).unwrap();
+
+    let mut plan = SecurePlan::prepare(directory.path(), profile.id, SecureMode::Auth)
+        .unwrap()
+        .unwrap();
+    plan.commit_files().unwrap();
+    plan.publish_state().unwrap();
+
+    let published = fs::metadata(&state).unwrap();
+    assert_eq!(
+        (published.uid(), published.gid()),
+        (original.uid(), original.gid())
+    );
+    assert_eq!(published.mode() & 0o777, 0o640);
+    assert!(SecurePlan::already_secure(directory.path(), profile.id).unwrap());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn socks5_secure_preserves_state_posix_acl_through_publish_and_rollback() {
     for rollback in [false, true] {
         let directory = tempfile::tempdir().unwrap();

@@ -602,17 +602,20 @@ pub(crate) enum ShoesServiceHook {
 
 // 只有 systemd 正在等待的 shoes 钩子、启动依赖及其同步读者可以绕过写锁。
 // systemd timer 的独立服务也有 INVOCATION_ID，清理环境的钩子则没有它。
-pub(crate) async fn shoes_service_hook() -> Option<ShoesServiceHook> {
+pub(crate) async fn shoes_service_hook(state_path: &Path) -> Option<ShoesServiceHook> {
     #[cfg(target_os = "linux")]
     {
-        detect_shoes_service_hook().await
+        detect_shoes_service_hook(state_path).await
     }
     #[cfg(not(target_os = "linux"))]
-    None
+    {
+        let _ = state_path;
+        None
+    }
 }
 
 #[cfg(target_os = "linux")]
-async fn detect_shoes_service_hook() -> Option<ShoesServiceHook> {
+async fn detect_shoes_service_hook(state_path: &Path) -> Option<ShoesServiceHook> {
     let process = std::process::id();
     let cgroups = fs::read_to_string("/proc/self/cgroup").ok()?;
     let cgroup = systemd_cgroup(&cgroups)?;
@@ -629,6 +632,7 @@ async fn detect_shoes_service_hook() -> Option<ShoesServiceHook> {
                 "--property=SubState",
                 "--property=Type",
                 "--property=After",
+                "--property=Before",
                 SERVICE_NAME,
             ],
             SECURE_QUERY_TIMEOUT,
@@ -698,9 +702,27 @@ async fn detect_shoes_service_hook() -> Option<ShoesServiceHook> {
         }
     }
 
+    let substate = unit_property(&target, "SubState");
+    if control_reader
+        && unit_property(&target, "ActiveState") == Some("deactivating")
+        && matches!(substate, Some("stop" | "stop-post"))
+    {
+        let ordered = tokio::time::timeout(
+            SECURE_QUERY_TIMEOUT,
+            ordered_service_job(systemctl, &shoes, unit, "Before", "stop"),
+        )
+        .await
+        .ok()?
+        .ok()?;
+        return ordered.then(|| {
+            ShoesServiceHook::Stop(
+                unit_property(&shoes, "InvocationID").and_then(parse_invocation_id),
+            )
+        });
+    }
+
     // 有序依赖先于 shoes 启动钩子执行，此时可能还没有 shoes ControlPID。
     let activating = unit_property(&target, "ActiveState") == Some("activating");
-    let substate = unit_property(&target, "SubState");
     let waiting_oneshot = activating && unit_property(&target, "Type") == Some("oneshot");
     // 有序依赖的 ExecStartPre 和 ExecStartPost 均阻塞启动作业，包括 Type=simple。
     let waiting_start_hook =
@@ -715,38 +737,59 @@ async fn detect_shoes_service_hook() -> Option<ShoesServiceHook> {
     if !(waiting_oneshot || waiting_start_hook || waiting_forking || waiting_notify) {
         return None;
     }
-    tokio::time::timeout(
-        SECURE_QUERY_TIMEOUT,
-        ordered_startup_dependency(systemctl, &shoes, unit),
-    )
+    let waiting = tokio::time::timeout(SECURE_QUERY_TIMEOUT, async {
+        if ordered_service_job(systemctl, &shoes, unit, "After", "start").await? {
+            return Ok(true);
+        }
+        if !crate::config::socks5_secure::has_live_restored_state(state_path)? {
+            return Ok(false);
+        }
+        // 回滚显式启动此前活跃的 PartOf 单元，即使 shoes 的启动作业已经完成。
+        let starting = service_jobs(systemctl, "start").await?;
+        Ok::<_, anyhow::Error>(
+            starting.contains(unit) && systemctl.secure_part_of_units().await?.contains(unit),
+        )
+    })
     .await
     .ok()?
-    .ok()?
-    .then_some(ShoesServiceHook::Start)
+    .ok()?;
+    waiting.then_some(ShoesServiceHook::Start)
 }
 
 #[cfg(target_os = "linux")]
-async fn ordered_startup_dependency(systemctl: Systemctl, shoes: &str, unit: &str) -> Result<bool> {
+async fn service_jobs(systemctl: Systemctl, action: &str) -> Result<BTreeSet<String>> {
     let jobs = systemctl
         .timed(
             &["list-jobs", "--no-legend", "--no-pager", "--full"],
             SECURE_QUERY_TIMEOUT,
         )
         .await?;
-    let mut starting: BTreeSet<_> = jobs
+    Ok(jobs
         .lines()
         .filter_map(|line| {
             let mut fields = line.split_whitespace().skip(1);
             let name = fields.next()?;
-            matches!(fields.next(), Some("start" | "restart")).then_some(name)
+            let job = fields.next()?;
+            (job == action || job == "restart").then(|| name.to_owned())
         })
-        .collect();
-    if !starting.remove(SERVICE_NAME) || !starting.contains(unit) {
+        .collect())
+}
+
+#[cfg(target_os = "linux")]
+async fn ordered_service_job(
+    systemctl: Systemctl,
+    shoes: &str,
+    unit: &str,
+    ordering: &str,
+    action: &str,
+) -> Result<bool> {
+    let mut jobs = service_jobs(systemctl, action).await?;
+    if !jobs.remove(SERVICE_NAME) || !jobs.contains(unit) {
         return Ok(false);
     }
 
-    // 只有启动作业之间的 After 关系才会阻塞 shoes，已就绪的中间单元不传递等待。
-    let mut pending = vec![SERVICE_NAME];
+    // 启动按 After 等待，停止按 Before 反向等待。已完成作业的单元不传递等待。
+    let mut pending = vec![SERVICE_NAME.to_owned()];
     while let Some(name) = pending.pop() {
         let queried;
         let properties = if name == SERVICE_NAME {
@@ -754,17 +797,17 @@ async fn ordered_startup_dependency(systemctl: Systemctl, shoes: &str, unit: &st
         } else {
             queried = systemctl
                 .timed(
-                    &["show", "--property=After", "--", name],
+                    &["show", &format!("--property={ordering}"), "--", &name],
                     SECURE_QUERY_TIMEOUT,
                 )
                 .await?;
             &queried
         };
-        for dependency in unit_property(properties, "After")
+        for dependency in unit_property(properties, ordering)
             .unwrap_or_default()
             .split_whitespace()
         {
-            if let Some(dependency) = starting.take(dependency) {
+            if let Some(dependency) = jobs.take(dependency) {
                 if dependency == unit {
                     return Ok(true);
                 }
@@ -1085,6 +1128,83 @@ impl Systemctl {
         Ok(())
     }
 
+    async fn secure_part_of_units(self) -> Result<BTreeSet<String>> {
+        let mut units = BTreeSet::new();
+        let mut pending = vec![SERVICE_NAME.to_owned()];
+        while let Some(unit) = pending.pop() {
+            let members = self.timed_unit_show(&unit, "ConsistsOf").await?;
+            for member in members.split_whitespace() {
+                if member != SERVICE_NAME && units.insert(member.to_owned()) {
+                    pending.push(member.to_owned());
+                }
+            }
+        }
+        Ok(units)
+    }
+
+    pub(crate) async fn secure_active_part_of_units(self) -> Result<Vec<String>> {
+        tokio::time::timeout(SECURE_QUERY_TIMEOUT, async {
+            let mut active = Vec::new();
+            for unit in self.secure_part_of_units().await? {
+                if self.secure_unit_is_active(&unit).await? {
+                    active.push(unit);
+                }
+            }
+            Ok(active)
+        })
+        .await
+        .context("查询 shoes 的 PartOf 伴随单元超时")?
+    }
+
+    pub(crate) async fn restore_secure_part_of_units(self, units: &[String]) -> Result<()> {
+        let stopped = self.secure_inactive_units(units).await?;
+        if !stopped.is_empty() {
+            let mut args = vec!["reset-failed", "--"];
+            args.extend(stopped.iter().copied());
+            // 已卸载的停止单元可能无法 reset-failed，仍要尝试启动。
+            let reset = self.timed(&args, SECURE_QUERY_TIMEOUT).await;
+            args[0] = "start";
+            self.timed(&args, SECURE_JOB_TIMEOUT)
+                .await
+                .with_context(|| {
+                    if let Err(error) = reset {
+                        format!("恢复 PartOf 伴随单元失败，重置启动限流也失败：{error:#}")
+                    } else {
+                        "恢复 PartOf 伴随单元失败".to_owned()
+                    }
+                })?;
+        }
+        let stopped = self.secure_inactive_units(units).await?;
+        if !stopped.is_empty() {
+            bail!(
+                "回滚后以下 PartOf 伴随单元未恢复为 active：{}",
+                stopped.join("、")
+            );
+        }
+        Ok(())
+    }
+
+    async fn secure_inactive_units(self, units: &[String]) -> Result<Vec<&str>> {
+        tokio::time::timeout(SECURE_QUERY_TIMEOUT, async {
+            let mut stopped = Vec::new();
+            for unit in units {
+                if !self.secure_unit_is_active(unit).await? {
+                    stopped.push(unit.as_str());
+                }
+            }
+            Ok(stopped)
+        })
+        .await
+        .context("复查 shoes 的 PartOf 伴随单元超时")?
+    }
+
+    async fn secure_unit_is_active(self, unit: &str) -> Result<bool> {
+        Ok(matches!(
+            self.timed_unit_show(unit, "ActiveState").await?.as_str(),
+            "active" | "reloading" | "refreshing"
+        ))
+    }
+
     pub(crate) async fn secure_is_active(self) -> Result<bool> {
         Ok(self.timed_show("ActiveState").await? == "active")
     }
@@ -1095,6 +1215,46 @@ impl Systemctl {
 
     pub(crate) async fn secure_invocation_id(self) -> Result<Option<Uuid>> {
         Ok(parse_invocation_id(&self.timed_show("InvocationID").await?))
+    }
+
+    pub(crate) async fn require_config_predates_shoes(self, config: &Path) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::MetadataExt;
+
+            let timestamp = self
+                .timed(
+                    &[
+                        "show",
+                        "--timestamp=us+utc",
+                        "--property=ExecMainStartTimestamp",
+                        "--value",
+                        SERVICE_NAME,
+                    ],
+                    SECURE_QUERY_TIMEOUT,
+                )
+                .await?;
+            let started = parse_systemd_timestamp(&timestamp)
+                .context("无法确认 shoes 进程启动时间，请检查 systemd 后重试")?;
+            let metadata = fs::metadata(config).context("无法检查受管聚合配置变更时间")?;
+            let nanos =
+                |seconds, subsecond| i128::from(seconds) * 1_000_000_000 + i128::from(subsecond);
+            if [
+                nanos(metadata.ctime(), metadata.ctime_nsec()),
+                nanos(metadata.mtime(), metadata.mtime_nsec()),
+            ]
+            .into_iter()
+            .any(|changed| changed >= started)
+            {
+                bail!("聚合配置在 shoes 进程启动后发生变更，无法确认其它协议正在使用的配置。请先核对磁盘配置与在线节点，再同步 shoes.service 后重试");
+            }
+            Ok(())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = config;
+            bail!("无法检查受管聚合配置变更时间")
+        }
     }
 
     pub(crate) async fn require_managed_shoes_exec_start(self, config: &Path) -> Result<()> {
@@ -1112,12 +1272,17 @@ impl Systemctl {
     }
 
     async fn timed_show(self, property: &str) -> Result<String> {
+        self.timed_unit_show(SERVICE_NAME, property).await
+    }
+
+    async fn timed_unit_show(self, unit: &str, property: &str) -> Result<String> {
         self.timed(
             &[
                 "show",
                 &format!("--property={property}"),
                 "--value",
-                SERVICE_NAME,
+                "--",
+                unit,
             ],
             SECURE_QUERY_TIMEOUT,
         )
@@ -1127,6 +1292,37 @@ impl Systemctl {
     async fn timed(self, args: &[&str], timeout: Duration) -> Result<String> {
         wait_for_systemctl(self.command("systemctl"), args, timeout).await
     }
+}
+
+#[cfg(target_os = "linux")]
+fn parse_systemd_timestamp(timestamp: &str) -> Result<i128> {
+    let parts: Vec<_> = timestamp.split_ascii_whitespace().collect();
+    let [_, date, clock, "UTC"] = parts.as_slice() else {
+        bail!("systemd 未报告 UTC 启动时间");
+    };
+    let date: Vec<_> = date.split('-').collect();
+    let clock: Vec<_> = clock.split([':', '.']).collect();
+    let ([year, month, day], [hour, minute, second, micros]) = (date.as_slice(), clock.as_slice())
+    else {
+        bail!("systemd 启动时间格式无效");
+    };
+    if micros.len() != 6 {
+        bail!("systemd 启动时间缺少微秒精度");
+    }
+    let date = time::Date::from_calendar_date(
+        year.parse()?,
+        month.parse::<u8>()?.try_into()?,
+        day.parse()?,
+    )?;
+    Ok(date
+        .with_hms_micro(
+            hour.parse()?,
+            minute.parse()?,
+            second.parse()?,
+            micros.parse()?,
+        )?
+        .assume_utc()
+        .unix_timestamp_nanos())
 }
 
 fn parse_invocation_id(value: &str) -> Option<Uuid> {

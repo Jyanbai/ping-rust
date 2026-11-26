@@ -202,6 +202,7 @@ impl FirewallExecutor for SystemFirewall {
 pub(super) struct FirewallPlan {
     rules: Vec<Rule>,
     attempted: Vec<Attempt>,
+    shared_firewalld_ports: Vec<String>,
     listener: Option<SocketAddr>,
 }
 
@@ -346,13 +347,17 @@ impl FirewallPlan {
             false
         };
         if managed_firewalld {
-            let runtime = capture_firewalld(backend, listener, &[]).await?;
+            let runtime =
+                capture_firewalld(backend, listener, false, &mut plan.shared_firewalld_ports)
+                    .await?;
             if let Some(Rule::Rich { base, .. }) = runtime.first() {
                 // 同文的持久配置无法证明运行时规则没有独立的超时。
                 bail!("firewalld 区域 {} 有匹配 TCP 端口 {} 的运行时 rich rule，无法查询其剩余超时并安全回滚。请先检查并手动处理该规则后重试", base[0], listener.port());
             }
-            plan.rules
-                .extend(capture_firewalld(backend, listener, &["--permanent".into()]).await?);
+            plan.rules.extend(
+                capture_firewalld(backend, listener, true, &mut plan.shared_firewalld_ports)
+                    .await?,
+            );
         }
         let (program, legacy_program, family) = if listener.is_ipv4() {
             ("iptables", "iptables-legacy", "ip")
@@ -559,7 +564,12 @@ impl FirewallPlan {
                 }
             }
         }
-        closure_report(runtime, persistent, nft, iptables)
+        let mut report = closure_report(runtime, persistent, nft, iptables);
+        for port in &self.shared_firewalld_ports {
+            report.push_str(port);
+            report.push('\n');
+        }
+        report
     }
 }
 
@@ -1394,15 +1404,32 @@ async fn service_running(backend: &mut impl FirewallExecutor, unit: &str) -> Res
 async fn capture_firewalld(
     backend: &mut impl FirewallExecutor,
     listener: SocketAddr,
-    prefix: &[String],
+    permanent: bool,
+    shared_ports: &mut Vec<String>,
 ) -> Result<Vec<Rule>> {
-    let mut zones_args = prefix.to_vec();
+    let prefix = if permanent {
+        vec!["--permanent".into()]
+    } else {
+        Vec::new()
+    };
+    let scope = if permanent { "持久" } else { "运行时" };
+    let port = format!("{}/tcp", listener.port());
+    let mut zones_args = prefix.clone();
     zones_args.push("--get-zones".into());
     let zones = backend.execute("firewall-cmd", &zones_args, None).await?;
     let mut rules = Vec::new();
     for zone in zones.split_whitespace() {
-        let mut base = prefix.to_vec();
+        let mut base = prefix.clone();
         base.push(format!("--zone={zone}"));
+        let mut ports = base.clone();
+        ports.push("--list-ports".into());
+        let output = backend.execute("firewall-cmd", &ports, None).await?;
+        if output.split_whitespace().any(|entry| entry == port) {
+            // 普通端口放行对双栈有效，不能按单个监听的地址族删除。
+            shared_ports.push(format!(
+                "firewalld 区域 {zone} 的{scope}端口放行 {port} 适用于 IPv4 和 IPv6，已保留，请手动检查并按需移除。"
+            ));
+        }
         let mut sources = base.clone();
         sources.push("--list-sources".into());
         if backend
@@ -1411,7 +1438,6 @@ async fn capture_firewalld(
             .trim()
             .is_empty()
         {
-            // 普通端口放行作用于双栈，只清理能明确限定地址族的 rich rule。
             let output = list_rich_rules(backend, &base).await?;
             rules.extend(firewalld_rules(&output, listener, &base));
         }
@@ -1794,6 +1820,7 @@ mod tests {
     #[derive(Default)]
     struct FakeFirewalld {
         rules: [Vec<&'static str>; 2],
+        ports: [&'static str; 2],
         runtime_timeout: Option<u32>,
         revoke_before_permanent_removal: bool,
         fail_permanent_removal: Option<&'static str>,
@@ -1821,7 +1848,7 @@ mod tests {
             match option.as_str() {
                 "--get-zones" => Ok("public".into()),
                 "--list-sources" => Ok(String::new()),
-                "--list-ports" => Ok("1080/tcp".into()),
+                "--list-ports" => Ok(self.ports[permanent].into()),
                 "--list-rich-rules" => Ok(self.rules[permanent].join("\n")),
                 _ if option.strip_prefix("--add-rich-rule=") == Some(SCOPED) => {
                     assert_eq!(permanent, 1);
@@ -1853,6 +1880,38 @@ mod tests {
                 return firewalld_rich_rule_removed(Some(0), warning.as_bytes());
             }
             firewalld_rich_rule_removed(Some(0), b"")
+        }
+    }
+
+    #[tokio::test]
+    async fn socks5_secure_firewalld_reports_shared_single_port_allows() {
+        for permanent in [false, true] {
+            let mut ports = ["1081/tcp 1080/udp", "1079-1081/tcp"];
+            ports[usize::from(permanent)] = "1080/tcp";
+            let mut backend = FakeFirewalld {
+                ports,
+                ..Default::default()
+            };
+            let mut plan =
+                FirewallPlan::capture_with("0.0.0.0:1080".parse().unwrap(), &mut backend)
+                    .await
+                    .unwrap();
+            plan.close_with(&mut backend).await.unwrap();
+            let report = plan.closure_report();
+            assert_eq!(
+                report.contains("firewalld 区域 public 的运行时端口放行 1080/tcp"),
+                !permanent
+            );
+            assert_eq!(
+                report.contains("firewalld 区域 public 的持久端口放行 1080/tcp"),
+                permanent
+            );
+            assert!(report.contains("请手动检查"));
+            assert!(!report.contains("1081/tcp"));
+            assert!(!report.contains("1080/udp"));
+            assert!(!report.contains("1079-1081/tcp"));
+            plan.restore_with(&mut backend).await.unwrap();
+            assert_eq!(backend.ports, ports);
         }
     }
 

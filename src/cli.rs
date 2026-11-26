@@ -1834,7 +1834,7 @@ async fn read_profile_snapshot<T>(
 
     #[cfg(not(target_os = "linux"))]
     let _ = client_export;
-    let service_hook = service::shoes_service_hook().await;
+    let service_hook = service::shoes_service_hook(state_path).await;
     utils::read_with_existing_lock_or_service_hook(
         lock_path,
         service_hook.is_some(),
