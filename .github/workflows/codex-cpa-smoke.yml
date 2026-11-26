@@ -390,6 +390,13 @@ jobs:
             echo '::error::Codex 事件流不完整（缺少起始事件 thread.started），无法确认自检过程没有执行命令。'
             exit 1
           fi
+          # rust-v0.166.0 在 thread.started 之后还有 turn.started；缺这一条的截断流不能算完整。
+          turn_start_rc=0
+          jq -s -e 'any(.[]; .type? == "turn.started")' "$events" >/dev/null 2>&1 || turn_start_rc=$?
+          if [ "$turn_start_rc" -ne 0 ]; then
+            echo '::error::Codex 事件流不完整（缺少回合起始事件 turn.started），无法确认自检过程没有执行命令。'
+            exit 1
+          fi
           complete_rc=0
           jq -s -e 'any(.[]; .type? == "turn.completed") and any(.[]; .type? == "item.completed" and .item.type? == "agent_message")' "$events" >/dev/null 2>&1 || complete_rc=$?
           if [ "$complete_rc" -ne 0 ]; then

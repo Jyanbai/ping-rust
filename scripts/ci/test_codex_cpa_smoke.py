@@ -529,7 +529,21 @@ class ReplyAndFailureTest(unittest.TestCase):
         self.assertNotIn("CPA 自检通过", summary)
         self.assertFalse(any("Responses 调用成功" in line for line in result.stdout.splitlines()))
 
+    def test_ok_reply_without_turn_started_fails(self):
+        events = """{"type":"thread.started","thread_id":"t1"}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"OK"}}
+{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":1,"reasoning_output_tokens":0}}
+"""
+        self.assertNotIn("turn.started", events)
+        result, summary = self.run_smoke(b"OK\n", events=events)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        errors = "\n".join(self.error_lines(result))
+        self.assertIn("缺少回合起始事件", errors)
+        self.assertNotIn("CPA 自检通过", summary)
+        self.assertFalse(any("Responses 调用成功" in line for line in result.stdout.splitlines()))
+
     def test_http_401_reports_key_category(self):
+
 
 
         raw = (
