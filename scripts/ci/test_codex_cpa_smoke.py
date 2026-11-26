@@ -158,6 +158,9 @@ class WorkflowPolicyTest(unittest.TestCase):
         self.assertNotIn("gh secret set CODEX_AUTH_JSON", self.text)
         self.assertNotIn("secrets.CODEX_AUTH_JSON", self.text)
         self.assertNotIn("secrets.CODEX_BOT_TOKEN", self.text)
+        self.assertIn("secrets.CODEX_CPA_API_KEY", self.text)
+        self.assertNotIn("secrets.CODEX_API_KEY", self.text)
+        self.assertEqual(self.text.count("secrets.CODEX_CPA_API_KEY"), 3)
 
 
 class CiWiringTest(unittest.TestCase):
@@ -277,6 +280,7 @@ class ReplyAndFailureTest(unittest.TestCase):
             "RUNNER_TEMP": str(runner_temp),
             "GITHUB_STEP_SUMMARY": str(summary),
             "CODEX_API_KEY": key,
+            "CODEX_CPA_API_KEY": key,
             "CPA_MODEL": "gpt-6.2-sol",
             "CPA_EFFORT": "high",
             "CPA_BASE_URL": "https://api.moio.cn/v1",
@@ -436,7 +440,7 @@ class ReplyAndFailureTest(unittest.TestCase):
             "GITHUB_ENV": str(files["env"]),
             "GITHUB_OUTPUT": str(files["output"]),
             "GITHUB_STEP_SUMMARY": str(files["summary"]),
-            "CODEX_API_KEY": "test-cpa-key-not-real",
+            "CODEX_CPA_API_KEY": "test-cpa-key-not-real",
             "CODEX_API_BASE_URL": "",
             "CODEX_MODEL": "",
             "CODEX_REASONING_EFFORT": "",
@@ -456,7 +460,60 @@ class ReplyAndFailureTest(unittest.TestCase):
         self.assertRegex(raw, r'(?m)^model_provider = "cpa"$')
         self.assertNotIn("test-cpa-key-not-real", raw)
 
+    def test_repo_level_api_key_is_not_accepted_without_env_scoped_secret(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        work = Path(temporary.name)
+        runner_temp = work / "runner-temp"
+        runner_temp.mkdir()
+        files = {name: work / name for name in ("env", "output", "summary")}
+        for path in files.values():
+            path.touch()
+        leaked = "test-cpa-key-not-real"
+        env = {
+            **os.environ,
+            "RUNNER_TEMP": str(runner_temp),
+            "GITHUB_ENV": str(files["env"]),
+            "GITHUB_OUTPUT": str(files["output"]),
+            "GITHUB_STEP_SUMMARY": str(files["summary"]),
+            "CODEX_API_KEY": leaked,
+            "CODEX_CPA_API_KEY": "",
+            "CODEX_API_BASE_URL": "",
+            "CODEX_MODEL": "",
+            "CODEX_REASONING_EFFORT": "",
+        }
+        result = subprocess.run(
+            ["bash", "-o", "pipefail", "-c", step_script("Prepare CPA config")],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        combined = result.stdout + result.stderr
+        self.assertIn("CODEX_CPA_API_KEY", combined)
+        self.assertIn("environment codex", combined)
+        self.assertNotIn("ok=true", files["output"].read_text(encoding="utf-8"))
+        self.assertFalse((runner_temp / "codex-home" / "config.toml").exists())
+        for text in (combined, files["env"].read_text(encoding="utf-8"), files["summary"].read_text(encoding="utf-8")):
+            self.assertNotIn(leaked, text)
+
+    def test_ok_reply_with_non_event_json_in_stream_fails(self):
+        events = COMPLETE_OK_EVENTS.replace(
+            '{"type":"turn.started"}\n',
+            '{"type":"turn.started"}\n0\n',
+            1,
+        )
+        self.assertIn("\n0\n", events)
+        result, summary = self.run_smoke(b"OK\n", events=events)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        errors = "\n".join(self.error_lines(result))
+        self.assertIn("非事件记录", errors)
+        self.assertNotIn("CPA 自检通过", summary)
+        self.assertFalse(any("Responses 调用成功" in line for line in result.stdout.splitlines()))
+
     def test_http_401_reports_key_category(self):
+
         raw = (
             'api error 401 Unauthorized: invalid_api_key raw payload={"error":"nope","token":"secret-token-value"}\n'
         )
@@ -575,7 +632,7 @@ class SandboxProbeDnsTest(unittest.TestCase):
             "RUNNER_TEMP": str(runner_temp),
             "GITHUB_OUTPUT": str(output),
             "CODEX_HOME": str(codex_home),
-            "CODEX_API_KEY": "test-cpa-key-not-real",
+            "CODEX_CPA_API_KEY": "test-cpa-key-not-real",
         }
         result = subprocess.run(
             ["bash", "-o", "pipefail", "-c", step_script("Verify read-only sandbox")],
