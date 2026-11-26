@@ -533,6 +533,59 @@ fn socks5_secure_rollback_restores_state_symlink() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn socks5_secure_removes_public_access_to_new_credentials() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let profile = legacy(directory.path());
+    let config = directory.path().join("config.yaml");
+    let state_path = directory.path().join("ping-rust-state.json");
+    let profiles = directory.path().join("profiles");
+    let yaml = profiles.join(profile.config_file_name());
+    let state = load_state_from(&state_path).unwrap();
+    let servers = load_servers(&config).unwrap();
+    write_profile_documents(
+        &profiles,
+        &profile_documents(&servers, &state.profiles).unwrap(),
+    )
+    .unwrap();
+    utils::set_mode(directory.path(), 0o755).unwrap();
+    utils::set_mode(&profiles, 0o755).unwrap();
+    let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    let assert_acl = delegate_file_read(&config);
+    utils::set_mode(&config, 0o644).unwrap();
+    for path in [&state_path, &yaml] {
+        utils::set_mode(path, 0o644).unwrap();
+    }
+
+    let mut plan = SecurePlan::prepare(directory.path(), profile.id, SecureMode::Auth)
+        .unwrap()
+        .unwrap();
+    plan.commit_files().unwrap();
+    assert_eq!(mode(&config), 0o640);
+    assert_acl();
+    assert_eq!(mode(&yaml), 0o600);
+    assert_eq!(mode(&state_path), 0o644);
+    plan.rollback_files().unwrap();
+    plan.finish_pending().unwrap();
+    for path in [&config, &state_path, &yaml] {
+        assert_eq!(mode(path), 0o644);
+    }
+
+    let mut plan = SecurePlan::prepare(directory.path(), profile.id, SecureMode::Auth)
+        .unwrap()
+        .unwrap();
+    plan.commit_files().unwrap();
+    plan.publish_state().unwrap();
+    assert!(SecurePlan::already_secure(directory.path(), profile.id).unwrap());
+    assert_eq!(mode(&state_path), 0o600);
+    assert_eq!(mode(&config), 0o640);
+    assert_eq!(mode(&yaml), 0o600);
+    assert_acl();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn socks5_secure_preserves_aggregate_owner_group_and_mode_through_rollback() {
     use std::os::unix::fs::MetadataExt;
 

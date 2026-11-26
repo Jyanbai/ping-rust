@@ -154,21 +154,23 @@ pub(super) fn write_profile_documents(
     path: &Path,
     documents: &BTreeMap<String, Vec<u8>>,
 ) -> Result<()> {
-    write_profile_documents_inner(path, documents, None)
+    write_profile_documents_inner(path, documents, None, None)
 }
 
 pub(super) fn write_profile_documents_with_access(
     path: &Path,
     documents: &BTreeMap<String, Vec<u8>>,
     snapshot: &ProfileDirectorySnapshot,
+    private_profile: Option<&str>,
 ) -> Result<()> {
-    write_profile_documents_inner(path, documents, Some(snapshot))
+    write_profile_documents_inner(path, documents, Some(snapshot), private_profile)
 }
 
 fn write_profile_documents_inner(
     path: &Path,
     documents: &BTreeMap<String, Vec<u8>>,
     snapshot: Option<&ProfileDirectorySnapshot>,
+    private_profile: Option<&str>,
 ) -> Result<()> {
     if !snapshot.is_some_and(ProfileDirectorySnapshot::existed) {
         utils::ensure_directory(path, 0o700)?;
@@ -193,7 +195,7 @@ fn write_profile_documents_inner(
     }
     for (name, contents) in documents {
         if let Some(snapshot) = snapshot {
-            snapshot.write_profile(path, name, contents)?;
+            snapshot.write_profile(path, name, contents, private_profile == Some(name.as_str()))?;
         } else {
             utils::atomic_write(&path.join(name), contents, 0o600)?;
         }

@@ -32,7 +32,7 @@ struct ProfileDocumentSnapshot {
     access: FileAccess,
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(super) struct FileAccess {
     permissions: fs::Permissions,
     #[cfg(unix)]
@@ -82,22 +82,47 @@ impl FileAccess {
                 fchown(file, Some(self.uid), Some(self.gid))?;
             }
         }
-        file.set_permissions(self.permissions.clone())?;
         #[cfg(target_os = "linux")]
         {
-            use rustix::fs::{fsetxattr, XattrFlags};
-
+            // 在设置组权限前替换从父目录继承的 ACL。
             write_acl(file, ACCESS_ACL, self.acl.as_deref())?;
             if file.metadata()?.is_dir() {
                 write_acl(file, DEFAULT_ACL, self.default_acl.as_deref())?;
             }
-            if let Some(label) = &self.selinux_label {
-                if read_file_xattr(file, SELINUX_LABEL)?.as_ref() != Some(label) {
-                    fsetxattr(file, SELINUX_LABEL, label, XattrFlags::empty())?;
-                }
+        }
+        file.set_permissions(self.permissions.clone())?;
+        #[cfg(target_os = "linux")]
+        if let Some(label) = &self.selinux_label {
+            use rustix::fs::{fsetxattr, XattrFlags};
+
+            if read_file_xattr(file, SELINUX_LABEL)?.as_ref() != Some(label) {
+                fsetxattr(file, SELINUX_LABEL, label, XattrFlags::empty())?;
             }
         }
         Ok(())
+    }
+
+    pub(super) fn apply_without_public_access(&self, file: &fs::File) -> io::Result<()> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut access = self.clone();
+            let mode = access.permissions.mode() & !0o007;
+            access.permissions.set_mode(mode);
+            #[cfg(target_os = "linux")]
+            if let Some(acl) = &mut access.acl {
+                // Linux POSIX ACL xattr v2：四字节头，后接八字节条目。
+                for entry in acl[4..].chunks_exact_mut(8) {
+                    if u16::from_le_bytes([entry[0], entry[1]]) == 0x20 {
+                        entry[2..4].fill(0); // ACL_OTHER
+                    }
+                }
+            }
+            access.apply(file)
+        }
+        #[cfg(not(unix))]
+        self.apply(file)
     }
 }
 
@@ -343,10 +368,17 @@ impl ProfileDirectorySnapshot {
         directory: &Path,
         name: &str,
         contents: &[u8],
+        protect_credentials: bool,
     ) -> Result<()> {
         let path = directory.join(name);
         if let Some(snapshot) = self.files.get(name) {
-            utils::atomic_write_with(&path, contents, |file| snapshot.access.apply(file))
+            utils::atomic_write_with(&path, contents, |file| {
+                if protect_credentials {
+                    snapshot.access.apply_without_public_access(file)
+                } else {
+                    snapshot.access.apply(file)
+                }
+            })
         } else {
             utils::atomic_write(&path, contents, 0o600)
         }

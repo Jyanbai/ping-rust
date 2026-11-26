@@ -382,6 +382,28 @@ impl SystemRuntime {
         Ok(())
     }
 
+    async fn verify_udp_associations(&self, target: &ManagedProfile, phase: &str) -> Result<()> {
+        for profile in std::iter::once(target).chain(&self.other_socks5_profiles) {
+            let address = profile.listen_address()?.parse()?;
+            match tokio::time::timeout(
+                Duration::from_secs(5),
+                verify_udp_associate(profile, address),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(error) => Err(error).context("SOCKS5 UDP ASSOCIATE 验证超时"),
+            }
+            .with_context(|| {
+                format!(
+                    "端口 {} 的{phase} UDP 设置与受管配置不一致，请先同步 shoes.service 与受管配置",
+                    profile.port
+                )
+            })?;
+        }
+        Ok(())
+    }
+
     async fn verify_config_source(&self, pid: u32, phase: &str) -> Result<()> {
         crate::service::require_managed_shoes_process(pid, &self.managed_config).with_context(
             || format!("{phase} shoes 进程未使用受管聚合配置；请先同步 shoes.service 与受管配置"),
@@ -427,6 +449,7 @@ impl Runtime for SystemRuntime {
             .context("原认证与受管配置不一致，无法安全回滚；请先同步 shoes.service 与受管配置")?;
         self.verify_other_authentication("原").await?;
         self.verify_config_source(main_pid, "原").await?;
+        self.verify_udp_associations(&plan.original, "原").await?;
         if self.mode == SecureMode::Local {
             self.firewall = firewall::FirewallPlan::capture(listener).await?;
         }
@@ -449,7 +472,12 @@ impl Runtime for SystemRuntime {
             verify_listener(profile, Systemctl::SecureTransaction, Some(&self.listeners)).await?;
         verify_authentication(profile, expected).await?;
         self.verify_other_authentication("运行态").await?;
-        self.verify_config_source(main_pid, "重启后的").await
+        self.verify_config_source(main_pid, "重启后的").await?;
+        self.verify_udp_associations(profile, "运行态").await?;
+        if Systemctl::SecureTransaction.secure_main_pid().await? != Some(main_pid) {
+            bail!("验证 SOCKS5 UDP 期间 shoes.service 的 MainPID 已改变，请重试");
+        }
+        Ok(())
     }
     async fn close_firewall(&mut self) -> Result<()> {
         self.firewall.close().await
@@ -508,7 +536,17 @@ pub(crate) async fn verify(profile: &ManagedProfile) -> Result<()> {
 }
 
 async fn verify_authentication(profile: &ManagedProfile, expected: SocketAddr) -> Result<()> {
-    let target = SocketAddr::new(
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        probe(profile, probe_address(expected)),
+    )
+    .await
+    .context("SOCKS5 认证验证超时")??;
+    Ok(())
+}
+
+fn probe_address(expected: SocketAddr) -> SocketAddr {
+    SocketAddr::new(
         if expected.ip().is_unspecified() {
             if expected.is_ipv4() {
                 std::net::Ipv4Addr::LOCALHOST.into()
@@ -519,11 +557,7 @@ async fn verify_authentication(profile: &ManagedProfile, expected: SocketAddr) -
             expected.ip()
         },
         expected.port(),
-    );
-    tokio::time::timeout(Duration::from_secs(5), probe(profile, target))
-        .await
-        .context("SOCKS5 认证验证超时")??;
-    Ok(())
+    )
 }
 
 async fn verify_listener(
@@ -604,7 +638,7 @@ pub(crate) fn check_listeners(output: &str, expected: SocketAddr, main_pid: u32)
     Ok(())
 }
 
-pub(crate) async fn probe(profile: &ManagedProfile, target: SocketAddr) -> Result<()> {
+pub(crate) async fn probe(profile: &ManagedProfile, target: SocketAddr) -> Result<TcpStream> {
     let Credentials::Socks5 {
         username, password, ..
     } = &profile.credentials
@@ -645,6 +679,32 @@ pub(crate) async fn probe(profile: &ManagedProfile, target: SocketAddr) -> Resul
         if reply != [1, 0] {
             bail!("SOCKS5 新凭据验证失败");
         }
+    }
+    Ok(stream)
+}
+
+async fn verify_udp_associate(profile: &ManagedProfile, address: SocketAddr) -> Result<()> {
+    let Credentials::Socks5 { udp_enabled, .. } = &profile.credentials else {
+        bail!("非 SOCKS5 节点");
+    };
+    let mut stream = probe(profile, probe_address(address)).await?;
+    // 仅请求关联并立即关闭控制连接，不发送 UDP 数据或连接任何目标。
+    stream.write_all(&[5, 3, 0, 1, 0, 0, 0, 0, 0, 0]).await?;
+    let mut header = [0; 4];
+    stream.read_exact(&mut header).await?;
+    let expected_reply = if *udp_enabled { 0 } else { 7 };
+    if header[..3] != [5, expected_reply, 0] {
+        bail!("SOCKS5 UDP ASSOCIATE 返回了非预期的应答");
+    }
+    let address_length = match header[3] {
+        1 => 4,
+        4 => 16,
+        _ => bail!("SOCKS5 UDP ASSOCIATE 返回了无效的地址类型"),
+    };
+    let mut bound = [0; 18];
+    stream.read_exact(&mut bound[..address_length + 2]).await?;
+    if *udp_enabled && bound[address_length..address_length + 2] == [0, 0] {
+        bail!("SOCKS5 UDP ASSOCIATE 返回了无效的端口");
     }
     Ok(())
 }

@@ -685,10 +685,10 @@ async fn detect_shoes_service_hook() -> Option<ShoesServiceHook> {
         )
         .await
         .ok()?;
-    if !["MainPID", "ControlPID"]
-        .into_iter()
-        .filter_map(|key| unit_pid(&target, key))
-        .any(|pid| descends_from(process, pid))
+    let control_reader =
+        unit_pid(&target, "ControlPID").is_some_and(|pid| descends_from(process, pid));
+    if !control_reader
+        && !unit_pid(&target, "MainPID").is_some_and(|pid| descends_from(process, pid))
     {
         return None;
     }
@@ -710,16 +710,22 @@ async fn detect_shoes_service_hook() -> Option<ShoesServiceHook> {
 
     // 有序依赖先于 shoes 启动钩子执行，此时可能还没有 shoes ControlPID。
     // 要求两个启动作业同时存在，避免把独立运行的依赖服务视作同步读者。
-    let waiting_oneshot = unit_property(&target, "Type") == Some("oneshot")
-        && unit_property(&target, "ActiveState") == Some("activating");
+    let activating = unit_property(&target, "ActiveState") == Some("activating");
+    let substate = unit_property(&target, "SubState");
+    let waiting_oneshot = activating && unit_property(&target, "Type") == Some("oneshot");
+    // 有序依赖的 ExecStartPre 和 ExecStartPost 均阻塞启动作业，包括 Type=simple。
+    let waiting_start_hook =
+        activating && control_reader && matches!(substate, Some("start-pre" | "start-post"));
     // Type=forking 使用 ControlPID 执行 ExecStart，退出后才完成启动。
-    let waiting_forking = unit_property(&target, "Type") == Some("forking")
-        && unit_property(&target, "ActiveState") == Some("activating")
-        && unit_property(&target, "SubState") == Some("start")
-        && unit_pid(&target, "ControlPID").is_some_and(|pid| descends_from(process, pid));
+    let waiting_forking = activating
+        && control_reader
+        && unit_property(&target, "Type") == Some("forking")
+        && substate == Some("start");
     let waiting_notify =
         waiting_notify_main(&target).is_some_and(|pid| descends_from(process, pid));
-    if !ordered_dependency || !(waiting_oneshot || waiting_forking || waiting_notify) {
+    if !ordered_dependency
+        || !(waiting_oneshot || waiting_start_hook || waiting_forking || waiting_notify)
+    {
         return None;
     }
     let jobs = systemctl

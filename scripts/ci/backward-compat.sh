@@ -635,8 +635,78 @@ EOF
   test "$(systemctl show --property=MainPID --value shoes.service)" = "$before_pid"
   find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/after"
   diff -u "$scenario/before" "$scenario/after"
+
+  # Start the original shoes executable with the managed path, then change
+  # that same inode without waking the inotify watcher or racing its debounce.
+  cat "$scenario/live.yaml" >/etc/shoes/config.yaml
+  python3 - "$NEW" "$legacy_socks5_id" "$scenario" <<'PY'
+import mmap
+from pathlib import Path
+import socket
+import subprocess
+import sys
+import time
+
+import yaml
+
+binary, profile, scenario = sys.argv[1:]
+config = Path('/etc/shoes/config.yaml')
+
+def main_pid():
+    return subprocess.check_output(
+        ['systemctl', 'show', '--property=MainPID', '--value', 'shoes.service'],
+        text=True,
+    ).strip()
+
+def require_udp_disabled(protocol):
+    username, password = (protocol[key].encode() for key in ('username', 'password'))
+    deadline = time.monotonic() + 5
+    while True:
+        try:
+            sock = socket.create_connection(('127.0.0.1', 24432), timeout=5)
+            break
+        except ConnectionRefusedError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.1)
+    with sock, sock.makefile('rb') as reply:
+        sock.sendall(bytes([5, 1, 2]))
+        assert reply.read(2) == bytes([5, 2])
+        sock.sendall(bytes([1, len(username)]) + username + bytes([len(password)]) + password)
+        assert reply.read(2) == bytes([1, 0])
+        sock.sendall(bytes([5, 3, 0, 1, 0, 0, 0, 0, 0, 0]))
+        assert reply.read(4) == bytes([5, 7, 0, 1]), 'live UDP must still be disabled'
+
+with config.open('r+b') as file, mmap.mmap(file.fileno(), 0) as mapped:
+    subprocess.run(['systemctl', 'restart', 'shoes.service'], check=True)
+    other, = (entry['protocol'] for entry in yaml.safe_load(mapped[:])
+              if entry['address'] == '0.0.0.0:24432')
+    assert other['udp_enabled'] is False
+    require_udp_disabled(other)
+    original_pid = main_pid()
+    original_inode = config.stat().st_ino
+    proc = Path('/proc') / original_pid
+    assert (proc / 'cmdline').read_bytes().split(b'\0')[1:] == [bytes(config), b'']
+    assert (proc / 'root/etc/shoes/config.yaml').stat().st_ino == original_inode
+    assert mapped[:].count(b'udp_enabled: false\n') == 1
+    offset = mapped.find(b'udp_enabled: false\n') + len(b'udp_enabled: ')
+    mapped[offset:offset + 5] = b'true '
+    mapped.flush()
+    files = {path: path.read_bytes() for path in config.parent.rglob('*') if path.is_file()}
+    require_udp_disabled(other)
+    with (Path(scenario) / 'same-path-result').open('wb') as log:
+        result = subprocess.run([binary, 'socks5', 'secure', profile, '--auth', '--yes'],
+                                stdout=log, stderr=subprocess.STDOUT, timeout=30)
+    assert result.returncode != 0, 'expected preflight to reject same-path UDP drift'
+    assert '端口 24432 的原 UDP 设置与受管配置不一致' in (
+        Path(scenario) / 'same-path-result').read_text()
+    assert main_pid() == original_pid and config.stat().st_ino == original_inode
+    assert {path: path.read_bytes() for path in config.parent.rglob('*') if path.is_file()} == files
+    require_udp_disabled(other)
+PY
 )
 echo 'SOCKS5-only auth: reject an alternate config with different UDP settings before restart: PASS'
+echo 'SOCKS5-only auth: reject same-path live UDP drift before restarting or writing files: PASS'
 
 # A daemon-reload can change the next ExecStart while the original process
 # still owns all managed listeners.
@@ -868,12 +938,14 @@ echo 'SOCKS5 preflight: PID signals, process-group SIGINT and timeout clean up d
   notify_unit="${notify##*/}"
   forking=/run/systemd/system/compat-socks5-required-forking.service
   forking_unit="${forking##*/}"
+  simple=/run/systemd/system/compat-socks5-required-simple.service
+  simple_unit="${simple##*/}"
   dependency_dropin=$dropin/90-compat-socks5-required-export.conf
   companion=/run/systemd/system/compat-socks5-start-companion.service
   timer=/run/systemd/system/compat-socks5-timer-export.timer
   exporter="${timer%.timer}.service"
   mkdir -p "$dropin"
-  trap '"$systemctl_bin" stop "${target##*/}" "$reader_unit" "$dependency_unit" "$notify_unit" "$forking_unit" "${companion##*/}" "${timer##*/}" "${exporter##*/}" || true; rm -f "$dropin/90-compat-socks5-rollback.conf" "$dependency_dropin" "$target" "$reader" "$dependency" "$notify" "$forking" "$companion" "$timer" "$exporter"; "$systemctl_bin" daemon-reload; rm -rf "$scenario"' EXIT
+  trap '"$systemctl_bin" stop "${target##*/}" "$reader_unit" "$dependency_unit" "$notify_unit" "$forking_unit" "$simple_unit" "${companion##*/}" "${timer##*/}" "${exporter##*/}" || true; rm -f "$dropin/90-compat-socks5-rollback.conf" "$dependency_dropin" "$target" "$reader" "$dependency" "$notify" "$forking" "$simple" "$companion" "$timer" "$exporter"; "$systemctl_bin" daemon-reload; rm -rf "$scenario"' EXIT
   cat >"$scenario/systemctl" <<'SH'
 #!/bin/sh
 case "$1" in
@@ -927,12 +999,13 @@ SH
   cat >"$scenario/exec-start-pre" <<'SH'
 #!/bin/sh
 set -eu
-"$1" info compat-socks5-legacy >"$2/info"
-if grep -Fq '用户名：无认证' "$2/info"; then
+if "$1" info compat-socks5-legacy >"$2/info" 2>"$2/info-error"; then
+  grep -Fq '用户名：无认证' "$2/info"
   echo original >>"$2/start-pre-auth"
 else
-  grep -Eq '^  用户名：.+$' "$2/info"
-  echo candidate >>"$2/start-pre-auth"
+  grep -Fq '请在加固结束后重试读取' "$2/info-error"
+  if grep -Eq '^配置数量：|^  URL：' "$2/info"; then exit 1; fi
+  echo deferred >>"$2/start-pre-auth"
 fi
 echo ok >>"$2/start-pre-runs"
 SH
@@ -946,12 +1019,13 @@ SH
   cat >"$scenario/reader" <<'SH'
 #!/bin/sh
 set -eu
-"$1" info compat-socks5-legacy >"$2/oneshot-info"
-if grep -Fq '用户名：无认证' "$2/oneshot-info"; then
+if "$1" info compat-socks5-legacy >"$2/oneshot-info" 2>"$2/oneshot-info-error"; then
+  grep -Fq '用户名：无认证' "$2/oneshot-info"
   echo original >>"$2/oneshot-auth"
 else
-  grep -Eq '^  用户名：.+$' "$2/oneshot-info"
-  echo candidate >>"$2/oneshot-auth"
+  grep -Fq '请在加固结束后重试读取' "$2/oneshot-info-error"
+  if grep -Eq '^配置数量：|^  URL：' "$2/oneshot-info"; then exit 1; fi
+  echo deferred >>"$2/oneshot-auth"
 fi
 if [ ! -e "$2/oneshot-export.json" ]; then
   if ! "$1" export sing-box --profile "$3" --server example.com \
@@ -1031,6 +1105,17 @@ PIDFile=$scenario/forking.pid
 TimeoutStartSec=5s
 ExecStart=$scenario/forking-dependency $NEW ${ids[1]} $scenario $forking_unit
 EOF
+  cat >"$simple" <<EOF
+[Unit]
+PartOf=shoes.service
+[Service]
+Type=simple
+TimeoutStartSec=5s
+ExecStartPre=$NEW export sing-box --profile ${ids[1]} --server example.com --output $scenario/simple-export.json
+ExecStartPre=/usr/bin/cmp -s $scenario/dependency-expected.json $scenario/simple-export.json
+ExecStartPre=/bin/sh -c 'echo ok >>$scenario/simple-dependency-runs'
+ExecStart=/bin/sleep infinity
+EOF
   cat >"$companion" <<'EOF'
 [Service]
 Type=oneshot
@@ -1073,8 +1158,8 @@ EOF
   # Install the ordered dependency after the initial start. Both restarts must run it.
   cat >"$dependency_dropin" <<EOF
 [Unit]
-Requires=$dependency_unit $notify_unit $forking_unit
-After=$dependency_unit $notify_unit $forking_unit
+Requires=$dependency_unit $notify_unit $forking_unit $simple_unit
+After=$dependency_unit $notify_unit $forking_unit $simple_unit
 EOF
   "$systemctl_bin" daemon-reload
   before_pid="$("$systemctl_bin" show --property=MainPID --value shoes.service)"
@@ -1088,11 +1173,12 @@ EOF
   test "$(grep -c '^ok$' "$scenario/dependency-runs")" -eq 2
   test "$(grep -c '^ok$' "$scenario/notify-dependency-runs")" -eq 2
   test "$(grep -c '^ok$' "$scenario/forking-dependency-runs")" -eq 2
+  test "$(grep -c '^ok$' "$scenario/simple-dependency-runs")" -eq 2
   test "$(grep -c '^ok$' "$scenario/start-pre-runs")" -eq 2
   test "$(grep -c '^ok$' "$scenario/oneshot-runs")" -eq 2
   test "$(grep -c '^ok$' "$scenario/oneshot-wrapper-runs")" -eq 2
-  test "$(cat "$scenario/start-pre-auth")" = $'candidate\noriginal'
-  test "$(cat "$scenario/oneshot-auth")" = $'candidate\noriginal'
+  test "$(cat "$scenario/start-pre-auth")" = $'deferred\noriginal'
+  test "$(cat "$scenario/oneshot-auth")" = $'deferred\noriginal'
   test -f "$scenario/oneshot-deferred-export"
   jq -e '[.outbounds[] | select(.type == "socks")] | length == 1 and
     (.[0] | (has("username") or has("password")) | not)' "$scenario/oneshot-export.json" >/dev/null
@@ -1123,6 +1209,7 @@ echo 'SOCKS5 rollback: synchronous readers finish and timer export waits for rol
 echo 'SOCKS5 rollback: ordered startup dependency exports during candidate and restored starts: PASS'
 echo 'SOCKS5 rollback: ordered Type=notify dependency exports before READY=1 on both starts: PASS'
 echo 'SOCKS5 rollback: ordered Type=forking dependency exports before forking on both starts: PASS'
+echo 'SOCKS5 rollback: ordered Type=simple dependency exports in ExecStartPre on both starts: PASS'
 echo 'SOCKS5 rollback: candidate credentials are withheld from redirected export stdout: PASS'
 
 # A referenced, stopped unit keeps its start-rate counter. Inject a firewall
@@ -1155,12 +1242,14 @@ EOF
 #!/bin/sh
 set -eu
 test "$(systemctl show --property=ControlPID --value shoes.service)" = 0
-url="$("$1" url "$2")"
-case "$url" in
-  socks5://example.com:24436#*) echo original ;;
-  socks5://127.0.0.1:24436#*) echo candidate ;;
-  *) exit 1 ;;
-esac >>"$3/notify-reads"
+if "$1" url "$2" >"$3/notify-url" 2>"$3/notify-url-error"; then
+  cmp -s "$3/stop-expected-url" "$3/notify-url"
+  echo original
+else
+  grep -Fq '请在加固结束后重试读取' "$3/notify-url-error"
+  test ! -s "$3/notify-url"
+  echo deferred
+fi >>"$3/notify-reads"
 systemd-notify --ready
 exec /usr/local/bin/shoes /etc/shoes/config.yaml
 SH
@@ -1244,7 +1333,7 @@ EOF
   cmp -s "$scenario/stop-expected-client.json" "$scenario/stop-client.json"
   test "$(cat "$scenario/delegated-stop-reads")" = $'ok\nok'
   test -f "$scenario/stop-candidate-checked"
-  test "$(cat "$scenario/notify-reads")" = $'candidate\noriginal'
+  test "$(cat "$scenario/notify-reads")" = $'deferred\noriginal'
   systemctl is-active --quiet shoes.service
   test "$(systemctl show --property=MainPID --value shoes.service)" != "$before_pid"
   grep -Fq '原配置、防火墙及服务已恢复并再次验证' "$WORK/socks5-start-limit.txt"
@@ -1307,6 +1396,23 @@ if [ -e "$pending" ]; then
 fi
 SH
   chmod 0755 "$scenario/export-unchanged"
+  cat >"$scenario/check-root-start" <<'SH'
+#!/bin/sh
+set -eu
+test -r /etc/shoes/.ping-rust-socks5-secure.pending || exit 0
+if [ -e "$3/root-start-read" ]; then
+  "$1" url "$2" >"$3/root-restored-url"
+  exit 0
+fi
+for command in url qr info; do
+  if "$1" "$command" "$2" >"$3/root-start-$command" 2>"$3/root-start-$command-error"; then
+    touch "$3/root-start-exported"
+  fi
+done
+touch "$3/root-start-read"
+SH
+  chmod 0755 "$scenario/check-root-start"
+  "$NEW" url "$legacy_socks5_id" >"$scenario/root-expected-url"
   cat >"$delegated" <<EOF
 [Service]
 Type=oneshot
@@ -1320,9 +1426,10 @@ EOF
 User=nobody
 Group=nogroup
 TimeoutStartSec=10s
-ReadWritePaths=$scenario/exports
+ReadWritePaths=$scenario
 ExecStartPre=+$systemctl_bin --quiet start $delegated_unit
 ExecStartPost=$scenario/export-unchanged $NEW ${ids[1]} $legacy_socks5_id $scenario/exports
+ExecStartPost=+$scenario/check-root-start $NEW $legacy_socks5_id $scenario
 EOF
   python3 - "$state" <<'PY'
 import os
@@ -1403,6 +1510,14 @@ try:
         scenario / 'unchanged-expected.json').read_bytes()
     assert (scenario / 'delegated/candidate-export-deferred').is_file()
     assert not (scenario / 'delegated/changed.json').exists()
+    assert (scenario / 'root-start-read').is_file()
+    assert not (scenario / 'root-start-exported').exists()
+    for command in ['url', 'qr', 'info']:
+        output = (scenario / f'root-start-{command}').read_bytes()
+        assert b'socks5://' not in output and '配置数量：'.encode() not in output
+        if command != 'info':
+            assert not output
+        assert '请在加固结束后重试读取' in (scenario / f'root-start-{command}-error').read_text()
     assert (config.stat().st_uid, config.stat().st_gid, config.stat().st_mode) == (
         original_stat.st_uid, original_stat.st_gid, original_stat.st_mode
     )
@@ -1418,11 +1533,14 @@ try:
     assert not pending.exists() and state.read_bytes() == original_state
     assert config.read_bytes() == original_config
     assert (scenario / 'delegated/changed.json').is_file()
+    assert (scenario / 'root-restored-url').read_bytes() == (
+        scenario / 'root-expected-url').read_bytes()
 finally:
     if proc.poll() is None:
         proc.kill()
         proc.wait()
 PY
+  echo 'SOCKS5 rollback: root ExecStartPost defers URL, QR and info before SIGHUP and reads the restored URL: PASS'
   "$systemctl_bin" is-active --quiet shoes.service
   test "$("$systemctl_bin" show --property=MainPID --value shoes.service)" != "$before_pid"
   ss -H -ltn 'sport = :24436' | grep -F '0.0.0.0:24436' >/dev/null
@@ -1434,6 +1552,8 @@ PY
   chown root:nogroup "$profiles"
   chmod 0710 "$profiles"
   chown nobody:nogroup "$readable_profile"
+  # The next restart intentionally rejects the candidate via the non-root hook.
+  rm "$scenario/root-start-read"
   cat >"$scenario/start-reader" <<'SH'
 #!/bin/sh
 set -eu
@@ -1474,12 +1594,14 @@ EOF
   cat >"$scenario/reject-candidate" <<'SH'
 #!/bin/sh
 set -eu
-url="$("$1" url "$2")"
-case "$url" in
-  socks5://example.com:24436#*) exit 0 ;;
-  socks5://*@example.com:24436#*) touch "$3/state-only-candidate-started"; exit 1 ;;
-  *) exit 1 ;;
-esac
+if "$1" url "$2" >"$3/state-only-root-url" 2>"$3/state-only-root-error"; then
+  cmp -s "$3/root-expected-url" "$3/state-only-root-url"
+  exit
+fi
+grep -Fq '请在加固结束后重试读取' "$3/state-only-root-error"
+test ! -s "$3/state-only-root-url"
+touch "$3/state-only-candidate-started"
+exit 1
 SH
   chmod 0755 "$scenario/reject-candidate"
   cat >"$dropin" <<EOF
@@ -1591,18 +1713,28 @@ echo 'SOCKS5 local: keep the loopback allow when other traffic on the port is de
 #!/bin/sh
 set -eu
 test -z "${INVOCATION_ID:-}"
-"$1" info "$3" >"$2/info"
-"$1" url "$3" >"$2/url"
-sed -n 's/^  URL：//p' "$2/info" >"$2/info-url"
-grep -Eq '^socks5://[^[:space:]@]+@example\.com:24436#' "$2/url"
-cmp -s "$2/info-url" "$2/url"
 "$1" export sing-box --profile "$4" --server example.com \
   --output "$2/unchanged-client.json" >/dev/null
-if ! "$1" export sing-box --profile "$3" --server example.com \
-  --output "$2/client.json" >/dev/null 2>"$2/export-error"; then
+if [ -e /etc/shoes/.ping-rust-socks5-secure.pending ]; then
+  for command in info url; do
+    if "$1" "$command" "$3" >"$2/$command" 2>"$2/$command-error"; then exit 1; fi
+    grep -Fq '请在加固结束后重试读取' "$2/$command-error"
+  done
+  if grep -Eq '^配置数量：|^  URL：' "$2/info"; then exit 1; fi
+  test ! -s "$2/url"
+  if "$1" export sing-box --profile "$3" --server example.com \
+    --output "$2/client.json" >/dev/null 2>"$2/export-error"; then exit 1; fi
   grep -Fq '请在 SOCKS5 加固结束后重试文件导出' "$2/export-error"
   test ! -e "$2/client.json"
   touch "$2/deferred-export"
+else
+  "$1" info "$3" >"$2/info"
+  "$1" url "$3" >"$2/url"
+  sed -n 's/^  URL：//p' "$2/info" >"$2/info-url"
+  grep -Eq '^socks5://[^[:space:]@]+@example\.com:24436#' "$2/url"
+  cmp -s "$2/info-url" "$2/url"
+  "$1" export sing-box --profile "$3" --server example.com \
+    --output "$2/client.json" >/dev/null
 fi
 SH
   chmod 0755 "$scenario/start-reader"
@@ -1755,12 +1887,12 @@ PY
   "$NEW" export sing-box --profile "$legacy_socks5_id" --server example.com \
     --output "$scenario/expected.json" >/dev/null
   "$NEW" url "$legacy_socks5_id" >"$scenario/expected-url"
-  cmp -s "$scenario/url" "$scenario/expected-url"
   "$OLD" url "$legacy_socks5_id" >"$scenario/v0.2.1-url"
   cmp -s "$scenario/v0.2.1-url" "$scenario/expected-url"
   # Once the state is published, a normal restart lets the same hook write it.
   systemctl restart shoes.service
   systemctl is-active --quiet shoes.service
+  cmp -s "$scenario/url" "$scenario/expected-url"
   jq -e '[.outbounds[] | select(.type == "socks")] | length == 1 and
     (.[0] | (.username | length) > 0 and (.password | length) > 0)' "$scenario/client.json" >/dev/null
   cmp -s "$scenario/client.json" "$scenario/expected.json"

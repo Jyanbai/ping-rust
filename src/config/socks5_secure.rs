@@ -98,25 +98,18 @@ pub(crate) fn load_for_plan(state_path: &Path) -> Result<ManagedState> {
     })
 }
 
-enum PendingHook {
-    Candidate(fs::File),
-    PublishedOnly,
-}
-
-fn open_live_pending(state_path: &Path) -> Result<Option<PendingHook>> {
+fn has_live_pending(state_path: &Path) -> Result<bool> {
     let pending = match fs::File::open(state_path.with_file_name(PENDING_STATE)) {
         Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
             // 同步钩子可以通过已发布状态 inode 上的锁确认事务仍在运行。
-            let published = fs::File::open(state_path).context("无法读取已发布的管理状态")?;
-            require_live_lock(&published)?;
-            return Ok(Some(PendingHook::PublishedOnly));
+            fs::File::open(state_path).context("无法读取已发布的管理状态")?
         }
         Err(error) => return Err(error).context("无法读取 SOCKS5 加固事务状态"),
     };
     require_live_lock(&pending)?;
-    Ok(Some(PendingHook::Candidate(pending)))
+    Ok(true)
 }
 
 fn require_live_lock(file: &fs::File) -> Result<()> {
@@ -220,55 +213,28 @@ fn read_pending_hook_state(
     hook: ShoesServiceHook,
     read: HookRead<'_>,
 ) -> Result<Option<ManagedState>> {
-    let Some(pending) = open_live_pending(state_path)? else {
+    if !has_live_pending(state_path)? {
         return Ok(None);
-    };
-    if let ShoesServiceHook::Stop(invocation) = hook {
-        return read_stop_hook_state(state_path, invocation, read).map(Some);
     }
-    let PendingHook::Candidate(pending) = pending else {
-        // 仅有 state 读取权限时，通过事务标记确认启动的是候选还是已恢复配置。
-        let stop = PendingStop::read(state_path)?;
-        if stop.config_restored {
-            return load_state_file(state_path).map(Some);
-        }
-        return read_unchanged_published(state_path, read, stop.profile).map(Some);
-    };
-    // 启动钩子读取本次启动使用的配置。回滚启动时聚合配置已恢复，优先使用原状态。
-    let servers = load_servers(&state_path.with_file_name("config.yaml"))
-        .map_err(|_| anyhow::anyhow!("无法读取 SOCKS5 加固期间的聚合配置，请检查 config.yaml"))?;
-    let published = load_state_file(state_path).ok();
-    if published
-        .as_ref()
-        .is_some_and(|state| ensure_servers_match_state(&servers, &state.profiles).is_ok())
-    {
-        return Ok(published);
-    }
-    let candidate = read_candidate(pending)?;
-    ensure_servers_match_state(&servers, &candidate.profiles).map_err(|_| {
-        anyhow::anyhow!("SOCKS5 加固期间的配置与状态不一致，请在加固结束后重试读取")
-    })?;
-    read_candidate_for_hook(candidate, published, read).map(Some)
-}
-
-fn read_stop_hook_state(
-    state_path: &Path,
-    invocation: Option<Uuid>,
-    read: HookRead<'_>,
-) -> Result<ManagedState> {
     let stop = PendingStop::read(state_path)?;
-    let invocation = invocation.context("无法确认停止钩子对应的 shoes.service 实例")?;
-    let uses_candidate = match stop.view {
-        StopView::Activating { original } => invocation != original,
-        StopView::RollingBack { candidate } => candidate == Some(invocation),
-        StopView::Unavailable => bail!("无法确认停止钩子对应的 shoes.service 实例"),
+    let uses_candidate = match hook {
+        ShoesServiceHook::Start => !stop.config_restored,
+        ShoesServiceHook::Stop(invocation) => {
+            let invocation = invocation.context("无法确认停止钩子对应的 shoes.service 实例")?;
+            match stop.view {
+                StopView::Activating { original } => invocation != original,
+                StopView::RollingBack { candidate } => candidate == Some(invocation),
+                StopView::Unavailable => bail!("无法确认停止钩子对应的 shoes.service 实例"),
+            }
+        }
     };
-    if uses_candidate {
-        // 停止钩子可能把链接、二维码或客户端配置保存到事务外。
+    // 启停钩子都可能将输出保存到事务外，只允许读取已经生效的节点。
+    let state = if uses_candidate {
         read_unchanged_published(state_path, read, stop.profile)
     } else {
         load_state_file(state_path)
-    }
+    }?;
+    Ok(Some(state))
 }
 
 fn read_unchanged_published(
@@ -294,28 +260,6 @@ fn read_unchanged_published(
     Ok(published)
 }
 
-fn read_candidate(pending: fs::File) -> Result<ManagedState> {
-    serde_json::from_reader(pending).context("无法解析待发布的 SOCKS5 加固状态")
-}
-
-fn read_candidate_for_hook(
-    candidate: ManagedState,
-    published: Option<ManagedState>,
-    read: HookRead<'_>,
-) -> Result<ManagedState> {
-    if let HookRead::ClientExport(selector) = read {
-        if let Some(published) = published {
-            let before = crate::client::select_export_profile(&published.profiles, selector)?;
-            let after = crate::client::select_export_profile(&candidate.profiles, selector)?;
-            if serde_json::to_value(before)? == serde_json::to_value(after)? {
-                return Ok(published);
-            }
-        }
-        bail!("{DEFER_FILE_EXPORT}");
-    }
-    Ok(candidate)
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SecureMode {
     Auth,
@@ -323,6 +267,7 @@ pub(crate) enum SecureMode {
 }
 
 pub(crate) struct SecurePlan {
+    mode: SecureMode,
     directory: PathBuf,
     servers: Vec<ServerConfig>,
     state: ManagedState,
@@ -407,7 +352,7 @@ fn socks5_secure_preserves_aggregate_label_on_atomic_commit_and_rollback() {
         let len = getxattr(&path, attribute, value.as_mut_slice()).unwrap();
         assert_eq!(&value[..len], label);
     };
-    original.write(&path, b"candidate").unwrap();
+    original.write(&path, b"candidate", false).unwrap();
     assert_file(b"candidate");
     original.restore(&path, &original.contents).unwrap();
     assert_file(b"original");
@@ -443,11 +388,17 @@ impl FileSnapshot {
             }
             return Ok(());
         }
-        self.write(path, contents)
+        self.write(path, contents, false)
     }
 
-    fn write(&self, path: &Path, contents: &[u8]) -> Result<()> {
-        utils::atomic_write_with(path, contents, |file| self.access.apply(file))
+    fn write(&self, path: &Path, contents: &[u8], protect_credentials: bool) -> Result<()> {
+        utils::atomic_write_with(path, contents, |file| {
+            if protect_credentials {
+                self.access.apply_without_public_access(file)
+            } else {
+                self.access.apply(file)
+            }
+        })
     }
 
     fn restored(&self, path: &Path) -> bool {
@@ -478,9 +429,14 @@ impl FileSnapshot {
             && contents == self.contents
     }
 
-    fn save_state(&self, path: &Path, state: &ManagedState) -> Result<()> {
+    fn save_state(
+        &self,
+        path: &Path,
+        state: &ManagedState,
+        protect_credentials: bool,
+    ) -> Result<()> {
         let contents = serde_json::to_vec_pretty(state).context("序列化管理状态失败")?;
-        self.write(path, &contents)
+        self.write(path, &contents, protect_credentials)
     }
 }
 
@@ -553,6 +509,7 @@ impl SecurePlan {
         ensure_servers_match_state(&servers, &state.profiles)?;
         let profile = state.profiles[index].clone();
         Ok(Some(Self {
+            mode,
             directory: directory.to_path_buf(),
             servers,
             state,
@@ -702,6 +659,8 @@ impl SecurePlan {
         let mut state_lock = original_state_file;
         #[cfg(not(target_os = "linux"))]
         drop(original_state_file);
+        let protect_credentials = self.mode == SecureMode::Auth;
+        let private_profile = protect_credentials.then(|| self.profile.config_file_name());
         let commit = commit::commit_managed_with_writers(
             &config,
             &state,
@@ -710,7 +669,7 @@ impl SecurePlan {
             &self.state,
             |path, _| match original_state {
                 Some(original_state) => {
-                    rollback.state.save_state(path, &original_state)?;
+                    rollback.state.save_state(path, &original_state, false)?;
                     #[cfg(target_os = "linux")]
                     {
                         let state = fs::File::open(path).context("无法打开已迁移的管理状态")?;
@@ -723,9 +682,16 @@ impl SecurePlan {
             },
             |path, write| match write {
                 commit::ManagedWrite::Profiles(documents) => {
-                    commit::write_profile_documents_with_access(path, documents, &rollback.profiles)
+                    commit::write_profile_documents_with_access(
+                        path,
+                        documents,
+                        &rollback.profiles,
+                        private_profile.as_deref(),
+                    )
                 }
-                commit::ManagedWrite::Config(contents) => rollback.config.write(path, contents),
+                commit::ManagedWrite::Config(contents) => {
+                    rollback.config.write(path, contents, protect_credentials)
+                }
                 commit::ManagedWrite::RestoreConfig(contents) => {
                     rollback.config.restore(path, contents)
                 }
@@ -762,7 +728,11 @@ impl SecurePlan {
             .context("没有已提交的 SOCKS5 加固事务")?;
         rollback
             .state
-            .save_state(&self.directory.join("ping-rust-state.json"), &self.state)
+            .save_state(
+                &self.directory.join("ping-rust-state.json"),
+                &self.state,
+                self.mode == SecureMode::Auth,
+            )
             .context("保存已验证的 SOCKS5 状态失败")?;
         self.finish_pending()?;
         self.rollback = None;
