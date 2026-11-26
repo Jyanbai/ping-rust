@@ -122,6 +122,21 @@ class WorkflowPolicyTest(unittest.TestCase):
             with self.subTest(trigger=trigger):
                 self.assertNotIn(trigger, on)
 
+    def test_concurrency_is_scoped_to_admitted_job(self):
+        # 工作流级并发组会让未获准的运行先取消所有者的自检，再在作业级被跳过。
+        top = self.text[: self.text.index("\njobs:\n")]
+        self.assertNotIn("concurrency:", top)
+        self.assertNotIn("cancel-in-progress", top)
+        lines = self.text.splitlines()
+        job = lines.index("  smoke:")
+        steps = lines.index("    steps:", job)
+        job_header = "\n".join(lines[job:steps])
+        self.assertIn("    concurrency:", job_header)
+        self.assertIn("      group: codex-cpa-smoke", job_header)
+        self.assertIn("github.triggering_actor == github.repository_owner", job_header)
+        # 准入条件必须写在并发组之前所属的同一个作业里。
+        self.assertLess(job_header.index("    if:"), job_header.index("    concurrency:"))
+
     def test_provider_is_ci_cpa_not_desktop_id(self):
         self.assertIn('model_provider = "cpa"', self.text)
         self.assertIn("[model_providers.cpa]", self.text)
@@ -134,6 +149,14 @@ class WorkflowPolicyTest(unittest.TestCase):
         self.assertNotIn("gh secret set CODEX_AUTH_JSON", self.text)
         self.assertNotIn("secrets.CODEX_AUTH_JSON", self.text)
         self.assertNotIn("secrets.CODEX_BOT_TOKEN", self.text)
+
+
+class CiWiringTest(unittest.TestCase):
+    def test_pr_ci_runs_this_regression(self):
+        ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        self.assertIn("run: python3 scripts/ci/test_codex_cpa_smoke.py", ci)
+        # 不需要 CPA 密钥。
+        self.assertNotIn("CODEX_API_KEY", ci)
 
 
 class AdmissionTest(unittest.TestCase):
@@ -245,6 +268,18 @@ class ReplyAndFailureTest(unittest.TestCase):
                 self.assertTrue(any("CPA 认证" in line for line in result.stdout.splitlines()))
                 self.assertIn("CPA 自检通过", summary)
 
+    def test_success_reports_requested_model_without_claiming_availability(self):
+        result, summary = self.run_smoke(b"OK\n")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        for text in (result.stdout, summary):
+            with self.subTest(text=text[:30]):
+                self.assertIn("CPA 返回了", text)
+                self.assertIn("请求的模型：gpt-6.2-sol", text)
+                self.assertIn("实际处理请求的模型未核实", text)
+                self.assertNotIn("请求的模型已跑通", text)
+                self.assertNotIn("请求的模型可用", text)
+                self.assertNotIn("模型可用", text)
+
     def test_rejection_text_containing_ok_fails(self):
         result, _ = self.run_smoke("无法按要求回复 OK。\n")
         self.assertNotEqual(result.returncode, 0)
@@ -287,6 +322,26 @@ class ReplyAndFailureTest(unittest.TestCase):
         self.assertNotIn("/v1/responses was not found", errors)
         self.assertNotIn("raw=", errors)
         self.assertNotIn("was not found", summary)
+
+    def test_unexpected_status_form_is_classified(self):
+        cases = (
+            ("unexpected status 401 Unauthorized: {\"error\":\"bad key\",\"token\":\"leak-me-401\"}\n",
+             "401", "密钥无效或被拒绝", "CODEX_API_KEY", "leak-me-401"),
+            ("unexpected status 404 Not Found: <html>route /v1/responses missing leak-me-404</html>\n",
+             "404", "接口不存在", "CODEX_API_BASE_URL", "leak-me-404"),
+        )
+        for raw, status, category, hint, leak in cases:
+            with self.subTest(status=status):
+                result, summary = self.run_smoke("x", exit_code=1, stderr=raw)
+                self.assertEqual(result.returncode, 1)
+                errors = "\n".join(self.error_lines(result))
+                self.assertIn(category, errors)
+                self.assertIn(f"HTTP 状态：{status}", errors)
+                self.assertIn(hint, errors)
+                self.assertNotIn("其他调用失败", errors)
+                for text in (result.stdout, result.stderr, summary):
+                    self.assertNotIn(leak, text)
+                    self.assertNotIn("unexpected status", text)
 
     def test_401_and_404_diagnostics_differ(self):
         unauthorized, _ = self.run_smoke("x", exit_code=1, stderr="api error 401: unauthorized\n")

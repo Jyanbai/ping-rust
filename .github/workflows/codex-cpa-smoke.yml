@@ -16,16 +16,16 @@ permissions:
 env:
   NO_COLOR: '1'
 
-concurrency:
-  group: codex-cpa-smoke
-  cancel-in-progress: true
-
 jobs:
   smoke:
     if: >-
       github.event_name == 'workflow_dispatch' &&
       github.actor == github.repository_owner &&
       github.triggering_actor == github.repository_owner
+    # 并发组放在带准入条件的作业上：未获准的运行在作业级被跳过，不会进入这个组，也就不能取消所有者的自检。
+    concurrency:
+      group: codex-cpa-smoke
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     environment: codex
     timeout-minutes: 20
@@ -249,7 +249,7 @@ jobs:
             [ -f "$RUNNER_TEMP/cpa-stderr.log" ] && files+=("$RUNNER_TEMP/cpa-stderr.log")
             [ -f "$RUNNER_TEMP/cpa-events.jsonl" ] && files+=("$RUNNER_TEMP/cpa-events.jsonl")
             if [ "${#files[@]}" -gt 0 ]; then
-              status="$(grep -h -oE 'api error (401|403|404|408|409|413|422|429|500|502|503|504)|HTTP[/ ](401|403|404|408|409|413|422|429|500|502|503|504)|"status": *?(401|403|404|408|409|413|422|429|500|502|503|504)' "${files[@]}" 2>/dev/null \
+              status="$(grep -h -oE 'api error (401|403|404|408|409|413|422|429|500|502|503|504)|unexpected status (401|403|404|408|409|413|422|429|500|502|503|504)|HTTP[/ ](401|403|404|408|409|413|422|429|500|502|503|504)|"status": *?(401|403|404|408|409|413|422|429|500|502|503|504)' "${files[@]}" 2>/dev/null \
                 | grep -oE '401|403|404|408|409|413|422|429|500|502|503|504' \
                 | head -n 1 || true)"
             fi
@@ -308,8 +308,9 @@ jobs:
             echo '::error::自检过程改动了工作区文件，预期是只读回复。'
             exit 1
           fi
-          echo '✅ CPA 认证、Responses 接口与请求的模型已跑通（模型回复了 OK）。现有 ChatGPT 自动流程未在本次运行中使用。'
-          echo '✅ CPA 自检通过：认证、Responses 与请求的模型可用。现有 ChatGPT 自动流程未切换。' >> "$GITHUB_STEP_SUMMARY"
+          # CPA 可能把请求的模型静默路由到别的模型；没有实际模型证据，只记录请求值和 CPA 返回了 OK。
+          echo "✅ CPA 认证与 Responses 调用成功，CPA 返回了单独一行 OK。请求的模型：$CPA_MODEL（实际处理请求的模型未核实）。现有 ChatGPT 自动流程未在本次运行中使用。"
+          echo "✅ CPA 自检通过：认证与 Responses 调用成功，CPA 返回了 OK。请求的模型：$CPA_MODEL（实际处理请求的模型未核实）。现有 ChatGPT 自动流程未切换。" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Remove local credentials
         if: always()

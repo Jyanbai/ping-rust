@@ -261,6 +261,8 @@ jobs:
         run: python3 scripts/ci/test_codex_review.py
       - name: Check Codex planning workflow stays read-only and manual
         run: python3 scripts/ci/test_codex_plan.py
+      - name: Check Codex CPA smoke admission and reply checks
+        run: python3 scripts/ci/test_codex_cpa_smoke.py
       - name: Check complete Codex runtime installation
         run: python3 scripts/ci/check_codex_runtime.py
       - run: cargo fmt --all -- --check
