@@ -304,38 +304,62 @@ jobs:
           if [ "$rc" -ne 0 ]; then
             echo '::error::Codex 规划失败，请检查登录状态或额度后手动重试'
             # begin-codex-failure-class
-            # 止损线已生效：不再打印 stderr 原文（包括脱敏后的原文）。失败时只按关键词
-            # 归类，输出固定标签：rate_limit、auth_401_403、stream_disconnected、
-            # context_window、unknown，以及白名单中的 http_NNN。输出只由常量构成。
+            # 止损线已生效：不打印 stderr 或事件原文。失败时读取 stderr 与 rust-v0.166.0
+            # 的 turn.failed / error 事件（jq 只提取 message），按关键词输出固定标签。
+            # HTTP 状态码只在有上下文的写法中识别，例如 status 429、HTTP 429、
+            # unexpected status 429、429 Too Many Requests。输出只由常量构成。
             log="$RUNNER_TEMP/codex-stderr.log"
+            events="$RUNNER_TEMP/codex-events.jsonl"
+            messages="$RUNNER_TEMP/codex-class-messages.txt"
+            : > "$messages"
+            if [ -f "$events" ]; then
+              jq -rR 'fromjson? | if .type == "turn.failed" then (.error.message // empty) elif .type == "error" then (.message // empty) else empty end' "$events" >> "$messages" 2>/dev/null || true
+            fi
             echo '::group::Codex 失败归类'
-            python3 - "$log" <<'PY' 2>/dev/null || echo 'unknown'
+            python3 - "$log" "$messages" <<'PY' 2>/dev/null || echo 'unknown'
           import re, sys
           from pathlib import Path
+          SEP = r"[\s_-]+"
           LABELS = (
               ("rate_limit", (
-                  r"\b429\b", r"rate[\s_-]*limit", r"too\s+many\s+requests",
-                  r"usage[\s_-]*limit", r"\bquota\b",
+                  r"rate" + SEP + r"limit",
+                  r"too" + SEP + r"many" + SEP + r"requests",
+                  r"usage" + SEP + r"limit",
+                  r"\bquota\b",
+                  r"hit" + SEP + r"your" + SEP + r"usage" + SEP + r"limit",
               )),
               ("auth_401_403", (
-                  r"\b401\b", r"\b403\b", r"\bunauthorized\b", r"\bforbidden\b",
-                  r"(?:invalid|expired)\s+(?:\w+\s+)*token",
-                  r"token\s+(?:\w+\s+)*(?:invalid|expired)",
-                  r"refresh(?:ed)?\s+failed",
+                  r"\bunauthorized\b", r"\bforbidden\b",
+                  r"(?:invalid|expired)" + SEP + r"(?:\w+[\s_-]+)*token",
+                  r"token" + SEP + r"(?:\w+[\s_-]+)*(?:invalid|expired)",
+                  r"refresh(?:ed)?" + SEP + r"failed",
+                  r"failed" + SEP + r"to" + SEP + r"refresh(?:ed)?" + SEP + r"(?:\w+[\s_-]+)*token",
+                  r"token" + SEP + r"refresh(?:ed)?" + SEP + r"failed",
+                  r"refresh(?:ed)?" + SEP + r"token" + SEP + r"(?:\w+[\s_-]+)*(?:expired|invalid|rejected|failed)",
+                  r"access" + SEP + r"token" + SEP + r"(?:expired|invalid)",
+                  r"no" + SEP + r"refresh" + SEP + r"token",
+                  r"rejected" + SEP + r"refresh" + SEP + r"token",
               )),
               ("stream_disconnected", (
-                  r"stream\s+disconnected", r"connection\s+reset",
-                  r"connection\s+closed", r"\btimeout\b", r"\beof\b",
+                  r"stream" + SEP + r"disconnected",
+                  r"connection" + SEP + r"reset",
+                  r"connection" + SEP + r"closed",
+                  r"\btimeout\b", r"timed" + SEP + r"out", r"\beof\b",
               )),
               ("context_window", (
-                  r"context\s+window", r"context\s+length", r"too\s+many\s+tokens",
+                  r"context" + SEP + r"window",
+                  r"context" + SEP + r"length",
+                  r"too" + SEP + r"many" + SEP + r"tokens",
+                  r"maximum" + SEP + r"context" + SEP + r"length",
               )),
           )
-          STATUS = {
-              400: "http_400", 401: "http_401", 403: "http_403", 404: "http_404",
-              408: "http_408", 429: "http_429", 500: "http_500", 502: "http_502",
-              503: "http_503", 504: "http_504",
+          REASONS = {
+              400: "bad request", 401: "unauthorized", 403: "forbidden",
+              404: "not found", 408: "request timeout", 429: "too many requests",
+              500: "internal server error", 502: "bad gateway",
+              503: "service unavailable", 504: "gateway timeout",
           }
+          ORDER = [name for name, _ in LABELS] + [f"http_{code}" for code in REASONS]
           def load(path):
               try:
                   data = Path(path).read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
@@ -343,22 +367,39 @@ jobs:
                   return ""
               text = data.decode("utf-8", "replace")
               return re.sub(r"\x1b(?:\[[0-9;?]*[ -/]*[@-~]|].*?(?:\x07|\x1b\\))", "", text)
-          def classify(text):
+          def status_codes(text):
               found = []
+              for code, reason in REASONS.items():
+                  c = str(code)
+                  pats = (
+                      rf"(?:unexpected\s+)?status\s*[:=]?\s*{c}\b",
+                      rf"\bHTTP(?:/\d+(?:\.\d+)?)?\s+{c}\b",
+                      rf"\b{c}\s+{reason}\b",
+                  )
+                  if any(re.search(p, text, re.I) for p in pats):
+                      found.append(code)
+              return found
+          def classify(text):
+              hits = set()
               for label, pats in LABELS:
                   if any(re.search(p, text, re.I) for p in pats):
-                      found.append(label)
-              for code, label in STATUS.items():
-                  if re.search(r"\b" + str(code) + r"\b", text):
-                      found.append(label)
-              return found or ["unknown"]
+                      hits.add(label)
+              codes = status_codes(text)
+              for code in codes:
+                  hits.add(f"http_{code}")
+                  if code == 429:
+                      hits.add("rate_limit")
+                  if code in (401, 403):
+                      hits.add("auth_401_403")
+              return [name for name in ORDER if name in hits] or ["unknown"]
           try:
-              path = sys.argv[1] if len(sys.argv) > 1 else ""
-              for line in classify(load(path)):
+              parts = [load(p) for p in sys.argv[1:]]
+              for line in classify("\n".join(parts)):
                   print(line)
           except Exception:
               print("unknown")
           PY
+            rm -f "$messages"
             echo '::endgroup::'
             # end-codex-failure-class
             exit "$rc"

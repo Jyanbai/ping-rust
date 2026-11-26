@@ -620,10 +620,15 @@ cp "$FAKE_CODEX_ARCHIVE" "$output"
         self.assertNotIn("429 Too Many Requests", out)
         self.assertNotIn("stream disconnected", out)
 
-    def classify(self, fixture, workflow=WORKFLOW):
+    def classify(self, fixture="", workflow=WORKFLOW, events=None):
         if isinstance(fixture, str):
             fixture = fixture.encode("utf-8")
         (self.work / "codex-stderr.log").write_bytes(fixture)
+        events_path = self.work / "codex-events.jsonl"
+        if events is None:
+            events_path.unlink(missing_ok=True)
+        else:
+            events_path.write_text(events, encoding="utf-8")
         result = subprocess.run(
             ["bash", "-e", "-o", "pipefail", "-c", failure_class_script(workflow)],
             env=self.env, text=True, capture_output=True, check=False,
@@ -697,7 +702,80 @@ cp "$FAKE_CODEX_ARCHIVE" "$output"
             ["rate_limit", "stream_disconnected", "http_429"],
         )
 
+    def test_turn_failed_event_classifies_when_stderr_is_empty(self):
+        events = (
+            '{"type":"turn.started"}\n'
+            '{"type":"turn.failed","error":{"message":"stream disconnected before completion"}}\n'
+        )
+        out, err = self.classify("", events=events)
+        self.assertEqual(self.class_labels(out), ["stream_disconnected"])
+        self.assertEqual(err.strip(), "")
+
+    def test_error_event_message_is_classified(self):
+        events = '{"type":"error","message":"Failed to refresh token: expired"}\n'
+        out, _ = self.classify("", events=events)
+        self.assertEqual(self.class_labels(out), ["auth_401_403"])
+
+    def test_source_line_number_is_not_an_http_status(self):
+        out, _ = self.classify("connection reset at transport.rs:429:17\n")
+        self.assertEqual(self.class_labels(out), ["stream_disconnected"])
+
+    def test_http_status_requires_context(self):
+        cases = (
+            ("status 429", ["rate_limit", "http_429"]),
+            ("status: 429", ["rate_limit", "http_429"]),
+            ("status=429", ["rate_limit", "http_429"]),
+            ("HTTP 429", ["rate_limit", "http_429"]),
+            ("HTTP/1.1 429", ["rate_limit", "http_429"]),
+            ("429 Too Many Requests", ["rate_limit", "http_429"]),
+            ("unexpected status 429", ["rate_limit", "http_429"]),
+            (":429", ["unknown"]),
+            ("id 429 was allocated", ["unknown"]),
+        )
+        for sample, expected in cases:
+            with self.subTest(sample=sample):
+                out, _ = self.classify(sample + "\n")
+                self.assertEqual(self.class_labels(out), expected)
+
+    def test_failed_to_refresh_token_wording(self):
+        self.assert_classifies("Failed to refresh token", ["auth_401_403"])
+        self.assert_classifies("Failed to refresh token: login expired", ["auth_401_403"])
+
+    def test_token_refresh_failed_wording(self):
+        self.assert_classifies("token refresh failed", ["auth_401_403"])
+
+    def test_refresh_token_expired_or_invalid_wording(self):
+        self.assert_classifies("refresh token has expired", ["auth_401_403"])
+        self.assert_classifies("refresh token invalid", ["auth_401_403"])
+
+    def test_context_window_underscore_and_maximum_wording(self):
+        self.assert_classifies("context_window_exceeded", ["context_window"])
+        self.assert_classifies("context_length_exceeded", ["context_window"])
+        self.assert_classifies("context window", ["context_window"])
+        self.assert_classifies("maximum context length", ["context_window"])
+
+    def test_pinned_cli_context_window_sentence(self):
+        self.assert_classifies(
+            "Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying.",
+            ["context_window"],
+        )
+
+    def test_event_secrets_do_not_appear_in_output(self):
+        events = (
+            '{"type":"turn.failed","error":{"message":'
+            + json.dumps("password: \"multiline-secret-value\" sk-xxx " + SECRET_JWT)
+            + "}}\n"
+        )
+        out, err = self.classify("", events=events)
+        combined = out + err
+        lines = [line for line in combined.splitlines() if line]
+        self.assertTrue(set(lines) <= ALLOWED_CLASS_LINES, lines)
+        for secret in ("multiline-secret-value", "sk-xxx", SECRET_JWT):
+            self.assertNotIn(secret, combined)
+        self.assertEqual(self.class_labels(out), ["unknown"])
+
     def test_secret_stderr_emits_only_allowed_constants(self):
+
         for workflow in (WORKFLOW, PLAN_WORKFLOW, DISPATCH_WORKFLOW):
             with self.subTest(workflow=workflow.name):
                 out, err = self.classify(SECRET_STDERR, workflow)
