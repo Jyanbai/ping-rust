@@ -300,106 +300,67 @@ jobs:
           codex "${args[@]}" - < "$RUNNER_TEMP/plan-prompt.txt" \
             > "$RUNNER_TEMP/codex-events.jsonl" 2> "$RUNNER_TEMP/codex-stderr.log" || rc=$?
           echo "codex exit code: $rc"
-          # 完整输出不进入公开日志，也不作为 artifact 上传；失败时只打印脱敏后的最后 30 行。
+          # 完整输出不进入公开日志，也不作为 artifact 上传；失败时只打印归类标签，不打印 stderr 原文。
           if [ "$rc" -ne 0 ]; then
             echo '::error::Codex 规划失败，请检查登录状态或额度后手动重试'
-            # begin-codex-stderr-tail
-            # 止损线：如果下一轮独立审查又报告了新的脱敏绕过写法，就换方案，不再打印 stderr 原文，
-            # 只按关键词归类输出：rate_limit、401/403、stream_disconnected、context_window、unknown。现在不实现。
+            # begin-codex-failure-class
+            # 止损线已生效：不再打印 stderr 原文（包括脱敏后的原文）。失败时只按关键词
+            # 归类，输出固定标签：rate_limit、auth_401_403、stream_disconnected、
+            # context_window、unknown，以及白名单中的 http_NNN。输出只由常量构成。
             log="$RUNNER_TEMP/codex-stderr.log"
-            auth_file="${CODEX_HOME:-}/auth.json"
-            have_masks=false
-            # 先重新读运行后的 auth.json（令牌可能已刷新），把所有字符串值登记为遮蔽，多行值逐行登记；
-            # 值只通过 ::add-mask:: 输出，之后才打印摘要。读不到就不打印。
-            if masks="$(jq -r '.. | strings | gsub("\r"; "") | split("\n")[] | select(test("\\S"))' "$auth_file" 2>/dev/null)"; then
-              while IFS= read -r mask; do
-                [ -z "$mask" ] || printf '::add-mask::%s\n' "$mask"
-              done <<< "$masks"
-              have_masks=true
-            fi
-            echo '::group::Codex 标准错误（脱敏，最后 30 行）'
-            if [ ! -f "$log" ]; then
-              echo '（未找到 stderr 日志）'
-            elif [ "$have_masks" != true ]; then
-              echo '（无法读取运行后的 auth.json，不打印 stderr 摘要）'
-            else
-              python3 - "$log" <<'PY' || echo '（脱敏输出失败）'
+            echo '::group::Codex 失败归类'
+            python3 - "$log" <<'PY' 2>/dev/null || echo 'unknown'
           import re, sys
           from pathlib import Path
-          MAX_LINE, TAIL_LINES, PRE_CAP = 240, 30, 2000
-          ANSI = re.compile(r"\x1b(?:\[[0-9;?]*[ -/]*[@-~]|].*?(?:\x07|\x1b\\))")
-          OQ = r"(?:\\*[\"'])?"
-          DQ = r'"(?:[^"\\]|\\.)*"'
-          SQ = r"'(?:[^'\\]|\\.)*'"
-          EDQ = r'\\+"(?:(?!\\+").)*\\+"'
-          OPEN = r"\\*[\"'].*$"
-          BARE = r"[^\s,;}&]+"
-          VALUE = "|".join((EDQ, DQ, SQ, OPEN, BARE))
-          SEP = r"\s*(?:=>|[:=])\s*"
-          WORDS = (r"(?:token|secret|key|auth|passw(?:or)?d|credential|user[_-]?id|account[_-]?id"
-                   r"|acct[_-]?id|email|cookie|bearer)")
-          HEADER = re.compile(
-              r"(?i)(?<![A-Za-z0-9_-])(?P<k>" + OQ + r"(?:proxy-)?(?:authorization|cookie|set-cookie)" + OQ + r")"
-              r"(?P<sep>" + SEP + r")(?:" + "|".join((EDQ, DQ, SQ)) + r"|.*$)")
-          KEYVAL = re.compile(
-              r"(?i)(?P<k>" + OQ + r"[A-Za-z0-9_.\-]{0,64}" + WORDS + r"[A-Za-z0-9_.\-]*" + OQ + r")"
-              r"(?P<sep>" + SEP + r")(?:" + VALUE + r")")
-          BEARER = re.compile(r"(?i)\bbearer\s+[^\s,;\"'\\]+")
-          BASIC = re.compile(r"(?i)\bbasic\s+[^\s,;\"'\\]+")
-          PAT_RE = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)\b")
-          SK = re.compile(r"\bsk-[A-Za-z0-9_-]+\b")
-          JWT = re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b")
-          EMAIL = re.compile(r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b")
-          UUID = re.compile(r"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b")
-          ACCOUNT_ID = re.compile(
-              r"(?i)\b(account[_-]?id|user[_-]?id|userid|accountid|acct[_-]?id)\b"
-              r"(\s*[:=]\s*)(\"[^\"]*\"|'[^']*'|[^\s,;}&]+)"
+          LABELS = (
+              ("rate_limit", (
+                  r"\b429\b", r"rate[\s_-]*limit", r"too\s+many\s+requests",
+                  r"usage[\s_-]*limit", r"\bquota\b",
+              )),
+              ("auth_401_403", (
+                  r"\b401\b", r"\b403\b", r"\bunauthorized\b", r"\bforbidden\b",
+                  r"(?:invalid|expired)\s+(?:\w+\s+)*token",
+                  r"token\s+(?:\w+\s+)*(?:invalid|expired)",
+                  r"refresh(?:ed)?\s+failed",
+              )),
+              ("stream_disconnected", (
+                  r"stream\s+disconnected", r"connection\s+reset",
+                  r"connection\s+closed", r"\btimeout\b", r"\beof\b",
+              )),
+              ("context_window", (
+                  r"context\s+window", r"context\s+length", r"too\s+many\s+tokens",
+              )),
           )
-          URL_QUERY = re.compile(r"(https?://[^\s?#]+)\?[^\s]*")
-          HEX = re.compile(r"(?<![A-Za-z0-9+/=_-])[A-Fa-f0-9]{24,}(?![A-Za-z0-9+/=_-])")
-          B64 = re.compile(r"(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{24,}={0,2}(?![A-Za-z0-9+/=])")
-          def strip_controls(text):
-              text = ANSI.sub("", text)
-              out = []
-              for ch in text:
-                  o = ord(ch)
-                  if ch in "\t\n" or (o >= 32 and o != 127 and not (0x80 <= o <= 0x9F)):
-                      out.append(ch)
-                  else:
-                      out.append(" ")
-              return "".join(out)
-          def keep_key(m):
-              return m.group("k") + m.group("sep") + "[redacted]"
-          def redact(s):
-              s = HEADER.sub(keep_key, s)
-              s = BEARER.sub("Bearer [redacted]", s)
-              s = BASIC.sub("Basic [redacted]", s)
-              s = PAT_RE.sub("[redacted-token]", s)
-              s = SK.sub("[redacted-token]", s)
-              s = JWT.sub("[redacted-jwt]", s)
-              s = EMAIL.sub("[redacted-email]", s)
-              s = UUID.sub("[redacted-id]", s)
-              s = ACCOUNT_ID.sub(r"\1\2[redacted-id]", s)
-              s = KEYVAL.sub(keep_key, s)
-              s = URL_QUERY.sub(r"\1?[redacted]", s)
-              s = HEX.sub("[redacted-secret]", s)
-              s = B64.sub("[redacted-secret]", s)
-              return s
-          def escape_workflow(s):
-              return s.replace("::", "∶∶").replace("##[", "##［")
-          def cap(s):
-              return s if len(s) <= MAX_LINE else s[:MAX_LINE] + "…"
-          data = Path(sys.argv[1]).read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
-          lines = strip_controls(data.decode("utf-8", "replace")).splitlines()
-          tail = lines[-TAIL_LINES:]
-          if len(lines) > TAIL_LINES:
-              print(f"（共 {len(lines)} 行，显示最后 {TAIL_LINES} 行）")
-          for line in tail:
-              print(cap(escape_workflow(redact(line[:PRE_CAP]))))
+          STATUS = {
+              400: "http_400", 401: "http_401", 403: "http_403", 404: "http_404",
+              408: "http_408", 429: "http_429", 500: "http_500", 502: "http_502",
+              503: "http_503", 504: "http_504",
+          }
+          def load(path):
+              try:
+                  data = Path(path).read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+              except OSError:
+                  return ""
+              text = data.decode("utf-8", "replace")
+              return re.sub(r"\x1b(?:\[[0-9;?]*[ -/]*[@-~]|].*?(?:\x07|\x1b\\))", "", text)
+          def classify(text):
+              found = []
+              for label, pats in LABELS:
+                  if any(re.search(p, text, re.I) for p in pats):
+                      found.append(label)
+              for code, label in STATUS.items():
+                  if re.search(r"\b" + str(code) + r"\b", text):
+                      found.append(label)
+              return found or ["unknown"]
+          try:
+              path = sys.argv[1] if len(sys.argv) > 1 else ""
+              for line in classify(load(path)):
+                  print(line)
+          except Exception:
+              print("unknown")
           PY
-            fi
             echo '::endgroup::'
-            # end-codex-stderr-tail
+            # end-codex-failure-class
             exit "$rc"
           fi
 

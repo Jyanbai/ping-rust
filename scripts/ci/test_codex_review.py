@@ -76,23 +76,44 @@ OLD_REVIEW_FAILURE = textwrap.dedent("""\
     echo "codex exit code: $rc"
     [ "$rc" -eq 0 ] || { echo '::error::Codex 审查失败，请检查登录状态或额度后手动重试'; exit "$rc"; }
 """)
-STDERR_JWT = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0In0.dGVzdHNpZ25hdHVyZQ"
-STDERR_EMAIL = "alice@example.com"
-STDERR_FIXTURE = textwrap.dedent(f"""\
-    stream disconnected
-    got sk-xxx and Bearer xxx for user {STDERR_EMAIL}
-    jwt {STDERR_JWT} and ghp_exampletoken
-    429 Too Many Requests
-""")
-STDERR_LEAKS = (
-    "sk-xxx", STDERR_EMAIL, STDERR_JWT, "ghp_exampletoken", "Bearer xxx",
+CLASS_MARK_START = "# begin-codex-failure-class"
+CLASS_MARK_END = "\n            # end-codex-failure-class"
+HTTP_STATUS_LABELS = tuple(
+    f"http_{code}" for code in (400, 401, 403, 404, 408, 429, 500, 502, 503, 504)
+)
+ALLOWED_CLASS_LINES = frozenset((
+    "::group::Codex 失败归类",
+    "::endgroup::",
+    "rate_limit",
+    "auth_401_403",
+    "stream_disconnected",
+    "context_window",
+    "unknown",
+    *HTTP_STATUS_LABELS,
+))
+SECRET_JWT = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0In0.dGVzdHNpZ25hdHVyZQ"
+SECRET_UUID = "123e4567-e89b-12d3-a456-426614174000"
+SECRET_LONG = "UnlabeledCredential" + ("A" * 240)
+SECRET_STDERR = (
+    r'{"error": "nested {\"password\": \"leak\"inner\"}"}' + "\n"
+    "password:\n"
+    '  "multiline-secret-value"\n'
+    "Authorization: Basic YTpi\n"
+    f"user {SECRET_UUID}\n"
+    "got sk-xxx and Bearer xxx\n"
+    f"jwt {SECRET_JWT}\n"
+    f"{SECRET_LONG}\n"
+)
+SECRET_LEAKS = (
+    "leak", "inner", "multiline-secret-value", "YTpi", SECRET_UUID,
+    "sk-xxx", "Bearer xxx", SECRET_JWT, SECRET_LONG, SECRET_LONG[:240],
 )
 
 
-def stderr_tail_script(workflow=WORKFLOW):
+def failure_class_script(workflow=WORKFLOW):
     text = workflow.read_text(encoding="utf-8")
-    start = text.index("# begin-codex-stderr-tail")
-    end = text.index("\n            # end-codex-stderr-tail", start)
+    start = text.index(CLASS_MARK_START)
+    end = text.index(CLASS_MARK_END, start)
     raw = text[text.rfind("\n", 0, start) + 1:end]
     return textwrap.dedent(raw) + "\n"
 
@@ -588,7 +609,7 @@ cp "$FAKE_CODEX_ARCHIVE" "$output"
         self.assertNotIn(secret, posted + result.stdout + result.stderr)
 
     def test_old_review_failure_path_prints_nothing_from_stderr(self):
-        (self.work / "codex-stderr.log").write_text(STDERR_FIXTURE, encoding="utf-8")
+        (self.work / "codex-stderr.log").write_text(SECRET_STDERR, encoding="utf-8")
         result = subprocess.run(
             ["bash", "-e", "-o", "pipefail", "-c", "rc=1\n" + OLD_REVIEW_FAILURE],
             env=self.env, text=True, capture_output=True, check=False,
@@ -599,100 +620,108 @@ cp "$FAKE_CODEX_ARCHIVE" "$output"
         self.assertNotIn("429 Too Many Requests", out)
         self.assertNotIn("stream disconnected", out)
 
-    AUTH_SEED = {
-        "auth_mode": "chatgpt",
-        "tokens": {"refresh_token": "seed" + "r" * 28, "id_token": "seed" + "i" * 28},
-    }
-
-    def write_auth(self, data=None):
-        (self.work / "codex-home/auth.json").write_text(
-            json.dumps(self.AUTH_SEED if data is None else data), encoding="utf-8")
-
-    def run_stderr_tail(self, workflow=WORKFLOW, fixture=STDERR_FIXTURE):
+    def classify(self, fixture, workflow=WORKFLOW):
         if isinstance(fixture, str):
             fixture = fixture.encode("utf-8")
         (self.work / "codex-stderr.log").write_bytes(fixture)
-        return subprocess.run(
-            ["bash", "-e", "-o", "pipefail", "-c", stderr_tail_script(workflow)],
+        result = subprocess.run(
+            ["bash", "-e", "-o", "pipefail", "-c", failure_class_script(workflow)],
             env=self.env, text=True, capture_output=True, check=False,
         )
-
-    def tail_summary(self, fixture, workflow=WORKFLOW):
-        self.write_auth()
-        result = self.run_stderr_tail(workflow, fixture)
         self.assertEqual(result.returncode, 0, result.stderr)
-        out = result.stdout
-        self.assertIn("::group::Codex 标准错误（脱敏，最后 30 行）", out)
-        return out.split("::group::", 1)[1]
+        return result.stdout, result.stderr
 
-    def assert_form_redacted(self, line, secret):
-        plain = "stream disconnected\n429 Too Many Requests\n"
+    def class_labels(self, out):
+        lines = [line for line in out.splitlines() if line]
+        self.assertTrue(set(lines) <= ALLOWED_CLASS_LINES, lines)
+        return [line for line in lines if line not in (
+            "::group::Codex 失败归类", "::endgroup::",
+        )]
+
+    def assert_classifies(self, sample, expected, workflow=WORKFLOW):
+        out, err = self.classify(sample if sample.endswith("\n") else sample + "\n", workflow)
+        labels = self.class_labels(out)
+        for label in expected:
+            self.assertIn(label, labels)
+        self.assertNotIn("unknown", labels)
+        self.assertEqual(err.strip(), "")
+
+    def test_rate_limit_classification(self):
+        for sample in (
+            "HTTP 429", "rate limit exceeded", "Too Many Requests",
+            "usage limit reached", "quota exhausted",
+        ):
+            with self.subTest(sample=sample):
+                self.assert_classifies(sample, ["rate_limit"])
+
+    def test_auth_401_403_classification(self):
+        for sample in (
+            "401 Unauthorized", "403 Forbidden", "request unauthorized",
+            "access forbidden", "invalid token", "expired token", "refresh failed",
+        ):
+            with self.subTest(sample=sample):
+                self.assert_classifies(sample, ["auth_401_403"])
+
+    def test_stream_disconnected_classification(self):
+        for sample in (
+            "stream disconnected", "connection reset", "connection closed",
+            "read timeout", "unexpected EOF",
+        ):
+            with self.subTest(sample=sample):
+                self.assert_classifies(sample, ["stream_disconnected"])
+
+    def test_context_window_classification(self):
+        for sample in (
+            "context window exceeded", "context length", "too many tokens",
+        ):
+            with self.subTest(sample=sample):
+                self.assert_classifies(sample, ["context_window"])
+
+    def test_unknown_when_no_keyword_matches(self):
+        out, err = self.classify("model stalled\n")
+        self.assertEqual(self.class_labels(out), ["unknown"])
+        self.assertEqual(err.strip(), "")
+
+    def test_missing_log_is_unknown(self):
+        result = subprocess.run(
+            ["bash", "-e", "-o", "pipefail", "-c", failure_class_script()],
+            env=self.env, text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.class_labels(result.stdout), ["unknown"])
+
+    def test_multiple_labels_and_http_status_constants(self):
+        out, _ = self.classify("429 Too Many Requests; stream disconnected\n")
+        self.assertEqual(
+            self.class_labels(out),
+            ["rate_limit", "stream_disconnected", "http_429"],
+        )
+
+    def test_secret_stderr_emits_only_allowed_constants(self):
         for workflow in (WORKFLOW, PLAN_WORKFLOW, DISPATCH_WORKFLOW):
             with self.subTest(workflow=workflow.name):
-                summary = self.tail_summary(plain + line + "\n", workflow)
-                self.assertNotIn(secret, summary)
-                self.assertIn("stream disconnected", summary)
-                self.assertIn("429 Too Many Requests", summary)
+                out, err = self.classify(SECRET_STDERR, workflow)
+                lines = [line for line in (out + err).splitlines() if line]
+                self.assertTrue(set(lines) <= ALLOWED_CLASS_LINES, lines)
+                combined = out + err
+                for secret in SECRET_LEAKS:
+                    self.assertNotIn(secret, combined)
+                self.assertEqual(self.class_labels(out), ["unknown"])
 
-    def test_key_value_equals_form_is_redacted(self):
-        self.assert_form_redacted("refresh_token=abc123", "abc123")
-        self.assert_form_redacted("OPENAI_API_KEY=short", "short")
-        self.assert_form_redacted("password=hunter2", "hunter2")
+    def test_ansi_colored_status_still_classifies(self):
+        out, _ = self.classify(b"\x1b[31m429 Too Many Requests\x1b[0m\n")
+        self.assertEqual(self.class_labels(out), ["rate_limit", "http_429"])
 
-    def test_key_colon_value_form_is_redacted(self):
-        self.assert_form_redacted("access_token: abc123", "abc123")
-        self.assert_form_redacted("Secret: s3cr3t", "s3cr3t")
-
-    def test_json_form_with_spaces_is_redacted(self):
-        self.assert_form_redacted('{"refresh_token": "abc123", "n": 1}', "abc123")
-        self.assert_form_redacted('{"password": "two words here"}', "two words")
-        self.assert_form_redacted('{"account_id": "acct-xyz"}', "acct-xyz")
-
-    def test_json_form_without_spaces_is_redacted(self):
-        self.assert_form_redacted('{"refresh_token":"abc123","n":1}', "abc123")
-        self.assert_form_redacted('{"api_key":"k-short"}', "k-short")
-        self.assert_form_redacted(r'{\"id_token\":\"abc123\"}', "abc123")
-
-    def test_single_quoted_form_is_redacted(self):
-        self.assert_form_redacted("{'refresh_token': 'abc123'}", "abc123")
-        self.assert_form_redacted("{'password':'two words'}", "two words")
-
-    def test_quoted_value_with_spaces_is_redacted(self):
-        self.assert_form_redacted('secret="some long phrase" ok', "long phrase")
-        self.assert_form_redacted("auth: 'two words'", "two words")
-
-    def test_short_basic_credentials_are_redacted(self):
-        self.assert_form_redacted("Authorization: Basic YTpi", "YTpi")
-        self.assert_form_redacted('{"Authorization":"Basic YTpi"}', "YTpi")
-        self.assert_form_redacted("sent Basic dTpw to proxy", "dTpw")
-
-    def test_uuid_user_id_is_redacted(self):
-        uuid = "123e4567-e89b-12d3-a456-426614174000"
-        self.assert_form_redacted(f"user_id={uuid}", uuid)
-        self.assert_form_redacted(f'{{"user_id": "{uuid}"}}', uuid)
-        self.assert_form_redacted(f"request for {uuid} failed", uuid)
-
-    def test_email_is_redacted_in_every_form(self):
-        self.assert_form_redacted("email=alice@example.com", "alice@example.com")
-        self.assert_form_redacted('{"email": "alice@example.com"}', "alice@example.com")
-        self.assert_form_redacted("failed for alice@example.com today", "alice@example.com")
-
-    def test_redaction_keeps_unrelated_text_next_to_secrets(self):
-        summary = self.tail_summary('{"refresh_token":"abc123","error":"stream disconnected"}\n')
-        self.assertNotIn("abc123", summary)
-        self.assertIn("stream disconnected", summary)
-
-    def run_failing_review(self, stderr_text, rotated_auth):
+    def run_failing_review(self, stderr_text):
         policy = self.work / "policy"
         policy.mkdir(exist_ok=True)
         (policy / "AGENTS.md").write_text((ROOT / "AGENTS.md").read_text(encoding="utf-8"), encoding="utf-8")
         (self.work / "review-pr.json").write_text(json.dumps(PR), encoding="utf-8")
-        self.write_auth()
         self.mock_command("git", "exit 0\n")
-        self.mock_command("codex", textwrap.dedent(f"""\
+        (self.work / "fake-stderr.txt").write_text(stderr_text, encoding="utf-8")
+        self.mock_command("codex", textwrap.dedent("""\
             cat >/dev/null
-            printf '%s' {json.dumps(json.dumps(rotated_auth))} > "$CODEX_HOME/auth.json"
-            printf '%s' {json.dumps(stderr_text)} >&2
+            cat "$RUNNER_TEMP/fake-stderr.txt" >&2
             exit 1
         """))
         return subprocess.run(
@@ -701,103 +730,36 @@ cp "$FAKE_CODEX_ARCHIVE" "$output"
             text=True, capture_output=True, check=False,
         )
 
-    def test_rotated_auth_values_are_masked_before_summary_is_printed(self):
-        rotated = {
-            "auth_mode": "chatgpt",
-            "tokens": {
-                "refresh_token": "rotated" + "R" * 25,
-                "id_token": "rotated" + "I" * 25,
-                "nested": {"deep": "deep" + "D" * 28, "empty": ""},
-                "multi": "first" + "L" * 20 + "\nsecond" + "M" * 20,
-            },
-            "last_refresh": "2026-11-27T00:00:00Z",
-            "OPENAI_API_KEY": None,
-        }
-        stderr = ("stream disconnected\n429 Too Many Requests\n"
-                  f"refresh_token={rotated['tokens']['refresh_token']}\n"
-                  f"saw {rotated['tokens']['nested']['deep']} in response\n")
-        result = self.run_failing_review(stderr, rotated)
+    def test_failed_review_prints_classification_not_stderr(self):
+        result = self.run_failing_review(SECRET_STDERR + "429 Too Many Requests\nstream disconnected\n")
         out = result.stdout + result.stderr
         self.assertNotEqual(result.returncode, 0, out)
-        lines = out.splitlines()
-        group = next(i for i, line in enumerate(lines) if line.startswith("::group::Codex 标准错误"))
-        masks = [(i, line[len("::add-mask::"):]) for i, line in enumerate(lines) if line.startswith("::add-mask::")]
-        expected = {
-            rotated["tokens"]["refresh_token"], rotated["tokens"]["id_token"],
-            rotated["tokens"]["nested"]["deep"], "first" + "L" * 20, "second" + "M" * 20,
-            rotated["auth_mode"], rotated["last_refresh"],
-        }
-        self.assertTrue(expected <= {value for _, value in masks}, masks)
-        self.assertNotIn("", {value for _, value in masks})
-        self.assertTrue(all(i < group for i, _ in masks), "遮蔽必须先于摘要输出")
-        rest = "\n".join(line for line in lines if not line.startswith("::add-mask::"))
-        for secret in (rotated["tokens"]["refresh_token"], rotated["tokens"]["id_token"],
-                       rotated["tokens"]["nested"]["deep"], "L" * 20, "M" * 20):
-            self.assertNotIn(secret, rest)
-        self.assertIn("stream disconnected", rest)
-        self.assertIn("429 Too Many Requests", rest)
-        self.assertIn("refresh_token=[redacted]", rest)
-
-    def test_summary_is_not_printed_when_auth_json_cannot_be_read(self):
-        (self.work / "codex-stderr.log").write_text("stream disconnected\n", encoding="utf-8")
-        (self.work / "codex-home/auth.json").unlink(missing_ok=True)
-        result = subprocess.run(
-            ["bash", "-e", "-o", "pipefail", "-c", stderr_tail_script()],
-            env=self.env, text=True, capture_output=True, check=False,
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertNotIn("stream disconnected", result.stdout)
-        self.assertIn("不打印 stderr 摘要", result.stdout)
-
-    def test_failed_review_prints_redacted_stderr_tail(self):
-        result = self.run_failing_review(STDERR_FIXTURE, self.AUTH_SEED)
-        out = result.stdout + result.stderr
-        self.assertNotEqual(result.returncode, 0, out)
-        self.assertIn("::error::Codex 审查失败", out)
-        self.assertIn("::group::Codex 标准错误（脱敏，最后 30 行）", out)
+        self.assertIn("::error::Codex 审查失败，请检查登录状态或额度后手动重试", out)
+        self.assertIn("::group::Codex 失败归类", out)
         self.assertIn("::endgroup::", out)
-        self.assertIn("stream disconnected", out)
-        self.assertIn("429 Too Many Requests", out)
-        for secret in STDERR_LEAKS:
-            self.assertNotIn(secret, out)
-        self.assertIn("[redacted-token]", out)
-        self.assertIn("[redacted-email]", out)
-        self.assertIn("[redacted-jwt]", out)
-
-    def test_stderr_tail_redacts_secrets_and_preserves_plain_errors(self):
-        self.write_auth()
-        result = self.run_stderr_tail()
-        self.assertEqual(result.returncode, 0, result.stderr)
-        out = result.stdout
-        self.assertIn("stream disconnected", out)
-        self.assertIn("429 Too Many Requests", out)
-        for secret in STDERR_LEAKS:
+        start = out.index("::group::Codex 失败归类")
+        end = out.index("::endgroup::", start) + len("::endgroup::")
+        group = out[start:end]
+        lines = [line for line in group.splitlines() if line]
+        self.assertTrue(set(lines) <= ALLOWED_CLASS_LINES, lines)
+        self.assertEqual(
+            self.class_labels(group),
+            ["rate_limit", "stream_disconnected", "http_429"],
+        )
+        for secret in SECRET_LEAKS:
             self.assertNotIn(secret, out)
 
-    def test_stderr_tail_strips_ansi_escapes_commands_and_long_lines(self):
-        self.write_auth()
-        long_plain = "error detail: " + ("failed again " * 30)
-        result = self.run_stderr_tail(fixture=(
-            b"\x1b[31m429 Too Many Requests\x1b[0m\n"
-            b"::add-mask::sk-xxx should not stay a command\n"
-            + long_plain.encode() + b"\n"))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        out = result.stdout
-        self.assertIn("429 Too Many Requests", out)
-        self.assertNotIn("\x1b", out)
-        self.assertNotIn("sk-xxx", out)
-        self.assertNotIn("::add-mask::sk", out)
-        self.assertIn("∶∶add-mask∶∶[redacted-token] should not stay a command", out)
-        capped = [line for line in out.splitlines() if line.endswith("…")]
-        self.assertEqual(capped, [long_plain[:240] + "…"])
-
-    def test_stderr_tail_blocks_match_across_codex_workflows(self):
-        blocks = [stderr_tail_script(item) for item in (WORKFLOW, PLAN_WORKFLOW, DISPATCH_WORKFLOW)]
+    def test_classification_blocks_match_across_codex_workflows(self):
+        blocks = [failure_class_script(item) for item in (WORKFLOW, PLAN_WORKFLOW, DISPATCH_WORKFLOW)]
         self.assertEqual(blocks[0], blocks[1])
         self.assertEqual(blocks[0], blocks[2])
         dispatch = DISPATCH_WORKFLOW.read_text(encoding="utf-8")
         self.assertNotIn('tail -n 20 "$RUNNER_TEMP/codex-stderr.log"', dispatch)
-        self.assertIn("# begin-codex-stderr-tail", PLAN_WORKFLOW.read_text(encoding="utf-8"))
+        self.assertIn(CLASS_MARK_START, PLAN_WORKFLOW.read_text(encoding="utf-8"))
+        run = step_script("Run Codex", DISPATCH_WORKFLOW)
+        mask = run.index('jq -r \'.tokens // {} | .[] | strings | select(length >= 16)\' "$CODEX_HOME/auth.json"')
+        classify = run.index(CLASS_MARK_START)
+        self.assertLess(mask, classify)
 
     def test_stderr_log_is_not_uploaded_as_artifact(self):
         for workflow in (WORKFLOW, PLAN_WORKFLOW, DISPATCH_WORKFLOW):
