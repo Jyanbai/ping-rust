@@ -103,6 +103,58 @@ fn socks5_secure_rejects_other_reality_credentials_drift() {
 }
 
 #[test]
+fn socks5_secure_rejects_snell_drift() {
+    let directory = tempfile::tempdir().unwrap();
+    let profile = legacy(directory.path());
+    let config = directory.path().join("config.yaml");
+    let state_path = directory.path().join("ping-rust-state.json");
+    let mut servers = load_servers(&config).unwrap();
+    let mut state = load_state_from(&state_path).unwrap();
+    let mut request = tests::request(Protocol::Snell, config.clone());
+    request.port = 8443;
+    let id = Uuid::new_v4();
+    let snell = presets::generate(&request, directory.path(), id).unwrap();
+    servers.push(snell.server);
+    state.profiles.push(ManagedProfile {
+        id,
+        name: "snell".into(),
+        port: request.port,
+        credentials: snell.credentials,
+        ..profile.clone()
+    });
+    save_state_to(&state_path, &state).unwrap();
+    fs::write(&config, crate::yaml::to_string(&servers).unwrap()).unwrap();
+    assert!(SecurePlan::prepare(directory.path(), profile.id, SecureMode::Auth).is_ok());
+
+    for field in ["password", "cipher", "udp_enabled"] {
+        let mut candidate = servers.clone();
+        let ServerProtocol::Snell {
+            cipher,
+            password,
+            udp_enabled,
+        } = &mut candidate[1].protocol
+        else {
+            panic!("expected Snell server");
+        };
+        match field {
+            "password" => password.push_str("-changed"),
+            "cipher" => *cipher = SnellCipher::Aes256Gcm.as_str().into(),
+            "udp_enabled" => *udp_enabled = !*udp_enabled,
+            _ => unreachable!(),
+        }
+        fs::write(&config, crate::yaml::to_string(&candidate).unwrap()).unwrap();
+        for mode in [SecureMode::Auth, SecureMode::Local] {
+            let error = SecurePlan::prepare(directory.path(), profile.id, mode)
+                .err()
+                .expect("expected Snell drift rejection");
+            assert!(error
+                .to_string()
+                .contains("端口 8443 的 Snell 配置与管理状态不一致"));
+        }
+    }
+}
+
+#[test]
 fn socks5_secure_preserves_other_shoes_fields() {
     for mode in [SecureMode::Auth, SecureMode::Local] {
         let directory = tempfile::tempdir().unwrap();
@@ -1736,6 +1788,12 @@ impl crate::socks5_secure::Runtime for InterruptedRuntime<'_> {
     ) -> Result<Option<Uuid>> {
         assert!(!self.directory.join("profiles").exists());
         crate::socks5_secure::require_tools(|tool| self.has_ss || tool != "ss")?;
+        if self.stop_at == "config-drift" {
+            let path = self.directory.join("config.yaml");
+            let mut servers: Vec<serde_json::Value> = crate::yaml::from_slice(&fs::read(&path)?)?;
+            servers[1]["protocol"]["encryption_limits"]["max_sessions"] = 128.into();
+            fs::write(path, crate::yaml::to_string(&servers)?)?;
+        }
         Ok(None)
     }
 
@@ -1821,6 +1879,53 @@ impl InterruptedRuntime<'_> {
                 .defer_signal(crate::socks5_secure::ShutdownSignal::Interrupt));
         }
     }
+}
+
+#[tokio::test]
+async fn socks5_secure_rejects_config_changes_during_preflight() {
+    let directory = tempfile::tempdir().unwrap();
+    let target = legacy(directory.path());
+    let config_path = directory.path().join("config.yaml");
+    let state_path = directory.path().join("ping-rust-state.json");
+    let mut state = load_state_from(&state_path).unwrap();
+    let mut servers = load_servers(&config_path).unwrap();
+    let (server, other) = vless_encryption_tests::sample(false);
+    servers.push(server);
+    state.profiles.push(other);
+    save_state_to(&state_path, &state).unwrap();
+    let original_state = fs::read(&state_path).unwrap();
+    fs::write(&config_path, crate::yaml::to_string(&servers).unwrap()).unwrap();
+
+    let mut plan = SecurePlan::prepare(directory.path(), target.id, SecureMode::Auth)
+        .unwrap()
+        .unwrap();
+    let interrupt = crate::socks5_secure::Interrupt::default();
+    let mut runtime = InterruptedRuntime {
+        interrupt: &interrupt,
+        directory: directory.path(),
+        has_ss: true,
+        stop_at: "config-drift",
+        events: vec![],
+        service_active: true,
+    };
+    let error = crate::socks5_secure::apply(&mut plan, &mut runtime, &interrupt)
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("加固预检期间聚合配置已变更"));
+    assert!(runtime.events.is_empty());
+    assert!(runtime.service_active);
+    assert_eq!(fs::read(state_path).unwrap(), original_state);
+    assert!(!directory.path().join("profiles").exists());
+    assert!(!directory
+        .path()
+        .join(".ping-rust-socks5-secure.pending")
+        .exists());
+    let mut expected = crate::yaml::to_value(&servers).unwrap();
+    expected[1]["protocol"]["encryption_limits"]["max_sessions"] = 128.into();
+    assert_eq!(
+        fs::read_to_string(config_path).unwrap(),
+        crate::yaml::to_string(expected.as_array().unwrap()).unwrap()
+    );
 }
 
 #[tokio::test]

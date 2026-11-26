@@ -270,6 +270,7 @@ pub(crate) struct SecurePlan {
     mode: SecureMode,
     directory: PathBuf,
     servers: Vec<ServerConfig>,
+    original_yaml: String,
     candidate_yaml: String,
     documents: BTreeMap<String, Vec<u8>>,
     state: ManagedState,
@@ -471,6 +472,29 @@ impl SecurePlan {
         })?;
         // 本次加固会重启所有节点，核对服务端将加载的配置与客户端导出是否一致。
         for (server, profile) in servers.iter().zip(&state.profiles) {
+            if let (
+                ServerProtocol::Snell {
+                    cipher: server_cipher,
+                    password: server_password,
+                    udp_enabled: server_udp,
+                },
+                Credentials::Snell {
+                    cipher,
+                    password,
+                    udp_enabled,
+                },
+            ) = (&server.protocol, &profile.credentials)
+            {
+                if server_cipher != cipher.as_str()
+                    || server_password != password
+                    || server_udp != udp_enabled
+                {
+                    bail!(
+                        "端口 {} 的 Snell 配置与管理状态不一致，请检查 config.yaml 和 ping-rust-state.json",
+                        profile.port
+                    );
+                }
+            }
             if let Credentials::Shadowsocks {
                 cipher,
                 password,
@@ -599,6 +623,7 @@ impl SecurePlan {
             mode,
             directory: directory.to_path_buf(),
             servers,
+            original_yaml: yaml,
             candidate_yaml,
             documents,
             state,
@@ -692,7 +717,6 @@ impl SecurePlan {
         let config = self.directory.join("config.yaml");
         let state = self.directory.join("ping-rust-state.json");
         let profiles = self.directory.join("profiles");
-        let original_config = fs::File::open(&config).context("无法读取原聚合配置")?;
         let original_state_file = fs::File::open(&state).context("无法读取原管理状态")?;
         #[cfg(target_os = "linux")]
         match FileExt::try_lock_exclusive(&original_state_file) {
@@ -702,9 +726,14 @@ impl SecurePlan {
             }
             Err(error) => return Err(error).context("无法锁定原管理状态"),
         }
+        let original_config = fs::File::open(&config).context("无法读取原聚合配置")?;
+        let original_config =
+            FileSnapshot::capture(&config, &original_config).context("无法备份原聚合配置")?;
+        if original_config.contents != self.original_yaml.as_bytes() {
+            bail!("加固预检期间聚合配置已变更，请检查 config.yaml 后重试");
+        }
         let rollback = SecureRollback {
-            config: FileSnapshot::capture(&config, &original_config)
-                .context("无法备份原聚合配置")?,
+            config: original_config,
             state: FileSnapshot::capture(&state, &original_state_file)
                 .context("无法备份原管理状态")?,
             profiles: ProfileDirectorySnapshot::capture(&profiles)?,

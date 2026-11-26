@@ -508,8 +508,11 @@ echo 'SOCKS5 auth: reject Reality UUID drift in the managed file without restart
   done
   ss -H -ltn 'sport = :24438' | grep -Fq '0.0.0.0:24438'
   before_pid="$(systemctl show --property=MainPID --value shoes.service)"
+  shadowsocks_id="$(jq -er '.profiles[] | select(.name == "compat-shadowsocks") | .id' /etc/shoes/ping-rust-state.json)"
   "$NEW" url compat-shadowsocks >"$scenario/before-url"
-  "$NEW" export sing-box --profile compat-shadowsocks --server "$SERVER" >"$scenario/before-export"
+  "$NEW" export sing-box --profile "$shadowsocks_id" --server "$SERVER" >"$scenario/before-export"
+  jq -e '[.outbounds[] | select(.type == "shadowsocks" and .server_port == 24438)] | length == 1' \
+    "$scenario/before-export" >/dev/null
   python3 - <<'PY'
 import base64
 import json
@@ -536,13 +539,64 @@ PY
   test "$(systemctl show --property=MainPID --value shoes.service)" = "$before_pid"
   ss -H -ltn 'sport = :24438' | grep -Fq '0.0.0.0:24438'
   "$NEW" url compat-shadowsocks >"$scenario/after-url"
-  "$NEW" export sing-box --profile compat-shadowsocks --server "$SERVER" >"$scenario/after-export"
+  "$NEW" export sing-box --profile "$shadowsocks_id" --server "$SERVER" >"$scenario/after-export"
   cmp -s "$scenario/before-url" "$scenario/after-url"
   cmp -s "$scenario/before-export" "$scenario/after-export"
   find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/after"
   diff -u "$scenario/before" "$scenario/after"
 )
 echo 'SOCKS5 auth: reject same-path native Shadowsocks password drift before restart or writes: PASS'
+
+# Keep Snell on its original PSK while changing only the managed file.
+(
+  scenario="$(mktemp -d /usr/local/lib/socks5-snell-password.XXXXXX)"
+  umask 077
+  cp -a /etc/shoes "$scenario/original"
+  trap 'rm -f /etc/shoes/profiles/SNELL-24439.yaml; cp -a "$scenario/original/." /etc/shoes/; systemctl restart shoes.service; rm -rf "$scenario"' EXIT
+  "$NEW" add snell --port 24439 --name compat-snell --server-address "$SERVER" --yes >/dev/null
+  for _ in {1..50}; do
+    if ss -H -ltn 'sport = :24439' | grep -Fq '0.0.0.0:24439'; then break; fi
+    sleep 0.1
+  done
+  ss -H -ltn 'sport = :24439' | grep -Fq '0.0.0.0:24439'
+  before_pid="$(systemctl show --property=MainPID --value shoes.service)"
+  snell_id="$(jq -er '.profiles[] | select(.name == "compat-snell") | .id' /etc/shoes/ping-rust-state.json)"
+  "$NEW" export clash-meta --profile "$snell_id" --server "$SERVER" >"$scenario/before-export"
+  python3 - "$scenario/before-export" <<'PY'
+import json
+import mmap
+import sys
+
+import yaml
+
+with open('/etc/shoes/ping-rust-state.json') as source:
+    profile, = (p for p in json.load(source)['profiles'] if p['name'] == 'compat-snell')
+password = profile['credentials']['Snell']['password']
+with open(sys.argv[1]) as source:
+    proxy, = yaml.safe_load(source)['proxies']
+assert proxy['type'] == 'snell' and proxy['psk'] == password
+original = password.encode()
+replacement = (b'b' if original.startswith(b'a') else b'a') + original[1:]
+with open('/etc/shoes/config.yaml', 'r+b') as source, mmap.mmap(source.fileno(), 0) as config:
+    offset = config.find(original)
+    assert offset >= 0 and config.find(original, offset + len(original)) < 0
+    config[offset:offset + len(original)] = replacement
+    config.flush()
+PY
+  find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/before"
+  if "$NEW" socks5 secure "$legacy_socks5_id" --auth --yes >"$scenario/result" 2>&1; then
+    echo 'Expected SOCKS5 hardening to reject Snell password drift' >&2
+    exit 1
+  fi
+  grep -Fq '端口 24439 的 Snell 配置与管理状态不一致' "$scenario/result"
+  test "$(systemctl show --property=MainPID --value shoes.service)" = "$before_pid"
+  ss -H -ltn 'sport = :24439' | grep -Fq '0.0.0.0:24439'
+  "$NEW" export clash-meta --profile "$snell_id" --server "$SERVER" >"$scenario/after-export"
+  cmp -s "$scenario/before-export" "$scenario/after-export"
+  find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/after"
+  diff -u "$scenario/before" "$scenario/after"
+)
+echo 'SOCKS5 auth: reject Snell PSK drift before restart or writes: PASS'
 
 # Reload the default ExecStart while the authenticated process still owns the
 # same wildcard listener that the managed configuration would start anonymously.
@@ -2027,10 +2081,12 @@ echo 'SOCKS5 authentication: clean-environment ExecStartPost info, URL and expor
   dropin=/etc/systemd/system/shoes.service.d/90-compat-socks5-restart-export.conf
   helper=/run/systemd/system/compat-socks5-restart-export.service
   reload_helper=/run/systemd/system/compat-socks5-restore-reload.service
+  dependency=/run/systemd/system/compat-socks5-restore-dependency.service
+  nested=/run/systemd/system/compat-socks5-restore-nested-export.service
   pending=/etc/shoes/.ping-rust-socks5-secure.pending
   systemctl_bin="$(command -v systemctl)"
   umask 077
-  trap '"$systemctl_bin" stop "${helper##*/}" "${reload_helper##*/}" || true; rm -f "$dropin" "$helper" "$reload_helper" "$pending"; "$systemctl_bin" daemon-reload; rm -rf "$scenario"' EXIT
+  trap '"$systemctl_bin" stop "${helper##*/}" "${reload_helper##*/}" "${dependency##*/}" "${nested##*/}" || true; rm -f "$dropin" "$helper" "$reload_helper" "$dependency" "$nested" "$pending"; "$systemctl_bin" daemon-reload; rm -rf "$scenario"' EXIT
   "$NEW" backup "$scenario/backup.tar.gz" >/dev/null
   "$NEW" export sing-box --profile "$legacy_socks5_id" --server example.com \
     --output "$scenario/expected.json" >/dev/null
@@ -2062,7 +2118,24 @@ TimeoutStartSec=5s
 ExecStart=/bin/true
 ExecReload=$NEW export sing-box --profile $legacy_socks5_id --server example.com --output $scenario/reload-client.json
 EOF
+  cat >"$nested" <<EOF
+[Service]
+Type=oneshot
+TimeoutStartSec=5s
+ExecStart=$NEW export sing-box --profile $legacy_socks5_id --server example.com --output $scenario/nested-client.json
+EOF
+  cat >"$dependency" <<EOF
+[Unit]
+Requires=${nested##*/}
+After=${nested##*/}
+[Service]
+Type=oneshot
+ExecStart=/bin/true
+EOF
   cat >"$dropin" <<EOF
+[Unit]
+Requires=${dependency##*/}
+After=${dependency##*/}
 [Service]
 TimeoutStartSec=10s
 ExecStartPre=$systemctl_bin --quiet restart ${helper##*/}
@@ -2076,8 +2149,10 @@ EOF
   test ! -e "$pending"
   cmp -s "$scenario/expected.json" "$scenario/client.json"
   cmp -s "$scenario/expected.json" "$scenario/reload-client.json"
+  cmp -s "$scenario/expected.json" "$scenario/nested-client.json"
   test "$(grep -cx ok "$scenario/helper-runs")" -eq 3
   "$systemctl_bin" is-active --quiet shoes.service
 )
 echo 'Backup: refuse an unfinished SOCKS5 transaction and recover from the previous archive: PASS'
 echo 'Backup restore: synchronous restart, try-restart, reload-or-restart and ExecReload helpers can export restored state: PASS'
+echo 'Backup restore: a two-level ordered startup dependency can export restored state: PASS'

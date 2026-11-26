@@ -629,8 +629,6 @@ async fn detect_shoes_service_hook() -> Option<ShoesServiceHook> {
                 "--property=SubState",
                 "--property=Type",
                 "--property=After",
-                "--property=Requires",
-                "--property=Wants",
                 SERVICE_NAME,
             ],
             SECURE_QUERY_TIMEOUT,
@@ -659,14 +657,6 @@ async fn detect_shoes_service_hook() -> Option<ShoesServiceHook> {
 
     if unit == SERVICE_NAME {
         return waited_phase(process);
-    }
-    let has_dependency = |key| {
-        unit_property(&shoes, key).is_some_and(|value| value.split_whitespace().any(|s| s == unit))
-    };
-    let ordered_dependency =
-        has_dependency("After") && (has_dependency("Requires") || has_dependency("Wants"));
-    if control_pid.is_none() && main_pid.is_none() && !ordered_dependency {
-        return None;
     }
     // 用目标 unit 的进程核对读者归属。systemd 报告的 cgroup 路径可能相对于容器根。
     let target = systemctl
@@ -709,7 +699,6 @@ async fn detect_shoes_service_hook() -> Option<ShoesServiceHook> {
     }
 
     // 有序依赖先于 shoes 启动钩子执行，此时可能还没有 shoes ControlPID。
-    // 要求两个启动作业同时存在，避免把独立运行的依赖服务视作同步读者。
     let activating = unit_property(&target, "ActiveState") == Some("activating");
     let substate = unit_property(&target, "SubState");
     let waiting_oneshot = activating && unit_property(&target, "Type") == Some("oneshot");
@@ -723,33 +712,67 @@ async fn detect_shoes_service_hook() -> Option<ShoesServiceHook> {
         && substate == Some("start");
     let waiting_notify =
         waiting_notify_main(&target).is_some_and(|pid| descends_from(process, pid));
-    if !ordered_dependency
-        || !(waiting_oneshot || waiting_start_hook || waiting_forking || waiting_notify)
-    {
+    if !(waiting_oneshot || waiting_start_hook || waiting_forking || waiting_notify) {
         return None;
     }
+    tokio::time::timeout(
+        SECURE_QUERY_TIMEOUT,
+        ordered_startup_dependency(systemctl, &shoes, unit),
+    )
+    .await
+    .ok()?
+    .ok()?
+    .then_some(ShoesServiceHook::Start)
+}
+
+#[cfg(target_os = "linux")]
+async fn ordered_startup_dependency(systemctl: Systemctl, shoes: &str, unit: &str) -> Result<bool> {
     let jobs = systemctl
         .timed(
-            &[
-                "list-jobs",
-                "--no-legend",
-                "--no-pager",
-                "--full",
-                "--",
-                SERVICE_NAME,
-                unit,
-            ],
+            &["list-jobs", "--no-legend", "--no-pager", "--full"],
             SECURE_QUERY_TIMEOUT,
         )
-        .await
-        .ok()?;
-    let has_start_job = |name| {
-        jobs.lines().any(|line| {
+        .await?;
+    let mut starting: BTreeSet<_> = jobs
+        .lines()
+        .filter_map(|line| {
             let mut fields = line.split_whitespace().skip(1);
-            fields.next() == Some(name) && matches!(fields.next(), Some("start" | "restart"))
+            let name = fields.next()?;
+            matches!(fields.next(), Some("start" | "restart")).then_some(name)
         })
-    };
-    (has_start_job(SERVICE_NAME) && has_start_job(unit)).then_some(ShoesServiceHook::Start)
+        .collect();
+    if !starting.remove(SERVICE_NAME) || !starting.contains(unit) {
+        return Ok(false);
+    }
+
+    // 只有启动作业之间的 After 关系才会阻塞 shoes，已就绪的中间单元不传递等待。
+    let mut pending = vec![SERVICE_NAME];
+    while let Some(name) = pending.pop() {
+        let queried;
+        let properties = if name == SERVICE_NAME {
+            shoes
+        } else {
+            queried = systemctl
+                .timed(
+                    &["show", "--property=After", "--", name],
+                    SECURE_QUERY_TIMEOUT,
+                )
+                .await?;
+            &queried
+        };
+        for dependency in unit_property(properties, "After")
+            .unwrap_or_default()
+            .split_whitespace()
+        {
+            if let Some(dependency) = starting.take(dependency) {
+                if dependency == unit {
+                    return Ok(true);
+                }
+                pending.push(dependency);
+            }
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(target_os = "linux")]

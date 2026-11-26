@@ -125,7 +125,8 @@ impl FileAccess {
             #[cfg(target_os = "linux")]
             if let Some(acl) = &mut access.acl {
                 // Linux POSIX ACL xattr v2：四字节头，后接八字节条目。
-                for entry in acl[4..].chunks_exact_mut(8) {
+                let (entries, _) = acl[4..].as_chunks_mut::<8>();
+                for entry in entries {
                     if u16::from_le_bytes([entry[0], entry[1]]) == 0x20 {
                         entry[2..4].fill(0); // ACL_OTHER
                     }
