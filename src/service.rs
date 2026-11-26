@@ -688,24 +688,59 @@ async fn detect_shoes_service_hook(state_path: &Path) -> Option<ShoesServiceHook
         return None;
     }
 
+    let substate = unit_property(&target, "SubState");
+    let activating = unit_property(&target, "ActiveState") == Some("activating");
+    let waiting_oneshot = activating && unit_property(&target, "Type") == Some("oneshot");
+    // 有序依赖的 ExecCondition、ExecStartPre 和 ExecStartPost 均阻塞启动作业。
+    let waiting_start_hook = activating
+        && control_reader
+        && matches!(substate, Some("condition" | "start-pre" | "start-post"));
+    // Type=forking 使用 ControlPID 执行 ExecStart，退出后才完成启动。
+    let waiting_forking = activating
+        && control_reader
+        && unit_property(&target, "Type") == Some("forking")
+        && substate == Some("start");
+    let waiting_main = waiting_start_main(&target).is_some_and(|pid| descends_from(process, pid));
+    let waiting_start = waiting_oneshot || waiting_start_hook || waiting_forking || waiting_main;
+
     // 同步 systemctl 可以是控制进程本身，也可以由钩子脚本派生。
+    let mut delegated_starts = Vec::new();
     if control_pid.is_some() || main_pid.is_some() {
         let systemctl_path = utils::command_path("systemctl")?;
         // systemd 的 Names 包含 cgroup 使用的主名称及其已解析的别名。
         let unit_names = unit_property(&target, "Names").unwrap_or(unit);
-        let delegated = fs::read_dir("/proc")
+        for pid in fs::read_dir("/proc")
             .ok()?
             .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse::<u32>().ok())
-            .find_map(|pid| {
-                let phase = waited_phase(pid)?;
-                waits_for_unit(pid, &systemctl_path, unit_names).then_some(phase)
-            });
-        if delegated.is_some() {
-            return delegated;
+        {
+            let Some(phase) = waited_phase(pid) else {
+                continue;
+            };
+            let Some(line) = blocking_systemctl_cmdline(pid, &systemctl_path) else {
+                continue;
+            };
+            let Some(command) = BlockingSystemctl::parse(&line) else {
+                continue;
+            };
+            if command.waits_for_unit(unit_names) {
+                return Some(phase);
+            }
+            if waiting_start
+                && !command.ignore_ordering
+                && matches!(
+                    command.verb,
+                    b"start" | b"restart" | b"try-restart" | b"reload-or-restart"
+                )
+            {
+                delegated_starts.extend(command.units.into_iter().filter_map(|name| {
+                    let name = std::str::from_utf8(name).ok()?;
+                    (!name.is_empty() && !name.contains(['*', '?', '[']))
+                        .then(|| (name.to_owned(), phase))
+                }));
+            }
         }
     }
 
-    let substate = unit_property(&target, "SubState");
     if control_reader
         && unit_property(&target, "ActiveState") == Some("deactivating")
         && matches!(substate, Some("stop" | "stop-post"))
@@ -724,39 +759,36 @@ async fn detect_shoes_service_hook(state_path: &Path) -> Option<ShoesServiceHook
         });
     }
 
-    // 有序依赖先于 shoes 启动钩子执行，此时可能还没有 shoes ControlPID。
-    let activating = unit_property(&target, "ActiveState") == Some("activating");
-    let waiting_oneshot = activating && unit_property(&target, "Type") == Some("oneshot");
-    // 有序依赖的 ExecCondition、ExecStartPre 和 ExecStartPost 均阻塞启动作业。
-    let waiting_start_hook = activating
-        && control_reader
-        && matches!(substate, Some("condition" | "start-pre" | "start-post"));
-    // Type=forking 使用 ControlPID 执行 ExecStart，退出后才完成启动。
-    let waiting_forking = activating
-        && control_reader
-        && unit_property(&target, "Type") == Some("forking")
-        && substate == Some("start");
-    let waiting_main = waiting_start_main(&target).is_some_and(|pid| descends_from(process, pid));
-    if !(waiting_oneshot || waiting_start_hook || waiting_forking || waiting_main) {
+    if !waiting_start {
         return None;
     }
+    // 有序依赖先于 shoes 启动钩子执行，此时可能还没有 shoes ControlPID。
     let waiting = tokio::time::timeout(SECURE_QUERY_TIMEOUT, async {
-        if ordered_service_job(systemctl, &shoes, unit, "After", "start").await? {
-            return Ok(true);
+        let starting = service_jobs(systemctl, "start").await?;
+        if !starting.contains(unit) {
+            return Ok(None);
         }
-        if !crate::config::socks5_secure::has_live_restored_state(state_path)? {
-            return Ok(false);
+        for (name, phase) in delegated_starts {
+            // 取主名称，与 list-jobs 使用的名称一致，也支持别名和省略 .service。
+            let Ok(root) = systemctl.timed_unit_show(&name, "Id").await else {
+                continue;
+            };
+            if ordered_job(systemctl, &shoes, &starting, &root, unit, "After").await? {
+                return Ok(Some(phase));
+            }
+        }
+        if ordered_job(systemctl, &shoes, &starting, SERVICE_NAME, unit, "After").await? {
+            return Ok(Some(ShoesServiceHook::Start));
         }
         // 回滚显式启动此前活跃的伴随单元，此时 shoes 的启动作业可能已完成。
-        let starting = service_jobs(systemctl, "start").await?;
-        Ok::<_, anyhow::Error>(
-            starting.contains(unit) && systemctl.secure_companion_units().await?.contains(unit),
-        )
+        let companion = crate::config::socks5_secure::has_live_restored_state(state_path)?
+            && systemctl.secure_companion_units().await?.contains(unit);
+        Ok::<_, anyhow::Error>(companion.then_some(ShoesServiceHook::Start))
     })
     .await
     .ok()?
     .ok()?;
-    waiting.then_some(ShoesServiceHook::Start)
+    waiting
 }
 
 #[cfg(target_os = "linux")]
@@ -786,13 +818,26 @@ async fn ordered_service_job(
     ordering: &str,
     action: &str,
 ) -> Result<bool> {
-    let mut jobs = service_jobs(systemctl, action).await?;
-    if !jobs.remove(SERVICE_NAME) || !jobs.contains(unit) {
+    let jobs = service_jobs(systemctl, action).await?;
+    ordered_job(systemctl, shoes, &jobs, SERVICE_NAME, unit, ordering).await
+}
+
+#[cfg(target_os = "linux")]
+async fn ordered_job(
+    systemctl: Systemctl,
+    shoes: &str,
+    jobs: &BTreeSet<String>,
+    root: &str,
+    unit: &str,
+    ordering: &str,
+) -> Result<bool> {
+    if !jobs.contains(root) || !jobs.contains(unit) {
         return Ok(false);
     }
 
     // 启动按 After 等待，停止按 Before 反向等待。已完成作业的单元不传递等待。
-    let mut pending = vec![SERVICE_NAME.to_owned()];
+    let mut visited = BTreeSet::from([root.to_owned()]);
+    let mut pending = vec![root.to_owned()];
     while let Some(name) = pending.pop() {
         let queried;
         let properties = if name == SERVICE_NAME {
@@ -810,11 +855,11 @@ async fn ordered_service_job(
             .unwrap_or_default()
             .split_whitespace()
         {
-            if let Some(dependency) = jobs.take(dependency) {
+            if jobs.contains(dependency) && visited.insert(dependency.to_owned()) {
                 if dependency == unit {
                     return Ok(true);
                 }
-                pending.push(dependency);
+                pending.push(dependency.to_owned());
             }
         }
     }
@@ -853,7 +898,7 @@ fn unit_pid(properties: &str, key: &str) -> Option<u32> {
 }
 
 #[cfg(target_os = "linux")]
-fn waits_for_unit(pid: u32, executable: &Path, unit_names: &str) -> bool {
+fn blocking_systemctl_cmdline(pid: u32, executable: &Path) -> Option<Vec<u8>> {
     let process = Path::new("/proc").join(pid.to_string());
     let matches_executable = match same_executable(&process.join("exe"), executable) {
         Ok(matches) => matches,
@@ -876,49 +921,75 @@ fn waits_for_unit(pid: u32, executable: &Path, unit_names: &str) -> bool {
         }
         Err(_) => false,
     };
-    matches_executable
-        && fs::read(process.join("cmdline"))
-            .is_ok_and(|line| systemctl_waits_for_unit(&line, unit_names))
+    if !matches_executable {
+        return None;
+    }
+    fs::read(process.join("cmdline")).ok()
 }
 
 #[cfg(target_os = "linux")]
-fn systemctl_waits_for_unit(command_line: &[u8], unit_names: &str) -> bool {
-    let Some(command_line) = command_line.strip_suffix(b"\0") else {
-        return false;
-    };
-    let mut args = command_line.split(|byte| *byte == 0).skip(1);
-    let mut has_verb = false;
-    let mut matches_unit = false;
-    let mut parse_options = true;
-    while let Some(arg) = args.next() {
-        if parse_options && arg.starts_with(b"-") {
-            // 只允许本机系统管理器上仍会等待作业完成的选项。
-            match arg {
-                b"--" => parse_options = false,
-                b"-q" | b"--quiet" | b"--no-ask-password" | b"--no-pager" | b"--system"
-                | b"--wait" => {}
-                b"--job-mode"
-                    if args
-                        .next()
-                        .is_some_and(|mode| !mode.starts_with(b"-") && !mode.is_empty()) => {}
-                mode if mode.starts_with(b"--job-mode=") && mode.len() > b"--job-mode=".len() => {}
-                _ => return false,
-            }
-        } else if has_verb {
-            matches_unit |= unit_names.split_ascii_whitespace().any(|name| {
-                arg == name.as_bytes() || systemctl_service_shorthand(arg, name.as_bytes())
-            });
-        } else {
-            if !matches!(
+struct BlockingSystemctl<'a> {
+    verb: &'a [u8],
+    units: Vec<&'a [u8]>,
+    ignore_ordering: bool,
+}
+
+#[cfg(target_os = "linux")]
+impl<'a> BlockingSystemctl<'a> {
+    fn parse(command_line: &'a [u8]) -> Option<Self> {
+        let mut args = command_line
+            .strip_suffix(b"\0")?
+            .split(|byte| *byte == 0)
+            .skip(1);
+        let mut verb = None;
+        let mut units = Vec::new();
+        let mut ignore_ordering = false;
+        let mut parse_options = true;
+        while let Some(arg) = args.next() {
+            if parse_options && arg.starts_with(b"-") {
+                // 只允许本机系统管理器上仍会等待作业完成的选项。
+                match arg {
+                    b"--" => parse_options = false,
+                    b"-q" | b"--quiet" | b"--no-ask-password" | b"--no-pager" | b"--system"
+                    | b"--wait" => {}
+                    b"--job-mode" => {
+                        let mode = args
+                            .next()
+                            .filter(|mode| !mode.starts_with(b"-") && !mode.is_empty())?;
+                        ignore_ordering |= mode == b"ignore-dependencies";
+                    }
+                    mode if mode.starts_with(b"--job-mode=")
+                        && mode.len() > b"--job-mode=".len() =>
+                    {
+                        ignore_ordering |= mode == b"--job-mode=ignore-dependencies";
+                    }
+                    _ => return None,
+                }
+            } else if verb.is_some() {
+                units.push(arg);
+            } else if matches!(
                 arg,
                 b"start" | b"restart" | b"try-restart" | b"reload" | b"reload-or-restart" | b"stop"
             ) {
-                return false;
+                verb = Some(arg);
+            } else {
+                return None;
             }
-            has_verb = true;
         }
+        Some(Self {
+            verb: verb?,
+            units,
+            ignore_ordering,
+        })
     }
-    matches_unit
+
+    fn waits_for_unit(&self, unit_names: &str) -> bool {
+        self.units.iter().any(|&arg| {
+            unit_names.split_ascii_whitespace().any(|name| {
+                arg == name.as_bytes() || systemctl_service_shorthand(arg, name.as_bytes())
+            })
+        })
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -1143,6 +1214,7 @@ impl Systemctl {
                         "show",
                         "--property=ConsistsOf",
                         "--property=BoundBy",
+                        "--property=RequiredBy",
                         "--property=PropagatesStopTo",
                         "--value",
                         "--",
@@ -1251,16 +1323,17 @@ impl Systemctl {
                 .await?;
             let started = parse_systemd_timestamp(&timestamp)
                 .context("无法确认 shoes 进程启动时间，请检查 systemd 后重试")?;
-            let metadata = fs::metadata(config).context("无法检查受管聚合配置变更时间")?;
+            let entry = fs::symlink_metadata(config).context("无法检查受管聚合配置变更时间")?;
+            let target = entry
+                .is_symlink()
+                .then(|| fs::metadata(config).context("无法检查受管聚合配置目标变更时间"))
+                .transpose()?;
             let nanos =
                 |seconds, subsecond| i128::from(seconds) * 1_000_000_000 + i128::from(subsecond);
-            if [
-                nanos(metadata.ctime(), metadata.ctime_nsec()),
-                nanos(metadata.mtime(), metadata.mtime_nsec()),
-            ]
-            .into_iter()
-            .any(|changed| changed >= started)
-            {
+            if std::iter::once(entry).chain(target).any(|metadata| {
+                nanos(metadata.ctime(), metadata.ctime_nsec()) >= started
+                    || nanos(metadata.mtime(), metadata.mtime_nsec()) >= started
+            }) {
                 bail!("聚合配置在 shoes 进程启动后发生变更，无法确认其它协议正在使用的配置。请先核对磁盘配置与在线节点，再同步 shoes.service 后重试");
             }
             Ok(())
@@ -1382,6 +1455,11 @@ fn ensure_systemctl() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    fn systemctl_waits_for_unit(command: &[u8], unit_names: &str) -> bool {
+        BlockingSystemctl::parse(command).is_some_and(|command| command.waits_for_unit(unit_names))
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

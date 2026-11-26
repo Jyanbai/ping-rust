@@ -554,6 +554,59 @@ PY
 )
 echo 'SOCKS5 auth: reject matching on-disk Reality UUID changes while the same running process still uses the old UUID: PASS'
 
+# Switch the managed link to an older target while the original target stays untouched.
+(
+  scenario="$(mktemp -d /usr/local/lib/socks5-reality-config-link.XXXXXX)"
+  config=/etc/shoes/config.yaml
+  state=/etc/shoes/ping-rust-state.json
+  umask 077
+  cp -a "$config" "$state" "$scenario/"
+  trap 'rm -f "$config"; cp -a "$scenario/config.yaml" "$config"; cp -a "$scenario/ping-rust-state.json" "$state"; systemctl restart shoes.service; rm -rf "$scenario"' EXIT
+  python3 - "$scenario" <<'PY'
+import json
+from pathlib import Path
+import sys
+import uuid
+
+directory = Path(sys.argv[1])
+config = directory / 'config.yaml'
+state = (directory / 'ping-rust-state.json').read_bytes()
+profile, = (p for p in json.loads(state)['profiles'] if p['port'] == 24431)
+original = profile['credentials']['Reality']['user_id'].encode()
+replacement = str(uuid.uuid4()).encode()
+assert config.read_bytes().count(original) == state.count(original) == 1
+(directory / 'alternate.yaml').write_bytes(config.read_bytes().replace(original, replacement))
+(directory / 'alternate.json').write_bytes(state.replace(original, replacement))
+PY
+  ln -sfn "$scenario/config.yaml" "$config"
+  sleep 0.1
+  systemctl restart shoes.service
+  for _ in {1..50}; do
+    if ss -H -ltn 'sport = :24436' | grep -Fq '0.0.0.0:24436'; then break; fi
+    sleep 0.1
+  done
+  ss -H -ltn 'sport = :24436' | grep -Fq '0.0.0.0:24436'
+  ss -H -ltn 'sport = :24431' | grep -Fq '0.0.0.0:24431'
+  sleep 0.05
+  before_pid="$(systemctl show --property=MainPID --value shoes.service)"
+  test "$before_pid" -gt 1
+  ln -sfn "$scenario/alternate.yaml" "$config"
+  cat "$scenario/alternate.json" >"$state"
+  sha256sum "$scenario/config.yaml" "$scenario/alternate.yaml" >"$scenario/targets"
+  find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/before"
+  if "$NEW" socks5 secure "$legacy_socks5_id" --auth --yes >"$scenario/result" 2>&1; then
+    echo 'Expected SOCKS5 hardening to reject a configuration link switched after startup' >&2
+    exit 1
+  fi
+  grep -Fq '聚合配置在 shoes 进程启动后发生变更' "$scenario/result"
+  test "$(systemctl show --property=MainPID --value shoes.service)" = "$before_pid"
+  test "$(readlink "$config")" = "$scenario/alternate.yaml"
+  sha256sum --check --status "$scenario/targets"
+  find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/after"
+  diff -u "$scenario/before" "$scenario/after"
+)
+echo 'SOCKS5 auth: reject a configuration link switched to a pre-existing Reality UUID: PASS'
+
 # Keep the native Shadowsocks listener on its original password while changing the managed file.
 (
   scenario="$(mktemp -d /usr/local/lib/socks5-shadowsocks-password.XXXXXX)"
@@ -958,8 +1011,9 @@ check_other_auth_after_restart() (
   companion=/run/systemd/system/compat-socks5-partof-only.service
   bound=/run/systemd/system/compat-socks5-bound-only.service
   propagated=/run/systemd/system/compat-socks5-propagate-stop-only.service
+  required=/run/systemd/system/compat-socks5-requires-only.service
   inactive=/run/systemd/system/compat-socks5-partof-inactive.service
-  trap 'systemctl stop "${companion##*/}" "${bound##*/}" "${propagated##*/}" "${inactive##*/}" || true; rm -f "$dropin" "$stop_dropin" "$companion" "$bound" "$propagated" "$inactive"; systemctl daemon-reload; rm -rf "$scenario"' EXIT
+  trap 'systemctl stop "${companion##*/}" "${bound##*/}" "${propagated##*/}" "${required##*/}" "${inactive##*/}" || true; rm -f "$dropin" "$stop_dropin" "$companion" "$bound" "$propagated" "$required" "$inactive"; systemctl daemon-reload; rm -rf "$scenario"' EXIT
   umask 077
   cat >"$scenario/start-companion" <<'SH'
 #!/bin/sh
@@ -1000,15 +1054,27 @@ ExecStart=$scenario/start-companion $NEW ${ids[1]} $scenario/propagated.json
 ExecStop=/bin/rm -f $scenario/propagated.json
 ExecStop=/usr/bin/touch $scenario/propagated-stopped
 EOF
+  cat >"$required" <<EOF
+[Unit]
+Requires=shoes.service
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=5s
+ExecStart=$scenario/start-companion $NEW ${ids[1]} $scenario/required.json
+ExecStop=/bin/rm -f $scenario/required.json
+ExecStop=/usr/bin/touch $scenario/required-stopped
+EOF
   cat >"$stop_dropin" <<EOF
 [Unit]
 PropagatesStopTo=${propagated##*/}
 EOF
   systemctl daemon-reload
-  systemctl start "${companion##*/}" "${bound##*/}" "${propagated##*/}"
+  systemctl start "${companion##*/}" "${bound##*/}" "${propagated##*/}" "${required##*/}"
   test -s "$scenario/companion.json"
   test -s "$scenario/bound.json"
   test -s "$scenario/propagated.json"
+  test -s "$scenario/required.json"
   if [[ "$kind" == managed-reality ]]; then
     cat >"$scenario/change-uuid.py" <<'PY'
 from pathlib import Path
@@ -1094,12 +1160,15 @@ EOF
   systemctl is-active --quiet "${bound##*/}"
   test -f "$scenario/propagated-stopped"
   systemctl is-active --quiet "${propagated##*/}"
+  test -f "$scenario/required-stopped"
+  systemctl is-active --quiet "${required##*/}"
   test "$(systemctl show --property=ActiveState --value "${inactive##*/}")" = inactive
   "$NEW" export sing-box --profile "${ids[1]}" --server example.com \
     --output "$scenario/companion-expected.json" >/dev/null
   cmp -s "$scenario/companion.json" "$scenario/companion-expected.json"
   cmp -s "$scenario/bound.json" "$scenario/companion-expected.json"
   cmp -s "$scenario/propagated.json" "$scenario/companion-expected.json"
+  cmp -s "$scenario/required.json" "$scenario/companion-expected.json"
   test "$(systemctl show --property=MainPID --value shoes.service)" != "$before_pid"
   ss -H -ltn 'sport = :24436' | grep -Fq '0.0.0.0:24436'
   find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$scenario/after"
@@ -1114,6 +1183,7 @@ echo 'SOCKS5 local: reject a changed Reality UUID in the managed config after re
 echo 'SOCKS5 rollback: restore the active PartOf-only companion and keep the inactive unit stopped: PASS'
 echo 'SOCKS5 rollback: restore the active BindsTo-only companion and its client export: PASS'
 echo 'SOCKS5 rollback: restore the active PropagatesStopTo-only companion and its client export: PASS'
+echo 'SOCKS5 rollback: restore the active Requires-only companion and its client export: PASS'
 
 # Exercise signal cancellation and an unattended timeout with the same substitute.
 (
@@ -2402,11 +2472,13 @@ echo 'SOCKS5 auth: ordered ExecStop exports the original state before the shoes 
   reload_helper=/run/systemd/system/compat-socks5-restore-reload.service
   dependency=/run/systemd/system/compat-socks5-restore-dependency.service
   nested=/run/systemd/system/compat-socks5-restore-nested-export.service
+  delegated=/run/systemd/system/compat-socks5-restore-delegated.service
+  delegated_reader=/run/systemd/system/compat-socks5-restore-delegated-export.service
   stop_reader=/run/systemd/system/compat-socks5-ordered-stop-restore.service
   pending=/etc/shoes/.ping-rust-socks5-secure.pending
   systemctl_bin="$(command -v systemctl)"
   umask 077
-  trap '"$systemctl_bin" stop "${helper##*/}" "${reload_helper##*/}" "${dependency##*/}" "${nested##*/}" "${stop_reader##*/}" || true; rm -f "$dropin" "$helper" "$helper_alias" "$reload_helper" "$dependency" "$nested" "$stop_reader" "$pending"; "$systemctl_bin" daemon-reload; rm -rf "$scenario"' EXIT
+  trap '"$systemctl_bin" stop "${helper##*/}" "${reload_helper##*/}" "${dependency##*/}" "${nested##*/}" "${delegated##*/}" "${delegated_reader##*/}" "${stop_reader##*/}" || true; rm -f "$dropin" "$helper" "$helper_alias" "$reload_helper" "$dependency" "$nested" "$delegated" "$delegated_reader" "$stop_reader" "$pending"; "$systemctl_bin" daemon-reload; rm -rf "$scenario"' EXIT
   "$NEW" backup "$scenario/backup.tar.gz" >/dev/null
   "$NEW" export sing-box --profile "$legacy_socks5_id" --server example.com \
     --output "$scenario/expected.json" >/dev/null
@@ -2465,6 +2537,20 @@ After=${nested##*/}
 Type=oneshot
 ExecStart=/bin/true
 EOF
+  cat >"$delegated_reader" <<EOF
+[Service]
+Type=oneshot
+TimeoutStartSec=5s
+ExecStart=$NEW export sing-box --profile $legacy_socks5_id --server example.com --output $scenario/delegated-client.json
+EOF
+  cat >"$delegated" <<EOF
+[Unit]
+Requires=${delegated_reader##*/}
+After=${delegated_reader##*/}
+[Service]
+Type=oneshot
+ExecStart=/bin/true
+EOF
   cat >"$dropin" <<EOF
 [Unit]
 Requires=${dependency##*/}
@@ -2476,6 +2562,7 @@ ExecStartPre=$systemctl_bin --quiet restart ${helper##*/}
 ExecStartPre=$systemctl_bin --quiet try-restart ${helper##*/}
 ExecStartPre=$systemctl_bin --quiet reload-or-restart ${helper##*/}
 ExecStartPre=$systemctl_bin --quiet reload ${reload_helper##*/}
+ExecStartPre=$systemctl_bin --quiet start ${delegated##*/}
 EOF
   "$systemctl_bin" daemon-reload
   "$systemctl_bin" start "${reload_helper##*/}"
@@ -2485,6 +2572,7 @@ EOF
   cmp -s "$scenario/expected.json" "$scenario/client.json"
   cmp -s "$scenario/expected.json" "$scenario/reload-client.json"
   cmp -s "$scenario/expected.json" "$scenario/nested-client.json"
+  cmp -s "$scenario/expected.json" "$scenario/delegated-client.json"
   cmp -s "$scenario/expected.json" "$scenario/stop-client.json"
   test "$(grep -cx ok "$scenario/helper-runs")" -eq 4
   "$systemctl_bin" is-active --quiet shoes.service
@@ -2492,4 +2580,5 @@ EOF
 echo 'Backup: refuse an unfinished SOCKS5 transaction and recover from the previous archive: PASS'
 echo 'Backup restore: synchronous alias start, restart, try-restart, reload-or-restart and ExecReload helpers can export restored state: PASS'
 echo 'Backup restore: a two-level ordered startup dependency can export restored state: PASS'
+echo 'Backup restore: a synchronous startup hook waits for a helper whose ordered dependency exports restored state: PASS'
 echo 'Backup restore: ordered ExecStop can export restored state before shoes restarts: PASS'
