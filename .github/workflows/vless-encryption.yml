@@ -61,7 +61,8 @@ jobs:
           gzip -dc "$directory/mihomo.gz" > "$directory/mihomo"
           chmod 0755 "$directory/mihomo"
           "$directory/shoes" --version
-          "$directory/xray" version | head -n 1
+          "$directory/xray" version > "$RUNNER_TEMP/xray-version.txt"
+          head -n 1 "$RUNNER_TEMP/xray-version.txt"
           "$directory/mihomo" -v
       - name: Download v0.2.2 Release for the state downgrade probe
         shell: bash
@@ -76,7 +77,7 @@ jobs:
           (cd "$directory" && grep -F "  $asset" SHA256SUMS | sha256sum -c --strict)
           echo "66a8502a199c31971ab474545ecc18661c4cfd2dc1b0afe81511b33aaf04ba0b  $directory/$asset" | sha256sum -c --strict
           tar -xzf "$directory/$asset" -C "$directory"
-          old="$(find "$directory" -type f -name ping-rust -perm -111 | head -n 1)"
+          old="$(find "$directory" -type f -name ping-rust -perm -111 -print -quit)"
           test -x "$old"
           echo "OLD_PING_RUST=$old" >> "$GITHUB_ENV"
       - name: Nine proxy cases, controlled restart, listeners and credential audits

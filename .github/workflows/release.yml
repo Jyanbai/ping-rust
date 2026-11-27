@@ -97,11 +97,11 @@ jobs:
           test -x "${binary}"
 
           file "${binary}"
-          if readelf -l "${binary}" | grep -q "Requesting program interpreter"; then
+          if readelf -l "${binary}" | grep "Requesting program interpreter" >/dev/null; then
             echo "error: ${TARGET} binary contains a dynamic program interpreter" >&2
             exit 1
           fi
-          if readelf -d "${binary}" 2>/dev/null | grep -q "(NEEDED)"; then
+          if readelf -d "${binary}" 2>/dev/null | grep "(NEEDED)" >/dev/null; then
             echo "error: ${TARGET} binary contains dynamic library dependencies" >&2
             exit 1
           fi
@@ -114,8 +114,7 @@ jobs:
             "${binary}" install-self --help >/dev/null
           fi
           printf '%s\n' "${version_output}"
-          printf '%s\n' "${version_output}" \
-            | grep -Eq '^ping-rust [0-9]+\.[0-9]+\.[0-9]+([.+-][0-9A-Za-z.-]+)?$'
+          grep -Eq '^ping-rust [0-9]+\.[0-9]+\.[0-9]+([.+-][0-9A-Za-z.-]+)?$' <<< "${version_output}"
 
           package_dir="dist/${TARGET}"
           mkdir -p "${package_dir}"
@@ -289,21 +288,18 @@ jobs:
           grep -q '首次安装：自动部署 VLESS-REALITY' "${bootstrap_output}"
           grep -q 'vless://' "${bootstrap_output}"
           bootstrap_uri="$(sudo "${bootstrap_dir}/ping-rust" url)"
-          printf '%s' "${bootstrap_uri}" | grep -q '^vless://'
+          grep -q '^vless://' <<< "${bootstrap_uri}"
           sudo systemctl is-active --quiet shoes.service
           bootstrap_info="$(sudo "${bootstrap_dir}/ping-rust" info)"
           bootstrap_port="$(
-            printf '%s' "${bootstrap_info}" \
-              | sed -nE 's/.*0\.0\.0\.0:([0-9]+).*/\1/p' \
-              | head -n 1
+            sed -nE 's/.*0\.0\.0\.0:([0-9]+).*/\1/p' <<< "${bootstrap_info}"
           )"
+          bootstrap_port="${bootstrap_port%%$'\n'*}"
           test -n "${bootstrap_port}"
           sudo ss -H -lnt \
-            | awk '{print $4}' \
-            | grep -Eq "(^|:)${bootstrap_port}$"
+            | awk -v re="(^|:)${bootstrap_port}$" '$4 ~ re { found=1 } END { exit !found }'
           second_bootstrap="$(sudo "${bootstrap_dir}/ping-rust" bootstrap)"
-          printf '%s' "${second_bootstrap}" \
-            | grep -q '检测到已有 shoes 配置，跳过默认 VLESS-REALITY 部署。'
+          grep -q '检测到已有 shoes 配置，跳过默认 VLESS-REALITY 部署。' <<< "${second_bootstrap}"
           rm -f "${bootstrap_output}"
           sudo "${bootstrap_dir}/ping-rust" uninstall --purge
 

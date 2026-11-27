@@ -19,7 +19,8 @@ echo "== install pinned shoes via new build"
 echo "== generate profiles with new build"
 "$NEW" add reality --port 24431 --name compat-reality --server-address "$SERVER" --yes >/dev/null
 "$NEW" add socks5 --port 24432 --name compat-socks5 --server-address "$SERVER" --yes >/dev/null
-socks_uri="$("$NEW" url compat-socks5 | grep -Eo 'socks5?://[^[:space:]]+' | head -n1)"
+socks_uri="$("$NEW" url compat-socks5)"
+socks_uri="$(grep -Eo -m 1 'socks5?://[^[:space:]]+' <<< "$socks_uri")"
 test -n "$socks_uri"
 expect "$EXPECT_SCRIPT" "$NEW" add "$socks_uri"
 expect "$EXPECT_SCRIPT" "$NEW" enable
@@ -54,7 +55,7 @@ curl -fsSL --retry 3 -o "$WORK/dl/$asset" "$base/$asset"
 curl -fsSL --retry 3 -o "$WORK/dl/SHA256SUMS" "$base/SHA256SUMS"
 (cd "$WORK/dl" && grep -E "[[:space:]]\*?$asset\$" SHA256SUMS | sha256sum -c -)
 tar -xzf "$WORK/dl/$asset" -C "$WORK/dl"
-OLD="$(find "$WORK/dl" -type f -name ping-rust -perm -111 | head -n1)"
+OLD="$(find "$WORK/dl" -type f -name ping-rust -perm -111 -print -quit)"
 test -x "$OLD"
 "$OLD" --version | grep -Fx "ping-rust ${OLD_TAG#v}"
 

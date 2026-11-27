@@ -128,9 +128,9 @@ jobs:
             echo "error: installer unexpectedly succeeded with fake binary" >&2
             exit 1
           fi
-          printf '%s\n' "$err" | grep -Fq '超过大小上限' \
+          grep -Fq '超过大小上限' <<< "$err" \
             && { printf 'error: false size rejection:\n%s\n' "$err" >&2; exit 1; }
-          printf '%s\n' "$err" | grep -Fq 'Rust 安装阶段失败' \
+          grep -Fq 'Rust 安装阶段失败' <<< "$err" \
             || { printf 'error: expected install-self failure:\n%s\n' "$err" >&2; exit 1; }
           test -e "$executed_marker"
           rm -f -- "$executed_marker"
@@ -163,11 +163,11 @@ jobs:
             echo "error: installer accepted binary without install-self" >&2
             exit 1
           fi
-          printf '%s\n' "$err" | grep -Fq '不支持 install-self' \
+          grep -Fq '不支持 install-self' <<< "$err" \
             || { printf 'error: missing install-self protocol error:\n%s\n' "$err" >&2; exit 1; }
-          printf '%s\n' "$err" | grep -Fq "${min_install_self_version}" \
+          grep -Fq "${min_install_self_version}" <<< "$err" \
             || { printf 'error: protocol error missing min version:\n%s\n' "$err" >&2; exit 1; }
-          printf '%s\n' "$err" | grep -Fq '对应 tag' \
+          grep -Fq '对应 tag' <<< "$err" \
             || { printf 'error: protocol error missing tag script hint:\n%s\n' "$err" >&2; exit 1; }
           test -e "$executed_marker"
           rm -f -- "$executed_marker"
@@ -205,12 +205,12 @@ jobs:
             echo "error: installer accepted oversized SHA256SUMS" >&2
             exit 1
           fi
-          printf '%s\n' "$err" | grep -Fq 'SHA256SUMS超过大小上限' \
+          grep -Fq 'SHA256SUMS超过大小上限' <<< "$err" \
             || { printf 'error: missing SHA256SUMS size error:\n%s\n' "$err" >&2; exit 1; }
           test ! -e "$executed_marker"
           test ! -e "${install_root}/ping-rust"
           # 安装目标不得越过限制（不得留下可执行产物）。
-          if find "$install_root" -type f 2>/dev/null | grep -q .; then
+          if [ -n "$(find "$install_root" -type f -print -quit 2>/dev/null)" ]; then
             echo "error: install_root not empty after oversized SHA256SUMS" >&2
             exit 1
           fi
@@ -237,11 +237,11 @@ jobs:
             echo "error: installer accepted oversized archive" >&2
             exit 1
           fi
-          printf '%s\n' "$err" | grep -Fq '发布归档超过大小上限' \
+          grep -Fq '发布归档超过大小上限' <<< "$err" \
             || { printf 'error: missing archive size error:\n%s\n' "$err" >&2; exit 1; }
           test ! -e "$executed_marker"
           test ! -e "${install_root}/ping-rust"
-          if find "$install_root" -type f 2>/dev/null | grep -q .; then
+          if [ -n "$(find "$install_root" -type f -print -quit 2>/dev/null)" ]; then
             echo "error: install_root not empty after oversized archive" >&2
             exit 1
           fi
@@ -306,8 +306,8 @@ jobs:
           set -euo pipefail
           test -x target/release/ping-rust
           target/release/ping-rust install-self --help >/dev/null
-          target/release/ping-rust install-self --help \
-            | grep -Eq 'install-self|安装|install'
+          target/release/ping-rust install-self --help > "$RUNNER_TEMP/install-self-help.txt"
+          grep -Eq 'install-self|安装|install' "$RUNNER_TEMP/install-self-help.txt"
       - name: Gate public latest against install-self protocol
         # PR→main、main 和版本 tag 都验证公开安装协议。
         # 普通 feature branch push 不跑网络门禁，便于从候选分支先 tag/release。
@@ -352,14 +352,13 @@ jobs:
           fi
           # 拒绝意外空白/多行。
           if [ "$(printf '%s' "${latest_tag}" | wc -l)" -ne 0 ] \
-            || ! printf '%s' "${latest_tag}" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+$'; then
+            || ! grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+$' <<< "${latest_tag}"; then
             echo "error: latest tag is not strict three-part semver: ${latest_tag}" >&2
             exit 1
           fi
           printf 'public_latest_tag=%s\n' "${latest_tag}"
           latest_version="${latest_tag#v}"
-          if ! printf '%s\n' "${min_version}" \
-            | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+          if ! grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' <<< "${min_version}"; then
             echo "error: min version is not strict three-part semver: ${min_version}" >&2
             exit 1
           fi
@@ -369,7 +368,7 @@ jobs:
           IFS=. read -r lat_maj lat_min lat_pat <<<"${latest_version}"
           for part in "${min_maj}" "${min_min}" "${min_pat}" \
             "${lat_maj}" "${lat_min}" "${lat_pat}"; do
-            printf '%s\n' "${part}" | grep -Eq '^[0-9]+$' \
+            grep -Eq '^[0-9]+$' <<< "${part}" \
               || { echo "error: non-numeric semver component: ${part}" >&2; exit 1; }
           done
           cmp="eq"
