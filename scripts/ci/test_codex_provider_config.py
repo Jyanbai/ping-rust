@@ -16,7 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts/ci/codex_provider_config.py"
 WORKFLOWS = ROOT / ".github/workflows"
-BASE_URL = "https://cpa.example.test/v1"
+BASE_URL = "https://cpa.invalid/v1"
 CPA_KEY = "fake-cpa-key-0123456789abcdef"
 CHATGPT_TOKEN = "fake-chatgpt-refresh-token-0123456789"
 AUTH_JSON = json.dumps({"auth_mode": "chatgpt", "tokens": {"refresh_token": CHATGPT_TOKEN}})
@@ -236,7 +236,7 @@ class ScriptValidationTest(unittest.TestCase):
             return result, path.read_text() if path.exists() else ""
 
     def test_base_url_must_be_plain_https(self):
-        for bad in ("http://cpa.example.test/v1", 'https://x"\nmodel = "evil', "https://x/v1?a=b", "ftp://x"):
+        for bad in ("http://cpa.invalid/v1", 'https://x"\nmodel = "evil', "https://x/v1?a=b", "ftp://x"):
             with self.subTest(bad=bad):
                 result, config = self.render(CODEX_API_BASE_URL=bad)
                 self.assertNotEqual(result.returncode, 0)
@@ -270,6 +270,24 @@ class ScriptValidationTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertNotIn(CPA_KEY, config + result.stdout + result.stderr)
         self.assertNotIn(BASE_URL, result.stdout + result.stderr)
+
+    def test_flows_read_base_url_only_from_secret_and_have_no_url_literal(self):
+        for workflow in ("codex-code-review.yml", "codex-dispatch.yml", "codex-plan.yml", "codex-cpa-smoke.yml"):
+            text = (WORKFLOWS / workflow).read_text(encoding="utf-8")
+            with self.subTest(workflow=workflow):
+                self.assertNotIn("vars.CODEX_API_BASE_URL", text)
+                self.assertIn("secrets.CODEX_API_BASE_URL", text)
+        for path in (SCRIPT, ROOT / "docs/CODEX_DISPATCH.md"):
+            text = path.read_text(encoding="utf-8")
+            with self.subTest(path=path.name):
+                self.assertNotRegex(text, r"https://[A-Za-z0-9-]+\.(cn|com|io|net|ai)/v1")
+        # 基址为空或未设置时清楚报错，且不打印任何地址。
+        for value in ("", "  "):
+            result, config = ScriptValidationTest.render(self, CODEX_API_BASE_URL=value)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("secret CODEX_API_BASE_URL", result.stdout)
+            self.assertNotIn("https://", result.stdout + result.stderr)
+            self.assertEqual(config, "")
 
     def test_no_hardcoded_model_or_base_url(self):
         text = SCRIPT.read_text(encoding="utf-8")

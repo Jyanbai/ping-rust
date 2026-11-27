@@ -446,7 +446,7 @@ class ReplyAndFailureTest(unittest.TestCase):
             "GITHUB_OUTPUT": str(files["output"]),
             "GITHUB_STEP_SUMMARY": str(files["summary"]),
             "CODEX_CPA_API_KEY": "test-cpa-key-not-real",
-            "CODEX_API_BASE_URL": "https://cpa.example.test/v1",
+            "CODEX_API_BASE_URL": "https://cpa.invalid/v1",
             "CODEX_MODEL": "",
             "CODEX_REASONING_EFFORT": "",
         }
@@ -480,7 +480,7 @@ class ReplyAndFailureTest(unittest.TestCase):
             "GITHUB_OUTPUT": str(work / "output"),
             "GITHUB_STEP_SUMMARY": str(work / "summary"),
             "CODEX_CPA_API_KEY": "test-cpa-key-not-real",
-            "CODEX_API_BASE_URL": "https://cpa.example.test/v1",
+            "CODEX_API_BASE_URL": "https://cpa.invalid/v1",
             "CODEX_MODEL": "",
             "CODEX_REASONING_EFFORT": "",
             **overrides,
@@ -494,6 +494,9 @@ class ReplyAndFailureTest(unittest.TestCase):
 
     def test_base_url_is_a_secret_without_default_and_never_printed(self):
         text = WORKFLOW.read_text(encoding="utf-8")
+        # 工作流里没有任何内置的 CPA 基址：除 github.com 和 base_re 正则外不出现 https:// 地址。
+        hosts = [m for m in re.findall(r"https://[^\s'\"\\^]+", text) if not m.startswith("https://github.com")]
+        self.assertEqual(hosts, [], hosts)
         self.assertIn("CODEX_API_BASE_URL: ${{ secrets.CODEX_API_BASE_URL }}", text)
         self.assertNotIn("vars.CODEX_API_BASE_URL", text)
         for missing in ("", "   "):
@@ -502,12 +505,12 @@ class ReplyAndFailureTest(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("secret CODEX_API_BASE_URL", result.stdout)
                 self.assertFalse((runner_temp / "codex-home/config.toml").exists())
-        url = "https://cpa.example.test/v1"
+        url = "https://cpa.invalid/v1"
         result, summary, runner_temp = self.prepare()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertNotIn("cpa.example.test", result.stdout + result.stderr + summary)
+        self.assertNotIn("cpa.invalid", result.stdout + result.stderr + summary)
         self.assertIn(f'base_url = "{url}"', (runner_temp / "codex-home/config.toml").read_text())
-        for bad in ("http://cpa.example.test/v1", 'https://x"\nmodel = "evil'):
+        for bad in ("http://cpa.invalid/v1", 'https://x"\nmodel = "evil'):
             with self.subTest(bad=bad):
                 result, _, runner_temp = self.prepare(CODEX_API_BASE_URL=bad)
                 self.assertNotEqual(result.returncode, 0)

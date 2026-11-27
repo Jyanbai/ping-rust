@@ -56,7 +56,7 @@ else:
 def render_config(flow, provider):
     """用共用脚本生成一份 config.toml，供策略断言使用（不联网、不需要真实密钥）。"""
     with tempfile.TemporaryDirectory() as temporary:
-        env = {**os.environ, "CODEX_API_BASE_URL": "https://cpa.example.test/v1",
+        env = {**os.environ, "CODEX_API_BASE_URL": "https://cpa.invalid/v1",
                "CODEX_MODEL": "gpt-test", "CODEX_REASONING_EFFORT": "high",
                "CODEX_CPA_API_KEY": "fake-cpa-key-for-policy-test"}
         result = subprocess.run(
@@ -296,7 +296,7 @@ class PlanStepTest(unittest.TestCase):
         secret = "fake-chatgpt-login-for-cpa-test"
         key = "fake-cpa-key-for-plan-test"
         self.env.update(CODEX_PROVIDER="", CODEX_AUTH_JSON=secret, CODEX_CPA_API_KEY=key,
-                        CODEX_API_BASE_URL="https://cpa.example.test/v1",
+                        CODEX_API_BASE_URL="https://cpa.invalid/v1",
                         CODEX_MODEL="gpt-test-astra", CODEX_REASONING_EFFORT="high")
         (self.work / "output").write_text("")
         result = self.run_restore()
