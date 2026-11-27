@@ -505,6 +505,8 @@ fn tcp_listeners_match(
         }
     };
     let expected_port = format!("{:04X}", expected.port());
+    let mapped_word = u32::from_ne_bytes([0, 0, 255, 255]);
+    let ipv4_mapped_prefix = format!("0000000000000000{mapped_word:08X}");
     let mut found = false;
     for line in tcp.lines().skip(1).chain(tcp6.lines().skip(1)) {
         let columns: Vec<_> = line.split_whitespace().collect();
@@ -520,7 +522,18 @@ fn tcp_listeners_match(
             .context("TCP 监听表缺少 socket inode")?
             .parse::<u64>()
             .context("TCP 监听的 socket inode 无效")?;
-        if ip != expected_ip || !socket_inodes.contains(&inode) {
+        let owned = socket_inodes.contains(&inode);
+        // A foreign native IPv6 bind cannot serve IPv4. An IPv6 wildcard may
+        // be dual-stack, and /proc does not report IPV6_V6ONLY.
+        if !owned
+            && expected.is_ipv4()
+            && ip.len() == 32
+            && ip != "00000000000000000000000000000000"
+            && !ip.starts_with(&ipv4_mapped_prefix)
+        {
+            continue;
+        }
+        if ip != expected_ip || !owned {
             return Ok(false);
         }
         found = true;
@@ -965,6 +978,40 @@ mod tests {
                 expected.parse().unwrap()
             )
             .unwrap());
+        }
+    }
+
+    #[test]
+    fn proc_net_ignores_unrelated_native_ipv6_for_ipv4_socks5() {
+        let header = "sl local_address rem_address st tx_queue tr retrnsmt uid timeout inode";
+        let address6 = |word, last| format!("0000000000000000{word:08X}{last:08X}");
+        let ipv6_loopback = address6(0u32, u32::from_ne_bytes([0, 0, 0, 1]));
+        let ipv6_mapped = address6(
+            u32::from_ne_bytes([0, 0, 255, 255]),
+            u32::from_ne_bytes([127, 0, 0, 1]),
+        );
+        let ipv6_wildcard = address6(0, 0);
+        let row = |ip: &str, inode| {
+            format!("{header}\n0: {ip}:0438 00000000:0000 0A 0:0 0:0 0 0 0 {inode}")
+        };
+        let inodes = BTreeSet::from([7001]);
+        for (octets, expected) in [
+            ([0, 0, 0, 0], "0.0.0.0:1080"),
+            ([127, 0, 0, 1], "127.0.0.1:1080"),
+        ] {
+            let expected = expected.parse().unwrap();
+            let tcp = row(&format!("{:08X}", u32::from_ne_bytes(octets)), 7001);
+            assert!(
+                tcp_listeners_match(&tcp, &row(&ipv6_loopback, 7002), &inodes, expected).unwrap()
+            );
+            for ambiguous in [&ipv6_mapped, &ipv6_wildcard] {
+                assert!(
+                    !tcp_listeners_match(&tcp, &row(ambiguous, 7002), &inodes, expected).unwrap()
+                );
+            }
+            assert!(
+                !tcp_listeners_match(&tcp, &row(&ipv6_loopback, 7001), &inodes, expected).unwrap()
+            );
         }
     }
 

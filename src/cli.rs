@@ -392,7 +392,11 @@ pub async fn run(cli: Cli) -> Result<()> {
                 println!("2) 仅监听回环地址：远端连接将中断。");
                 println!("0) 取消");
                 let choice =
-                    input::read_menu_choice(&mut io::stdin().lock(), &mut io::stdout(), 2)?;
+                    match input::read_menu_choice(&mut io::stdin().lock(), &mut io::stdout(), 2) {
+                        Ok(choice) => choice,
+                        Err(error) if error.is::<input::MenuEof>() => return Ok(None),
+                        Err(error) => return Err(error),
+                    };
                 Ok(match choice.trim().parse::<u8>()? {
                     1 => Some(config::Socks5SecureMode::Auth),
                     2 => Some(config::Socks5SecureMode::Local),

@@ -46,13 +46,13 @@ pub(crate) async fn secure(
 
     eprintln!("将重启受管 shoes.service，同机节点的连接可能短暂中断。");
     let mode = plan.mode;
-    let profile = {
-        let _guard = crate::defer_interrupt_exit();
+    let profile = commit_with_signal_protection(move || {
         plan.commit(directory, |profile| {
             service::restart_and_verify()?;
             verify_running(profile)
-        })?
-    };
+        })
+    })
+    .await?;
     match mode {
         SecureMode::Auth => {
             println!("SOCKS5 已启用认证，监听地址保持不变。请更新客户端凭据。");
@@ -67,6 +67,45 @@ pub(crate) async fn secure(
         }
     }
     Ok(())
+}
+
+async fn commit_with_signal_protection(
+    commit: impl FnOnce() -> Result<ManagedProfile> + Send + 'static,
+) -> Result<ManagedProfile> {
+    #[cfg(target_os = "linux")]
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .context("无法安装 SIGTERM 处理，配置未提交")?;
+    let task = tokio::task::spawn_blocking(move || {
+        let _guard = crate::defer_interrupt_exit();
+        commit()
+    });
+    #[cfg(target_os = "linux")]
+    let result = {
+        let mut task = task;
+        let result = tokio::select! {
+            biased;
+            _ = terminate.recv() => {
+                eprintln!("收到 SIGTERM，等待 SOCKS5 加固完成或回滚。");
+                match task.await {
+                    Ok(Ok(_)) => eprintln!("SOCKS5 加固已提交并验证，请用 sudo prs info 查看结果。"),
+                    Ok(Err(error)) => eprintln!("{error:#}"),
+                    Err(error) => eprintln!("SOCKS5 配置提交任务异常结束：{error}"),
+                }
+                std::process::exit(143);
+            }
+            result = &mut task => result,
+        };
+        // Tokio keeps the signal handler installed after dropping the receiver.
+        // Let SIGTERM exit normally while the caller prints the finished result.
+        tokio::spawn(async move {
+            terminate.recv().await;
+            std::process::exit(143);
+        });
+        result
+    };
+    #[cfg(not(target_os = "linux"))]
+    let result = task.await;
+    result.context("SOCKS5 配置提交任务异常结束")?
 }
 
 struct SecurePlan {
@@ -162,7 +201,12 @@ impl SecurePlan {
     fn diff(&self, directory: &Path) -> String {
         let mut output = String::new();
         let filename = self.profile().config_file_name();
-        let before = self.original.listen_address().expect("已验证原监听");
+        let original = socket_address(&self.original).expect("已验证原监听");
+        let before = if original.ip().is_unspecified() {
+            original.to_string()
+        } else {
+            format!("<已脱敏>:{}", original.port())
+        };
         let after = self.profile().listen_address().expect("已验证新监听");
         if !profile_path(directory, self.profile()).exists() {
             writeln!(output, "将从原聚合条目创建缺失的 profile {filename}。").unwrap();
