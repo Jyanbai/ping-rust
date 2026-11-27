@@ -10,6 +10,7 @@ import os
 import re
 import subprocess
 import tempfile
+import time
 import tarfile
 import textwrap
 import unittest
@@ -759,6 +760,55 @@ cp "$FAKE_CODEX_ARCHIVE" "$output"
             "Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying.",
             ["context_window"],
         )
+
+    def test_refresh_token_reused_wording(self):
+        self.assert_classifies("refresh_token_reused", ["auth_401_403"])
+
+    def test_not_signed_in_wording(self):
+        self.assert_classifies("Not signed in", ["auth_401_403"])
+
+    def test_http_status_code_prefix(self):
+        out, _ = self.classify("HTTP status code: 429\n")
+        self.assertEqual(self.class_labels(out), ["rate_limit", "http_429"])
+
+    def test_long_token_identifier_classifies_quickly(self):
+        sample = "token " + "_".join(["id"] * 26) + "\n"
+        self.classify("warmup\n")
+        start = time.perf_counter()
+        out, err = self.classify(sample)
+        elapsed = time.perf_counter() - start
+        self.assertEqual(self.class_labels(out), ["unknown"])
+        self.assertEqual(err.strip(), "")
+        self.assertLess(elapsed, 0.1, f"workflow block took {elapsed:.4f}s")
+        print(f"long_token_identifier_elapsed={elapsed:.4f}s", flush=True)
+
+    def test_classifier_stays_bounded_on_huge_input(self):
+        out, _ = self.classify(b"rate limit\n" + b"x" * (80 * 1024))
+        self.assertEqual(self.class_labels(out), ["unknown"])
+        out, _ = self.classify(b"x" * (80 * 1024) + b"\nrate limit\n")
+        self.assertEqual(self.class_labels(out), ["rate_limit"])
+        out, _ = self.classify(b"x" * 5000 + b"rate limit\n")
+        self.assertEqual(self.class_labels(out), ["unknown"])
+        out, _ = self.classify(b"rate limit " + b"x" * 8000 + b"\n")
+        self.assertEqual(self.class_labels(out), ["rate_limit"])
+        pad = '{"type":"item.completed","x":"' + ("y" * 200) + '"}\n'
+        early = '{"type":"turn.failed","error":{"message":"stream disconnected"}}\n'
+        events = early + pad * ((70 * 1024) // len(pad) + 1)
+        out, _ = self.classify("", events=events)
+        self.assertEqual(self.class_labels(out), ["unknown"])
+        events = pad * ((70 * 1024) // len(pad) + 1) + '{"type":"error","message":"Not signed in"}\n'
+        out, _ = self.classify("", events=events)
+        self.assertEqual(self.class_labels(out), ["auth_401_403"])
+        events = '{"type":"error","message":' + json.dumps("x" * 5000 + "rate limit") + "}\n"
+        out, _ = self.classify("", events=events)
+        self.assertEqual(self.class_labels(out), ["unknown"])
+
+    def test_classifier_does_not_use_regex(self):
+        block = failure_class_script()
+        self.assertNotIn("import re", block)
+        self.assertNotIn("re.search", block)
+        self.assertNotIn("re.sub", block)
+        self.assertNotIn("re.compile", block)
 
     def test_event_secrets_do_not_appear_in_output(self):
         events = (

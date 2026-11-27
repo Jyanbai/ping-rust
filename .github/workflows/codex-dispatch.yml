@@ -503,52 +503,70 @@ jobs:
             echo "::error::Codex 运行失败"
             # begin-codex-failure-class
             # 止损线已生效：不打印 stderr 或事件原文。失败时读取 stderr 与 rust-v0.166.0
-            # 的 turn.failed / error 事件（jq 只提取 message），按关键词输出固定标签。
+            # 的 turn.failed / error 事件（jq 只提取 message，且只读事件文件最后 64KB）。
+            # 归类只做小写子串检查，不使用正则。各输入只看最后 64KB，单行超过 4KB 截断。
             # HTTP 状态码只在有上下文的写法中识别，例如 status 429、HTTP 429、
-            # unexpected status 429、429 Too Many Requests。输出只由常量构成。
+            # HTTP status code: 429、unexpected status 429、429 Too Many Requests。
+            # 输出只由常量构成。
             log="$RUNNER_TEMP/codex-stderr.log"
             events="$RUNNER_TEMP/codex-events.jsonl"
             messages="$RUNNER_TEMP/codex-class-messages.txt"
             : > "$messages"
             if [ -f "$events" ]; then
-              jq -rR 'fromjson? | if .type == "turn.failed" then (.error.message // empty) elif .type == "error" then (.message // empty) else empty end' "$events" >> "$messages" 2>/dev/null || true
+              tail -c 65536 "$events" | jq -rR 'fromjson? | if .type == "turn.failed" then (.error.message // empty) elif .type == "error" then (.message // empty) else empty end' >> "$messages" 2>/dev/null || true
             fi
             echo '::group::Codex 失败归类'
             python3 - "$log" "$messages" <<'PY' 2>/dev/null || echo 'unknown'
-          import re, sys
+          import sys
           from pathlib import Path
-          SEP = r"[\s_-]+"
+          MAX_FILE = 64 * 1024
+          MAX_LINE = 4 * 1024
           LABELS = (
               ("rate_limit", (
-                  r"rate" + SEP + r"limit",
-                  r"too" + SEP + r"many" + SEP + r"requests",
-                  r"usage" + SEP + r"limit",
-                  r"\bquota\b",
-                  r"hit" + SEP + r"your" + SEP + r"usage" + SEP + r"limit",
+                  "rate limit",
+                  "too many requests",
+                  "usage limit",
+                  "quota",
+                  "hit your usage limit",
               )),
               ("auth_401_403", (
-                  r"\bunauthorized\b", r"\bforbidden\b",
-                  r"(?:invalid|expired)" + SEP + r"(?:\w+[\s_-]+)*token",
-                  r"token" + SEP + r"(?:\w+[\s_-]+)*(?:invalid|expired)",
-                  r"refresh(?:ed)?" + SEP + r"failed",
-                  r"failed" + SEP + r"to" + SEP + r"refresh(?:ed)?" + SEP + r"(?:\w+[\s_-]+)*token",
-                  r"token" + SEP + r"refresh(?:ed)?" + SEP + r"failed",
-                  r"refresh(?:ed)?" + SEP + r"token" + SEP + r"(?:\w+[\s_-]+)*(?:expired|invalid|rejected|failed)",
-                  r"access" + SEP + r"token" + SEP + r"(?:expired|invalid)",
-                  r"no" + SEP + r"refresh" + SEP + r"token",
-                  r"rejected" + SEP + r"refresh" + SEP + r"token",
+                  "unauthorized",
+                  "forbidden",
+                  "invalid token",
+                  "expired token",
+                  "token invalid",
+                  "token expired",
+                  "refresh failed",
+                  "refreshed failed",
+                  "failed to refresh",
+                  "token refresh failed",
+                  "token refreshed failed",
+                  "refresh token expired",
+                  "refresh token invalid",
+                  "refresh token rejected",
+                  "refresh token failed",
+                  "refresh token has expired",
+                  "refresh token has invalid",
+                  "access token expired",
+                  "access token invalid",
+                  "no refresh token",
+                  "rejected refresh token",
+                  "refresh token reused",
+                  "not signed in",
               )),
               ("stream_disconnected", (
-                  r"stream" + SEP + r"disconnected",
-                  r"connection" + SEP + r"reset",
-                  r"connection" + SEP + r"closed",
-                  r"\btimeout\b", r"timed" + SEP + r"out", r"\beof\b",
+                  "stream disconnected",
+                  "connection reset",
+                  "connection closed",
+                  "timeout",
+                  "timed out",
+                  "eof",
               )),
               ("context_window", (
-                  r"context" + SEP + r"window",
-                  r"context" + SEP + r"length",
-                  r"too" + SEP + r"many" + SEP + r"tokens",
-                  r"maximum" + SEP + r"context" + SEP + r"length",
+                  "context window",
+                  "context length",
+                  "too many tokens",
+                  "maximum context length",
               )),
           )
           REASONS = {
@@ -558,41 +576,95 @@ jobs:
               503: "service unavailable", 504: "gateway timeout",
           }
           ORDER = [name for name, _ in LABELS] + [f"http_{code}" for code in REASONS]
+          SHORT = frozenset(("quota", "timeout", "eof"))
+          def strip_ansi(text):
+              out = []
+              i = 0
+              n = len(text)
+              while i < n:
+                  if text[i] == "\x1b":
+                      i += 1
+                      if i < n and text[i] == "[":
+                          i += 1
+                          while i < n and not (64 <= ord(text[i]) <= 126):
+                              i += 1
+                          if i < n:
+                              i += 1
+                      elif i < n and text[i] == "]":
+                          i += 1
+                          while i < n:
+                              if text[i] == "\x07":
+                                  i += 1
+                                  break
+                              if text[i] == "\x1b" and i + 1 < n and text[i + 1] == "\\":
+                                  i += 2
+                                  break
+                              i += 1
+                      continue
+                  out.append(text[i])
+                  i += 1
+              return "".join(out)
           def load(path):
               try:
-                  data = Path(path).read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+                  data = Path(path).read_bytes()
               except OSError:
-                  return ""
-              text = data.decode("utf-8", "replace")
-              return re.sub(r"\x1b(?:\[[0-9;?]*[ -/]*[@-~]|].*?(?:\x07|\x1b\\))", "", text)
-          def status_codes(text):
-              found = []
-              for code, reason in REASONS.items():
-                  c = str(code)
-                  pats = (
-                      rf"(?:unexpected\s+)?status\s*[:=]?\s*{c}\b",
-                      rf"\bHTTP(?:/\d+(?:\.\d+)?)?\s+{c}\b",
-                      rf"\b{c}\s+{reason}\b",
-                  )
-                  if any(re.search(p, text, re.I) for p in pats):
-                      found.append(code)
-              return found
-          def classify(text):
+                  return []
+              if len(data) > MAX_FILE:
+                  data = data[-MAX_FILE:]
+              data = data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+              lines = []
+              for line in strip_ansi(data.decode("utf-8", "replace")).split("\n"):
+                  lines.append(line[:MAX_LINE] if len(line) > MAX_LINE else line)
+              return lines
+          def folded(line):
+              chars = []
+              for ch in line.lower():
+                  chars.append(" " if ch in "_-" else ch)
+              return "".join(chars)
+          def status_needles(code, reason):
+              c = str(code)
+              return (
+                  f"status {c}",
+                  f"status: {c}",
+                  f"status:{c}",
+                  f"status={c}",
+                  f"http {c}",
+                  f"http/1.1 {c}",
+                  f"http/1.0 {c}",
+                  f"http/2 {c}",
+                  f"{c} {reason}",
+                  f"unexpected status {c}",
+                  f"status code: {c}",
+                  f"status code:{c}",
+                  f"status code {c}",
+              )
+          def classify(lines):
               hits = set()
-              for label, pats in LABELS:
-                  if any(re.search(p, text, re.I) for p in pats):
-                      hits.add(label)
-              codes = status_codes(text)
-              for code in codes:
-                  hits.add(f"http_{code}")
-                  if code == 429:
-                      hits.add("rate_limit")
-                  if code in (401, 403):
-                      hits.add("auth_401_403")
+              for raw in lines:
+                  line = folded(raw)
+                  padded = f" {line} "
+                  for label, needles in LABELS:
+                      for needle in needles:
+                          if needle in SHORT:
+                              if f" {needle} " in padded:
+                                  hits.add(label)
+                                  break
+                          elif needle in line:
+                              hits.add(label)
+                              break
+                  for code, reason in REASONS.items():
+                      if any(needle in line for needle in status_needles(code, reason)):
+                          hits.add(f"http_{code}")
+                          if code == 429:
+                              hits.add("rate_limit")
+                          if code in (401, 403):
+                              hits.add("auth_401_403")
               return [name for name in ORDER if name in hits] or ["unknown"]
           try:
-              parts = [load(p) for p in sys.argv[1:]]
-              for line in classify("\n".join(parts)):
+              parts = []
+              for path in sys.argv[1:]:
+                  parts.extend(load(path))
+              for line in classify(parts):
                   print(line)
           except Exception:
               print("unknown")
