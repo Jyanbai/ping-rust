@@ -217,8 +217,12 @@ impl SecureTarget {
             .iter()
             .position(|profile| profile.id == original.id)
             .context("未找到所选 SOCKS5 节点")?;
-        let servers = load_servers(&config_path)?;
-        let server = servers.get(index).context("聚合配置缺少所选 SOCKS5 节点")?;
+        let snapshot = ManagedYaml::load(directory)?;
+        snapshot.guard_legacy(&state.profiles)?;
+        let server = snapshot
+            .servers
+            .get(index)
+            .context("聚合配置缺少所选 SOCKS5 节点")?;
         let read_document = |profile: &ManagedProfile| {
             commit::managed_profile_directory_exists(&directory.join("profiles"))?;
             commit::read_managed_file(&profile_path(directory, profile))
@@ -231,21 +235,15 @@ impl SecureTarget {
             }
         }
         let pending_state = document.is_some();
-        migrate_listen(&mut state, &servers).context("聚合配置与管理状态不一致，无法安全加固")?;
-        ensure_chain_proxy_matches_state(&servers, &state)?;
+        migrate_listen(&mut state, &snapshot.servers)
+            .context("聚合配置与管理状态不一致，无法安全加固")?;
+        ensure_chain_proxy_matches_state(&snapshot.servers, &state)?;
         if state.profiles[index].socks5_risk_warning().is_some() {
             document = read_document(&state.profiles[index])?;
         }
-        if let Some(bytes) = &document {
-            let on_disk: ServerConfig = crate::yaml::from_slice(bytes)
-                .map_err(|_| anyhow::anyhow!("所选 SOCKS5 profile 无法解析"))?;
-            if crate::yaml::to_string(&on_disk)? != crate::yaml::to_string(&servers[index])? {
-                bail!("所选 SOCKS5 profile 与聚合配置不一致，请先恢复一致后重试");
-            }
-        }
         Ok(Self {
             state,
-            servers,
+            servers: snapshot.servers,
             index,
             document,
             pending_state,
@@ -292,15 +290,14 @@ impl SecureTarget {
                 server.address = profile.listen_address()?;
             }
         }
-        let documents = profile_documents(&servers, &state.profiles)?;
-        let runtime = commit::aggregate_profile_documents(&documents, &state.profiles)?;
+        let yaml = render_legacy(&servers, &state.profiles)?;
         Ok(SecurePlan {
             mode,
             original,
             state,
             index,
-            documents,
-            runtime,
+            documents: yaml.profiles,
+            runtime: yaml.aggregate,
         })
     }
 }
@@ -430,6 +427,7 @@ impl SecurePlan {
         directory: &Path,
         mut restart_and_verify: impl FnMut(&ManagedProfile) -> Result<()>,
     ) -> Result<ManagedProfile> {
+        ManagedYaml::load(directory)?.guard_legacy(&self.state.profiles)?;
         let profile = self.profile();
         commit::commit_profile_with_activation(
             directory,

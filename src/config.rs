@@ -28,6 +28,7 @@ use crate::{
 };
 
 mod commit;
+mod managed_yaml;
 mod naive_certificate;
 pub use naive_certificate::NaiveCertificateValidity;
 mod presets;
@@ -41,6 +42,8 @@ mod state;
 mod transaction;
 mod validation;
 
+#[cfg(test)]
+mod managed_yaml_tests;
 #[cfg(test)]
 mod naive_certificate_tests;
 #[cfg(test)]
@@ -59,15 +62,19 @@ use commit::{
     aggregate_profile_documents, commit_managed_with_state_writer, is_managed_profile_file_name,
 };
 use commit::{
-    commit_managed, profile_documents, profile_documents_are_current, write_profile_documents,
+    commit_prepared, profile_documents, profile_documents_are_current, render_legacy,
+    write_profile_documents,
 };
+use managed_yaml::ManagedYaml;
 pub(crate) use routing::chain_value;
 use routing::{render_legacy_rules, render_rules};
 use schema::{
     default_h3_alpn, ChainRule, InnerProtocol, NaiveUser, QuicSettings, RealityTarget,
     ServerConfig, ServerProtocol, ServerRule, ShadowTlsHandshake, ShadowTlsTarget,
 };
-use transaction::{read_optional, CredentialCleanup, ManagedRollback, ProfileDirectorySnapshot};
+#[cfg(test)]
+use transaction::ProfileDirectorySnapshot;
+use transaction::{CredentialCleanup, ManagedRollback};
 use validation::{
     validate_anytls_users, validate_padding_scheme, validate_reality_short_id,
     validate_websocket_path,
@@ -917,38 +924,33 @@ pub(crate) async fn migrate_managed_config_with_binary(
     binary: &Path,
 ) -> Result<ConfigMigrationResult> {
     utils::require_linux_root()?;
-    let config_path = Path::new(utils::CONFIG_FILE);
-    let state_path = Path::new(utils::STATE_FILE);
-    let state = load_state_for_update()?;
-    let old_servers = load_servers(config_path)?;
-    ensure_servers_match_state(&old_servers, &state.profiles)
-        .context("配置文件与管理状态不一致，已拒绝 shoes 迁移")?;
-    let mut servers = old_servers;
+    let directory = Path::new(utils::CONFIG_DIR);
+    let (mut servers, state, rollback, _) = ManagedYaml::load(directory)?.into_legacy(true)?;
     if state.chain_proxy.enabled {
         apply_chain_proxy_rules(&mut servers, &state);
     }
-    let yaml = crate::yaml::to_string(&servers).context("序列化 shoes 迁移配置失败")?;
-    validate_yaml(&yaml)?;
+    let yaml = render_legacy(&servers, &state.profiles)?;
+    validate_yaml(&yaml.aggregate)?;
     #[cfg(feature = "ci-fault-injection")]
     let dry_run_yaml = if std::env::var("PING_RUST_CI_UPGRADE_FAULT").as_deref() == Ok("dry-run") {
         "- address: ["
     } else {
-        yaml.as_str()
+        yaml.aggregate.as_str()
     };
     #[cfg(not(feature = "ci-fault-injection"))]
-    let dry_run_yaml = yaml.as_str();
-    validate_candidate_with_binary(dry_run_yaml, Path::new(utils::CONFIG_DIR), binary).await?;
-    let rollback = ManagedRollback {
-        config: read_optional(config_path)?,
-        state: read_optional(state_path)?,
-        profiles: ProfileDirectorySnapshot::capture(Path::new(utils::PROFILES_DIR))?,
-        generated_certificate: None,
-        generated_certificate_key: None,
-    };
-    commit_managed(config_path, state_path, &servers, &state)?;
+    let dry_run_yaml = yaml.aggregate.as_str();
+    validate_candidate_with_binary(dry_run_yaml, directory, binary).await?;
+    commit_prepared(directory, &yaml, &state, &rollback)?;
     Ok(ConfigMigrationResult {
         rollback: Some(rollback),
     })
+}
+
+pub(crate) fn preflight_shoes_migration() -> Result<()> {
+    if Path::new(utils::CONFIG_FILE).is_file() {
+        ManagedYaml::load(Path::new(utils::CONFIG_DIR))?.into_legacy(true)?;
+    }
+    Ok(())
 }
 
 fn ensure_chain_proxy_has_no_direct_udp_path(state: &ManagedState) -> Result<()> {
@@ -978,14 +980,20 @@ async fn generate_inner(
     request: GenerationRequest,
     validate_with_shoes: bool,
 ) -> Result<GenerationResult> {
-    generate_inner_with_lock(request, validate_with_shoes, None).await
+    generate_inner_with_lock(
+        request,
+        validate_with_shoes,
+        None,
+        Path::new(utils::CONFIG_DIR),
+    )
+    .await
 }
 
 pub(crate) async fn generate_locked(
     request: GenerationRequest,
     lock: utils::ExclusiveLock,
 ) -> Result<GenerationResult> {
-    generate_inner_with_lock(request, true, Some(lock)).await
+    generate_inner_with_lock(request, true, Some(lock), Path::new(utils::CONFIG_DIR)).await
 }
 
 pub(crate) fn preflight_generation(request: &GenerationRequest) -> Result<()> {
@@ -1018,6 +1026,7 @@ async fn generate_inner_with_lock(
     request: GenerationRequest,
     validate_with_shoes: bool,
     supplied_lock: Option<utils::ExclusiveLock>,
+    managed_directory: &Path,
 ) -> Result<GenerationResult> {
     validate_request(&request)?;
     let parent = request.output.parent().context("配置输出路径没有父目录")?;
@@ -1026,10 +1035,9 @@ async fn generate_inner_with_lock(
     } else {
         parent
     };
-    let managed = request.output == Path::new(utils::CONFIG_FILE);
-    if managed {
+    let managed = request.output == managed_directory.join("config.yaml");
+    if managed && managed_directory == Path::new(utils::CONFIG_DIR) {
         utils::require_linux_root()?;
-        utils::ensure_directory(Path::new(utils::CONFIG_DIR), 0o700)?;
     }
     let lock = if managed {
         Some(match supplied_lock {
@@ -1042,11 +1050,21 @@ async fn generate_inner_with_lock(
         }
         None
     };
-    let mut state = if managed {
-        load_state_for_update()?
-    } else {
-        ManagedState::default()
-    };
+    let snapshot = managed
+        .then(|| ManagedYaml::load(managed_directory))
+        .transpose()?;
+    let mut state = snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.state(false))
+        .transpose()?
+        .unwrap_or_default();
+    if let Some(snapshot) = &snapshot {
+        snapshot.check_copies(&state.profiles)?;
+        ensure_servers_match_state(&snapshot.servers, &state.profiles)
+            .context("配置文件与管理状态不一致；请先备份并修复，ping-rust 不会覆盖现有配置")?;
+        ensure_chain_proxy_matches_state(&snapshot.servers, &state)?;
+        utils::ensure_directory(managed_directory, 0o700)?;
+    }
     validate_generation_conflicts(&request, &state.profiles)?;
     let profile_id = Uuid::new_v4();
     let profile_name = request
@@ -1063,7 +1081,7 @@ async fn generate_inner_with_lock(
     let generated = presets::generate(&request, parent, profile_id)?;
     drop(generation_timer);
     let presets::GeneratedPreset {
-        server,
+        mut server,
         credentials,
         certificate_path,
         certificate_key_path,
@@ -1092,48 +1110,32 @@ async fn generate_inner_with_lock(
         certificate_key_path.as_deref(),
     );
 
-    let mut servers = if managed && !state.profiles.is_empty() {
-        load_servers(Path::new(utils::CONFIG_FILE))?
-    } else {
-        Vec::new()
-    };
-    ensure_servers_match_state(&servers, &state.profiles)
-        .context("配置文件与管理状态不一致；请先备份并修复，ping-rust 不会覆盖现有配置")?;
-    ensure_chain_proxy_matches_state(&servers, &state)?;
-    servers.push(server);
     state.profiles.push(profile.clone());
-    ensure_servers_match_state(&servers, &state.profiles)?;
     ensure_chain_proxy_has_no_direct_udp_path(&state)?;
     if state.chain_proxy.enabled {
-        apply_chain_proxy_rules(&mut servers, &state);
+        apply_chain_proxy_rules(std::slice::from_mut(&mut server), &state);
     }
-
-    let yaml = crate::yaml::to_string(&servers).context("序列化 shoes YAML 失败")?;
-    validate_yaml(&yaml)?;
-    if validate_with_shoes {
-        validate_candidate_with_shoes(&yaml, parent).await?;
-    }
-    let rollback = if managed {
-        Some(ManagedRollback {
-            config: read_optional(Path::new(utils::CONFIG_FILE))?,
-            state: read_optional(Path::new(utils::STATE_FILE))?,
-            profiles: ProfileDirectorySnapshot::capture(Path::new(utils::PROFILES_DIR))?,
-            generated_certificate: self_signed.then(|| certificate_path.clone()).flatten(),
-            generated_certificate_key: self_signed.then(|| certificate_key_path.clone()).flatten(),
-        })
+    let rollback = if let Some(mut snapshot) = snapshot {
+        snapshot.append(server)?;
+        let (yaml, mut rollback) = snapshot.prepare(&state.profiles)?;
+        if validate_with_shoes {
+            validate_candidate_with_shoes(&yaml.aggregate, parent).await?;
+        }
+        commit_prepared(managed_directory, &yaml, &state, &rollback)?;
+        rollback.generated_certificate = self_signed.then(|| certificate_path.clone()).flatten();
+        rollback.generated_certificate_key =
+            self_signed.then(|| certificate_key_path.clone()).flatten();
+        Some(rollback)
     } else {
+        ensure_servers_match_state(std::slice::from_ref(&server), &state.profiles)?;
+        let yaml = crate::yaml::to_string(&[server]).context("序列化 shoes YAML 失败")?;
+        validate_yaml(&yaml)?;
+        if validate_with_shoes {
+            validate_candidate_with_shoes(&yaml, parent).await?;
+        }
+        utils::atomic_write(&request.output, yaml.as_bytes(), 0o600)?;
         None
     };
-    if managed {
-        commit_managed(
-            &request.output,
-            Path::new(utils::STATE_FILE),
-            &servers,
-            &state,
-        )?;
-    } else {
-        utils::atomic_write(&request.output, yaml.as_bytes(), 0o600)?;
-    }
     credential_cleanup.disarm();
 
     Ok(GenerationResult {
@@ -1247,19 +1249,27 @@ pub(crate) async fn update_profile_locked(
     lock: utils::ExclusiveLock,
 ) -> Result<GenerationResult> {
     utils::require_linux_root()?;
-    utils::ensure_directory(Path::new(utils::CONFIG_DIR), 0o700)?;
-    let config_path = Path::new(utils::CONFIG_FILE);
-    let state_path = Path::new(utils::STATE_FILE);
-    let mut state = load_state_for_update()?;
+    update_profile_at(Path::new(utils::CONFIG_DIR), id, change, lock, true).await
+}
+
+async fn update_profile_at(
+    directory: &Path,
+    id: Uuid,
+    change: ProfileChange,
+    lock: utils::ExclusiveLock,
+    validate_with_shoes: bool,
+) -> Result<GenerationResult> {
+    let mut snapshot = ManagedYaml::load(directory)?;
+    let mut state = snapshot.state(false)?;
+    snapshot.check_copies(&state.profiles)?;
     let index = state
         .profiles
         .iter()
         .position(|profile| profile.id == id)
         .with_context(|| format!("未找到配置 {id}"))?;
-    let mut servers = load_servers(config_path)?;
-    ensure_servers_match_state(&servers, &state.profiles)
+    ensure_servers_match_state(&snapshot.servers, &state.profiles)
         .context("配置文件与管理状态不一致；请先备份并修复，ping-rust 不会覆盖现有配置")?;
-    ensure_chain_proxy_matches_state(&servers, &state)?;
+    ensure_chain_proxy_matches_state(&snapshot.servers, &state)?;
 
     validate_profile_change(&state, index, id, &change)?;
 
@@ -1276,41 +1286,38 @@ pub(crate) async fn update_profile_locked(
     let retired_certificate_key = retire_owned_certificate
         .then(|| state.profiles[index].certificate_key_path.clone())
         .flatten();
-    let mut rollback = ManagedRollback {
-        config: read_optional(config_path)?,
-        state: read_optional(state_path)?,
-        profiles: ProfileDirectorySnapshot::capture(Path::new(utils::PROFILES_DIR))?,
-        generated_certificate: None,
-        generated_certificate_key: None,
-    };
+    utils::ensure_directory(directory, 0o700)?;
     let regenerate_naive_certificate = state.profiles[index].self_signed_certificate
         && matches!(
             &change,
             ProfileChange::NaiveServerName(_) | ProfileChange::RegenerateNaiveCertificate
         );
-    apply_profile_change(&mut servers[index], &mut state.profiles[index], change)?;
+    let mut server = snapshot.servers[index].clone();
+    apply_profile_change(&mut server, &mut state.profiles[index], change)?;
     let mut generated_cleanup = None;
     if regenerate_naive_certificate {
         generated_cleanup = Some(regenerate_naive_test_certificate(
-            &mut servers[index],
+            &mut server,
             &mut state.profiles[index],
-            Path::new(utils::CONFIG_DIR),
-            &mut rollback,
+            directory,
+            snapshot.rollback_mut(),
         )?);
     }
     let profile = state.profiles[index].clone();
-    let yaml = crate::yaml::to_string(&servers).context("序列化更新后 shoes YAML 失败")?;
-    let runtime_config_changed = rollback.config.as_deref() != Some(yaml.as_bytes());
-    validate_yaml(&yaml)?;
-    validate_candidate_with_shoes(&yaml, Path::new(utils::CONFIG_DIR)).await?;
-    commit_managed(config_path, state_path, &servers, &state)?;
+    snapshot.edit(index, server)?;
+    let (yaml, rollback) = snapshot.prepare(&state.profiles)?;
+    let runtime_config_changed = rollback.config.as_deref() != Some(yaml.aggregate.as_bytes());
+    if validate_with_shoes {
+        validate_candidate_with_shoes(&yaml.aggregate, directory).await?;
+    }
+    commit_prepared(directory, &yaml, &state, &rollback)?;
     if let Some(mut cleanup) = generated_cleanup {
         cleanup.disarm();
     }
 
     Ok(GenerationResult {
         profile_id: profile.id,
-        config_path: config_path.to_path_buf(),
+        config_path: directory.join("config.yaml"),
         certificate_path: profile.certificate_path.clone(),
         certificate_key_path: profile.certificate_key_path.clone(),
         credentials: profile.credentials.clone(),
@@ -2374,29 +2381,26 @@ fn load_servers(path: &Path) -> Result<Vec<ServerConfig>> {
 
 pub async fn ensure_profile_files() -> Result<bool> {
     utils::require_linux_root()?;
-    let lock = utils::exclusive_lock(Path::new(utils::LOCK_FILE))?;
-    let config_path = Path::new(utils::CONFIG_FILE);
-    let state_path = Path::new(utils::STATE_FILE);
+    let _lock = utils::exclusive_lock(Path::new(utils::LOCK_FILE))?;
+    ensure_profile_files_at(Path::new(utils::CONFIG_DIR)).await
+}
+
+async fn ensure_profile_files_at(directory: &Path) -> Result<bool> {
+    let config_path = &directory.join("config.yaml");
+    let state_path = &directory.join("ping-rust-state.json");
     if !config_path.exists() && !state_path.exists() {
         return Ok(false);
     }
-    let state = load_state_for_update()?;
-    let servers = load_servers(config_path)?;
-    ensure_servers_match_state(&servers, &state.profiles)
-        .context("旧版聚合配置与管理状态不一致，无法安全迁移节点文件")?;
+    let (servers, state, rollback, complete) = ManagedYaml::load(directory)?.into_legacy(true)?;
     ensure_chain_proxy_matches_state(&servers, &state)?;
-    let documents = profile_documents(&servers, &state.profiles)?;
-    if profile_documents_are_current(Path::new(utils::PROFILES_DIR), &documents)?
-        && !socks5::listen_migration_pending(state_path)?
-    {
+    if complete && !socks5::listen_migration_pending(state_path)? {
         return Ok(false);
     }
-    let yaml = crate::yaml::to_string(&servers).context("序列化迁移聚合配置失败")?;
+    let yaml = render_legacy(&servers, &state.profiles)?;
     if !servers.is_empty() {
-        validate_candidate_with_shoes(&yaml, Path::new(utils::CONFIG_DIR)).await?;
+        validate_candidate_with_shoes(&yaml.aggregate, directory).await?;
     }
-    commit_managed(config_path, state_path, &servers, &state)?;
-    drop(lock);
+    commit_prepared(directory, &yaml, &state, &rollback)?;
     Ok(true)
 }
 
@@ -2406,8 +2410,10 @@ pub(crate) fn prepare_managed_snapshot(directory: &Path) -> Result<bool> {
     if !state_path.exists() {
         return Ok(false);
     }
-    let state = load_state_from(&state_path)?;
-    let servers = load_servers(&config_path)?;
+    let snapshot = ManagedYaml::load(directory)?;
+    let state = snapshot.state(true)?;
+    snapshot.guard_legacy(&state.profiles)?;
+    let servers = snapshot.servers;
     ensure_servers_match_state(&servers, &state.profiles).context("备份内容不一致")?;
     ensure_chain_proxy_matches_state(&servers, &state).context("备份内容不一致")?;
     ensure_chain_proxy_has_no_direct_udp_path(&state).context("备份内容不安全")?;
@@ -2725,16 +2731,24 @@ pub fn load_state() -> Result<ManagedState> {
 }
 
 fn load_state_from(path: &Path) -> Result<ManagedState> {
-    let mut state = load_state_before_socks5_migration(path)?;
+    finish_state_load(load_state_before_socks5_migration(path)?, |state| {
+        let servers = load_servers(&path.with_file_name("config.yaml"))
+            .context("迁移 SOCKS5 监听地址需要原有聚合配置；请恢复 config.yaml 后重试")?;
+        socks5::migrate_listen(state, &servers)
+    })
+}
+
+fn finish_state_load(
+    mut state: ManagedState,
+    migrate_listen: impl FnOnce(&mut ManagedState) -> Result<()>,
+) -> Result<ManagedState> {
     if state.profiles.iter().any(|profile| {
         matches!(
             profile.credentials,
             Credentials::Socks5 { listen: None, .. }
         )
     }) {
-        let servers = load_servers(&path.with_file_name("config.yaml"))
-            .context("迁移 SOCKS5 监听地址需要原有聚合配置；请恢复 config.yaml 后重试")?;
-        socks5::migrate_listen(&mut state, &servers)?;
+        migrate_listen(&mut state)?;
     }
     for profile in &state.profiles {
         profile.validate_socks5_listen()?;
@@ -2743,14 +2757,17 @@ fn load_state_from(path: &Path) -> Result<ManagedState> {
 }
 
 fn load_state_before_socks5_migration(path: &Path) -> Result<ManagedState> {
-    let json = fs::read_to_string(path)
-        .with_context(|| format!("读取管理状态 {} 失败", path.display()))?;
-    let mut state: ManagedState = serde_json::from_str(&json).context("管理状态 JSON 已损坏")?;
+    let json = fs::read(path).with_context(|| format!("读取管理状态 {} 失败", path.display()))?;
+    parse_state(&json)
+}
+
+fn parse_state(json: &[u8]) -> Result<ManagedState> {
+    let mut state: ManagedState = serde_json::from_slice(json).context("管理状态 JSON 已损坏")?;
     if !matches!(state.schema_version, 1 | 2) {
         bail!("不支持的管理状态版本 {}", state.schema_version);
     }
     state.schema_version = 2;
-    let has_v2_chain_state = serde_json::from_str::<serde_json::Value>(&json)
+    let has_v2_chain_state = serde_json::from_slice::<serde_json::Value>(json)
         .ok()
         .is_some_and(|value| {
             value
@@ -2783,25 +2800,16 @@ pub(crate) async fn update_chain_proxy_locked(
     lock: utils::ExclusiveLock,
 ) -> Result<ChainProxyUpdateResult> {
     utils::require_linux_root()?;
-    utils::ensure_directory(Path::new(utils::CONFIG_DIR), 0o700)?;
-    let config_path = Path::new(utils::CONFIG_FILE);
-    let state_path = Path::new(utils::STATE_FILE);
-    let mut state = load_state_for_update()?;
-    let mut servers = if config_path.exists() {
-        load_servers(config_path)?
-    } else {
-        Vec::new()
-    };
-    ensure_servers_match_state(&servers, &state.profiles)
-        .context("配置文件与管理状态不一致，已拒绝修改链式代理")?;
+    update_chain_proxy_at(Path::new(utils::CONFIG_DIR), change, lock).await
+}
+
+async fn update_chain_proxy_at(
+    directory: &Path,
+    change: ChainProxyChange,
+    lock: utils::ExclusiveLock,
+) -> Result<ChainProxyUpdateResult> {
+    let (mut servers, mut state, rollback, _) = ManagedYaml::load(directory)?.into_legacy(false)?;
     ensure_chain_proxy_matches_state(&servers, &state)?;
-    let rollback = ManagedRollback {
-        config: read_optional(config_path)?,
-        state: read_optional(state_path)?,
-        profiles: ProfileDirectorySnapshot::capture(Path::new(utils::PROFILES_DIR))?,
-        generated_certificate: None,
-        generated_certificate_key: None,
-    };
     let old_rules = servers
         .iter()
         .map(|server| server.rules.clone())
@@ -2814,12 +2822,13 @@ pub(crate) async fn update_chain_proxy_locked(
         .map(|server| server.rules.clone())
         .collect::<Vec<_>>()
         != old_rules;
-    let yaml = crate::yaml::to_string(&servers).context("序列化链式代理配置失败")?;
+    let yaml = render_legacy(&servers, &state.profiles)?;
     if !servers.is_empty() {
-        validate_yaml(&yaml)?;
-        validate_candidate_with_shoes(&yaml, Path::new(utils::CONFIG_DIR)).await?;
+        validate_yaml(&yaml.aggregate)?;
+        validate_candidate_with_shoes(&yaml.aggregate, directory).await?;
     }
-    commit_managed(config_path, state_path, &servers, &state)?;
+    utils::ensure_directory(directory, 0o700)?;
+    commit_prepared(directory, &yaml, &state, &rollback)?;
     let profiles_count = state.profiles.len();
     Ok(ChainProxyUpdateResult {
         state,
@@ -2835,32 +2844,33 @@ pub(crate) async fn delete_profile_locked(
     lock: utils::ExclusiveLock,
 ) -> Result<DeletionResult> {
     utils::require_linux_root()?;
-    let mut state = load_state()?;
+    delete_profile_at(Path::new(utils::CONFIG_DIR), id, lock, true).await
+}
+
+async fn delete_profile_at(
+    directory: &Path,
+    id: Uuid,
+    lock: utils::ExclusiveLock,
+    validate_with_shoes: bool,
+) -> Result<DeletionResult> {
+    let mut snapshot = ManagedYaml::load(directory)?;
+    let mut state = snapshot.state(true)?;
+    snapshot.check_copies(&state.profiles)?;
     let index = state
         .profiles
         .iter()
         .position(|profile| profile.id == id)
         .with_context(|| format!("未找到配置 {id}"))?;
-    let config_path = Path::new(utils::CONFIG_FILE);
-    let mut servers = load_servers(config_path)?;
-    ensure_servers_match_state(&servers, &state.profiles)
+    ensure_servers_match_state(&snapshot.servers, &state.profiles)
         .context("配置文件与管理状态不一致，已拒绝删除")?;
-    ensure_chain_proxy_matches_state(&servers, &state)?;
-    let rollback = ManagedRollback {
-        config: read_optional(config_path)?,
-        state: read_optional(Path::new(utils::STATE_FILE))?,
-        profiles: ProfileDirectorySnapshot::capture(Path::new(utils::PROFILES_DIR))?,
-        generated_certificate: None,
-        generated_certificate_key: None,
-    };
-    servers.remove(index);
+    ensure_chain_proxy_matches_state(&snapshot.servers, &state)?;
+    snapshot.remove(index);
     let profile = state.profiles.remove(index);
-    let yaml = crate::yaml::to_string(&servers).context("序列化更新后配置失败")?;
-    if !servers.is_empty() {
-        validate_yaml(&yaml)?;
-        validate_candidate_with_shoes(&yaml, Path::new(utils::CONFIG_DIR)).await?;
+    let (yaml, rollback) = snapshot.prepare(&state.profiles)?;
+    if !state.profiles.is_empty() && validate_with_shoes {
+        validate_candidate_with_shoes(&yaml.aggregate, directory).await?;
     }
-    commit_managed(config_path, Path::new(utils::STATE_FILE), &servers, &state)?;
+    commit_prepared(directory, &yaml, &state, &rollback)?;
 
     Ok(DeletionResult {
         profile,
