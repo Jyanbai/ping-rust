@@ -123,8 +123,9 @@ async fn sigterm_does_not_interrupt_socks5_rollback() {
         let result = commit_with_signal_protection(move || {
             plan.commit(&path, |profile| {
                 if profile.socks5_loopback().is_some() {
-                    assert!(Command::new("kill")
-                        .args(["-TERM", &std::process::id().to_string()])
+                    assert!(Command::new("/bin/sh")
+                        .args(["-c", "kill -s TERM \"$1\"", "sh"])
+                        .arg(std::process::id().to_string())
                         .status()
                         .unwrap()
                         .success());
@@ -157,6 +158,8 @@ async fn sigterm_does_not_interrupt_socks5_rollback() {
             "--nocapture",
         ])
         .env(CHILD, path)
+        // Reproduce a minimal container without an external kill executable.
+        .env("PATH", path)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -175,7 +178,7 @@ async fn sigterm_does_not_interrupt_socks5_rollback() {
     drop(child.stdin.take());
     let status = child.wait().unwrap();
     let log = log.join().unwrap();
-    assert!(snapshot() == before, "SIGTERM 导致配置未完整回滚");
+    assert!(snapshot() == before, "SIGTERM 导致配置未完整回滚：{log}");
     assert_eq!(signal_received, Ok(true), "{log}");
     assert_eq!(status.code(), Some(143));
     assert!(log.contains("原配置已恢复"), "{log}");
