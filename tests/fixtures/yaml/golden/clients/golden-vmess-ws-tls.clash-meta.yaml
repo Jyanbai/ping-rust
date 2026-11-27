@@ -2,7 +2,7 @@ proxies:
 - alpn:
   - http/1.1
   alterId: 0
-  cipher: auto
+  cipher: aes-128-gcm
   client-fingerprint: chrome
   name: golden-vmess-ws-tls
   network: ws
