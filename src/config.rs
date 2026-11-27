@@ -924,7 +924,13 @@ pub(crate) async fn migrate_managed_config_with_binary(
     binary: &Path,
 ) -> Result<ConfigMigrationResult> {
     utils::require_linux_root()?;
-    let directory = Path::new(utils::CONFIG_DIR);
+    migrate_managed_config_at(Path::new(utils::CONFIG_DIR), binary).await
+}
+
+async fn migrate_managed_config_at(
+    directory: &Path,
+    binary: &Path,
+) -> Result<ConfigMigrationResult> {
     let (mut servers, state, rollback, _) = ManagedYaml::load(directory)?.into_legacy(true)?;
     if state.chain_proxy.enabled {
         apply_chain_proxy_rules(&mut servers, &state);
@@ -1116,7 +1122,7 @@ async fn generate_inner_with_lock(
         apply_chain_proxy_rules(std::slice::from_mut(&mut server), &state);
     }
     let rollback = if let Some(mut snapshot) = snapshot {
-        snapshot.append(server)?;
+        snapshot.append(server, state.chain_proxy.enabled)?;
         let (yaml, mut rollback) = snapshot.prepare(&state.profiles)?;
         if validate_with_shoes {
             validate_candidate_with_shoes(&yaml.aggregate, parent).await?;
@@ -2391,16 +2397,20 @@ async fn ensure_profile_files_at(directory: &Path) -> Result<bool> {
     if !config_path.exists() && !state_path.exists() {
         return Ok(false);
     }
-    let (servers, state, rollback, complete) = ManagedYaml::load(directory)?.into_legacy(true)?;
-    ensure_chain_proxy_matches_state(&servers, &state)?;
+    let mut snapshot = ManagedYaml::load(directory)?;
+    let state = snapshot.state(true)?;
+    let complete = snapshot.check_copies(&state.profiles)?;
+    ensure_servers_match_state(&snapshot.servers, &state.profiles)?;
+    ensure_chain_proxy_matches_state(&snapshot.servers, &state)?;
     if complete && !socks5::listen_migration_pending(state_path)? {
         return Ok(false);
     }
-    let yaml = render_legacy(&servers, &state.profiles)?;
-    if !servers.is_empty() {
+    snapshot.ensure_lossless_legacy_write()?;
+    let yaml = render_legacy(&snapshot.servers, &state.profiles)?;
+    if !snapshot.servers.is_empty() {
         validate_candidate_with_shoes(&yaml.aggregate, directory).await?;
     }
-    commit_prepared(directory, &yaml, &state, &rollback)?;
+    commit_prepared(directory, &yaml, &state, snapshot.rollback_mut())?;
     Ok(true)
 }
 

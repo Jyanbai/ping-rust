@@ -107,14 +107,42 @@ impl ManagedYaml {
 
     pub(super) fn guard_legacy(&self, profiles: &[ManagedProfile]) -> Result<bool> {
         let complete = self.check_copies(profiles)?;
-        if yaml::to_value(&self.servers)?.as_array() != Some(&self.entries) {
-            bail!("{LOSSY_WRITE}");
-        }
+        self.ensure_lossless_legacy_write()?;
         Ok(complete)
     }
 
-    pub(super) fn append(&mut self, server: ServerConfig) -> Result<()> {
-        self.entries.push(yaml::to_value(&server)?);
+    pub(super) fn ensure_lossless_legacy_write(&self) -> Result<()> {
+        if self.entries.len() != self.servers.len() {
+            bail!("{LOSSY_WRITE}");
+        }
+        for (entry, server) in self.entries.iter().zip(&self.servers) {
+            let modeled = yaml::to_value(server)?;
+            if entry == &modeled {
+                continue;
+            }
+            let mut normalized = entry.clone();
+            if let Some(rules) = normalized.get_mut("rules") {
+                normalize_rule_aliases(rules);
+            }
+            if normalized != modeled {
+                bail!("{LOSSY_WRITE}");
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn append(&mut self, server: ServerConfig, rerender_rules: bool) -> Result<()> {
+        let entry = yaml::to_value(&server)?;
+        if rerender_rules {
+            for (existing, previous) in self.entries.iter_mut().zip(&mut self.servers) {
+                let before = yaml::to_value(&previous.rules)?;
+                let rules = &mut existing["rules"];
+                normalize_rule_aliases(rules);
+                patch(rules, &before, &entry["rules"], "rules")?;
+                previous.rules.clone_from(&server.rules);
+            }
+        }
+        self.entries.push(entry);
         self.servers.push(server);
         self.changed = true;
         Ok(())
@@ -172,6 +200,18 @@ impl ManagedYaml {
             },
             self.original,
         ))
+    }
+}
+
+fn normalize_rule_aliases(rules: &mut Value) {
+    if let Some(rules) = rules.as_array_mut() {
+        for rule in rules.iter_mut().filter_map(Value::as_object_mut) {
+            if !rule.contains_key("client_chains") {
+                if let Some(client) = rule.remove("client_chain") {
+                    rule.insert("client_chains".to_owned(), client);
+                }
+            }
+        }
     }
 }
 

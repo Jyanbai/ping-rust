@@ -215,6 +215,148 @@ async fn conflicting_profile_copies_are_refused_without_exposing_values() {
 }
 
 #[tokio::test]
+async fn legacy_singular_client_chain_can_be_migrated() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path();
+    let (mut server, profile) = tests::reality_server_and_profile(53453);
+    let node = crate::chain_proxy::parse_share_uri("socks5://proxy.example.com:1080#old").unwrap();
+    server.rules = chain_rules(&node.client);
+    let expected = crate::yaml::to_value(&server).unwrap();
+    let mut legacy = expected.clone();
+    let rule = legacy["rules"][0].as_object_mut().unwrap();
+    let client = rule.remove("client_chains").unwrap();
+    rule.insert("client_chain".to_owned(), client);
+    fs::create_dir(path.join("profiles")).unwrap();
+    let profile_path = profile_file(path, &profile);
+    write_yaml(&profile_path, &legacy);
+    write_yaml(&path.join("config.yaml"), &[&legacy]);
+    let state_path = path.join("ping-rust-state.json");
+    fs::write(
+        &state_path,
+        serde_json::to_vec(&json!({
+            "schema_version": 1,
+            "profiles": [profile],
+            "chain_proxy": {"enabled": true, "active_node": node.id, "nodes": [node]}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let before = hashes(path);
+    assert!(!ensure_profile_files_at(path).await.unwrap());
+    assert_eq!(hashes(path), before);
+
+    let (servers, state, _, complete) = ManagedYaml::load(path).unwrap().into_legacy(true).unwrap();
+    assert!(complete);
+    assert!(state.chain_proxy.legacy_layout);
+    assert!(crate::yaml::to_value(&servers[0]).unwrap() == expected);
+
+    #[cfg(unix)]
+    {
+        let binary = path.join("mock-shoes");
+        utils::atomic_write(
+            &binary,
+            b"#!/bin/sh\ntest \"$1\" = --dry-run && grep -q 'client_chains:' \"$2\" && ! grep -q 'client_chain:' \"$2\"\n",
+            0o700,
+        )
+        .unwrap();
+        migrate_managed_config_at(path, &binary)
+            .await
+            .unwrap()
+            .finish();
+        assert!(read_entries(path) == [expected.clone()]);
+        assert!(read_yaml::<Value>(&profile_path) == expected);
+        assert!(
+            load_state_from(&state_path)
+                .unwrap()
+                .chain_proxy
+                .legacy_layout
+        );
+    }
+
+    legacy["rules"][0]["hand_added"] = json!({"nested": MARKER});
+    write_yaml(&profile_path, &legacy);
+    write_yaml(&path.join("config.yaml"), &[&legacy]);
+    let before = hashes(path);
+    let result = ManagedYaml::load(path).unwrap().into_legacy(true);
+    assert_refused_without_writes(result.err().unwrap(), path, &before);
+}
+
+#[tokio::test]
+async fn managed_add_migrates_legacy_wildcard_rules_for_every_node() {
+    use crate::chain_proxy::{RouteTarget, RoutingRule};
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path();
+    let (mut state, mut entries) = write_fixture(path).await;
+    state.chain_proxy.enabled = true;
+    state.chain_proxy.rules.push(RoutingRule {
+        id: Uuid::new_v4(),
+        name: "wildcard".to_owned(),
+        enabled: true,
+        masks: vec!["*.example.com".to_owned()],
+        target: RouteTarget::Direct,
+    });
+    let legacy = crate::yaml::to_value(render_legacy_rules(&state.chain_proxy)).unwrap();
+    assert_eq!(legacy[0]["masks"], "*.example.com");
+    for (entry, profile) in entries.iter_mut().zip(&state.profiles) {
+        entry["rules"] = legacy.clone();
+        write_yaml(&profile_file(path, profile), entry);
+    }
+    write_yaml(&path.join("config.yaml"), &entries);
+    save_state_to(&path.join("ping-rust-state.json"), &state).unwrap();
+
+    let added = generate_inner_with_lock(socks5_request(path, 3080), false, Some(lock(path)), path)
+        .await
+        .unwrap();
+    let actual = read_entries(path);
+    assert_eq!(actual.len(), entries.len() + 1);
+    let expected_rules = crate::yaml::to_value(render_rules(&state.chain_proxy)).unwrap();
+    assert_eq!(
+        expected_rules[0]["masks"]["domain_pattern"],
+        json!(["*.example.com"])
+    );
+    for (entry, profile) in actual
+        .iter()
+        .zip(state.profiles.iter().chain([&added.profile]))
+    {
+        assert_eq!(entry["rules"], expected_rules);
+        assert!(read_yaml::<Value>(&profile_file(path, profile)) == *entry);
+    }
+    for (mut original, migrated) in entries.into_iter().zip(actual) {
+        original["rules"] = expected_rules.clone();
+        assert!(original == migrated);
+    }
+}
+
+#[tokio::test]
+async fn current_profile_copies_with_unmodeled_fields_need_no_writes() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path();
+    let (_, entries) = write_fixture(path).await;
+    assert!(entries[0]["protocol"].get("encryption_limits").is_some());
+    let state_path = path.join("ping-rust-state.json");
+    save_state_to(&state_path, &load_state_from(&state_path).unwrap()).unwrap();
+    assert!(!socks5::listen_migration_pending(&state_path).unwrap());
+
+    let before = hashes(path);
+    let timestamp = std::time::UNIX_EPOCH + std::time::Duration::from_secs(946_684_800);
+    for file in before.keys() {
+        fs::OpenOptions::new()
+            .write(true)
+            .open(file)
+            .unwrap()
+            .set_modified(timestamp)
+            .unwrap();
+    }
+    assert!(!ensure_profile_files_at(path).await.unwrap());
+    assert_eq!(hashes(path), before);
+    for file in before.keys() {
+        assert_eq!(fs::metadata(file).unwrap().modified().unwrap(), timestamp);
+    }
+}
+
+#[tokio::test]
 async fn legacy_chain_and_profile_migration_refuse_unmodeled_fields() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path();
@@ -223,6 +365,7 @@ async fn legacy_chain_and_profile_migration_refuse_unmodeled_fields() {
     let before = hashes(path);
     let result = update_chain_proxy_at(path, ChainProxyChange::SetRules(Vec::new()), lock).await;
     assert_refused_without_writes(result.err().unwrap(), path, &before);
+    assert!(socks5::listen_migration_pending(&path.join("ping-rust-state.json")).unwrap());
     let error = ensure_profile_files_at(path).await.unwrap_err();
     assert_refused_without_writes(error, path, &before);
     let migration = ManagedYaml::load(path).unwrap().into_legacy(true);
