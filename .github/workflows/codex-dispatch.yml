@@ -518,7 +518,6 @@ jobs:
             echo '::group::Codex 失败归类'
             python3 - "$log" "$messages" <<'PY' 2>/dev/null || echo 'unknown'
           import sys
-          from pathlib import Path
           MAX_FILE = 64 * 1024
           MAX_LINE = 4 * 1024
           LABELS = (
@@ -606,11 +605,13 @@ jobs:
               return "".join(out)
           def load(path):
               try:
-                  data = Path(path).read_bytes()
+                  with open(path, "rb") as handle:
+                      handle.seek(0, 2)
+                      size = handle.tell()
+                      handle.seek(max(0, size - MAX_FILE))
+                      data = handle.read()
               except OSError:
                   return []
-              if len(data) > MAX_FILE:
-                  data = data[-MAX_FILE:]
               data = data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
               lines = []
               for line in strip_ansi(data.decode("utf-8", "replace")).split("\n"):

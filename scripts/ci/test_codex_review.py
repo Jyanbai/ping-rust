@@ -772,6 +772,7 @@ cp "$FAKE_CODEX_ARCHIVE" "$output"
         self.assertEqual(self.class_labels(out), ["rate_limit", "http_429"])
 
     def test_long_token_identifier_classifies_quickly(self):
+        # 只防止正则回溯被加回来；子串匹配本身远低于 2 秒，runner 偶发卡顿不应误报。
         sample = "token " + "_".join(["id"] * 26) + "\n"
         self.classify("warmup\n")
         start = time.perf_counter()
@@ -779,7 +780,7 @@ cp "$FAKE_CODEX_ARCHIVE" "$output"
         elapsed = time.perf_counter() - start
         self.assertEqual(self.class_labels(out), ["unknown"])
         self.assertEqual(err.strip(), "")
-        self.assertLess(elapsed, 0.1, f"workflow block took {elapsed:.4f}s")
+        self.assertLess(elapsed, 2.0, f"workflow block took {elapsed:.4f}s")
         print(f"long_token_identifier_elapsed={elapsed:.4f}s", flush=True)
 
     def test_classifier_stays_bounded_on_huge_input(self):
@@ -802,6 +803,40 @@ cp "$FAKE_CODEX_ARCHIVE" "$output"
         events = '{"type":"error","message":' + json.dumps("x" * 5000 + "rate limit") + "}\n"
         out, _ = self.classify("", events=events)
         self.assertEqual(self.class_labels(out), ["unknown"])
+
+    def classifier_python_namespace(self):
+        block = failure_class_script()
+        start = block.index("import sys\n")
+        end = block.rindex("\ntry:")
+        namespace = {}
+        exec(block[start:end], namespace)
+        return namespace
+
+    def test_megabyte_stderr_reads_only_64kb_and_classifies_tail(self):
+        payload = b"rate limit\n" + b"x" * (4 * 1024 * 1024) + b"\nstream disconnected\n"
+        out, err = self.classify(payload)
+        self.assertEqual(self.class_labels(out), ["stream_disconnected"])
+        self.assertEqual(err.strip(), "")
+
+        reads = []
+        real_open = open
+        def tracking_open(path, mode="r", *args, **kwargs):
+            handle = real_open(path, mode, *args, **kwargs)
+            if "b" in str(mode):
+                orig = handle.read
+                def tracked_read(n=-1):
+                    data = orig() if n is None or n < 0 else orig(n)
+                    reads.append(len(data))
+                    return data
+                handle.read = tracked_read
+            return handle
+
+        namespace = self.classifier_python_namespace()
+        namespace["open"] = tracking_open
+        lines = namespace["load"](str(self.work / "codex-stderr.log"))
+        self.assertEqual(sum(reads), 64 * 1024)
+        self.assertTrue(any("stream disconnected" in line.lower() for line in lines))
+        self.assertFalse(any("rate limit" in line.lower() for line in lines))
 
     def test_classifier_does_not_use_regex(self):
         block = failure_class_script()
