@@ -144,36 +144,61 @@ jobs:
         if: steps.target.outputs.review == 'true'
         shell: bash
         env:
-          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
+          # CODEX_PROVIDER=cpa（默认）时 CODEX_AUTH_JSON 不传入本步骤；chatgpt 时 CPA 密钥不传入。
+          CODEX_PROVIDER: ${{ vars.CODEX_PROVIDER }}
+          CODEX_AUTH_JSON: ${{ vars.CODEX_PROVIDER == 'chatgpt' && secrets.CODEX_AUTH_JSON || '' }}
+          CODEX_CPA_API_KEY: ${{ (vars.CODEX_PROVIDER || 'cpa') == 'cpa' && secrets.CODEX_CPA_API_KEY || '' }}
+          CODEX_API_BASE_URL: ${{ vars.CODEX_API_BASE_URL }}
+          CODEX_MODEL: ${{ vars.CODEX_REVIEW_MODEL || vars.CODEX_MODEL }}
+          CODEX_REASONING_EFFORT: ${{ vars.CODEX_REASONING_EFFORT }}
         run: |
           set -euo pipefail
           umask 077
-          [ -n "$CODEX_AUTH_JSON" ] || { echo '::error::缺少 environment codex 的 CODEX_AUTH_JSON'; exit 1; }
+          provider="${CODEX_PROVIDER:-cpa}"
+          case "$provider" in
+            cpa|chatgpt) ;;
+            *) echo '::error::CODEX_PROVIDER 只能是 cpa 或 chatgpt'; exit 1 ;;
+          esac
+          [ -z "${CODEX_CPA_API_KEY:-}" ] || printf '::add-mask::%s\n' "$CODEX_CPA_API_KEY"
+          # base_url 不是 secret，但也不进公开日志。
+          if [ "$provider" = cpa ] && [ -n "${CODEX_API_BASE_URL:-}" ]; then
+            printf '::add-mask::%s\n' "$CODEX_API_BASE_URL"
+          fi
           review_home="$RUNNER_TEMP/codex-home"
           mkdir -p "$review_home"
-          printf '%s' "$CODEX_AUTH_JSON" > "$review_home/auth.json"
-          jq -e '.auth_mode == "chatgpt" and ((.tokens.refresh_token // "") != "")' \
-            "$review_home/auth.json" >/dev/null
-          {
-            printf 'cli_auth_credentials_store = "file"\n'
-            printf 'approval_policy = "never"\nweb_search = "disabled"\nproject_doc_max_bytes = 0\n'
-            printf 'default_permissions = "review"\n\n'
-            printf '[permissions.review]\nextends = ":read-only"\n\n'
-            printf '[permissions.review.filesystem]\n"%s" = "deny"\n\n' "$RUNNER_TEMP"
-            printf '[permissions.review.network]\nenabled = false\n'
-          } > "$review_home/config.toml"
+          if [ "$provider" = chatgpt ]; then
+            [ -n "$CODEX_AUTH_JSON" ] || { echo '::error::缺少 environment codex 的 CODEX_AUTH_JSON'; exit 1; }
+            printf '%s' "$CODEX_AUTH_JSON" > "$review_home/auth.json"
+            jq -e '.auth_mode == "chatgpt" and ((.tokens.refresh_token // "") != "")' \
+              "$review_home/auth.json" >/dev/null
+          fi
+          # config.toml 由默认分支的共用脚本生成（policy/ 是 main 的检出，不执行 PR 里的脚本）。
+          python3 policy/scripts/ci/codex_provider_config.py --flow review --provider "$provider" \
+            --home "$review_home" --runner-temp "$RUNNER_TEMP"
           echo "CODEX_HOME=$review_home" >> "$GITHUB_ENV"
-          sha256sum "$review_home/auth.json" | cut -d' ' -f1 > "$RUNNER_TEMP/auth.seed.sha256"
-          jq -r '.tokens // {} | .[] | strings | select(length >= 16)' \
-            "$review_home/auth.json" > "$RUNNER_TEMP/seed-tokens.txt"
-          while IFS= read -r token; do printf '::add-mask::%s\n' "$token"; done < "$RUNNER_TEMP/seed-tokens.txt"
+          echo "CODEX_PROVIDER_RESOLVED=$provider" >> "$GITHUB_ENV"
+          if [ "$provider" = chatgpt ]; then
+            sha256sum "$review_home/auth.json" | cut -d' ' -f1 > "$RUNNER_TEMP/auth.seed.sha256"
+            jq -r '.tokens // {} | .[] | strings | select(length >= 16)' \
+              "$review_home/auth.json" > "$RUNNER_TEMP/seed-tokens.txt"
+            while IFS= read -r token; do printf '::add-mask::%s\n' "$token"; done < "$RUNNER_TEMP/seed-tokens.txt"
+          else
+            : > "$RUNNER_TEMP/seed-tokens.txt"
+          fi
+          echo "provider=$provider" >> "$GITHUB_OUTPUT"
           echo 'ok=true' >> "$GITHUB_OUTPUT"
 
       - name: Verify read-only sandbox
         if: steps.auth.outputs.ok == 'true'
         shell: bash
+        env:
+          CODEX_CPA_API_KEY: ${{ steps.auth.outputs.provider == 'cpa' && secrets.CODEX_CPA_API_KEY || '' }}
         run: |
           set -euo pipefail
+          [ -z "${CODEX_CPA_API_KEY:-}" ] || printf '::add-mask::%s\n' "$CODEX_CPA_API_KEY"
+          # chatgpt 时探测登录文件；cpa 时没有 auth.json，探测 config.toml，并确认沙箱里读不到 CPA 密钥。
+          secret_file="$CODEX_HOME/auth.json"
+          [ "${CODEX_PROVIDER_RESOLVED:-chatgpt}" != cpa ] || secret_file="$CODEX_HOME/config.toml"
           # 与已有 Codex Dispatch 一致，只调整一次性 GitHub runner 的 namespace 限制。
           if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
             sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns=0
@@ -187,6 +212,7 @@ jobs:
             test -r work/Cargo.toml
             fail=0
             if cat "$1" >/dev/null 2>&1; then echo "凭据文件可读"; fail=1; fi
+            if [ -n "${CODEX_CPA_API_KEY:-}" ]; then echo "沙箱里能读到 CODEX_CPA_API_KEY"; fail=1; fi
             if ls "$2" >/dev/null 2>&1; then echo "RUNNER_TEMP 可列出"; fail=1; fi
             if touch work/.codex-review-write-probe 2>/dev/null; then echo "PR 工作区可写"; fail=1; fi
             if curl -s --max-time 10 -o /dev/null https://github.com; then
@@ -196,15 +222,16 @@ jobs:
               echo "沙箱能访问外网（直连 IP）"; fail=1
             fi
             exit "$fail"
-          ' probe "$CODEX_HOME/auth.json" "$RUNNER_TEMP" "$ip"
+          ' probe "$secret_file" "$RUNNER_TEMP" "$ip"
 
       - name: Run Codex review
         if: steps.auth.outputs.ok == 'true'
         shell: bash
         env:
           BASE_SHA: ${{ steps.target.outputs.base_sha }}
-          CODEX_MODEL: ${{ vars.CODEX_MODEL }}
+          CODEX_MODEL: ${{ vars.CODEX_REVIEW_MODEL || vars.CODEX_MODEL }}
           CODEX_REASONING_EFFORT: ${{ vars.CODEX_REASONING_EFFORT }}
+          CODEX_CPA_API_KEY: ${{ steps.auth.outputs.provider == 'cpa' && secrets.CODEX_CPA_API_KEY || '' }}
         run: |
           set -euo pipefail
           git -C work cat-file -e "$BASE_SHA^{commit}"
@@ -262,10 +289,22 @@ jobs:
             [[ "$CODEX_REASONING_EFFORT" =~ ^[a-z]+$ ]] || exit 1
             args+=(-c "model_reasoning_effort=\"$CODEX_REASONING_EFFORT\"")
           fi
+          # cpa：Codex 只通过 env_key 从本步骤的环境变量读取密钥；启动前先登记遮蔽。
+          if [ "${CODEX_PROVIDER_RESOLVED:-}" = cpa ] && [ -z "${CODEX_CPA_API_KEY:-}" ]; then
+            echo '::error::environment codex 里没有环境级密钥 CODEX_CPA_API_KEY，已停止，不调用模型。'
+            exit 1
+          fi
+          [ -z "${CODEX_CPA_API_KEY:-}" ] || printf '::add-mask::%s\n' "$CODEX_CPA_API_KEY"
           rc=0
           codex "${args[@]}" - < "$RUNNER_TEMP/review-prompt.txt" \
             > "$RUNNER_TEMP/codex-events.jsonl" 2> "$RUNNER_TEMP/codex-stderr.log" || rc=$?
           echo "codex exit code: $rc"
+          if [ -n "${CODEX_CPA_API_KEY:-}" ] && [ -f "$RUNNER_TEMP/review.json" ] && \
+            grep -qF -e "$CODEX_CPA_API_KEY" "$RUNNER_TEMP/review.json"; then
+            echo '::error::审查输出包含 CPA 密钥，拒绝继续'
+            rm -f "$RUNNER_TEMP/review.json"
+            exit 1
+          fi
           # 完整输出不进入公开日志，也不作为 artifact 上传；失败时只打印归类标签，不打印 stderr 原文。
           if [ "$rc" -ne 0 ]; then
             echo '::error::Codex 审查失败，请检查登录状态或额度后手动重试'
@@ -274,7 +313,8 @@ jobs:
             # 的 turn.failed / error 事件（jq 只提取 message，且只读事件文件最后 64KB）。
             # 归类只做小写子串检查，不使用正则。各输入只看最后 64KB，单行超过 4KB 截断。
             # HTTP 状态码只在有上下文的写法中识别，例如 status 429、HTTP 429、
-            # HTTP status code: 429、unexpected status 429、429 Too Many Requests。
+            # HTTP status code: 429、unexpected status 429、429 Too Many Requests；
+            # CPA 的 api error 401、"status": 403 同样归为 auth_401_403。
             # 输出只由常量构成。
             log="$RUNNER_TEMP/codex-stderr.log"
             events="$RUNNER_TEMP/codex-events.jsonl"
@@ -320,6 +360,12 @@ jobs:
                   "rejected refresh token",
                   "refresh token reused",
                   "not signed in",
+                  # CPA（Responses API）的密钥错误写法；标签不变。
+                  "invalid api key",
+                  "incorrect api key",
+                  "api key invalid",
+                  "missing api key",
+                  "invalid authentication",
               )),
               ("stream_disconnected", (
                   "stream disconnected",
@@ -406,6 +452,9 @@ jobs:
                   f"status code: {c}",
                   f"status code:{c}",
                   f"status code {c}",
+                  f"api error {c}",
+                  f'"status": {c}',
+                  f'"status":{c}',
               )
           def classify(lines):
               hits = set()
@@ -487,6 +536,7 @@ jobs:
           NUMBER: ${{ steps.target.outputs.number }}
           HEAD_SHA: ${{ steps.target.outputs.head_sha }}
           BASE_SHA: ${{ steps.target.outputs.base_sha }}
+          CODEX_CPA_API_KEY: ${{ steps.auth.outputs.provider == 'cpa' && secrets.CODEX_CPA_API_KEY || '' }}
           REVIEW_RUN_ID: ${{ github.run_id }}
           REVIEW_RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
@@ -494,13 +544,21 @@ jobs:
           gh() { timeout 60s gh "$@"; }
           test -s "$RUNNER_TEMP/review.md"
           test "$(wc -c < "$RUNNER_TEMP/review.md")" -le 58000
-          jq -r '.tokens // {} | .[] | strings | select(length >= 16)' \
-            "$CODEX_HOME/auth.json" > "$RUNNER_TEMP/new-tokens.txt"
+          : > "$RUNNER_TEMP/new-tokens.txt"
+          # cpa 时没有 auth.json；chatgpt 时照旧检查刷新后的 token。
+          if [ "${CODEX_PROVIDER_RESOLVED:-chatgpt}" != cpa ]; then
+            jq -r '.tokens // {} | .[] | strings | select(length >= 16)' \
+              "$CODEX_HOME/auth.json" > "$RUNNER_TEMP/new-tokens.txt"
+          fi
           cat "$RUNNER_TEMP/seed-tokens.txt" "$RUNNER_TEMP/new-tokens.txt" \
             | sort -u > "$RUNNER_TEMP/all-tokens.txt"
           if [ -s "$RUNNER_TEMP/all-tokens.txt" ] && \
             grep -qF -f "$RUNNER_TEMP/all-tokens.txt" "$RUNNER_TEMP/review.md"; then
             echo '::error::审查输出包含登录凭据，拒绝发布'
+            exit 1
+          fi
+          if [ -n "${CODEX_CPA_API_KEY:-}" ] && grep -qF -e "$CODEX_CPA_API_KEY" "$RUNNER_TEMP/review.md"; then
+            echo '::error::审查输出包含 CPA 密钥，拒绝发布'
             exit 1
           fi
           current="$(gh api "repos/$REPO/pulls/$NUMBER")"
@@ -548,7 +606,8 @@ jobs:
           retention-days: 90
 
       - name: Persist refreshed auth
-        if: always() && steps.auth.outputs.ok == 'true'
+        # 只有 chatgpt 登录会刷新并写回 CODEX_AUTH_JSON；cpa 不读、不写它。
+        if: always() && steps.auth.outputs.ok == 'true' && steps.auth.outputs.provider == 'chatgpt'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.CODEX_BOT_TOKEN }}

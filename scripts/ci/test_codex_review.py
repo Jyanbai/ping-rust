@@ -767,6 +767,20 @@ cp "$FAKE_CODEX_ARCHIVE" "$output"
     def test_not_signed_in_wording(self):
         self.assert_classifies("Not signed in", ["auth_401_403"])
 
+    def test_cpa_401_403_wording_keeps_auth_label(self):
+        # 切到 CPA（Responses API）后的密钥错误写法；标签仍是 auth_401_403。
+        for workflow in (WORKFLOW, PLAN_WORKFLOW, DISPATCH_WORKFLOW):
+            for sample in (
+                "Error: api error 401",
+                "unexpected status 403: {\"error\": {\"code\": \"invalid_api_key\"}}",
+                '{"error": {"message": "Incorrect API key provided", "status": 401}}',
+                '{"status":403,"error":"denied"}',
+                "missing api key",
+                "invalid authentication",
+            ):
+                with self.subTest(workflow=workflow.name, sample=sample):
+                    self.assert_classifies(sample, ["auth_401_403"], workflow)
+
     def test_http_status_code_prefix(self):
         out, _ = self.classify("HTTP status code: 429\n")
         self.assertEqual(self.class_labels(out), ["rate_limit", "http_429"])

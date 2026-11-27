@@ -53,6 +53,20 @@ else:
 '''
 
 
+def render_config(flow, provider):
+    """用共用脚本生成一份 config.toml，供策略断言使用（不联网、不需要真实密钥）。"""
+    with tempfile.TemporaryDirectory() as temporary:
+        env = {**os.environ, "CODEX_API_BASE_URL": "https://cpa.example.test/v1",
+               "CODEX_MODEL": "gpt-test", "CODEX_REASONING_EFFORT": "high",
+               "CODEX_CPA_API_KEY": "fake-cpa-key-for-policy-test"}
+        result = subprocess.run(
+            ["python3", str(ROOT / "scripts/ci/codex_provider_config.py"), "--flow", flow,
+             "--provider", provider, "--home", temporary, "--runner-temp", "/tmp/runner-temp"],
+            env=env, text=True, capture_output=True, check=True)
+        assert result.returncode == 0, result.stdout
+        return (Path(temporary) / "config.toml").read_text(encoding="utf-8")
+
+
 def step_script(name):
     lines = WORKFLOW.read_text(encoding="utf-8").splitlines()
     start = lines.index(f"      - name: {name}")
@@ -118,15 +132,22 @@ class WorkflowPolicyTest(unittest.TestCase):
                     self.assertNotIn("${{", body)
 
     def test_model_runs_in_read_only_offline_sandbox_without_tokens(self):
-        self.assertIn('extends = ":read-only"', self.text)
-        self.assertIn("[permissions.plan.network]\\nenabled = false", self.text)
-        self.assertIn("project_doc_max_bytes = 0", self.text)
+        # config.toml 由共用脚本生成；cpa 与 chatgpt 的只读、断网权限必须相同。
+        self.assertIn("codex_provider_config.py --flow plan", self.text)
+        for provider in ("cpa", "chatgpt"):
+            with self.subTest(provider=provider):
+                config = render_config("plan", provider)
+                self.assertIn('[permissions.plan]\nextends = ":read-only"', config)
+                self.assertIn("[permissions.plan.network]\nenabled = false", config)
+                self.assertIn("project_doc_max_bytes = 0", config)
         self.assertIn("codex sandbox -P plan", self.text)
         run = step_script("Run Codex plan")
         self.assertNotIn("GH_TOKEN", run)
         block = self.text[self.text.index("      - name: Run Codex plan"):
                           self.text.index("      - name: Render plan")]
-        self.assertNotIn("secrets.", block)
+        # 模型步骤只拿得到 cpa 时 Codex 必需的 CPA 密钥，拿不到 GitHub token 或 ChatGPT 登录。
+        self.assertEqual(re.findall(r"secrets\.\w+", block), ["secrets.CODEX_CPA_API_KEY"])
+        self.assertIn("steps.auth.outputs.provider == 'cpa' && secrets.CODEX_CPA_API_KEY || ''", block)
         self.assertNotIn("github.token", block)
         # CODEX_BOT_TOKEN 只出现在写回刷新登录的步骤里。
         self.assertEqual(self.text.count("secrets.CODEX_BOT_TOKEN"), 1)
@@ -259,9 +280,38 @@ class PlanStepTest(unittest.TestCase):
         if days_ago is not None:
             when = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days_ago)
             auth["last_refresh"] = when.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-        self.env.update(CODEX_AUTH_JSON=json.dumps(auth), ALLOW_REFRESH=allow)
+        self.env.update(CODEX_PROVIDER="chatgpt", CODEX_AUTH_JSON=json.dumps(auth), ALLOW_REFRESH=allow)
         (self.work / "output").write_text("")
-        return self.run_step("Restore plan auth")
+        return self.run_restore()
+
+    def run_restore(self):
+        # Restore plan auth 从 work/（main 的精确检出）调用共用脚本。
+        script = self.work / "work/scripts/ci/codex_provider_config.py"
+        if not script.exists():
+            script.parent.mkdir(parents=True, exist_ok=True)
+            script.symlink_to(ROOT / "scripts/ci/codex_provider_config.py")
+        return self.run_step("Restore plan auth", cwd=self.work)
+
+    def test_cpa_restore_skips_chatgpt_login_and_refresh_guard(self):
+        secret = "fake-chatgpt-login-for-cpa-test"
+        key = "fake-cpa-key-for-plan-test"
+        self.env.update(CODEX_PROVIDER="", CODEX_AUTH_JSON=secret, CODEX_CPA_API_KEY=key,
+                        CODEX_API_BASE_URL="https://cpa.example.test/v1",
+                        CODEX_MODEL="gpt-test-astra", CODEX_REASONING_EFFORT="high")
+        (self.work / "output").write_text("")
+        result = self.run_restore()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("provider=cpa", self.output())
+        self.assertIn("ok=true", self.output())
+        self.assertFalse((self.work / "codex-home/auth.json").exists())
+        config = (self.work / "codex-home/config.toml").read_text()
+        self.assertIn('model = "gpt-test-astra"', config)
+        self.assertIn('env_key = "CODEX_CPA_API_KEY"', config)
+        self.assertNotIn(secret, config)
+        self.assertNotIn(key, config)
+        self.assertNotIn("cli_auth_credentials_store", config)
+        self.assertIn(f"::add-mask::{key}", result.stdout)
+        self.assertIn("CODEX_PROVIDER_RESOLVED=cpa", (self.work / "github_env").read_text())
 
     def test_recent_login_is_restored_read_only(self):
         result = self.restore_auth(days_ago=1)
