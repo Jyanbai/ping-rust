@@ -69,6 +69,20 @@ class ReleaseMetadataTest(unittest.TestCase):
         self.assertLess(notes.index("sudo ping-rust self-update"), notes.index("sudo ping-rust update"))
         self.assertNotIn("bero", notes)
 
+    def test_release_notes_only_upgrade_shoes_when_needed(self):
+        notes = (ROOT / "docs" / f"RELEASE_NOTES_v{VERSION}.md").read_text(encoding="utf-8")
+        upgrade = notes.split("## 升级与配置迁移\n", 1)[1].split("\n## ", 1)[0]
+        self.assertIn(
+            f"```bash\nsudo ping-rust self-update --version v{VERSION}\n```",
+            upgrade,
+        )
+        self.assertIn("已使用 shoes v0.3.7 时，只需更新 ping-rust", upgrade)
+        self.assertRegex(
+            upgrade,
+            r"仅在[^\n]*低于 v0\.3\.7[^\n]*确需升级[^\n]*\n\n"
+            r"```bash\nsudo ping-rust update --method release\n```",
+        )
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)

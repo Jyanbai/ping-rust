@@ -54,14 +54,22 @@ sudo prs socks5 secure <节点名称或 UUID> --local
 
 - 默认 shoes 版本为 **v0.3.7**。通配符路由规则在升级时自动迁移为 shoes v0.3.6 支持的格式；候选配置先验证，应用失败会回滚。
 - 新版 ping-rust 搭配旧 shoes 时，修改配置会提示先升级 shoes。
-- 升级顺序：先执行 `self-update` 更新 ping-rust，再执行 `update` 把 shoes 升级到 v0.3.7：
+
+先执行 `self-update` 更新 ping-rust：
 
 ```bash
 sudo ping-rust self-update --version v0.3.3
+```
+
+自更新成功后旧进程会退出。可用 `/usr/local/bin/shoes --version` 检查已安装的内核版本。已使用 shoes v0.3.7 时，只需更新 ping-rust；不要执行内核更新，以免重装同版本并重启共享的 `shoes.service`。
+
+仅在已安装的 shoes 低于 v0.3.7 且确需升级时，才在自更新成功后执行以下命令；升级会重启正在运行的 `shoes.service`，请安排维护窗口：
+
+```bash
 sudo ping-rust update --method release
 ```
 
-自更新成功后旧进程会退出，请重新运行 ping-rust，再执行第二条命令。安装了更新但未经验证的 shoes 版本时，请按工具提示决定是否显式允许降级。
+安装了更新但未经验证的 shoes 版本时，请按工具提示决定是否显式允许降级。
 
 ## VLESS-ENC 兼容要求
 
