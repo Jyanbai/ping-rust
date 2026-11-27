@@ -488,6 +488,23 @@ fn process_socket_inodes(pid: u32) -> Result<BTreeSet<u64>> {
 
 pub(crate) fn has_exclusive_tcp_listener(pid: u32, expected: SocketAddr) -> Result<bool> {
     let socket_inodes = process_socket_inodes(pid)?;
+    let (tcp, tcp6) = read_tcp_listener_tables(pid)?;
+    tcp_listeners_match(&tcp, &tcp6, &socket_inodes, expected)
+}
+
+pub(crate) fn tcp_listener_available_after_restart(pid: u32, expected: SocketAddr) -> Result<bool> {
+    let socket_inodes = process_socket_inodes(pid)?;
+    let (tcp, tcp6) = read_tcp_listener_tables(pid)?;
+    check_tcp_listeners(
+        &tcp,
+        &tcp6,
+        &socket_inodes,
+        expected,
+        TcpListenerCheck::AfterRestart,
+    )
+}
+
+fn read_tcp_listener_tables(pid: u32) -> Result<(String, String)> {
     // Both tables list all sockets in the process's network namespace. The fd
     // inodes identify the ones held by the target process.
     let tcp_path = format!("/proc/{pid}/net/tcp");
@@ -498,7 +515,7 @@ pub(crate) fn has_exclusive_tcp_listener(pid: u32, expected: SocketAddr) -> Resu
         Err(error) if error.kind() == ErrorKind::NotFound => String::new(),
         result => result.with_context(|| format!("读取 {tcp6_path} 失败"))?,
     };
-    tcp_listeners_match(&tcp, &tcp6, &socket_inodes, expected)
+    Ok((tcp, tcp6))
 }
 
 fn tcp_listeners_match(
@@ -507,6 +524,28 @@ fn tcp_listeners_match(
     socket_inodes: &BTreeSet<u64>,
     expected: SocketAddr,
 ) -> Result<bool> {
+    check_tcp_listeners(
+        tcp,
+        tcp6,
+        socket_inodes,
+        expected,
+        TcpListenerCheck::Exclusive,
+    )
+}
+
+enum TcpListenerCheck {
+    Exclusive,
+    AfterRestart,
+}
+
+fn check_tcp_listeners(
+    tcp: &str,
+    tcp6: &str,
+    socket_inodes: &BTreeSet<u64>,
+    expected: SocketAddr,
+    check: TcpListenerCheck,
+) -> Result<bool> {
+    let after_restart = matches!(check, TcpListenerCheck::AfterRestart);
     let expected_ip = match expected.ip() {
         IpAddr::V4(ip) => format!("{:08X}", u32::from_ne_bytes(ip.octets())),
         IpAddr::V6(ip) => {
@@ -545,6 +584,9 @@ fn tcp_listeners_match(
             .parse::<u64>()
             .context("TCP 监听的 socket inode 无效")?;
         let owned = socket_inodes.contains(&inode);
+        if owned && after_restart {
+            continue;
+        }
         let is_mapped = ip.starts_with(&ipv4_mapped_prefix);
         let wildcard = is_wildcard(ip);
         // A foreign native IPv6 bind cannot serve IPv4. An IPv6 wildcard may
@@ -566,7 +608,7 @@ fn tcp_listeners_match(
         }
         found = true;
     }
-    Ok(found)
+    Ok(found || after_restart)
 }
 
 fn listening_ports(pid: u32) -> Result<BTreeSet<u16>> {
@@ -1127,6 +1169,38 @@ mod tests {
             }
             assert!(!matches(row(&wildcard, 7001) + &row(&local, 7002), any));
         }
+    }
+
+    #[test]
+    fn proc_net_rejects_occupied_candidate_loopback_before_restart() {
+        let header = "sl local_address rem_address st tx_queue tr retrnsmt uid timeout inode";
+        let row = |octets, inode| {
+            let ip = u32::from_ne_bytes(octets);
+            format!("\n0: {ip:08X}:0438 00000000:0000 0A 0:0 0:0 0 0 0 {inode}")
+        };
+        let inodes = BTreeSet::from([7001]);
+        let target = "127.0.0.1:1080".parse().unwrap();
+        let available = |tcp: &str| {
+            check_tcp_listeners(tcp, header, &inodes, target, TcpListenerCheck::AfterRestart)
+                .unwrap()
+        };
+
+        let original = format!("{header}{}", row([203, 0, 113, 8], 7001));
+        let occupied = format!("{original}{}", row([127, 0, 0, 1], 7002));
+        assert!(tcp_listeners_match(
+            &occupied,
+            header,
+            &inodes,
+            "203.0.113.8:1080".parse().unwrap(),
+        )
+        .unwrap());
+        assert!(!available(&occupied));
+        assert!(available(&original));
+
+        let wildcard = format!("{header}{}", row([0, 0, 0, 0], 7001));
+        assert!(available(&wildcard));
+        let foreign_wildcard = format!("{original}{}", row([0, 0, 0, 0], 7002));
+        assert!(!available(&foreign_wildcard));
     }
 
     #[test]
