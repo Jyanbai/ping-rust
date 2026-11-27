@@ -267,7 +267,7 @@ class ReviewScriptsTest(unittest.TestCase):
 
     def prepare_review(self, text="未发现有充分证据的代码问题。", tokens=(), findings=()):
         (self.work / "review.md").write_text(text, encoding="utf-8")
-        (self.work / "review-scope.txt").write_text("审查范围：全量审查（本 PR 没有上一轮审查结论）。\n", encoding="utf-8")
+        (self.work / "review-scope.txt").write_text("审查范围：没有可核验的上一轮审查结论，执行全量审查。\n", encoding="utf-8")
         (self.work / "review.json").write_text(
             json.dumps({"summary": text, "findings": list(findings),
                         "review_complete": True, "read_check": READ_CHECK}), encoding="utf-8"

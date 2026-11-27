@@ -259,7 +259,7 @@ jobs:
           # 增量范围：prev 必须是当前 head 的祖先；force-push / rebase 后退回全量审查。
           scope=full
           if [ -z "${PREV_SHA:-}" ]; then
-            scope_note='审查范围：全量审查（本 PR 没有上一轮审查结论）。'
+            scope_note='审查范围：没有可核验的上一轮审查结论，执行全量审查。'
           else
             [[ "$PREV_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
             if git -C work cat-file -e "$PREV_SHA^{commit}" 2>/dev/null &&
