@@ -1,0 +1,435 @@
+name: Codex CPA Smoke
+
+# 可选的手动通道：验证 CI 里的 Codex CLI 能否通过第三方 CPA（Responses API）调用模型。
+# 现有 /codex、独立审查、CI 回修、规划仍走 ChatGPT 登录（CODEX_AUTH_JSON），本文件不改动那些工作流。
+# 只接受仓库所有者本人的 workflow_dispatch；重跑时还要校验 triggering_actor，不会在打开的 PR 上自动运行。
+#
+# CI 在 runner 上生成自己的 $CODEX_HOME/config.toml，供应商名只用 cpa（与本机 Codex 配置无关）。
+# 不写、不读、不回写 CODEX_AUTH_JSON。命令沙箱不能联网；模型请求在沙箱外发往 CPA。
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  NO_COLOR: '1'
+
+jobs:
+  smoke:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.actor == github.repository_owner &&
+      github.triggering_actor == github.repository_owner
+    # 并发组放在带准入条件的作业上：未获准的运行在作业级被跳过，不会进入这个组，也就不能取消所有者的自检。
+    concurrency:
+      group: codex-cpa-smoke
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+    environment: codex
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Admit owner operator
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          ACTOR: ${{ github.actor }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          # 作业级 if 已要求发起人和重跑者都是所有者；这里再校验一次当前操作者。
+          if [ "${EVENT_NAME}" != workflow_dispatch ]; then
+            echo '::error::只接受手动触发。'
+            exit 1
+          fi
+          if [ -z "${OWNER}" ] || [ "${ACTOR}" != "${OWNER}" ] || [ "${TRIGGERING_ACTOR}" != "${OWNER}" ]; then
+            echo '::error::只允许仓库所有者启动或重跑此自检。'
+            exit 1
+          fi
+
+      - name: Install pinned Codex CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          directory="$RUNNER_TEMP/codex-cli"
+          runtime="$HOME/.local/lib/codex-cpa-0.166.0"
+          mkdir -p "$directory" "$runtime"
+          curl --fail --location --retry 2 --connect-timeout 15 --max-time 180 \
+            --proto '=https' --tlsv1.2 --output "$directory/codex.tar.gz" \
+            https://github.com/openai/codex/releases/download/rust-v0.166.0/codex-package-x86_64-unknown-linux-musl.tar.gz
+          echo "1d44b28bc4ac9937d7d3532264baa68a507ce364956a0d4ebb856f331cdee254  $directory/codex.tar.gz" \
+            | sha256sum --check --strict
+          tar -xzf "$directory/codex.tar.gz" -C "$runtime"
+          test -f "$runtime/codex-package.json"
+          chmod 0755 "$runtime/bin/codex" "$runtime/bin/codex-code-mode-host" "$runtime/codex-path/rg"
+          if [ -f "$runtime/codex-resources/bwrap" ]; then chmod 0755 "$runtime/codex-resources/bwrap"; fi
+          "$runtime/bin/codex" --version
+          echo "$runtime/bin" >> "$GITHUB_PATH"
+
+      - name: Prepare CPA config
+        id: prep
+        shell: bash
+        env:
+          CODEX_CPA_API_KEY: ${{ secrets.CODEX_CPA_API_KEY }}
+          CODEX_API_BASE_URL: ${{ vars.CODEX_API_BASE_URL }}
+          CODEX_MODEL: ${{ vars.CODEX_MODEL }}
+          CODEX_REASONING_EFFORT: ${{ vars.CODEX_REASONING_EFFORT }}
+          GITHUB_TOKEN: ''
+          GH_TOKEN: ''
+        run: |
+          set -euo pipefail
+          umask 077
+          # 只接受 environment codex 的专名密钥；仓库/组织级 CODEX_API_KEY 不会传入本步骤。
+          if [ -z "${CODEX_CPA_API_KEY:-}" ]; then
+            echo '::error::environment codex 里没有环境级密钥 CODEX_CPA_API_KEY，已停止，不调用模型。仓库或组织级的 CODEX_API_KEY 不会被使用。请按 docs/CODEX_DISPATCH.md 在本机 PowerShell 设置：gh secret set CODEX_CPA_API_KEY --env codex --repo Jyanbai/ping-rust（密钥粘贴给 gh，不要发到聊天里）。不要在仓库或组织级创建同名 secret。'
+            exit 1
+          fi
+          # CLI 只从环境变量读取密钥，不写进文件。
+          CODEX_API_KEY="$CODEX_CPA_API_KEY"
+          export CODEX_API_KEY
+          printf '::add-mask::%s\n' "$CODEX_API_KEY"
+          # GitHub 会把同名仓库/组织 secret 合并进 secrets 上下文，工作流无法分辨来源。
+          echo '注意：CODEX_CPA_API_KEY 必须只在 environment codex 中设置；不要在仓库或组织级创建同名 secret，否则在环境密钥缺失时会把上层凭据发给 CPA。'
+
+          base="${CODEX_API_BASE_URL:-https://api.moio.cn/v1}"
+          base="${base%"${base##*[![:space:]]}"}"
+          base="${base#"${base%%[![:space:]]*}"}"
+          if [ -z "$base" ]; then
+            base='https://api.moio.cn/v1'
+          fi
+          # 只接受 https 基址，避免写入 config.toml 时注入其他配置。
+          base_re='^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._~/-]*)?$'
+          if ! [[ "$base" =~ $base_re ]]; then
+            echo '::error::CODEX_API_BASE_URL 必须是 https 基址（主机名、可选端口和路径），例如 https://api.moio.cn/v1'
+            exit 1
+          fi
+
+          model="${CODEX_MODEL:-gpt-6.2-sol}"
+          model_re='^[A-Za-z0-9][A-Za-z0-9._+-]*$'
+          if ! [[ "$model" =~ $model_re ]]; then
+            echo '::error::CODEX_MODEL 不是合法的模型名'
+            exit 1
+          fi
+
+          effort="${CODEX_REASONING_EFFORT:-high}"
+          effort_re='^[a-z]+$'
+          if ! [[ "$effort" =~ $effort_re ]]; then
+            echo '::error::CODEX_REASONING_EFFORT 只能是小写字母（如 high），当前值无效'
+            exit 1
+          fi
+
+          home="$RUNNER_TEMP/codex-home"
+          mkdir -p "$home"
+          # 密钥只通过 env_key 从环境变量读取，不写入任何会进日志的文件，也不写 auth.json。
+          {
+            printf 'model = "%s"\n' "$model"
+            printf 'model_provider = "cpa"\n'
+            printf 'model_reasoning_effort = "%s"\n' "$effort"
+            printf 'approval_policy = "never"\n'
+            printf 'web_search = "disabled"\n'
+            printf 'project_doc_max_bytes = 0\n'
+            printf 'default_permissions = "cpa-smoke"\n\n'
+            printf '[model_providers.cpa]\n'
+            printf 'name = "CPA"\n'
+            printf 'base_url = "%s"\n' "$base"
+            printf 'env_key = "CODEX_API_KEY"\n'
+            printf 'wire_api = "responses"\n\n'
+            printf '[permissions.cpa-smoke]\n'
+            printf 'extends = ":read-only"\n\n'
+            printf '[permissions.cpa-smoke.filesystem]\n'
+            printf '"%s" = "deny"\n\n' "$RUNNER_TEMP"
+            printf '[permissions.cpa-smoke.network]\nenabled = false\n\n'
+            # 默认 ignore_default_excludes = true，沙箱会继承 *KEY* 变量；这里必须关掉。
+            printf '[shell_environment_policy]\n'
+            printf 'inherit = "core"\n'
+            printf 'ignore_default_excludes = false\n'
+            printf 'exclude = ["CODEX_API_KEY", "GITHUB_TOKEN", "GH_TOKEN"]\n\n'
+            # 关掉 shell/命令工具（exec_command、write_stdin）：CPA 返回的工具调用不会被执行。
+            printf '[features]\nshell_tool = false\n'
+          } > "$home/config.toml"
+
+          if grep -Fqe "$CODEX_API_KEY" "$home/config.toml"; then
+            echo '::error::生成的 config.toml 含有 API 密钥，已停止。'
+            rm -f "$home/config.toml"
+            exit 1
+          fi
+
+          echo "CODEX_HOME=$home" >> "$GITHUB_ENV"
+          echo "CPA_MODEL=$model" >> "$GITHUB_ENV"
+          echo "CPA_EFFORT=$effort" >> "$GITHUB_ENV"
+          echo "CPA_BASE_URL=$base" >> "$GITHUB_ENV"
+          echo "ok=true" >> "$GITHUB_OUTPUT"
+          echo "已生成 CI 专用 config.toml：provider=cpa，model=$model，reasoning=$effort，base_url=$base"
+          echo "CPA 设置（请求值）：provider=cpa；模型=$model；推理强度=$effort；base_url=$base" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify read-only sandbox
+        id: sandbox
+        if: steps.prep.outputs.ok == 'true'
+        shell: bash
+        env:
+          CODEX_CPA_API_KEY: ${{ secrets.CODEX_CPA_API_KEY }}
+          GITHUB_TOKEN: ''
+          GH_TOKEN: ''
+        run: |
+          set -euo pipefail
+          if [ -z "${CODEX_CPA_API_KEY:-}" ]; then
+            echo '::error::environment codex 里没有环境级密钥 CODEX_CPA_API_KEY，已停止，不调用模型。'
+            exit 1
+          fi
+          CODEX_API_KEY="$CODEX_CPA_API_KEY"
+          export CODEX_API_KEY
+          printf '::add-mask::%s\n' "$CODEX_API_KEY"
+          # Ubuntu 24.04 默认限制非特权 user namespace，与现有 Codex 工作流相同，一次性 runner 上放开即可。
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          # getent 失败（DNS 不可用）时不能让 set -e 提前退出，要落到下面的中文诊断。
+          ip="$(getent ahostsv4 github.com 2>/dev/null | awk 'NR == 1 { print $1 }' || true)"
+          if [ -z "$ip" ] || ! curl -sS --retry 2 --max-time 15 -o /dev/null https://github.com; then
+            echo '::error::沙箱外访问不了 github.com，无法检查沙箱是否断网，已停止，不运行 Codex。'
+            exit 1
+          fi
+          printf 'probe\n' > "$RUNNER_TEMP/cpa-sandbox-probe"
+          chmod 600 "$RUNNER_TEMP/cpa-sandbox-probe"
+          work="$GITHUB_WORKSPACE/cpa-smoke"
+          mkdir -p "$work"
+          rc=0
+          # shellcheck disable=SC2016 # 单引号里的 $1… 由沙箱内的 bash 展开
+          codex sandbox -P cpa-smoke -C "$work" -- bash -c '
+            fail=0
+            if [ -n "${CODEX_API_KEY:-}" ]; then echo "沙箱里能读到 CODEX_API_KEY"; fail=1; fi
+            if [ -n "${GITHUB_TOKEN:-}" ]; then echo "沙箱里能读到 GITHUB_TOKEN"; fail=1; fi
+            if [ -n "${GH_TOKEN:-}" ]; then echo "沙箱里能读到 GH_TOKEN"; fail=1; fi
+            if cat "$1" >/dev/null 2>&1; then echo "CODEX_HOME 配置可读"; fail=1; fi
+            if cat "$2" >/dev/null 2>&1; then echo "RUNNER_TEMP 探测文件可读"; fail=1; fi
+            if ls "$3" >/dev/null 2>&1; then echo "RUNNER_TEMP 可列出"; fail=1; fi
+            if curl -s --max-time 10 -o /dev/null https://github.com; then
+              echo "沙箱里能访问外网（域名）"; fail=1
+            fi
+            if curl -s --max-time 10 -o /dev/null --resolve "github.com:443:$4" https://github.com; then
+              echo "沙箱里能访问外网（直连 IP）"; fail=1
+            fi
+            if touch "$5/.cpa-smoke-write-probe" 2>/dev/null; then echo "工作区可写"; fail=1; fi
+            exit "$fail"
+          ' probe "$CODEX_HOME/config.toml" "$RUNNER_TEMP/cpa-sandbox-probe" "$RUNNER_TEMP" "$ip" "$work" || rc=$?
+          rm -f "$RUNNER_TEMP/cpa-sandbox-probe"
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::Codex 沙箱没有按权限配置 cpa-smoke 生效（exit $rc），已停止，不运行 Codex。"
+            exit 1
+          fi
+          echo '✅ 沙箱内读不到 CPA 密钥、CODEX_HOME 和 RUNNER_TEMP，访问不了外网，工作区只读。'
+          echo "ok=true" >> "$GITHUB_OUTPUT"
+
+      - name: Run CPA smoke
+        id: run
+        if: steps.sandbox.outputs.ok == 'true'
+        shell: bash
+        env:
+          CODEX_CPA_API_KEY: ${{ secrets.CODEX_CPA_API_KEY }}
+          GITHUB_TOKEN: ''
+          GH_TOKEN: ''
+        run: |
+          set -uo pipefail
+          if [ -z "${CODEX_CPA_API_KEY:-}" ]; then
+            echo '::error::environment codex 里没有环境级密钥 CODEX_CPA_API_KEY，已停止，不调用模型。'
+            exit 1
+          fi
+          CODEX_API_KEY="$CODEX_CPA_API_KEY"
+          export CODEX_API_KEY
+          printf '::add-mask::%s\n' "$CODEX_API_KEY"
+          work="$GITHUB_WORKSPACE/cpa-smoke"
+          mkdir -p "$work"
+          # 空的本地 git 仓库，避免 Codex 依赖仓库状态；不添加 remote，也不检出 ping-rust。
+          if [ ! -d "$work/.git" ]; then
+            git -c init.defaultBranch=main init --quiet "$work"
+          fi
+          printf '%s\n' '只回复一行大写的 OK，不要改任何文件，不要执行命令，不要访问网络，不要读取环境变量或密钥。' \
+            > "$RUNNER_TEMP/cpa-prompt.txt"
+          # 调用模型前确认 shell/命令工具已关闭；否则 CPA 返回的工具调用会先在沙箱里执行，事后检查拦不住。
+          features_out="$(codex features list 2>/dev/null)" || features_out=""
+          shell_tool_state="$(printf '%s\n' "$features_out" | awk '$1 == "shell_tool" { print $NF }')"
+          if [ "$shell_tool_state" != "false" ]; then
+            echo '::error::无法确认 Codex 的 shell/命令工具已关闭（features.shell_tool），已停止，不调用模型。'
+            exit 1
+          fi
+          args=(exec -C "$work"
+            -c approval_policy='"never"'
+            -c features.shell_tool=false
+            -c model_provider='"cpa"'
+            --ignore-rules --ephemeral --json
+            -m "$CPA_MODEL"
+            -c "model_reasoning_effort=\"$CPA_EFFORT\""
+            -o "$RUNNER_TEMP/cpa-last-message.md")
+          echo "Codex 设置（请求值）：provider=cpa；模型=$CPA_MODEL；推理强度=$CPA_EFFORT；base_url=$CPA_BASE_URL"
+          rc=0
+          # `shell: bash` 实际是 bash -eo pipefail：失败时必须用 || rc=$? 接住。
+          codex "${args[@]}" - < "$RUNNER_TEMP/cpa-prompt.txt" \
+            > "$RUNNER_TEMP/cpa-events.jsonl" 2> "$RUNNER_TEMP/cpa-stderr.log" || rc=$?
+          printf '::add-mask::%s\n' "$CODEX_API_KEY"
+          echo "codex exit code: $rc"
+          # 在清理删除事件流和 stderr 之前，只输出白名单类别或 HTTP 状态，不打印原始响应或密钥。
+          report_cpa_call_failure() {
+            local status="" category="其他调用失败" hint=""
+            local files=()
+            [ -f "$RUNNER_TEMP/cpa-stderr.log" ] && files+=("$RUNNER_TEMP/cpa-stderr.log")
+            [ -f "$RUNNER_TEMP/cpa-events.jsonl" ] && files+=("$RUNNER_TEMP/cpa-events.jsonl")
+            if [ "${#files[@]}" -gt 0 ]; then
+              status="$(grep -h -oE 'api error (401|403|404|408|409|413|422|429|500|502|503|504)|unexpected status (401|403|404|408|409|413|422|429|500|502|503|504)|HTTP[/ ](401|403|404|408|409|413|422|429|500|502|503|504)|"status": *?(401|403|404|408|409|413|422|429|500|502|503|504)' "${files[@]}" 2>/dev/null \
+                | grep -oE '401|403|404|408|409|413|422|429|500|502|503|504' \
+                | head -n 1 || true)"
+            fi
+            # 404 可能是接口不存在，也可能是路由已通但模型未部署；有模型类证据时不要指向基址。
+            local model_missing=0
+            if [ "${#files[@]}" -gt 0 ] && grep -qiE 'model[_ ]not[_ ]found|model_not_available|unknown model|model.{0,80}does not exist|model.{0,80}is not deployed|model.{0,80}not deployed|model.{0,80}was not found|model.{0,80}not found' "${files[@]}" 2>/dev/null; then
+              model_missing=1
+            fi
+            case "$status" in
+              401) category="密钥无效或被拒绝"; hint="请检查 environment codex 的 CODEX_CPA_API_KEY" ;;
+              403)
+                if [ "$model_missing" -eq 1 ]; then
+                  category="请求的模型不可用"
+                  hint="请检查 vars.CODEX_MODEL（本次请求的模型：${CPA_MODEL:-未设置}）"
+                else
+                  category="访问被拒绝"; hint="请检查 API 密钥权限"
+                fi
+                ;;
+              404)
+                if [ "$model_missing" -eq 1 ]; then
+                  category="请求的模型不可用"
+                  hint="请检查 vars.CODEX_MODEL（本次请求的模型：${CPA_MODEL:-未设置}）"
+                else
+                  category="接口不存在"; hint="请检查 CODEX_API_BASE_URL 是否指向可用的 /responses 端点"
+                fi
+                ;;
+              408) category="请求超时"; hint="" ;;
+              409) category="请求冲突"; hint="" ;;
+              413) category="请求过大"; hint="" ;;
+              422) category="请求无法处理"; hint="" ;;
+              429) category="速率或额度限制"; hint="" ;;
+              500|502|503|504) category="CPA 服务端错误"; hint="" ;;
+              *)
+                status=""
+                if [ "${#files[@]}" -gt 0 ] && grep -qiE 'timed out|timeout|connection refused|connection reset|could not resolve|network is unreachable' "${files[@]}" 2>/dev/null; then
+                  category="连接或超时"
+                fi
+                ;;
+            esac
+            local detail="类别：${category}"
+            [ -n "$status" ] && detail="${detail}；HTTP 状态：${status}"
+            [ -n "$hint" ] && detail="${detail}。${hint}"
+            echo "::error::Codex CPA 自检失败（模型调用未成功）。${detail}。完整输出不进公开日志。"
+            if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+              echo "CPA 自检失败：${detail}。完整输出不进公开日志。" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          }
+          if [ "$rc" -ne 0 ]; then
+            report_cpa_call_failure
+            exit "$rc"
+          fi
+          if [ ! -s "$RUNNER_TEMP/cpa-last-message.md" ]; then
+            echo '::error::Codex 没有写出最后回复，无法确认 CPA 连通。'
+            exit 1
+          fi
+          if grep -Fqe "$CODEX_API_KEY" "$RUNNER_TEMP/cpa-last-message.md" \
+            "$RUNNER_TEMP/cpa-events.jsonl" "$RUNNER_TEMP/cpa-stderr.log"; then
+            echo '::error::Codex 输出里出现了 API 密钥，已停止。'
+            exit 1
+          fi
+          # 提示要求只回复一行大写 OK：比较整个最终回复，而不是匹配其中出现的 OK。
+          printf 'OK' > "$RUNNER_TEMP/cpa-expected-ok"
+          printf 'OK\n' > "$RUNNER_TEMP/cpa-expected-ok-lf"
+          printf 'OK\r\n' > "$RUNNER_TEMP/cpa-expected-ok-crlf"
+          if cmp -s "$RUNNER_TEMP/cpa-last-message.md" "$RUNNER_TEMP/cpa-expected-ok" \
+            || cmp -s "$RUNNER_TEMP/cpa-last-message.md" "$RUNNER_TEMP/cpa-expected-ok-lf" \
+            || cmp -s "$RUNNER_TEMP/cpa-last-message.md" "$RUNNER_TEMP/cpa-expected-ok-crlf"; then
+            :
+          else
+            echo '::error::CPA 调用已返回，但最终回复不是单独一行 OK（回复全文不打印）。'
+            exit 1
+          fi
+          # 最终回复是 OK 仍不够：必须有完整事件流（含完成事件），且不能出现命令执行。不打印命令或输出。
+          if [ ! -f "$RUNNER_TEMP/cpa-events.jsonl" ] || [ ! -s "$RUNNER_TEMP/cpa-events.jsonl" ]; then
+            echo '::error::Codex 事件流为空，无法确认自检过程没有执行命令。'
+            exit 1
+          fi
+          events="$RUNNER_TEMP/cpa-events.jsonl"
+          parse_rc=0
+          jq -s -e 'type == "array"' "$events" >/dev/null 2>&1 || parse_rc=$?
+          if [ "$parse_rc" -ne 0 ]; then
+            echo '::error::Codex 事件流无法解析，无法确认自检过程没有执行命令。'
+            exit 1
+          fi
+          records_rc=0
+          jq -s -e 'all(.[]; type == "object" and (.type | type == "string"))' "$events" >/dev/null 2>&1 || records_rc=$?
+          if [ "$records_rc" -eq 1 ]; then
+            echo '::error::Codex 事件流含有非事件记录，无法确认自检过程没有执行命令。'
+            exit 1
+          fi
+          if [ "$records_rc" -ne 0 ]; then
+            echo '::error::Codex 事件流无法解析，无法确认自检过程没有执行命令。'
+            exit 1
+          fi
+          cmd_rc=0
+          jq -s -e 'any(.[]; .item.type? == "command_execution")' "$events" >/dev/null 2>&1 || cmd_rc=$?
+          if [ "$cmd_rc" -eq 0 ]; then
+            echo '::error::事件流显示 Codex 执行了命令；自检要求只回复 OK、不执行命令（不打印命令内容）。'
+            exit 1
+          fi
+          if [ "$cmd_rc" -ne 1 ]; then
+            echo '::error::无法解析事件流中的命令执行记录，不报告成功。'
+            exit 1
+          fi
+          # rust-v0.166.0 的 codex exec --json 以 thread.started 开头；只剩完成事件的截断流不能算完整。
+          start_rc=0
+          jq -s -e 'length > 0 and (.[0].type == "thread.started")' "$events" >/dev/null 2>&1 || start_rc=$?
+          if [ "$start_rc" -ne 0 ]; then
+            echo '::error::Codex 事件流不完整（缺少起始事件 thread.started），无法确认自检过程没有执行命令。'
+            exit 1
+          fi
+          # rust-v0.166.0 在 thread.started 之后还有 turn.started；缺这一条的截断流不能算完整。
+          turn_start_rc=0
+          jq -s -e 'any(.[]; .type? == "turn.started")' "$events" >/dev/null 2>&1 || turn_start_rc=$?
+          if [ "$turn_start_rc" -ne 0 ]; then
+            echo '::error::Codex 事件流不完整（缺少回合起始事件 turn.started），无法确认自检过程没有执行命令。'
+            exit 1
+          fi
+          complete_rc=0
+          jq -s -e 'any(.[]; .type? == "turn.completed") and any(.[]; .type? == "item.completed" and .item.type? == "agent_message")' "$events" >/dev/null 2>&1 || complete_rc=$?
+          if [ "$complete_rc" -ne 0 ]; then
+            echo '::error::Codex 事件流不完整（缺少完成事件），无法确认自检过程没有执行命令。'
+            exit 1
+          fi
+          # 先检查 git status 退出码，再看是否有改动；命令失败不得当成工作区干净。
+          status_file="$RUNNER_TEMP/cpa-git-status.txt"
+          if ! git -C "$work" status --porcelain >"$status_file" 2>/dev/null; then
+            echo '::error::无法确认自检工作区状态，不报告成功。'
+            exit 1
+          fi
+          if [ -s "$status_file" ]; then
+            echo '::error::自检过程改动了工作区文件，预期是只读回复。'
+            exit 1
+          fi
+          # CPA 可能把请求的模型静默路由到别的模型；没有实际模型证据，只记录请求值和 CPA 返回了 OK。
+          echo "✅ CPA Responses 调用成功，CPA 返回了单独一行 OK。请求的模型：$CPA_MODEL（实际处理请求的模型未核实）。现有 ChatGPT 自动流程未在本次运行中使用。"
+          echo "✅ CPA 自检通过：Responses 调用成功，CPA 返回了 OK。请求的模型：$CPA_MODEL（实际处理请求的模型未核实）。现有 ChatGPT 自动流程未切换。" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove local credentials
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf "$RUNNER_TEMP/codex-home" \
+            "$RUNNER_TEMP/cpa-prompt.txt" \
+            "$RUNNER_TEMP/cpa-last-message.md" \
+            "$RUNNER_TEMP/cpa-events.jsonl" \
+            "$RUNNER_TEMP/cpa-stderr.log" \
+            "$RUNNER_TEMP/cpa-sandbox-probe" \
+            "$RUNNER_TEMP/cpa-expected-ok" \
+            "$RUNNER_TEMP/cpa-expected-ok-lf" \
+            "$RUNNER_TEMP/cpa-expected-ok-crlf" \
+            "$RUNNER_TEMP/cpa-git-status.txt" \
+            "$GITHUB_WORKSPACE/cpa-smoke"
