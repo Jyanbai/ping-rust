@@ -158,10 +158,10 @@ class WorkflowPolicyTest(unittest.TestCase):
         self.assertNotIn("gh secret set CODEX_AUTH_JSON", self.text)
         self.assertNotIn("secrets.CODEX_AUTH_JSON", self.text)
         self.assertNotIn("secrets.CODEX_BOT_TOKEN", self.text)
-        self.assertIn("secrets.CODEX_CPA_API_KEY", self.text)
+        self.assertIn("secrets.CODEX_CPA_API_KEY_V2", self.text)
         self.assertNotIn("secrets.CODEX_API_KEY", self.text)
-        self.assertEqual(self.text.count("secrets.CODEX_CPA_API_KEY"), 3)
-        hint = "CODEX_CPA_API_KEY 必须只在 environment codex 中设置；不要在仓库或组织级创建同名 secret"
+        self.assertEqual(self.text.count("secrets.CODEX_CPA_API_KEY_V2"), 3)
+        hint = "CODEX_CPA_API_KEY_V2 必须只在 environment codex 中设置；不要在仓库或组织级创建同名 secret"
         self.assertIn(hint, self.text)
         docs = (ROOT / "docs" / "CODEX_DISPATCH.md").read_text(encoding="utf-8")
         self.assertIn("请**只**在 environment `codex` 里设置", docs)
@@ -286,10 +286,9 @@ class ReplyAndFailureTest(unittest.TestCase):
             "RUNNER_TEMP": str(runner_temp),
             "GITHUB_STEP_SUMMARY": str(summary),
             "CODEX_API_KEY": key,
-            "CODEX_CPA_API_KEY": key,
+            "CODEX_CPA_API_KEY_V2": key,
             "CPA_MODEL": "gpt-6.2-sol",
             "CPA_EFFORT": "high",
-            "CPA_BASE_URL": "https://api.moio.cn/v1",
             "FAKE_CODEX_LAST": str(last),
             "FAKE_CODEX_EVENTS": str(events_file),
             "FAKE_CODEX_STDERR": str(stderr_file),
@@ -446,8 +445,8 @@ class ReplyAndFailureTest(unittest.TestCase):
             "GITHUB_ENV": str(files["env"]),
             "GITHUB_OUTPUT": str(files["output"]),
             "GITHUB_STEP_SUMMARY": str(files["summary"]),
-            "CODEX_CPA_API_KEY": "test-cpa-key-not-real",
-            "CODEX_API_BASE_URL": "",
+            "CODEX_CPA_API_KEY_V2": "test-cpa-key-not-real",
+            "CODEX_API_BASE_URL": "https://cpa.invalid/v1",
             "CODEX_MODEL": "",
             "CODEX_REASONING_EFFORT": "",
         }
@@ -466,6 +465,58 @@ class ReplyAndFailureTest(unittest.TestCase):
         self.assertRegex(raw, r'(?m)^model_provider = "cpa"$')
         self.assertNotIn("test-cpa-key-not-real", raw)
 
+    def prepare(self, **overrides):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        work = Path(temporary.name)
+        runner_temp = work / "runner-temp"
+        runner_temp.mkdir()
+        for name in ("env", "output", "summary"):
+            (work / name).touch()
+        env = {
+            **os.environ,
+            "RUNNER_TEMP": str(runner_temp),
+            "GITHUB_ENV": str(work / "env"),
+            "GITHUB_OUTPUT": str(work / "output"),
+            "GITHUB_STEP_SUMMARY": str(work / "summary"),
+            "CODEX_CPA_API_KEY_V2": "test-cpa-key-not-real",
+            "CODEX_API_BASE_URL": "https://cpa.invalid/v1",
+            "CODEX_MODEL": "",
+            "CODEX_REASONING_EFFORT": "",
+            **overrides,
+        }
+        result = subprocess.run(
+            ["bash", "-o", "pipefail", "-c", step_script("Prepare CPA config")],
+            env=env, capture_output=True, text=True, check=False,
+        )
+        summary = (work / "summary").read_text(encoding="utf-8")
+        return result, summary, runner_temp
+
+    def test_base_url_is_a_secret_without_default_and_never_printed(self):
+        text = WORKFLOW.read_text(encoding="utf-8")
+        # 工作流里没有任何内置的 CPA 基址：除 github.com 和 base_re 正则外不出现 https:// 地址。
+        hosts = [m for m in re.findall(r"https://[^\s'\"\\^]+", text) if not m.startswith(("https://github.com", "https://[A-Za-z0-9"))]
+        self.assertEqual(hosts, [], hosts)
+        self.assertIn("CODEX_API_BASE_URL: ${{ secrets.CODEX_API_BASE_URL }}", text)
+        self.assertNotIn("vars.CODEX_API_BASE_URL", text)
+        for missing in ("", "   "):
+            with self.subTest(missing=repr(missing)):
+                result, summary, runner_temp = self.prepare(CODEX_API_BASE_URL=missing)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("secret CODEX_API_BASE_URL", result.stdout)
+                self.assertFalse((runner_temp / "codex-home/config.toml").exists())
+        url = "https://cpa.invalid/v1"
+        result, summary, runner_temp = self.prepare()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("cpa.invalid", result.stdout + result.stderr + summary)
+        self.assertIn(f'base_url = "{url}"', (runner_temp / "codex-home/config.toml").read_text())
+        for bad in ("http://cpa.invalid/v1", 'https://x"\nmodel = "evil'):
+            with self.subTest(bad=bad):
+                result, _, runner_temp = self.prepare(CODEX_API_BASE_URL=bad)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("evil", result.stdout + result.stderr)
+                self.assertFalse((runner_temp / "codex-home/config.toml").exists())
+
     def test_repo_level_api_key_is_not_accepted_without_env_scoped_secret(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -483,7 +534,7 @@ class ReplyAndFailureTest(unittest.TestCase):
             "GITHUB_OUTPUT": str(files["output"]),
             "GITHUB_STEP_SUMMARY": str(files["summary"]),
             "CODEX_API_KEY": leaked,
-            "CODEX_CPA_API_KEY": "",
+            "CODEX_CPA_API_KEY_V2": "",
             "CODEX_API_BASE_URL": "",
             "CODEX_MODEL": "",
             "CODEX_REASONING_EFFORT": "",
@@ -497,7 +548,7 @@ class ReplyAndFailureTest(unittest.TestCase):
         )
         self.assertNotEqual(result.returncode, 0, result.stdout)
         combined = result.stdout + result.stderr
-        self.assertIn("CODEX_CPA_API_KEY", combined)
+        self.assertIn("CODEX_CPA_API_KEY_V2", combined)
         self.assertIn("environment codex", combined)
         self.assertNotIn("ok=true", files["output"].read_text(encoding="utf-8"))
         self.assertFalse((runner_temp / "codex-home" / "config.toml").exists())
@@ -554,7 +605,7 @@ class ReplyAndFailureTest(unittest.TestCase):
         errors = "\n".join(self.error_lines(result))
         self.assertIn("密钥无效或被拒绝", errors)
         self.assertIn("HTTP 状态：401", errors)
-        self.assertIn("CODEX_CPA_API_KEY", errors)
+        self.assertIn("CODEX_CPA_API_KEY_V2", errors)
         self.assertNotIn("的 CODEX_API_KEY", errors)
         self.assertNotIn("接口不存在", errors)
         self.assertNotIn("secret-token-value", errors)
@@ -602,7 +653,7 @@ class ReplyAndFailureTest(unittest.TestCase):
     def test_unexpected_status_form_is_classified(self):
         cases = (
             ("unexpected status 401 Unauthorized: {\"error\":\"bad key\",\"token\":\"leak-me-401\"}\n",
-             "401", "密钥无效或被拒绝", "CODEX_CPA_API_KEY", "leak-me-401"),
+             "401", "密钥无效或被拒绝", "CODEX_CPA_API_KEY_V2", "leak-me-401"),
             ("unexpected status 404 Not Found: <html>route /v1/responses missing leak-me-404</html>\n",
              "404", "接口不存在", "CODEX_API_BASE_URL", "leak-me-404"),
         )
@@ -665,7 +716,7 @@ class SandboxProbeDnsTest(unittest.TestCase):
             "RUNNER_TEMP": str(runner_temp),
             "GITHUB_OUTPUT": str(output),
             "CODEX_HOME": str(codex_home),
-            "CODEX_CPA_API_KEY": "test-cpa-key-not-real",
+            "CODEX_CPA_API_KEY_V2": "test-cpa-key-not-real",
         }
         result = subprocess.run(
             ["bash", "-o", "pipefail", "-c", step_script("Verify read-only sandbox")],

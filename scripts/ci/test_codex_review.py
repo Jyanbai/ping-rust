@@ -16,6 +16,8 @@ import textwrap
 import unittest
 from pathlib import Path
 
+import codex_hardening
+
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github/workflows/codex-code-review.yml"
 REPO = "owner/example"
@@ -60,7 +62,7 @@ else:
 '''
 
 
-def step_script(name, workflow=WORKFLOW):
+def step_script(name, workflow=WORKFLOW, pinned=False):
     lines = workflow.read_text(encoding="utf-8").splitlines()
     start = lines.index(f"      - name: {name}")
     run = next(i for i in range(start + 1, len(lines)) if lines[i] == "        run: |")
@@ -69,7 +71,26 @@ def step_script(name, workflow=WORKFLOW):
         if line.strip() and not line.startswith(" " * 10):
             break
         body.append(line)
-    return textwrap.dedent("\n".join(body)) + "\n"
+    script = textwrap.dedent("\n".join(body)) + "\n"
+    # 旧的行为测试用 PATH 里的假命令；Codex 之后的加固单独用 hardened_run 验证。
+    return script if pinned else codex_hardening.unpin(script)
+
+
+def hardened_run(test, script, env, cwd=None):
+    """按 runner 的样子运行 Codex 之后的步骤：沙箱可写的 ~/.cargo/bin 排在 PATH 最前面，
+    里面放满同名假程序；脚本里只有 /usr/bin/gh 换成测试的假 gh（真 gh 会联网）。"""
+    home = test.work / "hijack-home"
+    log = test.work / "hijack.log"
+    hijack = codex_hardening.install_hijack_bin(home / ".cargo/bin", log)
+    script = script.replace("/usr/bin/gh ", f"{test.work / 'bin' / 'gh'} ")
+    env = {**env, "HOME": str(home), "PATH": f"{hijack}{os.pathsep}{env['PATH']}"}
+    result = subprocess.run(["/usr/bin/bash", "-e", "-o", "pipefail", "-c", script],
+                            env=env, cwd=cwd, text=True, capture_output=True, check=False)
+    calls = log.read_text(encoding="utf-8") if log.exists() else ""
+    test.assertEqual(calls, "", "Codex 之后的步骤调用了 PATH 里的同名程序")
+    return result
+
+POST_CODEX_STEPS = frozenset(s["name"] for s in codex_hardening.run_steps("codex-code-review.yml")) - {"Run Codex review"}
 
 PLAN_WORKFLOW = ROOT / ".github/workflows/codex-plan.yml"
 DISPATCH_WORKFLOW = ROOT / ".github/workflows/codex-dispatch.yml"
@@ -217,6 +238,8 @@ class ReviewScriptsTest(unittest.TestCase):
 
     def run_step(self, name):
         (self.work / "api.json").write_text(json.dumps(self.api))
+        if name in POST_CODEX_STEPS:
+            return hardened_run(self, step_script(name, pinned=True), self.env)
         return subprocess.run(
             ["bash", "-e", "-o", "pipefail", "-c", step_script(name)],
             env=self.env, text=True, capture_output=True, check=False,
@@ -368,6 +391,22 @@ class ReviewScriptsTest(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertNotIn(secret, result.stdout + result.stderr)
                 self.assertFalse((self.work / "posted.json").exists())
+
+    def test_cpa_key_and_base_url_are_never_posted(self):
+        key, base = "fake-cpa-key-0123456789abcdef", "https://cpa.invalid:8443/v1"
+        for leaked in (key, base, "cpa.invalid", "cpa.invalid:8443", "HTTPS://CPA.Invalid:8443/v1", "Cpa.INVALID"):
+            with self.subTest(leaked=leaked):
+                self.prepare_review(f"审查里出现了 {leaked}")
+                self.env.update({"CODEX_CPA_API_KEY_V2": key, "CODEX_API_BASE_URL": f" {base}\n"})
+                result = self.run_step("Publish review")
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("CPA 密钥或 CPA 地址", result.stdout)
+                self.assertNotIn("cpa.invalid", (result.stdout + result.stderr).lower())
+                self.assertFalse((self.work / "posted.json").exists())
+        self.prepare_review("未发现有充分证据的代码问题。")
+        result = self.run_step("Publish review")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((self.work / "posted.json").exists())
 
     def test_probe_rejects_readable_auth_even_if_network_is_blocked(self):
         workspace = self.work / "workspace"
@@ -766,6 +805,45 @@ cp "$FAKE_CODEX_ARCHIVE" "$output"
 
     def test_not_signed_in_wording(self):
         self.assert_classifies("Not signed in", ["auth_401_403"])
+
+    def test_cpa_401_403_wording_keeps_auth_label(self):
+        # 切到 CPA（Responses API）后的密钥错误写法；标签仍是 auth_401_403。
+        for workflow in (WORKFLOW, PLAN_WORKFLOW, DISPATCH_WORKFLOW):
+            for sample in (
+                "Error: api error 401",
+                "unexpected status 403: {\"error\": {\"code\": \"invalid_api_key\"}}",
+                '{"error": {"message": "Incorrect API key provided", "status": 401}}',
+                '{"status":403,"error":"denied"}',
+                "missing api key",
+                "invalid authentication",
+            ):
+                with self.subTest(workflow=workflow.name, sample=sample):
+                    self.assert_classifies(sample, ["auth_401_403"], workflow)
+
+    def test_status_code_needs_digit_boundary(self):
+        # 较长的业务码不是 HTTP 状态码；三条流程的归类块行为一致。
+        for workflow in (WORKFLOW, PLAN_WORKFLOW, DISPATCH_WORKFLOW):
+            for sample in (
+                '{"status":40301,"error":"model not deployed"}',
+                '{"status": 40301, "error": "x"}',
+                "status 4290", "status=4001", "HTTP 4031", "unexpected status 4011",
+                "1403 Forbidden", "14290 Too Many Requests", "api error 4010",
+            ):
+                with self.subTest(workflow=workflow.name, sample=sample):
+                    out, _ = self.classify(sample + "\n", workflow)
+                    labels = self.class_labels(out)
+                    # 关键词标签（如 forbidden）仍可命中，但不能出现 http_NNN。
+                    self.assertEqual([x for x in labels if x.startswith("http_")], [], labels)
+            for sample, label in (
+                ('{"status":403,"error":"x"}', "http_403"),
+                ('{"status": 401}', "http_401"),
+                ("status 429.", "http_429"),
+                ("(HTTP 503)", "http_503"),
+                ("status=404,", "http_404"),
+            ):
+                with self.subTest(workflow=workflow.name, sample=sample):
+                    out, _ = self.classify(sample + "\n", workflow)
+                    self.assertIn(label, self.class_labels(out))
 
     def test_http_status_code_prefix(self):
         out, _ = self.classify("HTTP status code: 429\n")

@@ -14,6 +14,8 @@ import textwrap
 import unittest
 from pathlib import Path
 
+import codex_hardening
+
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github/workflows/codex-plan.yml"
 REPO = "owner/example"
@@ -53,7 +55,21 @@ else:
 '''
 
 
-def step_script(name):
+def render_config(flow, provider):
+    """用共用脚本生成一份 config.toml，供策略断言使用（不联网、不需要真实密钥）。"""
+    with tempfile.TemporaryDirectory() as temporary:
+        env = {**os.environ, "CODEX_API_BASE_URL": "https://cpa.invalid/v1",
+               "CODEX_MODEL": "gpt-test", "CODEX_REASONING_EFFORT": "high",
+               "CODEX_CPA_API_KEY_V2": "fake-cpa-key-for-policy-test"}
+        result = subprocess.run(
+            ["python3", str(ROOT / "scripts/ci/codex_provider_config.py"), "--flow", flow,
+             "--provider", provider, "--home", temporary, "--runner-temp", "/tmp/runner-temp"],
+            env=env, text=True, capture_output=True, check=True)
+        assert result.returncode == 0, result.stdout
+        return (Path(temporary) / "config.toml").read_text(encoding="utf-8")
+
+
+def step_script(name, pinned=False):
     lines = WORKFLOW.read_text(encoding="utf-8").splitlines()
     start = lines.index(f"      - name: {name}")
     run = next(i for i in range(start + 1, len(lines)) if lines[i] == "        run: |")
@@ -62,7 +78,26 @@ def step_script(name):
         if line.strip() and not line.startswith(" " * 10):
             break
         body.append(line)
-    return textwrap.dedent("\n".join(body)) + "\n"
+    script = textwrap.dedent("\n".join(body)) + "\n"
+    # 旧的行为测试用 PATH 里的假命令；Codex 之后的加固单独用 hardened_run 验证。
+    return script if pinned else codex_hardening.unpin(script)
+
+
+def hardened_run(test, script, env, cwd=None):
+    """按 runner 的样子运行 Codex 之后的步骤：沙箱可写的 ~/.cargo/bin 排在 PATH 最前面，
+    里面放满同名假程序；脚本里只有 /usr/bin/gh 换成测试的假 gh（真 gh 会联网）。"""
+    home = test.work / "hijack-home"
+    log = test.work / "hijack.log"
+    hijack = codex_hardening.install_hijack_bin(home / ".cargo/bin", log)
+    script = script.replace("/usr/bin/gh ", f"{test.work / 'bin' / 'gh'} ")
+    env = {**env, "HOME": str(home), "PATH": f"{hijack}{os.pathsep}{env['PATH']}"}
+    result = subprocess.run(["/usr/bin/bash", "-e", "-o", "pipefail", "-c", script],
+                            env=env, cwd=cwd, text=True, capture_output=True, check=False)
+    calls = log.read_text(encoding="utf-8") if log.exists() else ""
+    test.assertEqual(calls, "", "Codex 之后的步骤调用了 PATH 里的同名程序")
+    return result
+
+POST_CODEX_STEPS = frozenset(s["name"] for s in codex_hardening.run_steps("codex-plan.yml")) - {"Run Codex plan"}
 
 
 STEPS = (
@@ -118,15 +153,22 @@ class WorkflowPolicyTest(unittest.TestCase):
                     self.assertNotIn("${{", body)
 
     def test_model_runs_in_read_only_offline_sandbox_without_tokens(self):
-        self.assertIn('extends = ":read-only"', self.text)
-        self.assertIn("[permissions.plan.network]\\nenabled = false", self.text)
-        self.assertIn("project_doc_max_bytes = 0", self.text)
+        # config.toml 由共用脚本生成；cpa 与 chatgpt 的只读、断网权限必须相同。
+        self.assertIn("codex_provider_config.py --flow plan", self.text)
+        for provider in ("cpa", "chatgpt"):
+            with self.subTest(provider=provider):
+                config = render_config("plan", provider)
+                self.assertIn('[permissions.plan]\nextends = ":read-only"', config)
+                self.assertIn("[permissions.plan.network]\nenabled = false", config)
+                self.assertIn("project_doc_max_bytes = 0", config)
         self.assertIn("codex sandbox -P plan", self.text)
         run = step_script("Run Codex plan")
         self.assertNotIn("GH_TOKEN", run)
         block = self.text[self.text.index("      - name: Run Codex plan"):
                           self.text.index("      - name: Render plan")]
-        self.assertNotIn("secrets.", block)
+        # 模型步骤只拿得到 cpa 时 Codex 必需的 CPA 密钥，拿不到 GitHub token 或 ChatGPT 登录。
+        self.assertEqual(re.findall(r"secrets\.\w+", block), ["secrets.CODEX_CPA_API_KEY_V2"])
+        self.assertIn("steps.auth.outputs.provider == 'cpa' && secrets.CODEX_CPA_API_KEY_V2 || ''", block)
         self.assertNotIn("github.token", block)
         # CODEX_BOT_TOKEN 只出现在写回刷新登录的步骤里。
         self.assertEqual(self.text.count("secrets.CODEX_BOT_TOKEN"), 1)
@@ -199,6 +241,8 @@ class PlanStepTest(unittest.TestCase):
 
     def run_step(self, name, cwd=None):
         (self.work / "api.json").write_text(json.dumps(self.api))
+        if name in POST_CODEX_STEPS:
+            return hardened_run(self, step_script(name, pinned=True), self.env, cwd=cwd)
         return subprocess.run(["bash", "-e", "-o", "pipefail", "-c", step_script(name)],
                               env=self.env, cwd=cwd, text=True, capture_output=True, check=False)
 
@@ -259,9 +303,38 @@ class PlanStepTest(unittest.TestCase):
         if days_ago is not None:
             when = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days_ago)
             auth["last_refresh"] = when.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-        self.env.update(CODEX_AUTH_JSON=json.dumps(auth), ALLOW_REFRESH=allow)
+        self.env.update(CODEX_PROVIDER="chatgpt", CODEX_AUTH_JSON=json.dumps(auth), ALLOW_REFRESH=allow)
         (self.work / "output").write_text("")
-        return self.run_step("Restore plan auth")
+        return self.run_restore()
+
+    def run_restore(self):
+        # Restore plan auth 从 work/（main 的精确检出）调用共用脚本。
+        script = self.work / "work/scripts/ci/codex_provider_config.py"
+        if not script.exists():
+            script.parent.mkdir(parents=True, exist_ok=True)
+            script.symlink_to(ROOT / "scripts/ci/codex_provider_config.py")
+        return self.run_step("Restore plan auth", cwd=self.work)
+
+    def test_cpa_restore_skips_chatgpt_login_and_refresh_guard(self):
+        secret = "fake-chatgpt-login-for-cpa-test"
+        key = "fake-cpa-key-for-plan-test"
+        self.env.update(CODEX_PROVIDER="", CODEX_AUTH_JSON=secret, CODEX_CPA_API_KEY_V2=key,
+                        CODEX_API_BASE_URL="https://cpa.invalid/v1",
+                        CODEX_MODEL="gpt-test-astra", CODEX_REASONING_EFFORT="high")
+        (self.work / "output").write_text("")
+        result = self.run_restore()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("provider=cpa", self.output())
+        self.assertIn("ok=true", self.output())
+        self.assertFalse((self.work / "codex-home/auth.json").exists())
+        config = (self.work / "codex-home/config.toml").read_text()
+        self.assertIn('model = "gpt-test-astra"', config)
+        self.assertIn('env_key = "CODEX_CPA_API_KEY_V2"', config)
+        self.assertNotIn(secret, config)
+        self.assertNotIn(key, config)
+        self.assertNotIn("cli_auth_credentials_store", config)
+        self.assertIn(f"::add-mask::{key}", result.stdout)
+        self.assertIn("CODEX_PROVIDER_RESOLVED=cpa", (self.work / "github_env").read_text())
 
     def test_recent_login_is_restored_read_only(self):
         result = self.restore_auth(days_ago=1)
@@ -419,6 +492,27 @@ class PlanStepTest(unittest.TestCase):
         result = self.run_step("Publish plan")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse((self.work / "posted.json").exists())
+
+    def test_cpa_key_and_base_url_are_never_posted(self):
+        key, base = "fake-cpa-key-0123456789abcdef", "https://cpa.invalid:8443/v1"
+        for leaked in (key, base, "cpa.invalid", "cpa.invalid:8443", "HTTPS://CPA.Invalid:8443/v1", "Cpa.INVALID"):
+            with self.subTest(leaked=leaked):
+                self.prepare_plan()
+                self.assertEqual(self.run_step("Render plan").returncode, 0)
+                with (self.work / "plan.md").open("a", encoding="utf-8") as plan:
+                    plan.write(f"\n地址 {leaked}\n")
+                self.env.update({"CODEX_CPA_API_KEY_V2": key, "CODEX_API_BASE_URL": f" {base}\n"})
+                result = self.run_step("Publish plan")
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("CPA 密钥或 CPA 地址", result.stdout)
+                self.assertNotIn("cpa.invalid", (result.stdout + result.stderr).lower())
+                self.assertFalse((self.work / "posted.json").exists())
+        # chatgpt 时两项都为空，照常发布。
+        self.prepare_plan()
+        self.assertEqual(self.run_step("Render plan").returncode, 0)
+        self.env.update({"CODEX_CPA_API_KEY_V2": "", "CODEX_API_BASE_URL": ""})
+        self.assertEqual(self.run_step("Publish plan").returncode, 0)
+        self.assertTrue((self.work / "posted.json").exists())
 
     def test_marker_from_other_author_does_not_suppress_post(self):
         self.prepare_plan()

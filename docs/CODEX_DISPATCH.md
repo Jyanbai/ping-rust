@@ -7,16 +7,15 @@
 | PR | `/codex <要改什么>` | Codex 在该 PR 的分支上继续改，结果推到**同一个 PR** |
 | issue | `/codex [补充要求]` | Codex 从 `main` 开始实现这个 issue，推到新分支并开新 PR（`Closes #issue`）。别人开的 issue 必须写明要求，见下文 |
 | Actions 页面 | Run workflow，填 `prompt`（可选 `pr` / `base`） | 同上，不用留评论 |
-| Actions 页面 | Run workflow，`prompt` 留空 | 只做自检：Codex 登录、凭据写回权限 |
+| Actions 页面 | Run workflow，`prompt` 留空 | 自检当前模型通道。ChatGPT 通道还会验证凭据写回权限 |
 
-> 本功能已于 2026-11-03 在真实 runner 上实测通过。
+> Dispatch 的 ChatGPT 登录流程已于 2026-11-03 在真实 runner 上实测通过。
 
 - 只接受仓库所有者本人的评论或手动触发（以及下面"CI 失败后自动派回 Codex"的派发），其他人评论 `/codex` 不会有反应。
 - `/codex` 必须在一行的开头（允许前面有 `[via Claude]`）。
 - 收到命令后，workflow 会给评论加 👀，再回一条带 Codex 任务链接的评论，完成后更新为结果（推送的 commit 或新 PR 的链接）。
 - 同一个 PR / issue 的任务会排队，一次只跑一个。注意 GitHub 只保留一个排队中的任务：排队时再发一条，前一条排队中的会被取消。
-- 每个任务消耗 ChatGPT 套餐里 Codex 的本地消息额度（和在电脑上用 Codex 是同一个池子）。GitHub Actions 分钟数对公开仓库免费。
-- 另有一条仅手动触发的第三方 CPA 自检，见下文「可选：第三方 CPA 手动自检」。它不会切换 `/codex`、审查、回修或规划的 ChatGPT 登录路径。
+- Dispatch、Code Review 和 Architecture Plan 默认使用 CPA。选择 ChatGPT 登录时，任务消耗 ChatGPT 套餐的 Codex 消息额度（与本机共用）。GitHub Actions 分钟数对公开仓库免费。
 - Codex 在沙箱里不能联网，也不能创建 TCP/UDP socket（连 127.0.0.1 也不行，见下文"沙箱里能跑哪些测试"）。Rust 依赖会预先下载，所以它能跑 `cargo build/test --offline`；监听或连接端口的测试、依赖 shoes / Xray / Mihomo 的测试跑不了，推送后由 CI 完整测试。prompt 要求 Codex 在最终回复里把这些测试单独列出、标"未验证"，不算作通过。
 
 ## Codex 接管实现、审查与回修
@@ -28,8 +27,8 @@ Codex 负责实现、独立只读审查及回修，Grok bot 只读播报进度�
 编译和测试统一由 GitHub Actions 执行，包括普通 Linux debug / release 构建。旧 SSH 构建环境
 已停用，本机只编辑、操作 Git、派发任务和读取日志；部署与实机验收另行授权。
 
-`.github/workflows/codex-code-review.yml` 复用 environment
-`codex` 的 `CODEX_AUTH_JSON`、`CODEX_BOT_TOKEN` 和模型变量，不需要新增登录或 API key。
+`.github/workflows/codex-code-review.yml` 与 Dispatch 共用 environment
+`codex` 的模型通道配置和 `CODEX_BOT_TOKEN`。
 现有 `/codex <任务>` 仍负责写代码，循环如下：
 
 **issue / 验收标准 →（复杂任务）只读规划并由所有者确认方案 → Codex 实现同一个 PR → CI → Codex 独立审查 → 自动回修 → 再次 CI / 审查 → PR Merge Gate → 用户最终检查**。
@@ -104,9 +103,9 @@ Actions → Codex Architecture Plan → Run workflow，分支选 `main`，填 is
 | `issue` | 要规划的 issue 编号（必须是打开的 issue，不接受 PR） |
 | `notes` | 所有者补充说明。issue 不是所有者创建的时候必须填写，此时标题和正文不会交给 Codex |
 | `force_plan` | 默认关闭：模型判定为简单任务时只给要点并提示可直接 `/codex`；勾选后始终输出完整方案 |
-| `allow_refresh` | 默认关闭：登录上次刷新已满 7 天（Codex 约 8 天刷新一次）或无法判断时不运行；确认没有其他 Codex 任务在跑后勾选重试 |
+| `allow_refresh` | 仅 ChatGPT 通道使用，默认关闭。登录上次刷新已满 7 天（Codex 约 8 天刷新一次）或无法判断时不运行。确认没有其他 Codex 任务在跑后勾选重试 |
 
-- 只接受仓库所有者在 `main` 上触发；使用 environment `codex` 的 `CODEX_AUTH_JSON` 和 `CODEX_MODEL` / `CODEX_REASONING_EFFORT`，不新增登录或 token。
+- 只接受仓库所有者在 `main` 上触发，使用 environment `codex` 的模型通道配置。
 - 与 Codex Code Review 相同的只读沙箱（`:read-only`、禁止网络、读不到 `$RUNNER_TEMP`），运行前实测；模型步骤没有 GitHub token。分析的是触发时 `main` 的精确提交和该提交的 `AGENTS.md`。
 - 模型必须读取 prompt 中没有的随机校验值并返回 `plan_complete=true`，结构化结果通过格式和凭据检查后，才由 `github-actions[bot]` 以 **Codex Architecture Plan** 为标题评论到 issue。同一 run/attempt 只评论一次；失败时评论“未完成”，不发布方案。
 - 方案包括相关源码与调用链、兼容性、技术风险与回滚、实施步骤、测试计划（回归测试排在最前）以及“已验证 / 未验证 / 失败”。规划不编译、不运行测试，所以“已验证”只代表读过源码。
@@ -123,7 +122,7 @@ Actions → Codex Architecture Plan → Run workflow，分支选 `main`，填 is
 Settings → Environments → New environment，名字填 `codex`。
 
 在 **Deployment branches and tags** 里选 **Selected branches and tags**，添加规则 `main`。
-这样只有 `main` 上的 workflow 能读到下面两个 secret，PR 分支上的 workflow 读不到。
+这样只有 `main` 上的 workflow 能读到该 environment 的 secret。
 
 ### 2. 创建推送用的 token（`CODEX_BOT_TOKEN`）
 
@@ -141,7 +140,25 @@ GitHub → Settings → Developer settings → Personal access tokens → **Fine
 
 用 PAT 而不是 `GITHUB_TOKEN` 推送，是因为 `GITHUB_TOKEN` 推送和开的 PR 不会触发 CI 和审查 workflow。
 
-### 3. 生成 CI 专用的 Codex 登录（`CODEX_AUTH_JSON`）
+### 3. 配置模型通道
+
+Dispatch（含 `/codex` 和回修）、Code Review 和 Architecture Plan 共用 environment `codex` 的变量 `CODEX_PROVIDER`。留空等同于 `CODEX_PROVIDER=cpa`。
+
+#### CPA（默认）
+
+在 Settings → Environments → codex 配置以下必填项，再运行第 4 步的自检。
+
+| 名称 | 类型 | 用途 |
+|---|---|---|
+| `CODEX_CPA_API_KEY_V2` | Secret | CPA 密钥。见下文「设置 `CODEX_CPA_API_KEY_V2`」 |
+| `CODEX_API_BASE_URL` | Secret | CPA 的 HTTPS 基址，通常以 `/v1` 结尾。用 secret 是因为变量会在步骤开头的 env 里先于遮蔽出现在日志中；secret 全程自动遮蔽 |
+| `CODEX_MODEL` | Variable | 三条流程共用的模型名。`CODEX_DISPATCH_MODEL`、`CODEX_REVIEW_MODEL`、`CODEX_PLAN_MODEL` 分别优先于它。若留空，必须设置这三个专用变量 |
+
+独立的 **Codex CPA Smoke** 同样读取 secret `CODEX_API_BASE_URL`，没有内置基址；未设置会直接停止，不打印任何地址。它的模型和推理强度有内置默认值，所以它通过后，仍需给这三条流程配置模型变量。
+
+#### ChatGPT 登录
+
+要继续使用 ChatGPT 登录，在 environment `codex` 设置变量 `CODEX_PROVIDER=chatgpt`，并准备 CI 专用的 secret `CODEX_AUTH_JSON`。已有有效登录凭据时可沿用。走 chatgpt 时不会使用 `CODEX_DISPATCH_MODEL`、`CODEX_REVIEW_MODEL`、`CODEX_PLAN_MODEL`（它们可能是只有 CPA 认识的模型别名），只使用 `CODEX_MODEL`，也不会传入 CPA 密钥和基址。**切回 chatgpt 时还要同时检查 `CODEX_MODEL`：把它改成 ChatGPT 登录支持的模型，或者清空它（清空后使用 ChatGPT 套餐默认模型）。** 如果它仍是只有 CPA 认识的模型名，三条流程都会在调用模型时失败。
 
 在自己的电脑上做一次（Windows PowerShell，需要已安装 Node.js）：
 
@@ -169,27 +186,27 @@ Remove-Item Env:CODEX_HOME
 
 ### 4. 自检
 
-合并到 `main` 之后，到 Actions → Codex Dispatch → Run workflow，`prompt` 留空直接运行。它会：
+合并到 `main` 之后，到 Actions → Codex Dispatch → Run workflow，`prompt` 留空运行。自检按当前模型通道执行。
 
-- 用 `CODEX_AUTH_JSON` 让 Codex 回复一句 OK，确认登录可用（会用掉一条消息额度）；
-- 用 `CODEX_BOT_TOKEN` 真写一次 environment secret `CODEX_WRITEBACK_CHECK`，确认写回权限没问题。
+- **CPA** 使用上面配置的密钥、基址和模型发起一次 Codex 调用。
+- **ChatGPT** 使用 `CODEX_AUTH_JSON` 验证登录并按需刷新，再用 `CODEX_BOT_TOKEN` 写一次 `CODEX_WRITEBACK_CHECK`，确认有写回权限。
 
-全绿再开始用 `/codex`。之后每 3 天的定时任务也跑同样的自检，token 过期或权限不对会直接显示失败。
+自检通过后再用 `/codex`。之后每 3 天的定时任务也会按当前模型通道运行自检。
 
-### 5.（可选）environment 变量
+### 5. 共用模型变量与默认值
 
 | 变量 | 默认 | 作用 |
 |---|---|---|
-| `CODEX_MODEL` | 空（用套餐默认模型） | 指定 Codex 使用的模型 |
+| `CODEX_MODEL` | ChatGPT 可用套餐默认模型 | CPA 的模型配置见第 3 步 |
 | `CODEX_REASONING_EFFORT` | 空（用模型默认强度） | 推理强度，如 `medium`、`high`，可选值取决于模型；只能是小写字母 |
 
-两个变量的请求值会打印在运行日志和 job summary 里。`codex exec --json` 不会报告实际使用的模型，所以这里记录的是请求值。Codex CLI 不在本地校验这两个值（不认识的强度会原样发给服务端），写错时会不会报错由服务端决定，改完后看一次运行结果确认。
+运行日志和 job summary 中的模型与推理强度是请求值。CPA 通道会在启动前校验模型名和推理强度的格式。
 
 ## 可选：第三方 CPA 手动自检
 
 `.github/workflows/codex-cpa-smoke.yml` 是一条**仅手动触发**的可选通路，用来验证 CI 里的 Codex CLI 能否通过第三方 CPA（Responses API）调用模型。
 
-- 现有 `/codex`、独立审查、CI 回修、规划仍然使用 ChatGPT 登录（`CODEX_AUTH_JSON`），和本机 Codex 同一套餐额度。这条工作流**不会**切换那些自动流程。
+- 正式流程按「一次性配置」中的 `CODEX_PROVIDER` 选择模型通道。此自检可单独运行。
 - 只有仓库所有者可以在 Actions 页面手动运行（`workflow_dispatch`）。没有 `pull_request` / `push` / `issue_comment` 触发器，不会在已打开的 PR 上自动跑。
 - environment `codex` 只允许 `main` 部署，所以要等合并到 `main` 之后才能真正跑通（合并前的 PR 分支读不到这个 environment 的 secret）。
 - CI 在 runner 上生成自己的 `$CODEX_HOME/config.toml`，供应商名是 `cpa`，与本机 Codex 的自定义供应商配置无关。不要为了迁就 CI 去改本机供应商标识。
@@ -197,33 +214,36 @@ Remove-Item Env:CODEX_HOME
 
 这条通路走的是 CPA 的 API Key。它是否仍消耗 ChatGPT / Codex 套餐额度，取决于 CPA 账号背后接的是哪一套服务；如果还是同一个 ChatGPT 账号，额度仍可能被用掉。
 
-### 设置 `CODEX_CPA_API_KEY`
+### 设置 `CODEX_CPA_API_KEY_V2`
 
-本自检**只**读取名为 `CODEX_CPA_API_KEY` 的 secret。请**只**在 environment `codex` 里设置它，不要在仓库或组织级创建同名 secret。GitHub Actions 会按名称把环境、仓库、组织的 secret 合并到同一个 `secrets` 上下文，工作流无法分辨来源：如果环境里没有这项、但仓库或组织有同名 secret，缺失检查会通过，上层凭据会被发给 CPA。仓库或组织级的 `CODEX_API_KEY` 不会被本自检使用。
+密钥 secret 更名为 `CODEX_CPA_API_KEY_V2`。
+
+本自检**只**读取名为 `CODEX_CPA_API_KEY_V2` 的 secret。请**只**在 environment `codex` 里设置它，不要在仓库或组织级创建同名 secret。GitHub Actions 会按名称把环境、仓库、组织的 secret 合并到同一个 `secrets` 上下文，工作流无法分辨来源：如果环境里没有这项、但仓库或组织有同名 secret，缺失检查会通过，上层凭据会被发给 CPA。仓库或组织级的 `CODEX_API_KEY` 不会被本自检使用。
 
 在本机 PowerShell 里写入（运行后按提示把密钥粘贴给 `gh`，不要发到聊天或写进仓库、PR 描述）：
 
 ```powershell
-gh secret set CODEX_CPA_API_KEY --env codex --repo Jyanbai/ping-rust
+gh secret set CODEX_CPA_API_KEY_V2 --env codex --repo Jyanbai/ping-rust
 ```
 
-没装 `gh` 的话：到 Settings → Environments → codex → Add environment secret，名字填 `CODEX_CPA_API_KEY`，把密钥粘进去。
+没装 `gh` 的话：到 Settings → Environments → codex → Add environment secret，名字填 `CODEX_CPA_API_KEY_V2`，把密钥粘进去。
+
+基址同样只放 environment `codex`，作为 secret `CODEX_API_BASE_URL`（命令同上，把名字换成 `CODEX_API_BASE_URL`，按提示粘贴 https 基址，不要发到聊天或写进仓库）。
 
 ### 可选变量与模型
 
 | 变量 | 默认 | 作用 |
 |---|---|---|
-| `CODEX_API_BASE_URL` | `https://api.moio.cn/v1` | CPA 的 HTTPS 基址。可在 environment `codex` 里设置同名变量覆盖。 |
-| `CODEX_MODEL` | 若未设置，本自检使用 `gpt-6.2-sol` | 与现有 ChatGPT 通路共用的模型变量 |
+| `CODEX_MODEL` | 若未设置，本自检使用 `gpt-6.2-sol` | 与正式流程共用的模型变量 |
 | `CODEX_REASONING_EFFORT` | 若未设置，本自检使用 `high` | 与现有通路共用的推理强度变量；只能是小写字母 |
 
 Codex CLI 0.166.0 会把 `/responses` 拼到 `base_url` 后面，因此基址应包含 `/v1`（与本机已在用的地址一致）。不要把 API Key 写进配置文件或文档。
 
 ### 怎么跑
 
-合并到 `main` 并写好 environment `codex` 的 `CODEX_CPA_API_KEY` 之后：Actions → Codex CPA Smoke → Run workflow。只有仓库所有者能启动和重跑。成功时模型的最终回复必须是单独一行 `OK`，且必须有完整事件流（含完成事件）、其中不能有命令执行；这只说明 CPA 的 Responses 调用可用，日志只记录请求的模型名，不证明 CPA 实际用了该模型。调用失败时日志会给出白名单类别或 HTTP 状态（例如 401 请检查密钥；404 若提示模型未部署则检查请求的模型，否则检查基址），不会打印原始响应或密钥。缺环境级密钥 `CODEX_CPA_API_KEY`、沙箱检查失败（含沙箱外 DNS 或出网不通）或无法确认 shell/命令工具已关闭（`features.shell_tool = false`）会直接报错并停止，不调用模型。
+合并到 `main` 并写好 environment `codex` 的 `CODEX_CPA_API_KEY_V2` 之后：Actions → Codex CPA Smoke → Run workflow。只有仓库所有者能启动和重跑。成功时模型的最终回复必须是单独一行 `OK`，且必须有完整事件流（含完成事件）、其中不能有命令执行；这只说明 CPA 的 Responses 调用可用，日志只记录请求的模型名，不证明 CPA 实际用了该模型。调用失败时日志会给出白名单类别或 HTTP 状态（例如 401 请检查密钥；404 若提示模型未部署则检查请求的模型，否则检查基址），不会打印原始响应或密钥。缺环境级密钥 `CODEX_CPA_API_KEY_V2`、沙箱检查失败（含沙箱外 DNS 或出网不通）或无法确认 shell/命令工具已关闭（`features.shell_tool = false`）会直接报错并停止，不调用模型。
 
-## 凭据怎么保持有效
+## ChatGPT 登录凭据怎么保持有效
 
 Codex 在 `auth.json` 的 `last_refresh` 超过约 8 天时会自动刷新 token。workflow 每次运行后，如果文件变了，就用 `CODEX_BOT_TOKEN` 把新的 `auth.json` 写回 `CODEX_AUTH_JSON`。另外每 3 天有一个定时任务跑一遍自检，保证长时间不派任务时凭据也会被刷新。
 
@@ -239,7 +259,7 @@ OpenAI 的指南（Maintain Codex account auth in CI/CD）不建议在公开仓�
 其他限制：
 
 1. 只接受仓库所有者的评论和手动触发，以及 `codex-ci-fix.yml` 在 `codex/*` 分支 CI 失败后的派发；
-2. 两个 secret 都放在只允许 `main` 部署的 environment 里；
+2. `CODEX_BOT_TOKEN` 和所选模型通道的凭据都放在只允许 `main` 部署的 environment 里；
 3. `CODEX_BOT_TOKEN` 没有 Workflows 权限，并且改动 `.github/workflows/` 或 `.github/actions/` 的 diff 会被直接拒绝；
 4. 评论和 issue 内容只通过环境变量传给脚本，不做 `${{ }}` 插值；
 5. job 结束时删除本地凭据文件；

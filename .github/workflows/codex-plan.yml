@@ -130,49 +130,70 @@ jobs:
         if: steps.target.outputs.plan == 'true'
         shell: bash
         env:
-          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
+          # CODEX_PROVIDER=cpa（默认）时 CODEX_AUTH_JSON 不传入本步骤；chatgpt 时 CPA 密钥和基址不传入，也不使用流程专用模型变量。
+          CODEX_PROVIDER: ${{ vars.CODEX_PROVIDER }}
+          CODEX_AUTH_JSON: ${{ vars.CODEX_PROVIDER == 'chatgpt' && secrets.CODEX_AUTH_JSON || '' }}
+          CODEX_CPA_API_KEY_V2: ${{ (vars.CODEX_PROVIDER || 'cpa') == 'cpa' && secrets.CODEX_CPA_API_KEY_V2 || '' }}
+          CODEX_API_BASE_URL: ${{ (vars.CODEX_PROVIDER || 'cpa') == 'cpa' && secrets.CODEX_API_BASE_URL || '' }}
+          CODEX_MODEL: ${{ vars.CODEX_PROVIDER != 'chatgpt' && vars.CODEX_PLAN_MODEL || vars.CODEX_MODEL }}
+          CODEX_REASONING_EFFORT: ${{ vars.CODEX_REASONING_EFFORT }}
           ALLOW_REFRESH: ${{ inputs.allow_refresh }}
           REFRESH_GUARD_SECONDS: '604800'
         run: |
           set -euo pipefail
           umask 077
-          [ -n "$CODEX_AUTH_JSON" ] || { echo '::error::缺少 environment codex 的 CODEX_AUTH_JSON'; exit 1; }
+          provider="${CODEX_PROVIDER:-cpa}"
+          case "$provider" in
+            cpa|chatgpt) ;;
+            *) echo '::error::CODEX_PROVIDER 只能是 cpa 或 chatgpt'; exit 1 ;;
+          esac
+          [ -z "${CODEX_CPA_API_KEY_V2:-}" ] || printf '::add-mask::%s\n' "$CODEX_CPA_API_KEY_V2"
           plan_home="$RUNNER_TEMP/codex-home"
           mkdir -p "$plan_home"
-          printf '%s' "$CODEX_AUTH_JSON" > "$plan_home/auth.json"
-          jq -e '.auth_mode == "chatgpt" and ((.tokens.refresh_token // "") != "")' \
-            "$plan_home/auth.json" >/dev/null
-          # Codex 在 last_refresh 超过约 8 天时刷新登录；refresh token 只能用一次，
-          # 与同时运行的 Dispatch / Review 一起刷新会触发 refresh_token_reused。
-          # 规划是手动入口，接近期限（7 天）或无法判断时默认停止，交由所有者确认无并发后重试。
-          last="$(jq -r '.last_refresh // ""' "$plan_home/auth.json")"
-          refreshed=0
-          [ -z "$last" ] || refreshed="$(date -u -d "$last" +%s 2>/dev/null || echo 0)"
-          age=$(( $(date -u +%s) - refreshed ))
-          if [ "$age" -ge "$REFRESH_GUARD_SECONDS" ] && [ "$ALLOW_REFRESH" != true ]; then
-            echo '::error::Codex 登录接近刷新期限或无法判断上次刷新时间。为避免与其他 Codex 任务同时刷新共享登录，本次不运行；确认没有 Codex Dispatch / Code Review / CI Fix 在运行后，勾选 allow_refresh 重试。'
-            exit 1
+          if [ "$provider" = chatgpt ]; then
+            [ -n "$CODEX_AUTH_JSON" ] || { echo '::error::缺少 environment codex 的 CODEX_AUTH_JSON'; exit 1; }
+            printf '%s' "$CODEX_AUTH_JSON" > "$plan_home/auth.json"
+            jq -e '.auth_mode == "chatgpt" and ((.tokens.refresh_token // "") != "")' \
+              "$plan_home/auth.json" >/dev/null
+            # Codex 在 last_refresh 超过约 8 天时刷新登录；refresh token 只能用一次，
+            # 与同时运行的 Dispatch / Review 一起刷新会触发 refresh_token_reused。
+            # 规划是手动入口，接近期限（7 天）或无法判断时默认停止，交由所有者确认无并发后重试。
+            last="$(jq -r '.last_refresh // ""' "$plan_home/auth.json")"
+            refreshed=0
+            [ -z "$last" ] || refreshed="$(date -u -d "$last" +%s 2>/dev/null || echo 0)"
+            age=$(( $(date -u +%s) - refreshed ))
+            if [ "$age" -ge "$REFRESH_GUARD_SECONDS" ] && [ "$ALLOW_REFRESH" != true ]; then
+              echo '::error::Codex 登录接近刷新期限或无法判断上次刷新时间。为避免与其他 Codex 任务同时刷新共享登录，本次不运行；确认没有 Codex Dispatch / Code Review / CI Fix 在运行后，勾选 allow_refresh 重试。'
+              exit 1
+            fi
           fi
-          {
-            printf 'cli_auth_credentials_store = "file"\n'
-            printf 'approval_policy = "never"\nweb_search = "disabled"\nproject_doc_max_bytes = 0\n'
-            printf 'default_permissions = "plan"\n\n'
-            printf '[permissions.plan]\nextends = ":read-only"\n\n'
-            printf '[permissions.plan.filesystem]\n"%s" = "deny"\n\n' "$RUNNER_TEMP"
-            printf '[permissions.plan.network]\nenabled = false\n'
-          } > "$plan_home/config.toml"
+          # config.toml 由共用脚本生成；work/ 是本次规划检出的 main 精确提交。
+          python3 work/scripts/ci/codex_provider_config.py --flow plan --provider "$provider" \
+            --home "$plan_home" --runner-temp "$RUNNER_TEMP"
           echo "CODEX_HOME=$plan_home" >> "$GITHUB_ENV"
-          sha256sum "$plan_home/auth.json" | cut -d' ' -f1 > "$RUNNER_TEMP/auth.seed.sha256"
-          jq -r '.tokens // {} | .[] | strings | select(length >= 16)' \
-            "$plan_home/auth.json" > "$RUNNER_TEMP/seed-tokens.txt"
-          while IFS= read -r token; do printf '::add-mask::%s\n' "$token"; done < "$RUNNER_TEMP/seed-tokens.txt"
+          echo "CODEX_PROVIDER_RESOLVED=$provider" >> "$GITHUB_ENV"
+          if [ "$provider" = chatgpt ]; then
+            sha256sum "$plan_home/auth.json" | cut -d' ' -f1 > "$RUNNER_TEMP/auth.seed.sha256"
+            jq -r '.tokens // {} | .[] | strings | select(length >= 16)' \
+              "$plan_home/auth.json" > "$RUNNER_TEMP/seed-tokens.txt"
+            while IFS= read -r token; do printf '::add-mask::%s\n' "$token"; done < "$RUNNER_TEMP/seed-tokens.txt"
+          else
+            : > "$RUNNER_TEMP/seed-tokens.txt"
+          fi
+          echo "provider=$provider" >> "$GITHUB_OUTPUT"
           echo 'ok=true' >> "$GITHUB_OUTPUT"
 
       - name: Verify read-only sandbox
         if: steps.auth.outputs.ok == 'true'
         shell: bash
+        env:
+          CODEX_CPA_API_KEY_V2: ${{ steps.auth.outputs.provider == 'cpa' && secrets.CODEX_CPA_API_KEY_V2 || '' }}
         run: |
           set -euo pipefail
+          [ -z "${CODEX_CPA_API_KEY_V2:-}" ] || printf '::add-mask::%s\n' "$CODEX_CPA_API_KEY_V2"
+          # chatgpt 时探测登录文件；cpa 时没有 auth.json，探测 config.toml，并确认沙箱里读不到 CPA 密钥。
+          secret_file="$CODEX_HOME/auth.json"
+          [ "${CODEX_PROVIDER_RESOLVED:-chatgpt}" != cpa ] || secret_file="$CODEX_HOME/config.toml"
           # 与 Codex Code Review 一致，只调整一次性 GitHub runner 的 namespace 限制。
           if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
             sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns=0
@@ -186,6 +207,7 @@ jobs:
             test -r work/Cargo.toml
             fail=0
             if cat "$1" >/dev/null 2>&1; then echo "凭据文件可读"; fail=1; fi
+            if [ -n "${CODEX_CPA_API_KEY_V2:-}" ]; then echo "沙箱里能读到 CODEX_CPA_API_KEY_V2"; fail=1; fi
             if ls "$2" >/dev/null 2>&1; then echo "RUNNER_TEMP 可列出"; fail=1; fi
             if touch work/.codex-plan-write-probe 2>/dev/null; then echo "源码工作区可写"; fail=1; fi
             if curl -s --max-time 10 -o /dev/null https://github.com; then
@@ -195,7 +217,7 @@ jobs:
               echo "沙箱能访问外网（直连 IP）"; fail=1
             fi
             exit "$fail"
-          ' probe "$CODEX_HOME/auth.json" "$RUNNER_TEMP" "$ip"
+          ' probe "$secret_file" "$RUNNER_TEMP" "$ip"
 
       - name: Run Codex plan
         if: steps.auth.outputs.ok == 'true'
@@ -205,8 +227,9 @@ jobs:
           MAIN_SHA: ${{ steps.target.outputs.main_sha }}
           TRUSTED: ${{ steps.target.outputs.trusted }}
           FORCE_PLAN: ${{ steps.target.outputs.force }}
-          CODEX_MODEL: ${{ vars.CODEX_MODEL }}
+          CODEX_MODEL: ${{ steps.auth.outputs.provider != 'chatgpt' && vars.CODEX_PLAN_MODEL || vars.CODEX_MODEL }}
           CODEX_REASONING_EFFORT: ${{ vars.CODEX_REASONING_EFFORT }}
+          CODEX_CPA_API_KEY_V2: ${{ steps.auth.outputs.provider == 'cpa' && secrets.CODEX_CPA_API_KEY_V2 || '' }}
         run: |
           set -euo pipefail
           git -C work cat-file -e "$MAIN_SHA^{commit}"
@@ -296,10 +319,25 @@ jobs:
             [[ "$CODEX_REASONING_EFFORT" =~ ^[a-z]+$ ]] || exit 1
             args+=(-c "model_reasoning_effort=\"$CODEX_REASONING_EFFORT\"")
           fi
+          # cpa：Codex 只通过 env_key 从本步骤的环境变量读取密钥；启动前先登记遮蔽。
+          if [ "${CODEX_PROVIDER_RESOLVED:-}" = cpa ] && [ -z "${CODEX_CPA_API_KEY_V2:-}" ]; then
+            echo '::error::environment codex 里没有环境级密钥 CODEX_CPA_API_KEY_V2，已停止，不调用模型。'
+            exit 1
+          fi
+          [ -z "${CODEX_CPA_API_KEY_V2:-}" ] || printf '::add-mask::%s\n' "$CODEX_CPA_API_KEY_V2"
           rc=0
           codex "${args[@]}" - < "$RUNNER_TEMP/plan-prompt.txt" \
             > "$RUNNER_TEMP/codex-events.jsonl" 2> "$RUNNER_TEMP/codex-stderr.log" || rc=$?
+          # Codex 之后的步骤：PATH 写死为系统目录，命令用绝对路径，不会调用沙箱可写目录（如 ~/.cargo/bin）里的同名程序。
+          PATH=/usr/bin:/bin
+          export PATH
           echo "codex exit code: $rc"
+          if [ -n "${CODEX_CPA_API_KEY_V2:-}" ] && [ -f "$RUNNER_TEMP/plan.json" ] && \
+            /usr/bin/grep -qF -e "$CODEX_CPA_API_KEY_V2" "$RUNNER_TEMP/plan.json"; then
+            echo '::error::规划输出包含 CPA 密钥，拒绝继续'
+            /usr/bin/rm -f "$RUNNER_TEMP/plan.json"
+            exit 1
+          fi
           # 完整输出不进入公开日志，也不作为 artifact 上传；失败时只打印归类标签，不打印 stderr 原文。
           if [ "$rc" -ne 0 ]; then
             echo '::error::Codex 规划失败，请检查登录状态或额度后手动重试'
@@ -308,17 +346,18 @@ jobs:
             # 的 turn.failed / error 事件（jq 只提取 message，且只读事件文件最后 64KB）。
             # 归类只做小写子串检查，不使用正则。各输入只看最后 64KB，单行超过 4KB 截断。
             # HTTP 状态码只在有上下文的写法中识别，例如 status 429、HTTP 429、
-            # HTTP status code: 429、unexpected status 429、429 Too Many Requests。
+            # HTTP status code: 429、unexpected status 429、429 Too Many Requests；
+            # CPA 的 api error 401、"status": 403 同样归为 auth_401_403。
             # 输出只由常量构成。
             log="$RUNNER_TEMP/codex-stderr.log"
             events="$RUNNER_TEMP/codex-events.jsonl"
             messages="$RUNNER_TEMP/codex-class-messages.txt"
             : > "$messages"
             if [ -f "$events" ]; then
-              tail -c 65536 "$events" | jq -rR 'fromjson? | if .type == "turn.failed" then (.error.message // empty) elif .type == "error" then (.message // empty) else empty end' >> "$messages" 2>/dev/null || true
+              /usr/bin/tail -c 65536 "$events" | /usr/bin/jq -rR 'fromjson? | if .type == "turn.failed" then (.error.message // empty) elif .type == "error" then (.message // empty) else empty end' >> "$messages" 2>/dev/null || true
             fi
             echo '::group::Codex 失败归类'
-            python3 - "$log" "$messages" <<'PY' 2>/dev/null || echo 'unknown'
+            /usr/bin/python3 -I - "$log" "$messages" <<'PY' 2>/dev/null || echo 'unknown'
           import sys
           MAX_FILE = 64 * 1024
           MAX_LINE = 4 * 1024
@@ -354,6 +393,12 @@ jobs:
                   "rejected refresh token",
                   "refresh token reused",
                   "not signed in",
+                  # CPA（Responses API）的密钥错误写法；标签不变。
+                  "invalid api key",
+                  "incorrect api key",
+                  "api key invalid",
+                  "missing api key",
+                  "invalid authentication",
               )),
               ("stream_disconnected", (
                   "stream disconnected",
@@ -440,7 +485,21 @@ jobs:
                   f"status code: {c}",
                   f"status code:{c}",
                   f"status code {c}",
+                  f"api error {c}",
+                  f'"status": {c}',
+                  f'"status":{c}',
               )
+          def has_status(line, needle):
+              # 状态码两侧不能紧挨数字：status 40301、"status":4290 都不是 HTTP 状态码。
+              start = line.find(needle)
+              while start != -1:
+                  end = start + len(needle)
+                  before = line[start - 1] if start > 0 else ""
+                  after = line[end] if end < len(line) else ""
+                  if not before.isdigit() and not after.isdigit():
+                      return True
+                  start = line.find(needle, start + 1)
+              return False
           def classify(lines):
               hits = set()
               for raw in lines:
@@ -456,7 +515,7 @@ jobs:
                               hits.add(label)
                               break
                   for code, reason in REASONS.items():
-                      if any(needle in line for needle in status_needles(code, reason)):
+                      if any(has_status(line, needle) for needle in status_needles(code, reason)):
                           hits.add(f"http_{code}")
                           if code == 429:
                               hits.add("rate_limit")
@@ -472,7 +531,7 @@ jobs:
           except Exception:
               print("unknown")
           PY
-            rm -f "$messages"
+            /usr/bin/rm -f "$messages"
             echo '::endgroup::'
             # end-codex-failure-class
             exit "$rc"
@@ -480,13 +539,16 @@ jobs:
 
       - name: Render plan
         if: steps.target.outputs.plan == 'true'
-        shell: bash
+        shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
         env:
           MAIN_SHA: ${{ steps.target.outputs.main_sha }}
           FORCE_PLAN: ${{ steps.target.outputs.force }}
         run: |
+          # Codex 之后的步骤：PATH 写死为系统目录，命令用绝对路径，不会调用沙箱可写目录（如 ~/.cargo/bin）里的同名程序。
+          PATH=/usr/bin:/bin
+          export PATH
           set -euo pipefail
-          jq -e '
+          /usr/bin/jq -e '
             def strs: type == "array" and all(.[]; type == "string" and length > 0);
             type == "object" and
             keys == ["affected_code", "call_chain", "compatibility", "complexity", "plan_complete",
@@ -514,14 +576,14 @@ jobs:
             exit 1
           }
           test -s "$GITHUB_WORKSPACE/plan-read-check.txt"
-          expected="$(cat "$GITHUB_WORKSPACE/plan-read-check.txt")"
+          expected="$(/usr/bin/cat "$GITHUB_WORKSPACE/plan-read-check.txt")"
           [[ "$expected" =~ ^[0-9a-f]{64}$ ]] || exit 1
-          jq -e --arg expected "$expected" '.plan_complete == true and .read_check == $expected' \
+          /usr/bin/jq -e --arg expected "$expected" '.plan_complete == true and .read_check == $expected' \
             "$RUNNER_TEMP/plan.json" >/dev/null || {
             echo '::error::Codex 未完成规划或未成功读取校验文件，不发布'
             exit 1
           }
-          jq -r --arg sha "$MAIN_SHA" --arg force "$FORCE_PLAN" '
+          /usr/bin/jq -r --arg sha "$MAIN_SHA" --arg force "$FORCE_PLAN" '
             def list: if length == 0 then "- 无" else map("- " + .) | join("\n") end;
             .summary,
             "",
@@ -551,36 +613,61 @@ jobs:
       - name: Publish plan
         id: publish
         if: steps.target.outputs.plan == 'true'
-        shell: bash
+        shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
         env:
           GH_TOKEN: ${{ github.token }}
           NUMBER: ${{ steps.target.outputs.number }}
           MAIN_SHA: ${{ steps.target.outputs.main_sha }}
+          CODEX_CPA_API_KEY_V2: ${{ steps.auth.outputs.provider == 'cpa' && secrets.CODEX_CPA_API_KEY_V2 || '' }}
+          CODEX_API_BASE_URL: ${{ steps.auth.outputs.provider == 'cpa' && secrets.CODEX_API_BASE_URL || '' }}
           PLAN_RUN_ID: ${{ github.run_id }}
           PLAN_RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
+          # Codex 之后的步骤：PATH 写死为系统目录，命令用绝对路径，不会调用沙箱可写目录（如 ~/.cargo/bin）里的同名程序。
+          PATH=/usr/bin:/bin
+          export PATH
           set -euo pipefail
-          gh() { timeout 60s gh "$@"; }
+          gh() { /usr/bin/timeout 60s /usr/bin/gh "$@"; }
           test -s "$RUNNER_TEMP/plan.md"
-          test "$(wc -c < "$RUNNER_TEMP/plan.md")" -le 58000
-          jq -r '.tokens // {} | .[] | strings | select(length >= 16)' \
-            "$CODEX_HOME/auth.json" > "$RUNNER_TEMP/new-tokens.txt"
-          cat "$RUNNER_TEMP/seed-tokens.txt" "$RUNNER_TEMP/new-tokens.txt" \
-            | sort -u > "$RUNNER_TEMP/all-tokens.txt"
+          test "$(/usr/bin/wc -c < "$RUNNER_TEMP/plan.md")" -le 58000
+          : > "$RUNNER_TEMP/new-tokens.txt"
+          # cpa 时没有 auth.json；chatgpt 时照旧检查刷新后的 token。
+          if [ "${CODEX_PROVIDER_RESOLVED:-chatgpt}" != cpa ]; then
+            /usr/bin/jq -r '.tokens // {} | .[] | strings | select(length >= 16)' \
+              "$CODEX_HOME/auth.json" > "$RUNNER_TEMP/new-tokens.txt"
+          fi
+          /usr/bin/cat "$RUNNER_TEMP/seed-tokens.txt" "$RUNNER_TEMP/new-tokens.txt" \
+            | /usr/bin/sort -u > "$RUNNER_TEMP/all-tokens.txt"
           if [ -s "$RUNNER_TEMP/all-tokens.txt" ] && \
-            grep -qF -f "$RUNNER_TEMP/all-tokens.txt" "$RUNNER_TEMP/plan.md"; then
+            /usr/bin/grep -qF -f "$RUNNER_TEMP/all-tokens.txt" "$RUNNER_TEMP/plan.md"; then
             echo '::error::规划输出包含登录凭据，拒绝发布'
             exit 1
           fi
+          # CPA 密钥和 base_url（含主机名，不区分大小写）都不得出现在规划输出里；检查失败时不打印地址。
+          cpa_base="${CODEX_API_BASE_URL:-}"
+          cpa_base="${cpa_base#"${cpa_base%%[![:space:]]*}"}"
+          cpa_base="${cpa_base%"${cpa_base##*[![:space:]]}"}"
+          cpa_host="${cpa_base#*://}"
+          cpa_host="${cpa_host%%/*}"
+          cpa_host="${cpa_host##*@}"
+          cpa_host="${cpa_host%:*}"
+          cpa_needles=()
+          [ -z "${CODEX_CPA_API_KEY_V2:-}" ] || cpa_needles+=(-e "$CODEX_CPA_API_KEY_V2")
+          [ -z "$cpa_base" ] || cpa_needles+=(-e "$cpa_base")
+          [ "${#cpa_host}" -lt 4 ] || cpa_needles+=(-e "$cpa_host")
+          if [ "${#cpa_needles[@]}" -gt 0 ] && /usr/bin/grep -qiF "${cpa_needles[@]}" "$RUNNER_TEMP/plan.md"; then
+            echo '::error::规划输出包含 CPA 密钥或 CPA 地址，拒绝发布'
+            exit 1
+          fi
           current="$(gh api "repos/$REPO/issues/$NUMBER")"
-          if ! jq -e '.state == "open" and (has("pull_request") | not)' <<< "$current" >/dev/null; then
+          if ! /usr/bin/jq -e '.state == "open" and (has("pull_request") | not)' <<< "$current" >/dev/null; then
             echo 'issue 已关闭，不发布方案。'
             exit 0
           fi
           marker="<!-- codex-plan issue=$NUMBER sha=$MAIN_SHA run=$PLAN_RUN_ID attempt=$PLAN_RUN_ATTEMPT -->"
           {
             printf '## Codex Architecture Plan\n\n基于 main 提交：`%s`\n\n' "$MAIN_SHA"
-            cat "$RUNNER_TEMP/plan.md"
+            /usr/bin/cat "$RUNNER_TEMP/plan.md"
             printf '\n\n### 确认后如何实施\n\n'
             printf '本方案只是规划，不会自动派发。所有者确认（或修改）后，在本 issue 下评论 `/codex`，'
             printf '并把确认后的方案要点写在命令后面；实现会话读不到这条评论，只能拿到 issue 正文和 `/codex` 后的要求。\n'
@@ -589,41 +676,48 @@ jobs:
           } > "$RUNNER_TEMP/plan-comment.md"
           existing="$(gh api "repos/$REPO/issues/$NUMBER/comments" --paginate --jq \
             '.[] | select(.user.login == "github-actions[bot]") | .body')"
-          if grep -Fxq -- "$marker" <<< "$existing"; then
+          if /usr/bin/grep -Fxq -- "$marker" <<< "$existing"; then
             echo '当前 run/attempt 的方案已发布，不重复评论。'
           else
-            jq -n --rawfile body "$RUNNER_TEMP/plan-comment.md" '{body: $body}' > "$RUNNER_TEMP/plan-comment.json"
+            /usr/bin/jq -n --rawfile body "$RUNNER_TEMP/plan-comment.md" '{body: $body}' > "$RUNNER_TEMP/plan-comment.json"
             gh api "repos/$REPO/issues/$NUMBER/comments" --input "$RUNNER_TEMP/plan-comment.json" >/dev/null
           fi
-          cat "$RUNNER_TEMP/plan-comment.md" >> "$GITHUB_STEP_SUMMARY"
+          /usr/bin/cat "$RUNNER_TEMP/plan-comment.md" >> "$GITHUB_STEP_SUMMARY"
           echo 'posted=true' >> "$GITHUB_OUTPUT"
 
       - name: Persist refreshed auth
-        if: always() && steps.auth.outputs.ok == 'true'
-        shell: bash
+        # 只有 chatgpt 登录会刷新并写回 CODEX_AUTH_JSON；cpa 不读、不写它。
+        if: always() && steps.auth.outputs.ok == 'true' && steps.auth.outputs.provider == 'chatgpt'
+        shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
         env:
           GH_TOKEN: ${{ secrets.CODEX_BOT_TOKEN }}
         run: |
+          # Codex 之后的步骤：PATH 写死为系统目录，命令用绝对路径，不会调用沙箱可写目录（如 ~/.cargo/bin）里的同名程序。
+          PATH=/usr/bin:/bin
+          export PATH
           set -euo pipefail
           # 与 Codex Code Review 相同：refresh token 会轮换，只把刷新后的登录写回 environment secret。
           file="$CODEX_HOME/auth.json"
-          new_sha="$(sha256sum "$file" | cut -d' ' -f1)"
-          [ "$new_sha" != "$(cat "$RUNNER_TEMP/auth.seed.sha256")" ] || exit 0
-          jq -e '.auth_mode == "chatgpt" and ((.tokens.refresh_token // "") != "")' "$file" >/dev/null
-          timeout 60s gh secret set CODEX_AUTH_JSON --env codex --repo "$REPO" < "$file"
+          new_sha="$(/usr/bin/sha256sum "$file" | /usr/bin/cut -d' ' -f1)"
+          [ "$new_sha" != "$(/usr/bin/cat "$RUNNER_TEMP/auth.seed.sha256")" ] || exit 0
+          /usr/bin/jq -e '.auth_mode == "chatgpt" and ((.tokens.refresh_token // "") != "")' "$file" >/dev/null
+          /usr/bin/timeout 60s /usr/bin/gh secret set CODEX_AUTH_JSON --env codex --repo "$REPO" < "$file"
 
       - name: Report plan failure
         if: failure() && steps.target.outputs.plan == 'true'
-        shell: bash
+        shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
         env:
           GH_TOKEN: ${{ github.token }}
           NUMBER: ${{ steps.target.outputs.number }}
           POSTED: ${{ steps.publish.outputs.posted }}
         run: |
+          # Codex 之后的步骤：PATH 写死为系统目录，命令用绝对路径，不会调用沙箱可写目录（如 ~/.cargo/bin）里的同名程序。
+          PATH=/usr/bin:/bin
+          export PATH
           set -euo pipefail
-          gh() { timeout 60s gh "$@"; }
+          gh() { /usr/bin/timeout 60s /usr/bin/gh "$@"; }
           current="$(gh api "repos/$REPO/issues/$NUMBER")"
-          if ! jq -e '.state == "open" and (has("pull_request") | not)' <<< "$current" >/dev/null; then
+          if ! /usr/bin/jq -e '.state == "open" and (has("pull_request") | not)' <<< "$current" >/dev/null; then
             echo 'issue 已关闭，不评论失败说明。'
             exit 0
           fi
@@ -641,14 +735,17 @@ jobs:
               printf '[运行日志](%s)\n' "$RUN_URL"
             } > "$RUNNER_TEMP/failure-comment.md"
           fi
-          jq -n --rawfile body "$RUNNER_TEMP/failure-comment.md" '{body: $body}' > "$RUNNER_TEMP/failure-comment.json"
+          /usr/bin/jq -n --rawfile body "$RUNNER_TEMP/failure-comment.md" '{body: $body}' > "$RUNNER_TEMP/failure-comment.json"
           gh api "repos/$REPO/issues/$NUMBER/comments" --input "$RUNNER_TEMP/failure-comment.json" >/dev/null
 
       - name: Remove local credentials
         if: always()
-        shell: bash
+        shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
         run: |
-          rm -rf "$RUNNER_TEMP/codex-home"
-          rm -f "$RUNNER_TEMP"/*-tokens.txt "$RUNNER_TEMP/codex-events.jsonl" \
+          # Codex 之后的步骤：PATH 写死为系统目录，命令用绝对路径，不会调用沙箱可写目录（如 ~/.cargo/bin）里的同名程序。
+          PATH=/usr/bin:/bin
+          export PATH
+          /usr/bin/rm -rf "$RUNNER_TEMP/codex-home"
+          /usr/bin/rm -f "$RUNNER_TEMP"/*-tokens.txt "$RUNNER_TEMP/codex-events.jsonl" \
             "$RUNNER_TEMP/codex-stderr.log" "$RUNNER_TEMP/plan.md" "$RUNNER_TEMP/plan.json"
-          rm -f "$GITHUB_WORKSPACE/plan-read-check.txt"
+          /usr/bin/rm -f "$GITHUB_WORKSPACE/plan-read-check.txt"

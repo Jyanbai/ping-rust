@@ -74,8 +74,8 @@ jobs:
         id: prep
         shell: bash
         env:
-          CODEX_CPA_API_KEY: ${{ secrets.CODEX_CPA_API_KEY }}
-          CODEX_API_BASE_URL: ${{ vars.CODEX_API_BASE_URL }}
+          CODEX_CPA_API_KEY_V2: ${{ secrets.CODEX_CPA_API_KEY_V2 }}
+          CODEX_API_BASE_URL: ${{ secrets.CODEX_API_BASE_URL }}
           CODEX_MODEL: ${{ vars.CODEX_MODEL }}
           CODEX_REASONING_EFFORT: ${{ vars.CODEX_REASONING_EFFORT }}
           GITHUB_TOKEN: ''
@@ -84,27 +84,29 @@ jobs:
           set -euo pipefail
           umask 077
           # 只接受 environment codex 的专名密钥；仓库/组织级 CODEX_API_KEY 不会传入本步骤。
-          if [ -z "${CODEX_CPA_API_KEY:-}" ]; then
-            echo '::error::environment codex 里没有环境级密钥 CODEX_CPA_API_KEY，已停止，不调用模型。仓库或组织级的 CODEX_API_KEY 不会被使用。请按 docs/CODEX_DISPATCH.md 在本机 PowerShell 设置：gh secret set CODEX_CPA_API_KEY --env codex --repo Jyanbai/ping-rust（密钥粘贴给 gh，不要发到聊天里）。不要在仓库或组织级创建同名 secret。'
+          if [ -z "${CODEX_CPA_API_KEY_V2:-}" ]; then
+            echo '::error::environment codex 里没有环境级密钥 CODEX_CPA_API_KEY_V2，已停止，不调用模型。仓库或组织级的 CODEX_API_KEY 不会被使用。请按 docs/CODEX_DISPATCH.md 在本机 PowerShell 设置：gh secret set CODEX_CPA_API_KEY_V2 --env codex --repo Jyanbai/ping-rust（密钥粘贴给 gh，不要发到聊天里）。不要在仓库或组织级创建同名 secret。'
             exit 1
           fi
           # CLI 只从环境变量读取密钥，不写进文件。
-          CODEX_API_KEY="$CODEX_CPA_API_KEY"
+          CODEX_API_KEY="$CODEX_CPA_API_KEY_V2"
           export CODEX_API_KEY
           printf '::add-mask::%s\n' "$CODEX_API_KEY"
           # GitHub 会把同名仓库/组织 secret 合并进 secrets 上下文，工作流无法分辨来源。
-          echo '注意：CODEX_CPA_API_KEY 必须只在 environment codex 中设置；不要在仓库或组织级创建同名 secret，否则在环境密钥缺失时会把上层凭据发给 CPA。'
+          echo '注意：CODEX_CPA_API_KEY_V2 必须只在 environment codex 中设置；不要在仓库或组织级创建同名 secret，否则在环境密钥缺失时会把上层凭据发给 CPA。'
 
-          base="${CODEX_API_BASE_URL:-https://api.moio.cn/v1}"
+          # 基址是 environment codex 的 secret（Actions 全程自动遮蔽），没有内置默认值；未设置就停止，不打印任何地址。
+          base="${CODEX_API_BASE_URL:-}"
           base="${base%"${base##*[![:space:]]}"}"
           base="${base#"${base%%[![:space:]]*}"}"
           if [ -z "$base" ]; then
-            base='https://api.moio.cn/v1'
+            echo '::error::environment codex 里没有 secret CODEX_API_BASE_URL（CPA 的 https 基址），已停止，不调用模型。请在本机执行：gh secret set CODEX_API_BASE_URL --env codex --repo Jyanbai/ping-rust'
+            exit 1
           fi
           # 只接受 https 基址，避免写入 config.toml 时注入其他配置。
           base_re='^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._~/-]*)?$'
           if ! [[ "$base" =~ $base_re ]]; then
-            echo '::error::CODEX_API_BASE_URL 必须是 https 基址（主机名、可选端口和路径），例如 https://api.moio.cn/v1'
+            echo '::error::secret CODEX_API_BASE_URL 必须是 https 基址（主机名、可选端口和路径，以 /v1 结尾）'
             exit 1
           fi
 
@@ -161,26 +163,25 @@ jobs:
           echo "CODEX_HOME=$home" >> "$GITHUB_ENV"
           echo "CPA_MODEL=$model" >> "$GITHUB_ENV"
           echo "CPA_EFFORT=$effort" >> "$GITHUB_ENV"
-          echo "CPA_BASE_URL=$base" >> "$GITHUB_ENV"
           echo "ok=true" >> "$GITHUB_OUTPUT"
-          echo "已生成 CI 专用 config.toml：provider=cpa，model=$model，reasoning=$effort，base_url=$base"
-          echo "CPA 设置（请求值）：provider=cpa；模型=$model；推理强度=$effort；base_url=$base" >> "$GITHUB_STEP_SUMMARY"
+          echo "已生成 CI 专用 config.toml：provider=cpa，model=$model，reasoning=$effort（基址为 secret，不打印）"
+          echo "CPA 设置（请求值）：provider=cpa；模型=$model；推理强度=$effort；基址为 secret，不打印" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Verify read-only sandbox
         id: sandbox
         if: steps.prep.outputs.ok == 'true'
         shell: bash
         env:
-          CODEX_CPA_API_KEY: ${{ secrets.CODEX_CPA_API_KEY }}
+          CODEX_CPA_API_KEY_V2: ${{ secrets.CODEX_CPA_API_KEY_V2 }}
           GITHUB_TOKEN: ''
           GH_TOKEN: ''
         run: |
           set -euo pipefail
-          if [ -z "${CODEX_CPA_API_KEY:-}" ]; then
-            echo '::error::environment codex 里没有环境级密钥 CODEX_CPA_API_KEY，已停止，不调用模型。'
+          if [ -z "${CODEX_CPA_API_KEY_V2:-}" ]; then
+            echo '::error::environment codex 里没有环境级密钥 CODEX_CPA_API_KEY_V2，已停止，不调用模型。'
             exit 1
           fi
-          CODEX_API_KEY="$CODEX_CPA_API_KEY"
+          CODEX_API_KEY="$CODEX_CPA_API_KEY_V2"
           export CODEX_API_KEY
           printf '::add-mask::%s\n' "$CODEX_API_KEY"
           # Ubuntu 24.04 默认限制非特权 user namespace，与现有 Codex 工作流相同，一次性 runner 上放开即可。
@@ -229,16 +230,16 @@ jobs:
         if: steps.sandbox.outputs.ok == 'true'
         shell: bash
         env:
-          CODEX_CPA_API_KEY: ${{ secrets.CODEX_CPA_API_KEY }}
+          CODEX_CPA_API_KEY_V2: ${{ secrets.CODEX_CPA_API_KEY_V2 }}
           GITHUB_TOKEN: ''
           GH_TOKEN: ''
         run: |
           set -uo pipefail
-          if [ -z "${CODEX_CPA_API_KEY:-}" ]; then
-            echo '::error::environment codex 里没有环境级密钥 CODEX_CPA_API_KEY，已停止，不调用模型。'
+          if [ -z "${CODEX_CPA_API_KEY_V2:-}" ]; then
+            echo '::error::environment codex 里没有环境级密钥 CODEX_CPA_API_KEY_V2，已停止，不调用模型。'
             exit 1
           fi
-          CODEX_API_KEY="$CODEX_CPA_API_KEY"
+          CODEX_API_KEY="$CODEX_CPA_API_KEY_V2"
           export CODEX_API_KEY
           printf '::add-mask::%s\n' "$CODEX_API_KEY"
           work="$GITHUB_WORKSPACE/cpa-smoke"
@@ -264,7 +265,7 @@ jobs:
             -m "$CPA_MODEL"
             -c "model_reasoning_effort=\"$CPA_EFFORT\""
             -o "$RUNNER_TEMP/cpa-last-message.md")
-          echo "Codex 设置（请求值）：provider=cpa；模型=$CPA_MODEL；推理强度=$CPA_EFFORT；base_url=$CPA_BASE_URL"
+          echo "Codex 设置（请求值）：provider=cpa；模型=$CPA_MODEL；推理强度=$CPA_EFFORT；基址为 secret，不打印"
           rc=0
           # `shell: bash` 实际是 bash -eo pipefail：失败时必须用 || rc=$? 接住。
           codex "${args[@]}" - < "$RUNNER_TEMP/cpa-prompt.txt" \
@@ -288,7 +289,7 @@ jobs:
               model_missing=1
             fi
             case "$status" in
-              401) category="密钥无效或被拒绝"; hint="请检查 environment codex 的 CODEX_CPA_API_KEY" ;;
+              401) category="密钥无效或被拒绝"; hint="请检查 environment codex 的 CODEX_CPA_API_KEY_V2" ;;
               403)
                 if [ "$model_missing" -eq 1 ]; then
                   category="请求的模型不可用"
@@ -302,7 +303,7 @@ jobs:
                   category="请求的模型不可用"
                   hint="请检查 vars.CODEX_MODEL（本次请求的模型：${CPA_MODEL:-未设置}）"
                 else
-                  category="接口不存在"; hint="请检查 CODEX_API_BASE_URL 是否指向可用的 /responses 端点"
+                  category="接口不存在"; hint="请检查 secret CODEX_API_BASE_URL 是否指向可用的 /responses 端点"
                 fi
                 ;;
               408) category="请求超时"; hint="" ;;
