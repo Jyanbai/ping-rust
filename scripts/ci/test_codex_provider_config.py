@@ -197,6 +197,16 @@ class RestoreStepTest(unittest.TestCase):
                     self.assertNotIn("ok=true", self.output())
                     self.assertIn("::error::", result.stdout)
 
+    def test_cpa_rejects_reasoning_effort_with_whitespace_before_launch(self):
+        for flow in FLOWS:
+            for effort in ("high ", " high", "high\n", "\t"):
+                with self.subTest(flow=flow, effort=effort):
+                    result, config = self.restore(flow, "cpa", CODEX_REASONING_EFFORT=effort)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(config, "")
+                    self.assertNotIn("ok=true", self.output())
+                    self.assertIn("::error::CODEX_REASONING_EFFORT", result.stdout)
+
     def test_chatgpt_without_login_stops(self):
         for flow in FLOWS:
             with self.subTest(flow=flow):

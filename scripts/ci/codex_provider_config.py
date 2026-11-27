@@ -25,7 +25,7 @@ KEY_ENV = "CODEX_CPA_API_KEY"
 # 与 codex-cpa-smoke.yml 相同的校验：只接受 https 基址，避免写入 config.toml 时注入其他配置。
 BASE_RE = re.compile(r"^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._~/-]*)?$")
 MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
-EFFORT_RE = re.compile(r"^[a-z]+$")
+EFFORT_RE = re.compile(r"[a-z]+")
 # Codex 默认 ignore_default_excludes = true，命令会继承 *KEY* / *TOKEN* 变量；cpa 时必须关掉。
 SHELL_POLICY = (
     "[shell_environment_policy]\n"
@@ -85,8 +85,9 @@ def cpa_settings(env):
         raise ConfigError("CODEX_PROVIDER=cpa 需要设置本流程的模型变量（或回退用的 CODEX_MODEL），当前未设置")
     if not MODEL_RE.match(model):
         raise ConfigError("模型变量不是合法的模型名")
-    effort = (env.get("CODEX_REASONING_EFFORT") or "").strip()
-    if effort and not EFFORT_RE.match(effort):
+    # 启动步骤校验原始环境变量，恢复时也按原值校验。
+    effort = env.get("CODEX_REASONING_EFFORT", "")
+    if effort and not EFFORT_RE.fullmatch(effort):
         raise ConfigError("CODEX_REASONING_EFFORT 只能是小写字母（如 high），当前值无效")
     if not env.get(KEY_ENV):
         raise ConfigError(
