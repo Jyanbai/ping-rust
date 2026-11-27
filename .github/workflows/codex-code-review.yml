@@ -45,6 +45,8 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+      # 只读：核验上一轮审查的运行和证明产物（增量审查的 prev）。
+      actions: read
       pull-requests: write
     steps:
       - name: Checkout review policy
@@ -102,24 +104,15 @@ jobs:
               exit 0
             fi
           fi
-          # 增量审查：取最近一条 github-actions[bot] 审查结论（sha 不是当前 head）作为 prev。
-          # 只读 bot 自己发布的审查评论；所有者的 /accept 等其他评论不会进入 prompt。
-          gh api "repos/$REPO/issues/$number/comments" --paginate > "$RUNNER_TEMP/review-comments.json"
-          jq -s --arg head "$sha" '
-            (add // []) | map(select(.user.login == "github-actions[bot]")
-              | {id, body: (.body // "")}
-              | .marks = [.body | split("\n")[] | select(test(
-                  "^<!-- codex-review-verdict sha=[0-9a-f]{40} base=[0-9a-f]{40} findings=[0-9]+( blocking=[0-9]+)? run=[0-9]+ attempt=[0-9]+ -->$"))]
-              | select((.marks | length) == 1)
-              | .sha = (.marks[0] | .[30:70])
-              | select(.sha != $head))
-            | sort_by(.id) | last // {}
-          ' "$RUNNER_TEMP/review-comments.json" > "$RUNNER_TEMP/review-prev.json"
+          # 增量审查的 prev：复用门禁的 verify_review（policy/ 是 main 的检出），只认 main 上真实成功的
+          # Review 运行及其证明产物（run/attempt/head/base 一致）。评论标记本身不算数；核验不了就全量审查。
+          python3 policy/scripts/ci/pr_merge_gate.py --previous-review "$number" "$sha" > "$RUNNER_TEMP/review-prev.json"
           prev="$(jq -r '.sha // ""' "$RUNNER_TEMP/review-prev.json")"
           [ -z "$prev" ] || [[ "$prev" =~ ^[0-9a-f]{40}$ ]] || exit 1
-          # 上一轮审查正文去掉隐藏标记行后交给下一轮逐条核对；正文本身已在发布时做过凭据和地址检查。
+          [ "$prev" != "$sha" ] || exit 1
+          # 上一轮审查正文去掉隐藏标记行后交给下一轮逐条核对；所有者和其他人的评论不会进入 prompt。
           jq -r '.body // ""' "$RUNNER_TEMP/review-prev.json" | grep -v '^<!--' > "$RUNNER_TEMP/review-prev.md" || true
-          rm -f "$RUNNER_TEMP/review-comments.json" "$RUNNER_TEMP/review-prev.json"
+          rm -f "$RUNNER_TEMP/review-prev.json"
           {
             echo "number=$number"
             echo "head_sha=$sha"
@@ -601,8 +594,7 @@ jobs:
             exit 1
           }
           test -s "$RUNNER_TEMP/review-scope.txt"
-          # 写不出正常使用下触发路径的 P0/P1 按规则降为 P2；阻塞项排在前面，按顺序编号 F1、F2……
-          # 编号写进评论和证明产物，所有者用 /accept F<编号> 豁免时以它为准。
+          # 写不出正常使用下触发路径的 P0/P1 按规则降为 P2；阻塞项（P0/P1）排在前面，建议项（P2/P3）在后。
           /usr/bin/jq '
             .findings |= (map(
                 if .priority <= 1 and ((.trigger | test("\\S")) | not) then
@@ -612,14 +604,14 @@ jobs:
           ' "$RUNNER_TEMP/review.json" > "$RUNNER_TEMP/review.normalized.json"
           /usr/bin/mv "$RUNNER_TEMP/review.normalized.json" "$RUNNER_TEMP/review.json"
           /usr/bin/jq -r --rawfile scope "$RUNNER_TEMP/review-scope.txt" '
-            def item: "\n### [F\(.key + 1)] [P\(.value.priority)] \(.value.title)\n\n`\(.value.file):\(.value.line)`\n\n" +
+            def item: "\n### [P\(.value.priority)] \(.value.title)\n\n`\(.value.file):\(.value.line)`\n\n" +
               (if (.value.trigger | test("\\S")) then "正常使用下的触发路径：\(.value.trigger)\n\n" else "" end) + .value.body;
             (.findings | to_entries) as $all
             | ($all | map(select(.value.priority <= 1))) as $blocking
             | ($all | map(select(.value.priority > 1))) as $advice
             | ($scope | rtrimstr("\n")), "", .summary,
               (if ($blocking | length) > 0 then
-                "\n## 阻塞合并（P0/P1，共 \($blocking | length) 条）\n\n仓库所有者可在本 PR 评论 `/accept F<编号> <理由>` 豁免某条阻塞项；豁免只对本次 head 的这次审查有效，有新提交后需重新审查。"
+                "\n## 阻塞合并（P0/P1，共 \($blocking | length) 条）"
                else empty end),
               ($blocking[] | item),
               (if ($advice | length) > 0 then "\n## 建议（P2/P3，不阻塞合并，不自动开 issue）" else empty end),
@@ -682,12 +674,10 @@ jobs:
             echo 'PR 已关闭或提交已变化，不发布过期审查。'
             exit 0
           fi
-          # findings 是总数，blocking 是 P0/P1 数（发布时尚无豁免；所有者的 /accept 只能在本评论之后生效）。
-          # ids 按评论里的编号记录每条发现的优先级，门禁据此核对 /accept。
+          # findings 是总数，blocking 是 P0/P1 数；门禁只要求 blocking == 0。
           /usr/bin/jq -c '{
             findings: (.findings | length),
-            blocking: (.findings | map(select(.priority <= 1)) | length),
-            ids: (.findings | to_entries | map({key: "F\(.key + 1)", value: .value.priority}) | from_entries)
+            blocking: (.findings | map(select(.priority <= 1)) | length)
           }' "$RUNNER_TEMP/review.json" > "$RUNNER_TEMP/review-counts.json"
           findings="$(/usr/bin/jq '.findings' "$RUNNER_TEMP/review-counts.json")"
           blocking="$(/usr/bin/jq '.blocking' "$RUNNER_TEMP/review-counts.json")"
@@ -712,7 +702,7 @@ jobs:
           fi
           /usr/bin/jq -c --arg head "$HEAD_SHA" --arg base "$BASE_SHA" \
             --argjson run "$REVIEW_RUN_ID" --argjson attempt "$REVIEW_RUN_ATTEMPT" \
-            '{head: $head, base: $base, findings: .findings, blocking: .blocking, ids: .ids, run: $run, attempt: $attempt}' \
+            '{head: $head, base: $base, findings: .findings, blocking: .blocking, run: $run, attempt: $attempt}' \
             "$RUNNER_TEMP/review-counts.json" > "$RUNNER_TEMP/review-attestation.json"
           # 门禁只接受不超过 4096 字节的证明；超出时直接失败，不发布无法核验的证明。
           test "$(/usr/bin/wc -c < "$RUNNER_TEMP/review-attestation.json")" -le 4096

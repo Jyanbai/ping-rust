@@ -58,15 +58,12 @@ Codex 负责实现、独立只读审查及回修，Grok bot 只读播报进度�
   评论把发现分成“阻塞合并（P0/P1）”和“建议（P2/P3）”两组，按顺序编号 F1、F2……；建议项不阻塞合并、
   不自动开 issue，也不触发自动回修。
 - 审查结论标记为 `<!-- codex-review-verdict sha=… base=… findings=N blocking=M run=… attempt=… -->`：
-  `findings` 是总数，`blocking` 是 P0/P1 数。证明产物同步记录 `findings`、`blocking` 和 `ids`
-  （编号到优先级）。PR Merge Gate 只要求**未豁免的 P0/P1 为 0**，原有的运行来源（main 上的 workflow）、
-  run/attempt、head/base 校验不变。旧格式（没有 `blocking`）的结论不再被门禁接受，需要重新审查。
-- **`/accept` 豁免**：仓库所有者本人在 PR 下新发评论，第一行从行首写 `/accept F2 review=12345 <理由>`。
-  `12345` 是当前审查评论链接末尾 `#issuecomment-` 后的数字，也可从门禁失败日志复制。理由不能为空，一条评论只豁免一个编号。
-  门禁只认在指定审查评论之后发出、未经编辑的命令；新提交或重新审查后需要重新豁免，旧版不带 `review=` 的命令也不生效。
-  理由不会进入 prompt 或门禁日志。
-  `/accept` 本身不触发门禁，最迟由每 15 分钟的定时核对生效，也可以手动运行 PR Merge Gate。
-- **增量审查**：审查前取本 PR 最近一条（不是当前 head 的）审查结论的提交作为 prev。prev 是当前 head
+  `findings` 是总数，`blocking` 是 P0/P1 数。证明产物同步记录 `findings` 和 `blocking`。
+  PR Merge Gate 只要求 **`blocking == 0`**，原有的运行来源（main 上的 workflow）、run/attempt、head/base 校验不变。
+  旧格式（没有 `blocking`）的结论不再被门禁接受，需要重新审查。误报的 P1 由所有者判断后用管理员权限合并，不设豁免命令。
+- **增量审查**：审查前取本 PR 最近一条（不是当前 head 的）**经过核验**的审查结论的提交作为 prev。
+  核验复用门禁的 `verify_review`：结论必须来自 main 上成功的 Review 运行，run/attempt、head/base 与证明产物一致
+  （为此 Review job 增加了只读的 `actions: read`）；只有评论标记、核验不了的都不算，退回全量审查。prev 是当前 head
   的祖先时，prompt 分两部分：先逐条核对上一轮发现是否已修复（写进 summary，未修复的 P0/P1 照常列为发现），
   再只审查 `prev..HEAD` 的改动；prev 之前就有、本轮没改的代码只允许报 P0/P1。prev 不是祖先
   （force-push / rebase）或没有上一轮结论时做全量审查，评论开头会写明审查范围。
