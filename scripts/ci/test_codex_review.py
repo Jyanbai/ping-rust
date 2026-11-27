@@ -256,6 +256,7 @@ class ReviewScriptsTest(unittest.TestCase):
 
     def prepare_review(self, text="未发现有充分证据的代码问题。", tokens=(), findings=()):
         (self.work / "review.md").write_text(text, encoding="utf-8")
+        (self.work / "review-scope.txt").write_text("审查范围：全量审查（本 PR 没有上一轮审查结论）。\n", encoding="utf-8")
         (self.work / "review.json").write_text(
             json.dumps({"summary": text, "findings": list(findings),
                         "review_complete": True, "read_check": READ_CHECK}), encoding="utf-8"
@@ -318,7 +319,7 @@ class ReviewScriptsTest(unittest.TestCase):
     def test_modern_review_proof_requires_new_automatic_review(self):
         self.api[f"repos/{REPO}/issues/7/comments"] = [{
             "user": {"login": "github-actions[bot]"},
-            "body": MARKER + f"\n<!-- codex-review-verdict sha={HEAD} base={BASE} findings=0 run=98 attempt=1 -->",
+            "body": MARKER + f"\n<!-- codex-review-verdict sha={HEAD} base={BASE} findings=0 blocking=0 run=98 attempt=1 -->",
         }]
         result = self.run_step("Select PR")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -326,7 +327,7 @@ class ReviewScriptsTest(unittest.TestCase):
 
     def test_same_run_attempt_publication_is_idempotent_but_still_attested(self):
         self.prepare_review()
-        marker = f"<!-- codex-review-verdict sha={HEAD} base={BASE} findings=0 run=99 attempt=1 -->"
+        marker = f"<!-- codex-review-verdict sha={HEAD} base={BASE} findings=0 blocking=0 run=99 attempt=1 -->"
         self.api[f"repos/{REPO}/issues/7/comments"] = [{
             "user": {"login": "github-actions[bot]"},
             "body": MARKER + "\n" + marker,
@@ -336,7 +337,7 @@ class ReviewScriptsTest(unittest.TestCase):
         self.assertFalse((self.work / "posted.json").exists())
         attestation = json.loads((self.work / "review-attestation.json").read_text())
         self.assertEqual(attestation, {
-            "head": HEAD, "base": BASE, "findings": 0, "run": 99, "attempt": 1,
+            "head": HEAD, "base": BASE, "findings": 0, "blocking": 0, "ids": {}, "run": 99, "attempt": 1,
         })
         self.assertIn("posted=true", self.output())
 
@@ -363,7 +364,7 @@ class ReviewScriptsTest(unittest.TestCase):
         self.assertIn("Codex Code Review", posted)
         self.assertIn("未发现有充分证据", posted)
         self.assertIn(MARKER, posted)
-        self.assertIn(f"<!-- codex-review-verdict sha={HEAD} base={BASE} findings=0 run=99 attempt=1 -->", posted)
+        self.assertIn(f"<!-- codex-review-verdict sha={HEAD} base={BASE} findings=0 blocking=0 run=99 attempt=1 -->", posted)
 
     def test_updated_head_base_and_closed_pr_are_not_posted(self):
         for change in (
@@ -438,15 +439,19 @@ exec "$@"
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse((self.work / "posted.json").exists())
 
-    def build_review_prompt(self):
+    def build_review_prompt(self, prev="", ancestor=True):
         """执行 Run Codex review 步骤，用假 git / codex 只捕获发给模型的 prompt。"""
         policy = self.work / "policy"
-        policy.mkdir()
+        policy.mkdir(exist_ok=True)
         (policy / "AGENTS.md").write_text((ROOT / "AGENTS.md").read_text(encoding="utf-8"), encoding="utf-8")
         (self.work / "review-pr.json").write_text(json.dumps(PR), encoding="utf-8")
-        self.mock_command("git", "exit 0\n")
+        # 假 git 记录调用；merge-base --is-ancestor 的结果由 ancestor 控制。
+        self.mock_command("git", f'''echo "$*" >> "$RUNNER_TEMP/git.log"
+case "$*" in *merge-base*--is-ancestor*) exit {0 if ancestor else 1} ;; esac
+exit 0
+''')
         self.mock_command("codex", 'cat > "$RUNNER_TEMP/captured-prompt.txt"\n')
-        env = {**self.env, "CODEX_MODEL": "", "CODEX_REASONING_EFFORT": ""}
+        env = {**self.env, "CODEX_MODEL": "", "CODEX_REASONING_EFFORT": "", "PREV_SHA": prev}
         result = subprocess.run(
             ["bash", "-e", "-o", "pipefail", "-c", step_script("Run Codex review")],
             cwd=self.work, env=env, text=True, capture_output=True, check=False,
@@ -472,6 +477,150 @@ exec "$@"
         check = (self.work / "workspace/review-read-check.txt").read_text().strip()
         self.assertRegex(check, r"^[0-9a-f]{64}$")
         self.assertNotIn(check, prompt)
+
+    # ---- 增量审查、P1 定义、阻塞/建议分组与 /accept 豁免 ----
+    PREV = "c" * 40
+
+    def bot_verdict(self, sha, comment_id, findings_text="", blocking=True):
+        tail = f" blocking=0" if blocking else ""
+        return {"id": comment_id, "user": {"login": "github-actions[bot]", "type": "Bot"},
+                "body": f"## Codex Code Review\n\n{findings_text}\n\n{MARKER.replace(HEAD, sha)}\n"
+                        f"<!-- codex-review-verdict sha={sha} base={BASE} findings=1{tail} run=5 attempt=1 -->"}
+
+    def test_review_prompt_defines_p1_and_requires_trigger_path(self):
+        prompt = self.build_review_prompt()
+        self.assertIn("P1：正常使用就会碰到，并导致数据丢失、凭据/地址泄露、服务中断或安全边界失效", prompt)
+        self.assertIn("罕见的系统状态、人为构造的输入或多个故障同时发生", prompt)
+        self.assertIn("最多算 P2", prompt)
+        self.assertIn("正常使用下的触发路径", prompt)
+        self.assertNotIn("增量审查", prompt)
+        scope = (self.work / "review-scope.txt").read_text(encoding="utf-8")
+        self.assertIn("全量审查", scope)
+        schema = json.loads((self.work / "review-schema.json").read_text(encoding="utf-8"))
+        self.assertIn("trigger", schema["properties"]["findings"]["items"]["required"])
+
+    def test_select_pr_picks_latest_bot_verdict_as_prev_and_ignores_accept_comments(self):
+        accept_reason = "OWNER-ACCEPT-REASON-MUST-NOT-REACH-PROMPT"
+        self.api[f"repos/{REPO}/issues/7/comments"] = [
+            self.bot_verdict("d" * 40, 10, "更早的审查"),
+            self.bot_verdict(self.PREV, 20, "### [F1] [P1] 上一轮的问题"),
+            {"id": 25, "user": {"login": "owner", "type": "User"}, "author_association": "OWNER",
+             "body": f"/accept F1 {accept_reason}"},
+            {"id": 26, "user": {"login": "someone-else", "type": "User"},
+             "body": f"<!-- codex-review-verdict sha={'e' * 40} base={BASE} findings=0 blocking=0 run=6 attempt=1 -->"},
+        ]
+        result = self.run_step("Select PR")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"prev_sha={self.PREV}", self.output())
+        prev = (self.work / "review-prev.md").read_text(encoding="utf-8")
+        self.assertIn("上一轮的问题", prev)
+        self.assertNotIn("<!--", prev)
+        self.assertNotIn(accept_reason, prev)
+        prompt = self.build_review_prompt(prev=self.PREV)
+        self.assertIn("上一轮的问题", prompt)
+        self.assertNotIn(accept_reason, prompt)
+        self.assertNotIn("/accept F1", prompt)
+
+    def test_select_pr_without_previous_verdict_has_empty_prev(self):
+        self.api[f"repos/{REPO}/issues/7/comments"] = [
+            {"id": 3, "user": {"login": "owner"}, "body": "普通评论"},
+            # 当前 head 自己的旧结论不能当 prev，否则增量范围为空。
+            self.bot_verdict(HEAD, 4),
+        ]
+        self.env.update(EVENT_NAME="workflow_dispatch", PR_INPUT="7")
+        result = self.run_step("Select PR")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("prev_sha=\n", self.output())
+
+    def test_incremental_prompt_contains_prev_range_and_previous_findings(self):
+        (self.work / "review-prev.md").write_text("### [F1] [P1] 上一轮的阻塞问题\n", encoding="utf-8")
+        prompt = self.build_review_prompt(prev=self.PREV, ancestor=True)
+        self.assertIn(f"git -C work diff {self.PREV}..HEAD", prompt)
+        self.assertIn("逐条确认", prompt)
+        self.assertIn("上一轮的阻塞问题", prompt)
+        self.assertIn("只允许报告 P0/P1", prompt)
+        scope = (self.work / "review-scope.txt").read_text(encoding="utf-8")
+        self.assertIn(f"增量审查 {self.PREV}..{HEAD}", scope)
+        self.assertIn(f"merge-base --is-ancestor {self.PREV} HEAD", (self.work / "git.log").read_text())
+
+    def test_non_ancestor_prev_falls_back_to_full_review(self):
+        (self.work / "review-prev.md").write_text("### [F1] [P1] 旧问题\n", encoding="utf-8")
+        prompt = self.build_review_prompt(prev=self.PREV, ancestor=False)
+        self.assertNotIn(f"diff {self.PREV}..HEAD", prompt)
+        self.assertNotIn("旧问题", prompt)
+        self.assertIn("已退回全量审查", prompt)
+        scope = (self.work / "review-scope.txt").read_text(encoding="utf-8")
+        self.assertIn("全量审查", scope)
+        self.assertIn("不是当前 head 的祖先", scope)
+        # 渲染时把退回全量审查写进评论 summary 之前。
+        self.prepare_review()
+        (self.work / "review-scope.txt").write_text(scope, encoding="utf-8")
+        (self.work / "workspace/review-read-check.txt").write_text(READ_CHECK)
+        self.assertEqual(self.run_step("Render review").returncode, 0)
+        self.assertIn("不是当前 head 的祖先", (self.work / "review.md").read_text(encoding="utf-8"))
+
+    def mixed_findings(self):
+        def item(priority, title, trigger="正常添加节点"):
+            return {"priority": priority, "title": title, "body": f"{title}的说明", "trigger": trigger,
+                    "file": "src/example.rs", "line": 7}
+        return [item(3, "措辞建议"), item(1, "阻塞问题"), item(2, "边界建议"), item(1, "没有触发路径", trigger=" ")]
+
+    def test_render_groups_blocking_first_with_stable_ids_and_downgrades_p1_without_trigger(self):
+        self.prepare_review("summary", findings=self.mixed_findings())
+        result = self.run_step("Render review")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rendered = (self.work / "review.md").read_text(encoding="utf-8")
+        self.assertIn("### [F1] [P1] 阻塞问题", rendered)
+        self.assertIn("### [F2] [P3] 措辞建议", rendered)
+        self.assertIn("### [F3] [P2] 边界建议", rendered)
+        self.assertIn("### [F4] [P2] 没有触发路径", rendered)
+        self.assertIn("已降为 P2", rendered)
+        self.assertIn("正常使用下的触发路径：正常添加节点", rendered)
+        self.assertLess(rendered.index("阻塞合并"), rendered.index("## 建议"))
+        self.assertIn("/accept F<编号> <理由>", rendered)
+        self.assertIn("不自动开 issue", rendered)
+        normalized = json.loads((self.work / "review.json").read_text(encoding="utf-8"))
+        self.assertEqual([f["priority"] for f in normalized["findings"]], [1, 3, 2, 2])
+
+    def test_suggestions_only_publish_blocking_zero_and_do_not_queue_fixes(self):
+        findings = [f for f in self.mixed_findings() if f["priority"] > 1]
+        self.prepare_review("summary", findings=findings)
+        self.assertEqual(self.run_step("Render review").returncode, 0)
+        result = self.run_step("Publish review")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        posted = json.loads((self.work / "posted.json").read_text())["body"]
+        self.assertIn(f"findings=2 blocking=0 run=99 attempt=1 -->", posted)
+        self.assertIn("## 建议（P2/P3", posted)
+        self.assertNotIn("## 阻塞合并", posted)
+        attestation = json.loads((self.work / "review-attestation.json").read_text())
+        self.assertEqual(attestation, {"head": HEAD, "base": BASE, "findings": 2, "blocking": 0,
+                                       "ids": {"F1": 3, "F2": 2}, "run": 99, "attempt": 1})
+        self.assertIn("blocking=0", self.output())
+        (self.work / "posted.json").unlink()
+        (self.work / "gh.log").unlink()
+        self.assertEqual(self.run_step("Queue review fixes").returncode, 0)
+        self.assertFalse((self.work / "posted.json").exists())
+        self.assertFalse((self.work / "gh.log").exists())
+
+    def test_p1_publishes_blocking_count_and_ids_in_attestation(self):
+        self.prepare_review("summary", findings=self.mixed_findings())
+        self.assertEqual(self.run_step("Render review").returncode, 0)
+        result = self.run_step("Publish review")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        posted = json.loads((self.work / "posted.json").read_text())["body"]
+        self.assertIn(f"<!-- codex-review-verdict sha={HEAD} base={BASE} findings=4 blocking=1 run=99 attempt=1 -->", posted)
+        attestation = json.loads((self.work / "review-attestation.json").read_text())
+        self.assertEqual(attestation["ids"], {"F1": 1, "F2": 3, "F3": 2, "F4": 2})
+        self.assertEqual(attestation["blocking"], 1)
+        self.assertIn("blocking=1", self.output())
+
+    def test_publish_rejects_attestation_over_gate_size_limit(self):
+        many = [{"priority": 3, "title": f"建议{i}", "body": "b", "trigger": "t", "file": "f", "line": 1}
+                for i in range(600)]
+        self.prepare_review("summary", findings=many)
+        result = self.run_step("Publish review")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("posted=true", self.output())
 
     def test_installer_preserves_runtime_helpers_and_resources(self):
         # 裸二进制能启动 CLI，却无法读取代码；移动它时必须保留同包的相邻依赖。
@@ -547,7 +696,7 @@ cp "$FAKE_CODEX_ARCHIVE" "$output"
     def prepare_findings(self):
         self.prepare_review("发现一个可复现问题", findings=[{
             "priority": 1, "title": "错误路径没有回滚", "body": "端口占用时会留下错误配置",
-            "file": "src/example.rs", "line": 42,
+            "trigger": "添加节点时端口已被占用", "file": "src/example.rs", "line": 42,
         }])
 
     def test_findings_queue_codex_on_same_pr(self):

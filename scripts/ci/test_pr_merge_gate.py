@@ -4,11 +4,13 @@ import json
 from pathlib import Path
 import unittest
 
-from pr_merge_gate import evaluate, review_verdict, step_aliases, inspect_pr, latest_review, event_targets, REVIEW_STEPS, GitHub, run_event
+from pr_merge_gate import evaluate, review_verdict, accepted_ids, step_aliases, inspect_pr, latest_review, event_targets, REVIEW_STEPS, GitHub, run_event
 
 
 class CollectorAPI:
     """离线模拟多 attempt 和自动审查去重，未知请求直接失败。"""
+    repo = 'owner/example'
+
     def __init__(self, case):
         self.sha = case.sha
         self.base = 'b' * 40
@@ -20,9 +22,9 @@ class CollectorAPI:
         self.reviews = [self.review]
         self.jobs = {(1, 1): [copy.deepcopy(case.job)], (99, 1): [dict(case.job, name='review', steps=[
             dict(case.job['steps'][0], name=n) for n in REVIEW_STEPS])]}
-        self.proof = {'head': self.sha, 'base': self.base, 'findings': 0, 'run': 99, 'attempt': 1}
-        self.comments = [{'user': {'login': 'github-actions[bot]', 'type': 'Bot'},
-                          'body': f'<!-- codex-review-verdict sha={self.sha} base={self.base} findings=0 run=99 attempt=1 -->'}]
+        self.proof = {'head': self.sha, 'base': self.base, 'findings': 0, 'blocking': 0, 'ids': {}, 'run': 99, 'attempt': 1}
+        self.comments = [{'id': 1000, 'user': {'login': 'github-actions[bot]', 'type': 'Bot'},
+                          'body': f'<!-- codex-review-verdict sha={self.sha} base={self.base} findings=0 blocking=0 run=99 attempt=1 -->'}]
         self.fresh = {}
         self.statuses = []
         self.calls = []
@@ -283,10 +285,10 @@ class GateTests(unittest.TestCase):
 
     def test_review_attestation(self):
         base = "b" * 40
-        marker = f"<!-- codex-review-verdict sha={self.sha} base={base} findings=0 run=99 attempt=1 -->"
-        comment = {"user": {"login": "github-actions[bot]", "type": "Bot"}, "body": marker}
+        marker = f"<!-- codex-review-verdict sha={self.sha} base={base} findings=0 blocking=0 run=99 attempt=1 -->"
+        comment = {"id": 1000, "user": {"login": "github-actions[bot]", "type": "Bot"}, "body": marker}
         run = dict(self.run, id=99, path=".github/workflows/codex-code-review.yml", event="workflow_run", head_branch="main")
-        run['attestation'] = {'head': self.sha, 'base': base, 'findings': 0, 'run': 99, 'attempt': 1}
+        run['attestation'] = {'head': self.sha, 'base': base, 'findings': 0, 'blocking': 0, 'ids': {}, 'run': 99, 'attempt': 1}
         job = dict(self.job, name="review", steps=[
             {"name": n, "status": "completed", "conclusion": "success"} for n in
             REVIEW_STEPS])
@@ -382,8 +384,8 @@ class GateTests(unittest.TestCase):
     def test_collector_ignores_optional_and_superseded_review_runs(self):
         outer = self
         base = 'b' * 40
-        comment = {'user': {'login': 'github-actions[bot]', 'type': 'Bot'},
-                   'body': f'<!-- codex-review-verdict sha={self.sha} base={base} findings=0 run=99 attempt=1 -->'}
+        comment = {'id': 1000, 'user': {'login': 'github-actions[bot]', 'type': 'Bot'},
+                   'body': f'<!-- codex-review-verdict sha={self.sha} base={base} findings=0 blocking=0 run=99 attempt=1 -->'}
         run = dict(self.run, pull_requests=[{'number': 7, 'head': {'sha': self.sha}, 'base': {'sha': base}}])
         optional = dict(run, id=2, path='.github/workflows/reality-sni-candidates.yml', conclusion='failure')
         review = dict(self.run, id=99, path='.github/workflows/codex-code-review.yml', event='workflow_run', head_branch='main',
@@ -416,7 +418,7 @@ class GateTests(unittest.TestCase):
                         'actions/runs/99/attempts/1/jobs': [review_job]}[path]
 
             def attestation(self, selected):
-                return {'head': outer.sha, 'base': base, 'findings': 0, 'run': 99, 'attempt': 1}
+                return {'head': outer.sha, 'base': base, 'findings': 0, 'blocking': 0, 'ids': {}, 'run': 99, 'attempt': 1}
 
             def status(self, sha, state, description):
                 self.statuses.append(state)
@@ -453,9 +455,9 @@ class GateTests(unittest.TestCase):
         for step in api.jobs[(100, 1)][0]['steps']:
             if step['name'] in REVIEW_STEPS:
                 step['conclusion'] = 'success'
-        api.proof = {'head': api.sha, 'base': api.base, 'findings': 0, 'run': 100, 'attempt': 1}
-        api.comments.append({'user': {'login': 'github-actions[bot]', 'type': 'Bot'},
-                             'body': f'<!-- codex-review-verdict sha={api.sha} base={api.base} findings=0 run=100 attempt=1 -->'})
+        api.proof = {'head': api.sha, 'base': api.base, 'findings': 0, 'blocking': 0, 'ids': {}, 'run': 100, 'attempt': 1}
+        api.comments.append({'id': 1001, 'user': {'login': 'github-actions[bot]', 'type': 'Bot'},
+                             'body': f'<!-- codex-review-verdict sha={api.sha} base={api.base} findings=0 blocking=0 run=100 attempt=1 -->'})
         self.assertEqual(inspect_pr(api, 7, self.policy), [])
         self.assertEqual(api.statuses, ['pending', 'success'])
         self.assertIn('actions/runs/100', api.calls)
@@ -467,8 +469,8 @@ class GateTests(unittest.TestCase):
         self.assertTrue(inspect_pr(api, 7, self.policy))
         self.assertEqual(api.statuses[-1], 'failure')
         api.proof['attempt'] = 2
-        api.comments.append({'user': {'login': 'github-actions[bot]', 'type': 'Bot'},
-                             'body': f'<!-- codex-review-verdict sha={api.sha} base={api.base} findings=0 run=99 attempt=2 -->'})
+        api.comments.append({'id': 1001, 'user': {'login': 'github-actions[bot]', 'type': 'Bot'},
+                             'body': f'<!-- codex-review-verdict sha={api.sha} base={api.base} findings=0 blocking=0 run=99 attempt=2 -->'})
         api.statuses.clear()
         self.assertEqual(inspect_pr(api, 7, self.policy), [])
         self.assertEqual(api.statuses, ['pending', 'success'])
@@ -589,6 +591,141 @@ class GateTests(unittest.TestCase):
         self.assertEqual(event_targets(api, {}), (None, None))
 
 
+
+class BlockingAndAcceptTests(unittest.TestCase):
+    """门禁只拦未豁免的 P0/P1；/accept 只认所有者在当前审查评论之后的评论。"""
+    SHA, BASE, OWNER = 'a' * 40, 'b' * 40, 'owner'
+
+    def review(self, ids, sha=None, comment_id=1000, run=99, blocking=None, findings=None):
+        sha = sha or self.SHA
+        blocking = sum(1 for v in ids.values() if v <= 1) if blocking is None else blocking
+        findings = len(ids) if findings is None else findings
+        marker = (f'<!-- codex-review-verdict sha={sha} base={self.BASE} findings={findings} '
+                  f'blocking={blocking} run={run} attempt=1 -->')
+        comment = {'id': comment_id, 'user': {'login': 'github-actions[bot]', 'type': 'Bot'}, 'body': marker}
+        run_data = {'id': run, 'run_attempt': 1, 'path': '.github/workflows/codex-code-review.yml',
+                    'event': 'workflow_run', 'head_branch': 'main', 'status': 'completed', 'conclusion': 'success',
+                    'attestation': {'head': sha, 'base': self.BASE, 'findings': len(ids),
+                                    'blocking': sum(1 for v in ids.values() if v <= 1),
+                                    'ids': dict(ids), 'run': run, 'attempt': 1}}
+        job = {'name': 'review', 'status': 'completed', 'conclusion': 'success',
+               'steps': [{'name': n, 'status': 'completed', 'conclusion': 'success'} for n in REVIEW_STEPS]}
+        return comment, {run: run_data}, {run: [job]}
+
+    def accept(self, body, comment_id=1100, login=None, association='OWNER', kind='User'):
+        return {'id': comment_id, 'user': {'login': login or self.OWNER, 'type': kind},
+                'author_association': association, 'body': body}
+
+    def verdict(self, comments, runs, jobs, sha=None):
+        return review_verdict(sha or self.SHA, self.BASE, comments, runs, jobs, owner=self.OWNER)
+
+    def test_only_suggestions_give_blocking_zero_and_pass(self):
+        comment, runs, jobs = self.review({'F1': 2, 'F2': 3})
+        self.assertIn('findings=2 blocking=0', comment['body'])
+        self.assertEqual(self.verdict([comment], runs, jobs), [])
+
+    def test_p1_blocks_and_owner_accept_after_review_passes(self):
+        comment, runs, jobs = self.review({'F1': 1, 'F2': 2})
+        errors = self.verdict([comment], runs, jobs)
+        self.assertTrue(errors)
+        self.assertIn('F1', errors[-1])
+        reason = '这一条已经人工确认是误报-SECRET-REASON'
+        accepted = [comment, self.accept(f'/accept F1 {reason}')]
+        self.assertEqual(self.verdict(accepted, runs, jobs), [])
+        # P0 同样阻塞，同样可以豁免；理由文本不出现在门禁输出里。
+        comment, runs, jobs = self.review({'F1': 0, 'F2': 1})
+        errors = self.verdict([comment, self.accept(f'/accept F1 {reason}')], runs, jobs)
+        self.assertTrue(errors)
+        self.assertIn('F2', errors[-1])
+        self.assertNotIn(reason, ''.join(errors))
+        self.assertEqual(self.verdict([comment, self.accept('/accept F1 a'), self.accept('/accept F2 b', 1101)],
+                                      runs, jobs), [])
+
+    def test_accept_requires_owner_reason_exact_id_and_later_comment(self):
+        comment, runs, jobs = self.review({'F1': 1, 'F2': 2})
+        invalid = [
+            self.accept('/accept F1 理由', login='someone-else', association='COLLABORATOR'),
+            self.accept('/accept F1 理由', association='COLLABORATOR'),
+            self.accept('/accept F1 理由', login='owner', kind='Bot'),
+            self.accept('/accept F1 理由', login='github-actions[bot]', kind='Bot', association='NONE'),
+            self.accept('/accept F1'),
+            self.accept('/accept F1   '),
+            self.accept('/accept F1\n理由写在第二行'),
+            self.accept('/accept F2 只豁免了建议项'),
+            self.accept('/accept F01 编号不合法'),
+            self.accept('/accept f1 小写'),
+            self.accept('/accept F1,F2 多个'),
+            self.accept('请处理 /accept F1 不在行首'),
+            self.accept('/accept F1 理由', comment_id=999),  # 早于审查评论
+            dict(self.accept('/accept F1 理由'), id='1100'),
+        ]
+        for bad in invalid:
+            with self.subTest(bad=bad):
+                self.assertTrue(self.verdict([comment, bad], runs, jobs))
+        self.assertEqual(accepted_ids([self.accept('/accept F1 理由')], '', 0), set())
+        self.assertEqual(accepted_ids([self.accept('  /accept F12 理由\n补充说明')], self.OWNER, 0), {'F12'})
+
+    def test_new_commit_invalidates_old_accept(self):
+        old_comment, _, _ = self.review({'F1': 1}, sha='c' * 40, comment_id=1000)
+        old_accept = self.accept('/accept F1 针对旧提交的豁免', comment_id=1100)
+        new_comment, runs, jobs = self.review({'F1': 1}, comment_id=1200, run=100)
+        # 新 head 的审查评论在旧豁免之后，旧豁免不再生效。
+        self.assertTrue(self.verdict([old_comment, old_accept, new_comment], runs, jobs))
+        self.assertEqual(self.verdict([old_comment, old_accept, new_comment,
+                                       self.accept('/accept F1 重新确认', comment_id=1300)], runs, jobs), [])
+        # 同一 head 重新审查（新 run）后，之前的豁免同样失效。
+        rerun, rerun_runs, rerun_jobs = self.review({'F1': 1}, comment_id=1400, run=101)
+        self.assertTrue(self.verdict([new_comment, self.accept('/accept F1 旧', comment_id=1300), rerun],
+                                     rerun_runs, rerun_jobs))
+
+    def test_blocking_must_match_attestation(self):
+        comment, runs, jobs = self.review({'F1': 1, 'F2': 3})
+        cases = [
+            ('marker blocking', dict(comment, body=comment['body'].replace('blocking=1', 'blocking=0'))),
+            ('marker findings', dict(comment, body=comment['body'].replace('findings=2', 'findings=1'))),
+            ('old marker', dict(comment, body=comment['body'].replace(' blocking=1', ''))),
+        ]
+        for name, bad in cases:
+            with self.subTest(name=name):
+                self.assertTrue(self.verdict([bad], runs, jobs))
+        attestation = runs[99]['attestation']
+        for name, change in [('priority lowered', {'ids': {'F1': 2, 'F2': 3}}),
+                             ('blocking lowered', {'blocking': 0}),
+                             ('id gap', {'ids': {'F1': 1, 'F3': 3}}),
+                             ('bool priority', {'ids': {'F1': True, 'F2': 3}}),
+                             ('missing ids', {'ids': None}),
+                             ('extra key', {'accepted': ['F1']})]:
+            with self.subTest(name=name):
+                runs[99]['attestation'] = dict(attestation, **change)
+                self.assertTrue(self.verdict([comment, self.accept('/accept F1 理由')], runs, jobs))
+        runs[99]['attestation'] = attestation
+        self.assertEqual(self.verdict([comment, self.accept('/accept F1 理由')], runs, jobs), [])
+        # 运行来源、run/attempt、head/base 的校验保持不变。
+        for key, value in [('head_branch', 'feature'), ('path', '.github/workflows/other.yml'),
+                           ('run_attempt', 2), ('conclusion', 'failure')]:
+            with self.subTest(key=key):
+                bad_runs = {99: dict(runs[99], **{key: value})}
+                self.assertTrue(self.verdict([comment, self.accept('/accept F1 理由')], bad_runs, jobs))
+        for key, value in [('head', 'c' * 40), ('base', 'c' * 40), ('run', 98), ('attempt', 2)]:
+            with self.subTest(attestation=key):
+                bad_runs = {99: dict(runs[99], attestation=dict(attestation, **{key: value}))}
+                self.assertTrue(self.verdict([comment, self.accept('/accept F1 理由')], bad_runs, jobs))
+
+    def test_collector_blocks_p1_until_owner_accept(self):
+        case = GateTests('test_success')
+        case.setUp()
+        api = CollectorAPI(case)
+        api.proof.update(findings=2, blocking=1, ids={'F1': 1, 'F2': 2})
+        api.comments[0]['body'] = api.comments[0]['body'].replace('findings=0 blocking=0', 'findings=2 blocking=1')
+        errors = inspect_pr(api, 7, case.policy)
+        self.assertTrue(any('F1' in e for e in errors), errors)
+        self.assertEqual(api.statuses[-1], 'failure')
+        api.comments.append({'id': 1001, 'user': {'login': 'owner', 'type': 'User'},
+                             'author_association': 'OWNER', 'body': '/accept F1 已确认可接受'})
+        api.statuses.clear()
+        self.assertEqual(inspect_pr(api, 7, case.policy), [])
+        self.assertEqual(api.statuses, ['pending', 'success'])
+
+
 if __name__ == "__main__":
     unittest.main()
-

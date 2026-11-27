@@ -11,7 +11,11 @@ import zipfile
 
 CONTEXT = "PR Merge Gate"
 REVIEW_STEPS = ["Verify read-only sandbox", "Run Codex review", "Render review", "Publish review", "Upload review attestation"]
-VERDICT = re.compile(r"^<!-- codex-review-verdict sha=([0-9a-f]{40}) base=([0-9a-f]{40}) findings=([0-9]+) run=([0-9]+) attempt=([0-9]+) -->$", re.M)
+VERDICT = re.compile(r"^<!-- codex-review-verdict sha=([0-9a-f]{40}) base=([0-9a-f]{40}) findings=([0-9]+) blocking=([0-9]+) run=([0-9]+) attempt=([0-9]+) -->$", re.M)
+# 所有者豁免：评论第一行必须是 `/accept F<编号> <理由>`，理由不能为空。只解析编号，理由不进入任何 prompt 或日志。
+ACCEPT = re.compile(r"/accept[ \t]+(F[1-9][0-9]{0,3})[ \t]+\S[^\r\n]*")
+FINDING_ID = re.compile(r"F[1-9][0-9]{0,3}")
+BLOCKING_PRIORITY = 1  # P0/P1 阻塞合并；P2/P3 只是建议
 
 
 def succeeded(item):
@@ -66,6 +70,7 @@ def evaluate(sha, policy, runs, jobs):
 
 
 def review_evidence(sha, base, comments):
+    """返回 (run, attempt, findings, blocking, 评论 id)；同一 run/attempt 有多条时取最新的评论，豁免只认它之后的。"""
     evidence = []
     for c in comments:
         if c.get("user", {}).get("login") != "github-actions[bot]" or c.get("user", {}).get("type") != "Bot":
@@ -73,10 +78,58 @@ def review_evidence(sha, base, comments):
         markers = VERDICT.findall(c.get("body", ""))
         if len(markers) != 1:
             continue
-        for head, reviewed_base, count, run_id, attempt in markers:
-            if head == sha and reviewed_base == base:
-                evidence.append((int(run_id), int(attempt), int(count)))
-    return max(evidence) if evidence else None
+        for head, reviewed_base, count, blocking, run_id, attempt in markers:
+            if head == sha and reviewed_base == base and isinstance(c.get("id"), int):
+                evidence.append((int(run_id), int(attempt), int(count), int(blocking), c["id"]))
+    if not evidence:
+        return None
+    run_id, attempt = max(evidence)[:2]
+    same = [e for e in evidence if e[:2] == (run_id, attempt)]
+    # 同一 run/attempt 的多条评论数值必须一致，否则证据有歧义。
+    if len({e[2:4] for e in same}) != 1:
+        return None
+    return max(same, key=lambda e: e[4])
+
+
+def accepted_ids(comments, owner, after_comment_id):
+    """仓库所有者本人在该审查评论之后发出的 `/accept F<n> <理由>`。
+
+    审查评论绑定 head/base/run/attempt；有新提交或重新审查时会有新的审查评论，
+    早于它的豁免自然失效。只返回编号，不返回理由文本。
+    """
+    accepted = set()
+    if not owner:
+        return accepted
+    for c in comments:
+        user = c.get("user", {})
+        if (user.get("login") != owner or user.get("type") != "User"
+                or c.get("author_association") != "OWNER"):
+            continue
+        cid = c.get("id")
+        if not isinstance(cid, int) or cid <= after_comment_id:
+            continue
+        lines = (c.get("body") or "").strip().splitlines()
+        match = ACCEPT.fullmatch(lines[0].strip()) if lines else None
+        if match:
+            accepted.add(match.group(1))
+    return accepted
+
+
+def attestation_blocking(attestation, expected):
+    """校验证明产物并返回 P0/P1 编号集合；格式不符返回 None。"""
+    if not isinstance(attestation, dict) or set(attestation) != set(expected) | {"ids"}:
+        return None
+    if any(attestation.get(k) != v or type(attestation.get(k)) is not type(v) for k, v in expected.items()):
+        return None
+    ids = attestation["ids"]
+    if (not isinstance(ids, dict) or len(ids) != expected["findings"]
+            or set(ids) != {f"F{i}" for i in range(1, expected["findings"] + 1)}
+            or not all(type(v) is int and 0 <= v <= 3 for v in ids.values())):
+        return None
+    blocking = {k for k, v in ids.items() if v <= BLOCKING_PRIORITY}
+    if len(blocking) != expected["blocking"] or not all(FINDING_ID.fullmatch(k) for k in blocking):
+        return None
+    return blocking
 
 
 def review_candidates(number, sha, runs):
@@ -109,21 +162,27 @@ def run_jobs(api, run):
     return [job for matches in latest.values() for job in matches]
 
 
-def review_verdict(sha, base, comments, runs, jobs):
+def review_verdict(sha, base, comments, runs, jobs, owner=""):
     evidence = review_evidence(sha, base, comments)
     if not evidence:
         return ["缺失匹配当前 head/base 的独立 Codex 审查证明"]
-    run_id, attempt, count = evidence
+    run_id, attempt, count, blocking, comment_id = evidence
     run = runs.get(run_id, {})
-    if (count != 0 or run.get("path") != ".github/workflows/codex-code-review.yml"
+    if (blocking > count or run.get("path") != ".github/workflows/codex-code-review.yml"
             or run.get("head_branch") != "main"
             or run.get("event") not in ("workflow_run", "workflow_dispatch")
             or run.get("run_attempt") != attempt or not succeeded(run)):
-        return ["独立 Codex 审查有发现、运行未成功或证明不匹配"]
-    expected = {"head": sha, "base": base, "findings": 0, "run": run_id, "attempt": attempt}
-    if run.get("attestation") != expected:
+        return ["独立 Codex 审查运行未成功或证明不匹配"]
+    expected = {"head": sha, "base": base, "findings": count, "blocking": blocking, "run": run_id, "attempt": attempt}
+    blocking_ids = attestation_blocking(run.get("attestation"), expected)
+    if blocking_ids is None:
         return ["缺失可信 Review 运行的证明产物，或产物与当前 head/base 不匹配"]
-    return check_jobs({"review": REVIEW_STEPS}, jobs.get(run_id, []))
+    errors = check_jobs({"review": REVIEW_STEPS}, jobs.get(run_id, []))
+    # 只拦未豁免的 P0/P1；豁免必须是所有者在这条审查评论之后发出的。
+    remaining = sorted(blocking_ids - accepted_ids(comments, owner, comment_id), key=lambda k: int(k[1:]))
+    if remaining:
+        errors.append(f"独立 Codex 审查有 {len(remaining)} 条未豁免的阻塞发现：{', '.join(remaining)}")
+    return errors
 
 
 class GitHub:
@@ -244,7 +303,7 @@ def inspect_pr(api, number, policy, publish=True):
         # 只接受最新 Review run/attempt 本身发布的证明。每次 CI 重跑产生的
         # 新 Review 都必须实际执行；旧证明不能为新的 skipped steps 背书。
         if evidence and selected and evidence[:2] == (selected["id"], selected["run_attempt"]):
-            rid, _, _ = evidence
+            rid = evidence[0]
             run = api.request(f"actions/runs/{rid}")
             review_runs[rid] = run
             if (run.get("path") == ".github/workflows/codex-code-review.yml"
@@ -254,7 +313,8 @@ def inspect_pr(api, number, policy, publish=True):
                 run["attestation"] = api.attestation(run)
         elif evidence:
             errors.append("最新独立审查未提供同 run/attempt 的证明，旧证明不可复用")
-        errors += review_verdict(sha, base, comments, review_runs, jobs)
+        errors += review_verdict(sha, base, comments, review_runs, jobs,
+                                 owner=getattr(api, "repo", "").partition("/")[0])
         # 运行可能在取完 jobs 后被重新运行；只允许本次快照仍是最新 attempt。
         if not errors:
             fresh_runs = api.pages(f"actions/runs?head_sha={sha}&event=pull_request", "workflow_runs")
