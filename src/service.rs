@@ -1,4 +1,14 @@
-use std::{collections::BTreeSet, fs, path::Path, process::Command, thread, time::Duration};
+use std::{
+    collections::BTreeSet,
+    fmt::Write as _,
+    fs,
+    io::ErrorKind,
+    net::{IpAddr, SocketAddr},
+    path::Path,
+    process::Command,
+    thread,
+    time::Duration,
+};
 
 use anyhow::{bail, Context, Result};
 use clap::ValueEnum;
@@ -439,7 +449,7 @@ fn systemctl_show_value(property: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
-fn listening_ports(pid: u32) -> Result<BTreeSet<u16>> {
+fn process_socket_inodes(pid: u32) -> Result<BTreeSet<u64>> {
     let fd_dir = format!("/proc/{pid}/fd");
     let mut socket_inodes = BTreeSet::new();
     for entry in fs::read_dir(&fd_dir).with_context(|| format!("读取 {fd_dir} 失败"))? {
@@ -458,6 +468,68 @@ fn listening_ports(pid: u32) -> Result<BTreeSet<u16>> {
             socket_inodes.insert(inode);
         }
     }
+    Ok(socket_inodes)
+}
+
+pub(crate) fn has_exclusive_tcp_listener(pid: u32, expected: SocketAddr) -> Result<bool> {
+    let socket_inodes = process_socket_inodes(pid)?;
+    // Both tables list all sockets in the process's network namespace. The fd
+    // inodes identify the ones held by the target process.
+    let tcp_path = format!("/proc/{pid}/net/tcp");
+    let tcp = fs::read_to_string(&tcp_path).with_context(|| format!("读取 {tcp_path} 失败"))?;
+    let tcp6_path = format!("/proc/{pid}/net/tcp6");
+    let tcp6 = match fs::read_to_string(&tcp6_path) {
+        // Linux without IPv6 support does not expose this table.
+        Err(error) if error.kind() == ErrorKind::NotFound => String::new(),
+        result => result.with_context(|| format!("读取 {tcp6_path} 失败"))?,
+    };
+    tcp_listeners_match(&tcp, &tcp6, &socket_inodes, expected)
+}
+
+fn tcp_listeners_match(
+    tcp: &str,
+    tcp6: &str,
+    socket_inodes: &BTreeSet<u64>,
+    expected: SocketAddr,
+) -> Result<bool> {
+    let expected_ip = match expected.ip() {
+        IpAddr::V4(ip) => format!("{:08X}", u32::from_ne_bytes(ip.octets())),
+        IpAddr::V6(ip) => {
+            // /proc prints each 32-bit word in host byte order.
+            let mut address = String::with_capacity(32);
+            for &bytes in ip.octets().as_chunks::<4>().0 {
+                let word = u32::from_ne_bytes(bytes);
+                write!(address, "{word:08X}").unwrap();
+            }
+            address
+        }
+    };
+    let expected_port = format!("{:04X}", expected.port());
+    let mut found = false;
+    for line in tcp.lines().skip(1).chain(tcp6.lines().skip(1)) {
+        let columns: Vec<_> = line.split_whitespace().collect();
+        if *columns.get(3).context("TCP 监听表缺少状态")? != "0A" {
+            continue;
+        }
+        let (ip, port) = columns[1].split_once(':').context("TCP 监听地址无效")?;
+        if port != expected_port {
+            continue;
+        }
+        let inode = columns
+            .get(9)
+            .context("TCP 监听表缺少 socket inode")?
+            .parse::<u64>()
+            .context("TCP 监听的 socket inode 无效")?;
+        if ip != expected_ip || !socket_inodes.contains(&inode) {
+            return Ok(false);
+        }
+        found = true;
+    }
+    Ok(found)
+}
+
+fn listening_ports(pid: u32) -> Result<BTreeSet<u16>> {
+    let socket_inodes = process_socket_inodes(pid)?;
     let mut ports = BTreeSet::new();
     for (name, tcp) in [
         ("tcp", true),
@@ -846,6 +918,54 @@ mod tests {
         let table = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n  0: 0100007F:1F90 00000000:0000 0A 00000000:0000 00:00000000 00000000   0        0 7001 1 0000000000000000 100 0 0 10 0\n  1: 0100007F:1F91 00000000:0000 01 00000000:0000 00:00000000 00000000   0        0 7002 1 0000000000000000 100 0 0 10 0\n";
         let ports = parse_proc_net_ports(table, &BTreeSet::from([7001, 7002]), true);
         assert_eq!(ports, BTreeSet::from([8080]));
+    }
+
+    #[test]
+    fn proc_net_requires_the_exact_tcp_listener_and_owner() {
+        let header = "sl local_address rem_address st tx_queue tr retrnsmt uid timeout inode";
+        let row = |address: &str, port, state, inode| {
+            format!("0: {address}:{port:04X} 00000000:0000 {state} 0:0 0:0 0 0 0 {inode}")
+        };
+        let loopback = format!("{:08X}", u32::from_ne_bytes([127, 0, 0, 1]));
+        let public = format!("{:08X}", u32::from_ne_bytes([203, 0, 113, 8]));
+        let ipv6_loopback = format!("{:032X}", u32::from_ne_bytes([0, 0, 0, 1]));
+        let ipv6_wildcard = "00000000000000000000000000000000";
+        let inodes = BTreeSet::from([7001]);
+        let expected = "127.0.0.1:1080".parse().unwrap();
+        let good = row(&loopback, 1080, "0A", 7001);
+        let established = row(&public, 1080, "01", 7002);
+        let other_port = row(&public, 1081, "0A", 7002);
+        let wrong_owner = row(&loopback, 1080, "0A", 7002);
+        let wrong_address = row(&public, 1080, "0A", 7001);
+        let wildcard = row(ipv6_wildcard, 1080, "0A", 7001);
+        let loopback6 = row(&ipv6_loopback, 1080, "0A", 7001);
+        let tcp = format!("{header}\n{good}\n{established}\n{other_port}");
+        assert!(tcp_listeners_match(&tcp, header, &inodes, expected).unwrap());
+        for bad in [&wrong_owner, &wrong_address] {
+            assert!(
+                !tcp_listeners_match(&format!("{tcp}\n{bad}"), header, &inodes, expected).unwrap()
+            );
+        }
+        assert!(
+            !tcp_listeners_match(&tcp, &format!("{header}\n{wildcard}"), &inodes, expected)
+                .unwrap()
+        );
+        assert!(!tcp_listeners_match(
+            &format!("{header}\n{established}\n{other_port}"),
+            header,
+            &inodes,
+            expected
+        )
+        .unwrap());
+        for (row, expected) in [(wildcard, "[::]:1080"), (loopback6, "[::1]:1080")] {
+            assert!(tcp_listeners_match(
+                header,
+                &format!("{header}\n{row}"),
+                &inodes,
+                expected.parse().unwrap()
+            )
+            .unwrap());
+        }
     }
 
     #[test]
