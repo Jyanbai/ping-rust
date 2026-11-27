@@ -249,6 +249,12 @@ class ScriptValidationTest(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(config, "")
 
+    def test_model_with_trailing_newline_is_rejected(self):
+        result, config = self.render(CODEX_MODEL="gpt-test\n")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(config, "")
+        self.assertIn("::error::模型变量不是合法的模型名", result.stdout)
+
     def test_empty_effort_is_omitted(self):
         result, config = self.render(CODEX_REASONING_EFFORT="")
         self.assertEqual(result.returncode, 0, result.stdout)
@@ -268,6 +274,19 @@ class ScriptValidationTest(unittest.TestCase):
         text = SCRIPT.read_text(encoding="utf-8")
         self.assertNotRegex(text, r"https://[a-z0-9-]+\.[a-z]")
         self.assertNotIn("gpt-", text)
+
+
+class ConfigurationGuideTest(unittest.TestCase):
+    def test_setup_lists_provider_requirements_before_self_check(self):
+        guide = (ROOT / "docs/CODEX_DISPATCH.md").read_text(encoding="utf-8")
+        setup = guide.split("\n## 一次性配置\n", 1)[1].split("\n### 4. 自检\n", 1)[0]
+        for setting in (
+            "CODEX_PROVIDER=cpa", "CODEX_CPA_API_KEY", "CODEX_API_BASE_URL", "CODEX_MODEL",
+            "CODEX_DISPATCH_MODEL", "CODEX_REVIEW_MODEL", "CODEX_PLAN_MODEL",
+            "CODEX_PROVIDER=chatgpt", "CODEX_AUTH_JSON",
+        ):
+            with self.subTest(setting=setting):
+                self.assertIn(f"`{setting}`", setup)
 
 
 class WorkflowWiringTest(unittest.TestCase):
