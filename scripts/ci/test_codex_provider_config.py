@@ -23,7 +23,7 @@ AUTH_JSON = json.dumps({"auth_mode": "chatgpt", "tokens": {"refresh_token": CHAT
 
 # 流程 → (workflow 文件, 恢复步骤名, 共用脚本相对工作目录的位置, 模型变量, 运行步骤名)
 FLOWS = {
-    "review": ("codex-code-review.yml", "Restore review auth", "policy", "CODEX_REVIEW_MODEL", "Run Codex review"),
+    "review": ("codex-code-review.yml", "Restore review auth", "codex-policy", "CODEX_REVIEW_MODEL", "Run Codex review"),
     "plan": ("codex-plan.yml", "Restore plan auth", "work", "CODEX_PLAN_MODEL", "Run Codex plan"),
     "dispatch": ("codex-dispatch.yml", "Restore Codex auth", "codex-policy", "CODEX_DISPATCH_MODEL", "Run Codex"),
 }
@@ -312,8 +312,91 @@ class WorkflowWiringTest(unittest.TestCase):
         self.assertIn("ref: ${{ github.workflow_sha }}", dispatch)
         self.assertIn("sparse-checkout: scripts/ci/codex_provider_config.py", dispatch)
         self.assertIn("persist-credentials: false", dispatch)
-        review = step_block("codex-code-review.yml", "Checkout review policy")
-        self.assertIn("ref: main", review)
+        for workflow in ("codex-code-review.yml", "codex-dispatch.yml"):
+            block = step_block(workflow, "Checkout Codex provider script")
+            self.assertIn("ref: ${{ github.workflow_sha }}", block)
+            self.assertIn("path: codex-policy", block)
+        # 审查规则仍取 main，不随共用脚本改变。
+        self.assertIn("ref: main", step_block("codex-code-review.yml", "Checkout review policy"))
+
+    def test_dispatch_self_check_does_not_print_cpa_reply(self):
+        reply = "SECRET-REPLY-FRAGMENT-" + "x" * 40
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary)
+            (work / "bin").mkdir()
+            codex = work / "bin/codex"
+            codex.write_text('#!/usr/bin/env bash\nwhile [ "$#" -gt 0 ]; do\n'
+                             '  if [ "$1" = -o ]; then printf %s "$REPLY_TEXT" > "$2"; fi; shift\ndone\n')
+            codex.chmod(0o755)
+            for provider, printed in (("cpa", False), ("chatgpt", True)):
+                with self.subTest(provider=provider):
+                    env = {"PATH": f"{work / 'bin'}{os.pathsep}{os.environ['PATH']}",
+                           "RUNNER_TEMP": str(work), "CODEX_HOME": str(work / "codex-home"),
+                           "CODEX_PROVIDER_RESOLVED": provider, "REPLY_TEXT": reply,
+                           "CODEX_CPA_API_KEY": CPA_KEY if provider == "cpa" else ""}
+                    result = subprocess.run(
+                        ["bash", "-c", step_script("codex-dispatch.yml", "Self-check (auth and write-back)")],
+                        env=env, text=True, capture_output=True, check=False)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertEqual("SECRET-REPLY" in result.stdout, printed)
+                    self.assertNotIn(CPA_KEY, result.stdout.replace(f"::add-mask::{CPA_KEY}", ""))
+
+
+class DispatchCollectTest(unittest.TestCase):
+    """Collect diff 必须按原始内容检查暂存文件，二进制补丁不能绕过 CPA 密钥检查。"""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.work = Path(temporary.name)
+        workspace = self.work / "workspace"
+        tree = workspace / "work"
+        tree.mkdir(parents=True)
+        git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.test"]
+        subprocess.run(["git", "init", "-q", str(tree)], check=True)
+        (tree / "README.md").write_text("base\n")
+        subprocess.run([*git, "-C", str(tree), "add", "-A"], check=True)
+        subprocess.run([*git, "-C", str(tree), "commit", "-q", "-m", "base"], check=True)
+        subprocess.run(["cp", "-a", str(tree / ".git"), str(self.work / "pristine.git")], check=True)
+        self.tree = tree
+        self.env = {
+            "PATH": os.environ["PATH"],
+            "HOME": str(self.work),
+            "RUNNER_TEMP": str(self.work),
+            "GITHUB_WORKSPACE": str(workspace),
+            "GITHUB_OUTPUT": str(self.work / "output"),
+            "GITHUB_STEP_SUMMARY": str(self.work / "summary"),
+            "CODEX_CPA_API_KEY": CPA_KEY,
+        }
+        (self.work / "seed-tokens.txt").write_text("")
+        (self.work / "new-tokens.txt").write_text("")
+        (self.work / "last-message.md").write_text("done\n")
+
+    def collect(self):
+        return subprocess.run(
+            ["bash", "-e", "-o", "pipefail", "-c", step_script("codex-dispatch.yml", "Collect diff")],
+            cwd=self.work, env=self.env, text=True, capture_output=True, check=False,
+        )
+
+    def test_key_inside_binary_file_is_rejected(self):
+        (self.tree / "blob.bin").write_bytes(b"\x00\x01\x02" + CPA_KEY.encode() + b"\x00\xff")
+        result = self.collect()
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("CPA 密钥", result.stdout)
+        self.assertFalse((self.work / "codex-result").exists())
+        self.assertNotIn(CPA_KEY, result.stdout + result.stderr)
+
+    def test_key_inside_text_file_is_rejected(self):
+        (self.tree / "notes.txt").write_text(f"key={CPA_KEY}\n")
+        result = self.collect()
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertFalse((self.work / "codex-result").exists())
+
+    def test_clean_change_is_collected(self):
+        (self.tree / "notes.txt").write_text("ok\n")
+        result = self.collect()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("has_diff=true", (self.work / "output").read_text())
 
 
 if __name__ == "__main__":

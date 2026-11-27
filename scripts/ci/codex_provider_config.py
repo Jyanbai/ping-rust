@@ -80,7 +80,8 @@ def cpa_settings(env):
         raise ConfigError("CODEX_PROVIDER=cpa 需要 environment codex 的变量 CODEX_API_BASE_URL（https 基址），当前未设置")
     if not BASE_RE.match(base):
         raise ConfigError("CODEX_API_BASE_URL 必须是 https 基址（主机名、可选端口和路径）")
-    model = (env.get("CODEX_MODEL") or "").strip()
+    # 启动步骤用原始值传 -m，这里也不去空白，避免恢复成功而启动时用了另一个值。
+    model = env.get("CODEX_MODEL") or ""
     if not model:
         raise ConfigError("CODEX_PROVIDER=cpa 需要设置本流程的模型变量（或回退用的 CODEX_MODEL），当前未设置")
     if not MODEL_RE.match(model):

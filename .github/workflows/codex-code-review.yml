@@ -139,6 +139,17 @@ jobs:
           "$runtime/bin/codex" --version
           echo "$runtime/bin" >> "$GITHUB_PATH"
 
+      - name: Checkout Codex provider script
+        if: steps.target.outputs.review == 'true'
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          # 共用脚本取本 workflow 所在提交的版本；重跑旧运行或 main 回滚后也与 workflow 一致。
+          ref: ${{ github.workflow_sha }}
+          path: codex-policy
+          sparse-checkout: scripts/ci/codex_provider_config.py
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
       - name: Restore review auth
         id: auth
         if: steps.target.outputs.review == 'true'
@@ -172,8 +183,8 @@ jobs:
             jq -e '.auth_mode == "chatgpt" and ((.tokens.refresh_token // "") != "")' \
               "$review_home/auth.json" >/dev/null
           fi
-          # config.toml 由默认分支的共用脚本生成（policy/ 是 main 的检出，不执行 PR 里的脚本）。
-          python3 policy/scripts/ci/codex_provider_config.py --flow review --provider "$provider" \
+          # config.toml 由共用脚本生成（codex-policy/ 是本 workflow 所在提交的检出，不执行 PR 里的脚本）。
+          python3 codex-policy/scripts/ci/codex_provider_config.py --flow review --provider "$provider" \
             --home "$review_home" --runner-temp "$RUNNER_TEMP"
           echo "CODEX_HOME=$review_home" >> "$GITHUB_ENV"
           echo "CODEX_PROVIDER_RESOLVED=$provider" >> "$GITHUB_ENV"

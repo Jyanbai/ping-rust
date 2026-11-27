@@ -752,10 +752,15 @@ jobs:
             rm -rf "$out_dir"
             exit 1
           fi
-          if [ -n "${CODEX_CPA_API_KEY:-}" ] && grep -rqF -e "$CODEX_CPA_API_KEY" "$out_dir"; then
-            echo "::error::Codex 的输出里包含 CPA 密钥，已中止。"
-            rm -rf "$out_dir"
-            exit 1
+          if [ -n "${CODEX_CPA_API_KEY:-}" ]; then
+            # 二进制文件在 --binary 补丁里是编码后的内容，还要按原始内容检查暂存区里的每个文件。
+            staged_rc=0
+            "${g[@]}" grep --cached -q -a -F -e "$CODEX_CPA_API_KEY" || staged_rc=$?
+            if [ "$staged_rc" -ne 1 ] || grep -rqF -e "$CODEX_CPA_API_KEY" "$out_dir"; then
+              echo "::error::Codex 的输出里包含 CPA 密钥（或无法完成检查），已中止。"
+              rm -rf "$out_dir"
+              exit 1
+            fi
           fi
           if grep -qE '^(diff --git a/|--- a/|\+\+\+ b/|rename (from|to) |copy (from|to) )\.github/(workflows|actions)/' "$out_dir/task.patch"; then
             echo "::error::Codex 的改动涉及 .github/workflows/ 或 .github/actions/，已拒绝。"
@@ -804,7 +809,12 @@ jobs:
             fi
             exit 1
           fi
-          echo "✅ Codex 登录有效（回复：$(head -c 40 "$RUNNER_TEMP/selfcheck.txt" | tr -d '\n')）"
+          if [ "${CODEX_PROVIDER_RESOLVED:-chatgpt}" = cpa ]; then
+            # CPA 回复不进日志：截断的片段无法被完整密钥的遮蔽规则覆盖。
+            echo "✅ Codex CPA 调用成功（回复内容不打印）。"
+          else
+            echo "✅ Codex 登录有效（回复：$(head -c 40 "$RUNNER_TEMP/selfcheck.txt" | tr -d '\n')）"
+          fi
 
       - name: Check write-back permission
         # 写回只服务于 chatgpt 登录刷新；cpa 不写 CODEX_AUTH_JSON。
