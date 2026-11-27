@@ -67,6 +67,14 @@ pub(crate) fn pause_enter_main_menu() -> Result<()> {
     )
 }
 
+pub(super) fn pause_enter_updated_menu() -> Result<()> {
+    read_pause_with(
+        &mut io::stdin().lock(),
+        &mut io::stdout(),
+        "已更新到新版本，按回车进入新版本菜单...",
+    )
+}
+
 fn read_pause(reader: &mut impl BufRead, writer: &mut impl Write) -> Result<()> {
     read_pause_with(reader, writer, "按回车返回主菜单...")
 }
