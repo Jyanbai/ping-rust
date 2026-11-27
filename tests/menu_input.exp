@@ -2,8 +2,8 @@
 # 运行条件见 tests/menu_input_e2e.rs；不创建、删除或更改节点。
 set timeout 30
 log_user 1
-if {$argc != 3} {
-    puts stderr "usage: menu_input.exp <ping-rust> <first-profile-port> <profile-count>"
+if {$argc != 3 && $argc != 2} {
+    puts stderr "usage: menu_input.exp <ping-rust> <first-profile-port> <profile-count> | <ping-rust> <legacy-socks5-id>"
     exit 2
 }
 set binary [lindex $argv 0]
@@ -105,6 +105,19 @@ proc result_page {} {
 proc back_to_main {advanced} {
     if {$advanced} { tools_menu; send_choice 0 }
     main_menu
+}
+if {$argc == 2} {
+    set selector [lindex $argv 1]
+    foreach cancel {"0\r" "\004"} {
+        spawn $binary socks5 secure $selector --dry-run
+        expect_or_fail {请选择 \[0-2\]: } "SOCKS5 secure mode prompt"
+        send_choice 3
+        expect_or_fail {无效序号！\r?\n请选择 \[0-2\]: } "SOCKS5 invalid mode"
+        send -- $cancel
+        expect_or_fail {已取消 SOCKS5 加固。} "SOCKS5 secure cancellation"
+        successful_exit
+    }
+    exit 0
 }
 spawn $binary
 expect_or_fail {https://github.com/Jyanbai/ping-rust} "project link"

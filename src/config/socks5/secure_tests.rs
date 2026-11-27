@@ -84,6 +84,104 @@ async fn dry_run_redacts_diff_and_preserves_all_file_bytes() {
 }
 
 #[tokio::test]
+async fn dry_run_redacts_specific_ipv4_and_ipv6_bindings() {
+    for (binding, loopback) in [
+        ("203.0.113.8", "127.0.0.1:1080"),
+        ("2001:db8::8", "[::1]:1080"),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path();
+        let original = legacy(path, 1080, binding).await;
+        for mode in [SecureMode::Auth, SecureMode::Local] {
+            let diff = prepare(path, &original, mode).diff(path);
+            assert!(!diff.contains(binding));
+            assert_eq!(diff.matches("address: <已脱敏>:1080").count(), 2);
+            if mode == SecureMode::Local {
+                assert_eq!(diff.matches(&format!("+ address: {loopback}")).count(), 2);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+#[cfg(target_os = "linux")]
+async fn sigterm_does_not_interrupt_socks5_rollback() {
+    use std::{
+        io::BufRead,
+        process::{Command, Stdio},
+        sync::mpsc,
+    };
+
+    const CHILD: &str = "PING_RUST_TEST_SOCKS5_SIGTERM_DIR";
+    if let Some(path) = std::env::var_os(CHILD) {
+        let path = PathBuf::from(path);
+        let profile = load_state_from(&path.join("ping-rust-state.json"))
+            .unwrap()
+            .profiles
+            .remove(0);
+        let plan = prepare(&path, &profile, SecureMode::Local);
+        let result = commit_with_signal_protection(move || {
+            plan.commit(&path, |profile| {
+                if profile.socks5_loopback().is_some() {
+                    assert!(Command::new("kill")
+                        .args(["-TERM", &std::process::id().to_string()])
+                        .status()
+                        .unwrap()
+                        .success());
+                    // The parent closes the pipe once it sees SIGTERM has been received.
+                    io::stdin().read_line(&mut String::new())?;
+                    bail!("模拟收到 SIGTERM 后的服务启动失败");
+                }
+                Ok(())
+            })
+        })
+        .await;
+        assert!(result.is_err());
+        return;
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path();
+    let profile = legacy(path, 1080, "0.0.0.0").await;
+    let files = [
+        path.join("config.yaml"),
+        path.join("ping-rust-state.json"),
+        profile_path(path, &profile),
+    ];
+    let snapshot = || files.each_ref().map(|file| fs::read(file).unwrap());
+    let before = snapshot();
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "config::socks5::secure::tests::sigterm_does_not_interrupt_socks5_rollback",
+            "--nocapture",
+        ])
+        .env(CHILD, path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stderr = io::BufReader::new(child.stderr.take().unwrap());
+    let (notify, observed) = mpsc::channel();
+    let log = thread::spawn(move || {
+        let mut log = String::new();
+        stderr.read_line(&mut log).unwrap();
+        let _ = notify.send(log.contains("收到 SIGTERM"));
+        stderr.read_to_string(&mut log).unwrap();
+        log
+    });
+    let signal_received = observed.recv_timeout(Duration::from_secs(10));
+    drop(child.stdin.take());
+    let status = child.wait().unwrap();
+    let log = log.join().unwrap();
+    assert!(snapshot() == before, "SIGTERM 导致配置未完整回滚");
+    assert_eq!(signal_received, Ok(true), "{log}");
+    assert_eq!(status.code(), Some(143));
+    assert!(log.contains("原配置已恢复"), "{log}");
+}
+
+#[tokio::test]
 async fn restart_failure_restores_exact_files_before_restarting_original_service() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path();

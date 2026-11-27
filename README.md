@@ -391,6 +391,8 @@ SOCKS5 支持 TCP CONNECT 与 UDP ASSOCIATE，默认启用用户名/密码认证
 
 旧版无认证公网 SOCKS5 可用 `sudo prs socks5 secure <节点名称或 UUID> [--auth | --local] [--dry-run] [--yes]` 加固。 `--auth` 保留监听地址并生成新凭据，成功后输出客户端连接信息。 `--local` 改用同地址族的回环地址，远端客户端会断开，原有防火墙规则需另行检查。 `--dry-run` 仅显示脱敏差异。无终端或使用 `--yes` 时须指定加固方式。应用时会重启共享的 `shoes.service`，同机节点的连接可能短暂中断。
 
+使用 `--local` 前请备份整个 `/etc/shoes`。降级到 v0.2.1 后仍可查看和导出节点。只要受管聚合配置中保留回环绑定，v0.2.1 的一致性检查就会拒绝添加或修改任何受管节点。请使用支持回环绑定的版本管理这些节点。
+
 [VLESS-XHTTP-REALITY](docs/wiki/VLESS-XHTTP-REALITY.md) 使用 shoes 原生 XHTTP，放在 REALITY 目标内部，无需自己的域名或证书。只支持 v2rayN / Xray 客户端，通过分享链接或二维码导入；Mihomo、sing-box 和 NekoBox 导出明确拒绝。固定 `mode: auto`，REALITY 客户端默认走 stream-one，不支持 Vision。path 默认 `/` 加 16 位随机小写十六进制，可用 `--xhttp-path /my-path` 指定；“更改配置”支持端口、SNI 和 path，改 path 的确认默认 N。快速和高级添加均为 **4) VLESS-XHTTP-REALITY**，主菜单不变。公网监听建议按 [shoes v0.3.7 文档](https://github.com/cfal/shoes/blob/v0.3.7/docs/src/content/docs/zh-cn/protocols/xhttp.md) 显式配置 `limits`，生成器不默认开启。XHTTP 节点写入 state 的独立顶层扩展，v0.2.1 可忽略该扩展并读取原有节点的 info 和导出；旧版不支持管理 XHTTP，降级操作前请用新版删除 XHTTP 节点并备份配置。
 
 WebSocket 路径默认安全随机生成；需要固定路径时可使用完整命令：
