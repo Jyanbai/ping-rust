@@ -99,6 +99,16 @@ class TlsClientAcceptanceTests(unittest.TestCase):
         self.assertIsNone(acceptance.rejection_signal("dial tcp: connect: connection refused", ""))
         self.assertIsNone(acceptance.rejection_signal("", "curl: (97) cannot complete SOCKS5 connection"))
 
+    def test_recognizes_sing_box_v1_14_2_public_key_rejection(self):
+        rejection = acceptance.rejection_signal(
+            f"open outbound connection: unrecognized remote public key: {PIN}",
+            "curl: (97) cannot complete SOCKS5 connection",
+        )
+        observation = acceptance.Observation(curl_code=97, outbound_attempt=True, rejection=rejection)
+        self.assertEqual(acceptance.verdict(CASES[3], observation), (0, "acceptance"))
+        self.assertEqual(acceptance.verdict(CASES[2], observation), (1, "rejection-unconfirmed"))
+        self.assertIsNone(acceptance.rejection_signal("unrecognized remote public key: configured", ""))
+
     def test_tuic_credentials_require_both_mutations(self):
         with tempfile.TemporaryDirectory() as root:
             work = Path(root)

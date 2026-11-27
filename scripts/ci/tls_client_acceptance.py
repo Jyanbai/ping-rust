@@ -154,7 +154,8 @@ def verdict(case, observed):
 
 
 def rejection_signal(client_log, curl_error):
-    if re.search(r"(?:unmatched|no matching|unrecognized) (?:remote |peer )?certificate public key|"
+    if re.search(r"\bunrecognized remote public key: [A-Za-z0-9+/]{43}=(?![A-Za-z0-9+/=])|"
+                 r"(?:unmatched|no matching|unrecognized) (?:remote |peer )?certificate public key|"
                  r"certificate public key[^\r\n]*(?:mismatch|did not match|does not match)", client_log, re.I):
         return "pin-mismatch"
     if "x509: certificate signed by unknown authority" in client_log:
