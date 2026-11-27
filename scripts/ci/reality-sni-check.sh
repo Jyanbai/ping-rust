@@ -69,7 +69,7 @@ trap cleanup EXIT
 wait_tcp() {
   local port="$1"
   for _ in $(seq 1 50); do
-    if ss -H -lnt | awk '{print $4}' | grep -Eq "(^|:)${port}$"; then return 0; fi
+    if ss -H -lnt | awk -v re="(^|:)${port}$" '$4 ~ re { found=1 } END { exit !found }'; then return 0; fi
     sleep 0.1
   done
   return 1
@@ -293,7 +293,8 @@ if dups="$(printf '%s\n' "${domains[@]}" | sort | uniq -d)" && [ -n "$dups" ]; t
   exit 1
 fi
 
-echo "shoes v0.3.7, xray ${XRAY_TAG}: $($XRAY version 2>&1 | head -n 1), mihomo ${MIHOMO_TAG}"
+xray_version="$($XRAY version 2>&1)"
+echo "shoes v0.3.7, xray ${XRAY_TAG}: ${xray_version%%$'\n'*}, mihomo ${MIHOMO_TAG}"
 rows=()
 failed=0
 index=0

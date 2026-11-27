@@ -65,7 +65,7 @@ trap cleanup EXIT
 wait_tcp() {
   local port="$1"
   for _ in $(seq 1 50); do
-    if ss -H -lnt | awk '{print $4}' | grep -Eq "(^|:)${port}$"; then return 0; fi
+    if ss -H -lnt | awk -v re="(^|:)${port}$" '$4 ~ re { found=1 } END { exit !found }'; then return 0; fi
     sleep 0.1
   done
   return 1
@@ -208,8 +208,10 @@ for mode in auto packet-up; do
 done
 printf '%s\n' "${xhttp_results[@]}" >"$WORK/logs/xhttp-reality-summary.txt"
 
-echo "xray ${XRAY_26_TAG}: $($XRAY_26 version 2>&1 | head -n 1)"
-echo "xray ${XRAY_MIN_TAG}: $($XRAY_MIN version 2>&1 | head -n 1)"
+xray26_version="$($XRAY_26 version 2>&1)"
+xray_min_version="$($XRAY_MIN version 2>&1)"
+echo "xray ${XRAY_26_TAG}: ${xray26_version%%$'\n'*}"
+echo "xray ${XRAY_MIN_TAG}: ${xray_min_version%%$'\n'*}"
 legacy_fixture="$(cd "$(dirname "$0")/../../tests/fixtures/yaml/chain-v2" && pwd)/config.yaml"
 sudo mkdir -p /etc/shoes/fixtures
 sudo openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
@@ -364,7 +366,7 @@ printf '%s\n' "${snell_results[@]}" >"$WORK/logs/snell-summary.txt"
 # Keep XHTTP runtime/state private keys at their generated 0600 permissions.
 sudo find "$WORK" -path "$WORK/xhttp-*" -prune -o -exec chmod a+rX {} +
 echo 'external client acceptance complete'
-if printf '%s\n' "${reality_results[@]}" | grep -Fq '=FAIL' || [ "$minimum_result" != PASS ] \
-    || printf '%s\n' "${xhttp_results[@]}" | grep -Fq '=FAIL'; then
+if grep -Fq '=FAIL' "$WORK/logs/reality-summary.txt" || [ "$minimum_result" != PASS ] \
+    || grep -Fq '=FAIL' "$WORK/logs/xhttp-reality-summary.txt"; then
   exit 1
 fi

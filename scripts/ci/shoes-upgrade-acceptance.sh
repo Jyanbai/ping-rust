@@ -183,7 +183,7 @@ python3 "$WORK/endpoint.py" >"$WORK/records/endpoint.log" 2>&1 &
 endpoint_pid=$!
 trap 'kill "$endpoint_pid" 2>/dev/null || true' EXIT
 for _ in $(seq 1 50); do
-  if ss -H -lnt | grep -q ':18082$'; then break; fi
+  if ss -H -lnt | awk '/:18082$/ { found=1 } END { exit !found }'; then break; fi
   sleep 0.1
 done
 export PING_RUST_CHAIN_TEST_URL=http://127.0.0.1:18082/

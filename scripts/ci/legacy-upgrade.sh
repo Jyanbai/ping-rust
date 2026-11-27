@@ -66,7 +66,7 @@ assert_runtime() {
   local label="$1" listening=false
   systemctl is-active --quiet shoes.service
   for _ in {1..20}; do
-    if ss -H -lnt | awk '{print $4}' | grep -Eq "(^|:)$port$"; then
+    if ss -H -lnt | awk -v re="(^|:)$port$" '$4 ~ re { found=1 } END { exit !found }'; then
       listening=true; break
     fi
     sleep 0.5
@@ -100,7 +100,7 @@ PY
 }
 run_command install-old 0 "$old" install --method release
 # The old installer may resolve the then-current upstream latest: record, do not assume.
-version="$(grep -Eo 'v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?' "$work/install-old.stdout" | head -1)"
+version="$(grep -Eo -m 1 'v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?' "$work/install-old.stdout")"
 test -n "$version"
 record "Actual shoes Release selected by $old_tag: $version (installer output)"
 record "Initial shoes SHA-256: $(sha256sum /usr/local/bin/shoes | cut -d ' ' -f 1)"
@@ -134,7 +134,8 @@ record 'normal-update stderr: no unknown-source guidance'
 assert_recorded
 record_source normal-update
 assert_runtime normal-update
-installed_shoes="$(/usr/local/bin/shoes --version | head -n 1)"
+installed_shoes="$(/usr/local/bin/shoes --version)"
+installed_shoes="${installed_shoes%%$'\n'*}"
 record "normal-update: installed $installed_shoes (pinned $pinned_shoes)"
 test "$installed_shoes" = "shoes $pinned_shoes"
 record "$scenario: PASS"

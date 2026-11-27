@@ -190,10 +190,10 @@ jobs:
           reality_uri="$(sudo "$PING_RUST" url)"
           sudo rm -f "$bootstrap_output"
 
-          printf '%s' "$reality_uri" | grep -q '^vless://' \
+          grep -q '^vless://' <<< "$reality_uri" \
             || { echo 'saved URI missing' >&2; exit 1; }
           for parameter in security=reality flow=xtls-rprx-vision pbk= sid=; do
-            printf '%s' "$reality_uri" | grep -q "$parameter" \
+            grep -q "$parameter" <<< "$reality_uri" \
               || { echo 'saved URI parameter missing' >&2; exit 1; }
           done
           read -r reality_sni reality_fingerprint < <(
@@ -206,17 +206,18 @@ jobs:
           PY
           )
           # The default SNI is chosen from the built-in candidate list (#63).
-          if ! sed -e 's/#.*//' -e 's/[[:space:]]//g' data/reality-sni-candidates.txt \
-              | grep -v '^$' | grep -Fxq -- "$reality_sni"; then
+          sed -e 's/#.*//' -e 's/[[:space:]]//g' data/reality-sni-candidates.txt \
+            | grep -v '^$' > "$RUNNER_TEMP/reality-sni-candidates.txt"
+          if ! grep -Fxq -- "$reality_sni" "$RUNNER_TEMP/reality-sni-candidates.txt"; then
             echo "unexpected Reality SNI: $reality_sni" >&2
             exit 1
           fi
           test "$reality_fingerprint" = chrome \
             || { echo "unexpected Reality fingerprint: $reality_fingerprint" >&2; exit 1; }
           info_output="$(sudo "$PING_RUST" info)"
-          printf '%s' "$info_output" | grep -q '客户端地址：' \
+          grep -q '客户端地址：' <<< "$info_output" \
             || { echo 'client address missing from info' >&2; exit 1; }
-          printf '%s' "$info_output" | grep -Fq "| $reality_sni" \
+          grep -Fq "| $reality_sni" <<< "$info_output" \
             || { echo 'Reality SNI differs between info summary and URI' >&2; exit 1; }
           sudo grep -Fq "$reality_sni:" /etc/shoes/config.yaml \
             || { echo 'Reality SNI missing from shoes YAML' >&2; exit 1; }
@@ -224,10 +225,9 @@ jobs:
             /etc/shoes/ping-rust-state.json \
             || { echo 'Reality SNI missing from managed state' >&2; exit 1; }
           reality_port="$(
-            printf '%s' "$info_output" \
-              | sed -nE 's/.*0\.0\.0\.0:([0-9]+).*/\1/p' \
-              | head -n 1
+            sed -nE 's/.*0\.0\.0\.0:([0-9]+).*/\1/p' <<< "$info_output"
           )"
+          reality_port="${reality_port%%$'\n'*}"
           test -n "$reality_port" \
             || { echo 'Reality port missing from info' >&2; exit 1; }
           test "$reality_port" -ge 20000 \
@@ -253,20 +253,18 @@ jobs:
           sudo systemctl is-enabled --quiet shoes.service \
             || { echo 'shoes service is not enabled' >&2; exit 1; }
           for _ in {1..20}; do
-            if sudo ss -H -lnt | awk '{print $4}' | grep -Eq "(^|:)${reality_port}$"; then
+            if sudo ss -H -lnt | awk -v re="(^|:)${reality_port}$" '$4 ~ re { found=1 } END { exit !found }'; then
               break
             fi
             sleep 0.5
           done
-          sudo ss -H -lnt | awk '{print $4}' | grep -Eq "(^|:)${reality_port}$" \
+          sudo ss -H -lnt | awk -v re="(^|:)${reality_port}$" '$4 ~ re { found=1 } END { exit !found }' \
             || { echo 'Reality listener missing' >&2; exit 1; }
           sudo test -s "/etc/shoes/profiles/VLESS-REALITY-${reality_port}.yaml" \
             || { echo 'Reality profile file missing' >&2; exit 1; }
 
           reality_profile="$(
-            printf '%s' "$info_output" \
-              | grep -Eo '[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}' \
-              | head -n 1
+            grep -Eo -m 1 '[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}' <<< "$info_output"
           )"
           test -n "$reality_profile" \
             || { echo 'Reality profile UUID missing' >&2; exit 1; }
@@ -431,15 +429,13 @@ jobs:
 
           anytls_reality_info="$(sudo "$PING_RUST" info anytls-reality-view)"
           anytls_reality_profile="$(
-            printf '%s\n' "$anytls_reality_info" \
-              | grep -Eo '[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}' \
-              | head -n 1
+            grep -Eo -m 1 '[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}' <<< "$anytls_reality_info"
           )"
           test -n "$anytls_reality_profile" \
             || { echo 'AnyTLS Reality profile UUID missing' >&2; exit 1; }
           sudo "$PING_RUST" delete "$anytls_reality_profile" --yes >/dev/null
           sudo test ! -e /etc/shoes/profiles/ANYTLS-25447.yaml
-          ! sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)25447$'
+          ! sudo ss -H -lnt | awk -v re='(^|:)25447$' '$4 ~ re { found=1 } END { exit !found }'
           sudo systemctl is-active --quiet shoes.service
 
       - name: Reject lossy multi-user AnyTLS client exports
@@ -455,8 +451,8 @@ jobs:
             --user bob:bob-secret \
             | sudo tee "$multi_output" >/dev/null
           multi_profile="$(
-            grep -Eo '[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}' \
-              "$multi_output" | head -n 1
+            grep -Eo -m 1 '[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}' \
+              "$multi_output"
           )"
           test -n "$multi_profile" \
             || { echo 'multi-user AnyTLS profile UUID missing' >&2; exit 1; }
@@ -481,7 +477,7 @@ jobs:
           sudo "$PING_RUST" delete "$multi_profile" --yes >/dev/null
           sudo rm -f "$multi_output"
           sudo test ! -e /etc/shoes/profiles/ANYTLS-25446.yaml
-          ! sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)25446$'
+          ! sudo ss -H -lnt | awk -v re='(^|:)25446$' '$4 ~ re { found=1 } END { exit !found }'
           sudo systemctl is-active --quiet shoes.service
 
       - name: Keep successful add --plain stdout machine-readable
@@ -500,16 +496,14 @@ jobs:
           )"
           test "$(printf '%s\n' "$plain_output" | sed '/^[[:space:]]*$/d' | wc -l)" -eq 1 \
             || { echo 'add --plain emitted more than one non-empty stdout line' >&2; exit 1; }
-          printf '%s\n' "$plain_output" | grep -q '^vless://' \
+          grep -q '^vless://' <<< "$plain_output" \
             || { echo 'add --plain URI missing' >&2; exit 1; }
-          ! printf '%s\n' "$plain_output" | grep -Eq '部署成功|二维码|[▀▄█]' \
+          ! grep -Eq '部署成功|二维码|[▀▄█]' <<< "$plain_output" \
             || { echo 'add --plain leaked human-readable output' >&2; exit 1; }
 
           plain_info="$(sudo "$PING_RUST" info plain-contract)"
           plain_profile="$(
-            printf '%s\n' "$plain_info" \
-              | grep -Eo '[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}' \
-              | head -n 1
+            grep -Eo -m 1 '[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}' <<< "$plain_info"
           )"
           test -n "$plain_profile" \
             || { echo 'plain-contract profile UUID missing' >&2; exit 1; }
@@ -536,19 +530,19 @@ jobs:
           test "$current_pid" = "$previous_pid"
           sudo systemctl is-active --quiet shoes.service
           for _ in {1..20}; do
-            if sudo ss -H -lun | awk '{print $4}' | grep -Eq '(^|:)24444$'; then
+            if sudo ss -H -lun | awk -v re='(^|:)24444$' '$4 ~ re { found=1 } END { exit !found }'; then
               break
             fi
             sleep 0.5
           done
-          sudo ss -H -lun | awk '{print $4}' | grep -Eq '(^|:)24444$'
+          sudo ss -H -lun | awk -v re='(^|:)24444$' '$4 ~ re { found=1 } END { exit !found }'
           reload_after="$(sudo journalctl -u shoes.service -b -o cat --no-pager | grep -Fxc 'Servers ready' || true)"
           test "$reload_after" -eq "$((reload_before + 1))" \
             || { echo "expected one shoes reload for add (before=$reload_before after=$reload_after)" >&2; exit 1; }
 
           hysteria_profile="$(
-            grep -Eo '[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}' \
-              "$hysteria_output" | head -n 1
+            grep -Eo -m 1 '[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}' \
+              "$hysteria_output"
           )"
           test -n "$hysteria_profile"
           printf 'HYSTERIA_PROFILE=%s\n' "$hysteria_profile" >> "$GITHUB_ENV"
@@ -573,16 +567,16 @@ jobs:
           test "$current_pid" = "$previous_pid"
           sudo systemctl is-active --quiet shoes.service
           for _ in {1..20}; do
-            if sudo ss -H -lun | awk '{print $4}' | grep -Eq '(^|:)24445$'; then
+            if sudo ss -H -lun | awk -v re='(^|:)24445$' '$4 ~ re { found=1 } END { exit !found }'; then
               break
             fi
             sleep 0.5
           done
-          sudo ss -H -lun | awk '{print $4}' | grep -Eq '(^|:)24445$'
+          sudo ss -H -lun | awk -v re='(^|:)24445$' '$4 ~ re { found=1 } END { exit !found }'
 
           tuic_profile="$(
-            grep -Eo '[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}' \
-              "$tuic_output" | head -n 1
+            grep -Eo -m 1 '[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}' \
+              "$tuic_output"
           )"
           test -n "$tuic_profile"
           printf 'TUIC_PROFILE=%s\n' "$tuic_profile" >> "$GITHUB_ENV"
@@ -598,15 +592,15 @@ jobs:
             --port 24446 \
             | sudo tee "$shadowsocks_output" >/dev/null
           for _ in {1..20}; do
-            if sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)24446$'; then
+            if sudo ss -H -lnt | awk -v re='(^|:)24446$' '$4 ~ re { found=1 } END { exit !found }'; then
               break
             fi
             sleep 0.5
           done
-          sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)24446$'
+          sudo ss -H -lnt | awk -v re='(^|:)24446$' '$4 ~ re { found=1 } END { exit !found }'
           shadowsocks_profile="$(
-            grep -Eo '[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}' \
-              "$shadowsocks_output" | head -n 1
+            grep -Eo -m 1 '[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}' \
+              "$shadowsocks_output"
           )"
           test -n "$shadowsocks_profile"
           printf 'SHADOWSOCKS_PROFILE=%s\n' "$shadowsocks_profile" >> "$GITHUB_ENV"
@@ -619,12 +613,12 @@ jobs:
             --server-name www.cloudflare.com \
             | sudo tee "$shadowtls_output" >/dev/null
           for _ in {1..20}; do
-            if sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)24448$'; then
+            if sudo ss -H -lnt | awk -v re='(^|:)24448$' '$4 ~ re { found=1 } END { exit !found }'; then
               break
             fi
             sleep 0.5
           done
-          sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)24448$'
+          sudo ss -H -lnt | awk -v re='(^|:)24448$' '$4 ~ re { found=1 } END { exit !found }'
           grep -F "传输/伪装：ShadowTLS v3" "$shadowtls_output"
           grep -F "UDP/UoT：NOT_IMPLEMENTED" "$shadowtls_output"
           sudo test -s /etc/shoes/profiles/SHADOWSOCKS-24448.yaml
@@ -642,15 +636,15 @@ jobs:
             | sudo tee "$anytls_output" >/dev/null
           sudo systemctl is-active --quiet shoes.service
           for _ in {1..20}; do
-            if sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)24447$'; then
+            if sudo ss -H -lnt | awk -v re='(^|:)24447$' '$4 ~ re { found=1 } END { exit !found }'; then
               break
             fi
             sleep 0.5
           done
-          sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)24447$'
+          sudo ss -H -lnt | awk -v re='(^|:)24447$' '$4 ~ re { found=1 } END { exit !found }'
           anytls_profile="$(
-            grep -Eo '[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}' \
-              "$anytls_output" | head -n 1
+            grep -Eo -m 1 '[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}' \
+              "$anytls_output"
           )"
           test -n "$anytls_profile"
           printf 'ANYTLS_PROFILE=%s\n' "$anytls_profile" >> "$GITHUB_ENV"
@@ -963,7 +957,7 @@ jobs:
           sudo grep -F 'type: naiveproxy' /etc/shoes/profiles/NAIVEPROXY-25465.yaml
           sudo grep -F 'h2' /etc/shoes/profiles/NAIVEPROXY-25465.yaml
           sudo systemctl is-active --quiet shoes.service
-          sudo ss -H -lnt | grep -Eq '(^|:)25465[[:space:]]'
+          sudo ss -H -lnt | awk '$0 ~ /(^|:)25465[[:space:]]/ { found=1 } END { exit !found }'
           naive_fast_profile_id="$(sudo python3 - <<'PY'
           import json
           with open('/etc/shoes/ping-rust-state.json', encoding='utf-8') as stream:
@@ -1012,7 +1006,7 @@ jobs:
             local kind="$1"
             local port="$2"
             for _ in {1..20}; do
-              if sudo ss -H "-ln${kind}" | awk '{print $4}' | grep -Eq "(^|:)${port}$"; then
+              if sudo ss -H "-ln${kind}" | awk -v re="(^|:)${port}$" '$4 ~ re { found=1 } END { exit !found }'; then
                 return 0
               fi
               sleep 0.5
@@ -1140,7 +1134,7 @@ jobs:
           test "$(sudo systemctl show --property MainPID --value shoes.service)" = "$edit_pid_before"
           wait_for_single_reload "$edit_reload_before" "modify port"
           wait_listener t 25450
-          ! sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)25448$'
+          ! sudo ss -H -lnt | awk -v re='(^|:)25448$' '$4 ~ re { found=1 } END { exit !found }'
           sudo test ! -e /etc/shoes/profiles/VLESS-REALITY-25448.yaml
           sudo test -s /etc/shoes/profiles/VLESS-REALITY-25450.yaml
           sudo test -s /etc/shoes/profiles/SHADOWSOCKS-25449.yaml
@@ -1214,12 +1208,12 @@ jobs:
           wait_listener t 25450
           sudo test ! -e /etc/shoes/profiles/SHADOWSOCKS-25449.yaml
           for _ in {1..20}; do
-            if ! sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)25449$'; then
+            if ! sudo ss -H -lnt | awk -v re='(^|:)25449$' '$4 ~ re { found=1 } END { exit !found }'; then
               break
             fi
             sleep 0.5
           done
-          ! sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)25449$'
+          ! sudo ss -H -lnt | awk -v re='(^|:)25449$' '$4 ~ re { found=1 } END { exit !found }'
 
       - name: Verify AnyTLS TLS and REALITY through quick and advanced menus
         shell: bash
@@ -1230,7 +1224,7 @@ jobs:
             for mode in 1 2; do
               sudo expect scripts/ci/menu-anytls.exp "$PRS" "$flow" "$mode" "$port"
               sudo systemctl is-active --quiet shoes.service
-              sudo ss -H -lnt | awk '{print $4}' | grep -Eq "(^|:)${port}$"
+              sudo ss -H -lnt | awk -v re="(^|:)${port}$" '$4 ~ re { found=1 } END { exit !found }'
               sudo python3 - "$PRS" "$port" "$mode" "$RUNNER_TEMP" <<'PY'
           import json
           from pathlib import Path
@@ -1299,7 +1293,7 @@ jobs:
           print(f'AnyTLS menu mode {mode} state, YAML, export and cleanup: PASS')
           PY
               sudo systemctl is-active --quiet shoes.service
-              ! sudo ss -H -lnt | awk '{print $4}' | grep -Eq "(^|:)${port}$"
+              ! sudo ss -H -lnt | awk -v re="(^|:)${port}$" '$4 ~ re { found=1 } END { exit !found }'
               port=$((port + 1))
             done
           done
@@ -1409,8 +1403,8 @@ jobs:
           test "$(sudo sha256sum /etc/systemd/system/shoes.service | awk '{print $1}')" = "$unit_before"
           sudo systemctl is-active --quiet shoes.service
           sudo systemctl is-enabled --quiet shoes.service
-          sudo ss -H -lnt | awk '{print $4}' | grep -Eq "(^|:)${REALITY_PORT}$"
-          ! sudo ss -H -lnt | awk '{print $4}' | grep -Eq "(^|:)${rollback_port}$"
+          sudo ss -H -lnt | awk -v re="(^|:)${REALITY_PORT}$" '$4 ~ re { found=1 } END { exit !found }'
+          ! sudo ss -H -lnt | awk -v re="(^|:)${rollback_port}$" '$4 ~ re { found=1 } END { exit !found }'
           rm -f "$failure_log"
 
       - name: Roll back config and systemd state when activation fails
@@ -1473,7 +1467,7 @@ jobs:
             || { echo 'service not active after rollback' >&2; exit 1; }
           sudo systemctl is-enabled --quiet shoes.service \
             || { echo 'service not enabled after rollback' >&2; exit 1; }
-          ! sudo ss -H -lnt | awk '{print $4}' | grep -Eq "(^|:)${rollback_port}$" \
+          ! sudo ss -H -lnt | awk -v re="(^|:)${rollback_port}$" '$4 ~ re { found=1 } END { exit !found }' \
             || { echo 'rolled-back port still listening' >&2; exit 1; }
           rm -f "$failure_log"
 
@@ -1530,8 +1524,9 @@ jobs:
           backup="$RUNNER_TEMP/shoes-backup.tar.gz"
           sudo "$PING_RUST" backup "$backup"
           sudo test -s "$backup"
-          sudo tar -tzf "$backup" | grep -q 'shoes/profiles/VLESS-REALITY-'
-          sudo tar -tzf "$backup" | grep -q 'shoes/profiles/HYSTERIA2-'
+          sudo tar -tzf "$backup" > "$RUNNER_TEMP/backup-list.txt"
+          grep -q 'shoes/profiles/VLESS-REALITY-' "$RUNNER_TEMP/backup-list.txt"
+          grep -q 'shoes/profiles/HYSTERIA2-' "$RUNNER_TEMP/backup-list.txt"
           sudo "$PING_RUST" restore "$backup"
           sudo test -s "/etc/shoes/profiles/VLESS-REALITY-${REALITY_PORT}.yaml"
           sudo --preserve-env=GITHUB_TOKEN "$PING_RUST" update --method release --allow-downgrade
@@ -1541,13 +1536,13 @@ jobs:
           sudo "$PING_RUST" info
 
           sudo systemctl is-active --quiet shoes.service
-          sudo ss -H -lnt | awk '{print $4}' | grep -Eq "(^|:)${REALITY_PORT}$"
-          sudo ss -H -lun | awk '{print $4}' | grep -Eq '(^|:)24444$'
-          sudo ss -H -lun | awk '{print $4}' | grep -Eq '(^|:)24445$'
-          sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)24446$'
-          sudo ss -H -lnt | awk '{print $4}' | grep -Eq '(^|:)24447$'
+          sudo ss -H -lnt | awk -v re="(^|:)${REALITY_PORT}$" '$4 ~ re { found=1 } END { exit !found }'
+          sudo ss -H -lun | awk -v re='(^|:)24444$' '$4 ~ re { found=1 } END { exit !found }'
+          sudo ss -H -lun | awk -v re='(^|:)24445$' '$4 ~ re { found=1 } END { exit !found }'
+          sudo ss -H -lnt | awk -v re='(^|:)24446$' '$4 ~ re { found=1 } END { exit !found }'
+          sudo ss -H -lnt | awk -v re='(^|:)24447$' '$4 ~ re { found=1 } END { exit !found }'
           for port in 25451 25452 25453 25454 25455; do
-            sudo ss -H -lnt | awk '{print $4}' | grep -Eq "(^|:)${port}$"
+            sudo ss -H -lnt | awk -v re="(^|:)${port}$" '$4 ~ re { found=1 } END { exit !found }'
           done
 
       - name: Record acceptance summary
@@ -1717,7 +1712,7 @@ jobs:
             test -n "$profile"
             port="${profile##*-}"
             port="${port%.yaml}"
-            ss -H -lnt | awk "{print \$4}" | grep -Eq "(^|:)${port}$"
+            ss -H -lnt | awk -v re="(^|:)${port}$" "\$4 ~ re { found=1 } END { exit !found }"
           '
 
       - name: Add and inspect a second Debian configuration
@@ -1733,7 +1728,7 @@ jobs:
               ss://*"#SHADOWSOCKS-"*) ;;
               *) echo "unexpected Shadowsocks URI: $uri" >&2; exit 1 ;;
             esac
-            ! printf "%s\n" "$uri" | grep -Eq "部署成功|二维码|[▀▄█]"
+            ! grep -Eq "部署成功|二维码|[▀▄█]" <<< "$uri"
 
             systemctl is-active --quiet shoes.service
             /usr/local/bin/shoes --dry-run /etc/shoes/config.yaml
@@ -1762,8 +1757,8 @@ jobs:
               --user alice:alice-secret \
               --user bob:bob-secret >"$output"
             profile="$(
-              grep -Eo "[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}" \
-                "$output" | head -n 1
+              grep -Eo -m 1 "[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}" \
+                "$output"
             )"
             test -n "$profile"
 
@@ -1843,7 +1838,7 @@ jobs:
             test "$(sha256sum /etc/systemd/system/shoes.service | awk "{print \$1}")" = "$unit_before"
             systemctl is-enabled --quiet shoes.service
             systemctl is-active --quiet shoes.service
-            ! ss -H -lnt | awk "{print \$4}" | grep -Eq "(^|:)${rollback_port}$"
+            ! ss -H -lnt | awk -v re="(^|:)${rollback_port}$" "\$4 ~ re { found=1 } END { exit !found }"
           '
 
       - name: Record Debian acceptance summary
