@@ -4,7 +4,7 @@ use crate::{
     vless_encryption::{CredentialPair, VlessEncAuth, VlessEncMode},
 };
 
-fn sample(vision: bool) -> (ServerConfig, ManagedProfile) {
+pub(super) fn sample(vision: bool) -> (ServerConfig, ManagedProfile) {
     let request = GenerationRequest {
         name: None,
         protocol: Protocol::VlessEnc,

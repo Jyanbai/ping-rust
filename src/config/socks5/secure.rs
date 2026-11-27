@@ -35,7 +35,7 @@ pub(crate) async fn secure(
         Path::new(utils::LOCK_FILE),
         dry_run,
         choose,
-        verify_running,
+        |profile| verify_running(profile).map(|_| ()),
     )?
     else {
         return Ok(());
@@ -46,19 +46,27 @@ pub(crate) async fn secure(
     }
 
     service::check_socks5_restart_scope()?;
-    verify_running(&plan.original).context("无法确认原服务正常，请恢复原监听后重试")?;
+    let pid = verify_running(&plan.original).context("无法确认原服务正常，请恢复原监听后重试")?;
     validate_candidate_with_shoes(&plan.runtime, directory)
         .await
         .map_err(|_| {
             anyhow::anyhow!("shoes --dry-run 校验失败，配置未提交；请检查 shoes 安装和当前受管配置")
         })?;
+    if plan.mode == SecureMode::Local {
+        let target = socket_address(plan.profile())?;
+        if !service::tcp_listener_available_after_restart(pid, target)
+            .context("无法检查目标回环 TCP 监听，配置未提交；请检查 shoes.service 后重试")?
+        {
+            bail!("目标回环 TCP 监听 {target} 已被其他进程占用，配置未提交；请释放该监听后重试");
+        }
+    }
 
     eprintln!("将重启受管 shoes.service，同机节点的连接可能短暂中断。");
     let mode = plan.mode;
     let profile = commit_with_signal_protection(move || {
         plan.commit(directory, |profile| {
             service::restart_and_verify()?;
-            verify_running(profile)
+            verify_running(profile).map(|_| ())
         })
     })
     .await?;
@@ -217,8 +225,12 @@ impl SecureTarget {
             .iter()
             .position(|profile| profile.id == original.id)
             .context("未找到所选 SOCKS5 节点")?;
-        let servers = load_servers(&config_path)?;
-        let server = servers.get(index).context("聚合配置缺少所选 SOCKS5 节点")?;
+        let snapshot = ManagedYaml::load(directory)?;
+        snapshot.guard_legacy(&state.profiles)?;
+        let server = snapshot
+            .servers
+            .get(index)
+            .context("聚合配置缺少所选 SOCKS5 节点")?;
         let read_document = |profile: &ManagedProfile| {
             commit::managed_profile_directory_exists(&directory.join("profiles"))?;
             commit::read_managed_file(&profile_path(directory, profile))
@@ -231,21 +243,15 @@ impl SecureTarget {
             }
         }
         let pending_state = document.is_some();
-        migrate_listen(&mut state, &servers).context("聚合配置与管理状态不一致，无法安全加固")?;
-        ensure_chain_proxy_matches_state(&servers, &state)?;
+        migrate_listen(&mut state, &snapshot.servers)
+            .context("聚合配置与管理状态不一致，无法安全加固")?;
+        ensure_chain_proxy_matches_state(&snapshot.servers, &state)?;
         if state.profiles[index].socks5_risk_warning().is_some() {
             document = read_document(&state.profiles[index])?;
         }
-        if let Some(bytes) = &document {
-            let on_disk: ServerConfig = crate::yaml::from_slice(bytes)
-                .map_err(|_| anyhow::anyhow!("所选 SOCKS5 profile 无法解析"))?;
-            if crate::yaml::to_string(&on_disk)? != crate::yaml::to_string(&servers[index])? {
-                bail!("所选 SOCKS5 profile 与聚合配置不一致，请先恢复一致后重试");
-            }
-        }
         Ok(Self {
             state,
-            servers,
+            servers: snapshot.servers,
             index,
             document,
             pending_state,
@@ -292,15 +298,14 @@ impl SecureTarget {
                 server.address = profile.listen_address()?;
             }
         }
-        let documents = profile_documents(&servers, &state.profiles)?;
-        let runtime = commit::aggregate_profile_documents(&documents, &state.profiles)?;
+        let yaml = render_legacy(&servers, &state.profiles)?;
         Ok(SecurePlan {
             mode,
             original,
             state,
             index,
-            documents,
-            runtime,
+            documents: yaml.profiles,
+            runtime: yaml.aggregate,
         })
     }
 }
@@ -430,6 +435,7 @@ impl SecurePlan {
         directory: &Path,
         mut restart_and_verify: impl FnMut(&ManagedProfile) -> Result<()>,
     ) -> Result<ManagedProfile> {
+        ManagedYaml::load(directory)?.guard_legacy(&self.state.profiles)?;
         let profile = self.profile();
         commit::commit_profile_with_activation(
             directory,
@@ -478,7 +484,7 @@ fn socket_address(profile: &ManagedProfile) -> Result<SocketAddr> {
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
-fn verify_running(profile: &ManagedProfile) -> Result<()> {
+fn verify_running(profile: &ManagedProfile) -> Result<u32> {
     if !service::is_active()? {
         bail!("shoes.service 未处于 active 状态");
     }
@@ -497,7 +503,7 @@ fn verify_running(profile: &ManagedProfile) -> Result<()> {
     if !service::is_active()? || service::main_pid()? != Some(pid) {
         bail!("监听验证过程中 shoes.service 退出或重启");
     }
-    Ok(())
+    Ok(pid)
 }
 
 fn wait_for_listener(expected: SocketAddr, pid: u32) -> Result<()> {

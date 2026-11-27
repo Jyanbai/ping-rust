@@ -736,6 +736,7 @@ pub(crate) async fn update_shoes_with_options(
 ) -> Result<installer::InstallReport> {
     crate::utils::require_linux_root()?;
     let lock = crate::utils::exclusive_lock(std::path::Path::new(crate::utils::LOCK_FILE))?;
+    config::preflight_shoes_migration()?;
     let service_snapshot = if std::path::Path::new(crate::utils::SERVICE_FILE).is_file() {
         Some(service::capture_snapshot()?)
     } else {

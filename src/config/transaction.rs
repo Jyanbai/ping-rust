@@ -19,6 +19,7 @@ pub(super) struct ManagedRollback {
     pub(super) generated_certificate_key: Option<PathBuf>,
 }
 
+#[derive(PartialEq, Eq)]
 pub(super) struct ProfileDirectorySnapshot {
     pub(super) existed: bool,
     pub(super) files: BTreeMap<String, Vec<u8>>,

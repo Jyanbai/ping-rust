@@ -82,6 +82,22 @@ async fn choosing_socks5_mode_does_not_hold_config_lock() {
 }
 
 #[tokio::test]
+async fn secure_refuses_when_another_profile_has_unmodeled_fields() {
+    use crate::config::managed_yaml_tests::{assert_refused_without_writes, hashes, write_fixture};
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path();
+    let (state, _) = write_fixture(path).await;
+    let lock_path = path.join("lock");
+    drop(utils::exclusive_lock(&lock_path).unwrap());
+    let before = hashes(path);
+    let result = prepare_locked(path, &state.profiles[1].name, &lock_path, false, || {
+        Ok(Some(SecureMode::Auth))
+    });
+    assert_refused_without_writes(result.err().unwrap(), path, &before);
+}
+
+#[tokio::test]
 async fn already_safe_socks5_still_requires_config_lock() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path();
