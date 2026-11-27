@@ -562,6 +562,8 @@ sudo ping-rust export nekobox --profile <配置-UUID> --server 203.0.113.10
 
 只有一个配置时可以省略 `--profile`。SOCKS5 可导出 percent-encoded `socks5://` URI、终端 QR、sing-box `type: socks` 和 Clash Meta/Mihomo `type: socks5`；IPv6 地址会使用方括号。NekoBox 没有在本项目核实到稳定、明确的专用 SOCKS5 导入 schema，因此 `export nekobox` 会明确拒绝，不把普通 URI 冒充已验证的 NekoBox 格式。
 
+VMess-WS-TLS 导出明确使用 `aes-128-gcm`，不再依赖客户端的 `auto` 模式。已有受管节点不需要重建、修改服务端配置或重启 shoes；升级后重新导出并导入客户端，或重新生成分享链接、二维码。
+
 Snell v3 使用 shoes 原生服务端，新节点默认 `aes-128-gcm`；`aes-256-gcm` 和 `chacha20-ietf-poly1305` 保留为可选 cipher，选择时提示客户端兼容性。CI 的 Mihomo v1.19.33 实测仅 `aes-128-gcm` 可用；Mihomo/Clash Meta 仅对该 cipher 开放无损导出 `type: snell`、`version: 3`、`psk` 和 `udp`。已有节点的 cipher 不会自动修改；若已有 chacha20 或 aes-256 Snell 节点使用 Mihomo 客户端，请将节点改为 `aes-128-gcm` 并重新导出客户端配置。当前 sing-box Snell 只支持 v4/v6，NekoBox 也没有已核实的 v3 导入能力，因此两者明确拒绝。Snell v3 没有统一、跨客户端的标准 URI，`url`、`qr` 和 `--plain` 不会生成伪 `snell://`。链式代理 outbound 尚未实现 Snell。Mihomo 同样不支持 AnyTLS+Reality，标准 AnyTLS URI也无法表达 Reality 公钥；所有不兼容情况都会返回中文错误。所有 Reality 导出只包含公钥，永远不包含服务器私钥。
 
 ## 备份与恢复

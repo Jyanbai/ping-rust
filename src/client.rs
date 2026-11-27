@@ -15,6 +15,8 @@ use crate::{
     utils,
 };
 
+pub(crate) const VMESS_WS_TLS_CIPHER: &str = "aes-128-gcm";
+
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum ClientFormat {
     ClashMeta,
@@ -391,7 +393,7 @@ fn clash_meta(profile: &ManagedProfile, server: &str) -> Result<String> {
             "port": profile.port,
             "uuid": user_id,
             "alterId": 0,
-            "cipher": "auto",
+            "cipher": VMESS_WS_TLS_CIPHER,
             "udp": true,
             "tls": true,
             "servername": server_name,
@@ -675,7 +677,7 @@ fn sing_box(profile: &ManagedProfile, server: &str) -> Result<String> {
             "server": server,
             "server_port": profile.port,
             "uuid": user_id,
-            "security": "auto",
+            "security": VMESS_WS_TLS_CIPHER,
             "alter_id": 0,
             "tls": tls(server_name, profile.self_signed_certificate, alpn_protocols),
             "transport": {
@@ -977,7 +979,7 @@ pub fn share_uri(profile: &ManagedProfile, server: &str) -> Result<String> {
                 "port": profile.port,
                 "id": user_id,
                 "aid": 0,
-                "scy": "auto",
+                "scy": VMESS_WS_TLS_CIPHER,
                 "net": "ws",
                 "type": "none",
                 "host": server_name,
@@ -1075,6 +1077,61 @@ mod tests {
             self_signed_certificate: false,
             naive_certificate_validity: None,
         }
+    }
+
+    #[test]
+    fn vmess_ws_tls_exports_explicit_aead_cipher() {
+        let mut profile = reality_profile();
+        profile.self_signed_certificate = true;
+        profile.credentials = Credentials::VmessTls {
+            user_id: Uuid::nil(),
+            server_name: "vmess.example.com".to_owned(),
+            alpn_protocols: vec!["http/1.1".to_owned()],
+            websocket_path: "/vmess".to_owned(),
+        };
+        let server = "203.0.113.10";
+        let text = render(&profile, ClientFormat::SingBox, server).unwrap();
+        let sing_box: Value = serde_json::from_str(&text).unwrap();
+        let outbound = &sing_box["outbounds"][0];
+        assert_eq!(outbound["security"], "aes-128-gcm");
+        assert_eq!(outbound["alter_id"], 0);
+        assert!(outbound.get("authenticated_length").is_none());
+        assert!(outbound.get("global_padding").is_none());
+        assert_eq!(
+            outbound["tls"],
+            json!({"enabled": true, "server_name": "vmess.example.com", "insecure": true, "alpn": ["http/1.1"]})
+        );
+        let websocket = json!({"path": "/vmess", "headers": {"Host": "vmess.example.com"}});
+        assert_eq!(outbound["transport"]["type"], "ws");
+        assert_eq!(outbound["transport"]["path"], websocket["path"]);
+        assert_eq!(outbound["transport"]["headers"], websocket["headers"]);
+
+        let text = render(&profile, ClientFormat::ClashMeta, server).unwrap();
+        let clash: Value = crate::yaml::from_str(&text).unwrap();
+        let proxy = &clash["proxies"][0];
+        assert_eq!(proxy["cipher"], "aes-128-gcm");
+        assert_eq!(proxy["alterId"], 0);
+        assert_eq!(proxy["servername"], "vmess.example.com");
+        assert_eq!(proxy["alpn"], json!(["http/1.1"]));
+        assert_eq!(proxy["network"], "ws");
+        assert_eq!(proxy["ws-opts"], websocket);
+
+        let uri = stored_share_uri(&profile, Some(server)).unwrap();
+        assert_eq!(
+            render(&profile, ClientFormat::Nekobox, server).unwrap(),
+            uri
+        );
+        let payload = STANDARD
+            .decode(uri.strip_prefix("vmess://").unwrap())
+            .unwrap();
+        let payload: Value = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(payload["scy"], "aes-128-gcm");
+        assert_eq!(payload["aid"], 0);
+        assert_eq!(payload["net"], "ws");
+        assert_eq!(payload["host"], "vmess.example.com");
+        assert_eq!(payload["path"], "/vmess");
+        assert_eq!(payload["sni"], "vmess.example.com");
+        assert_eq!(payload["alpn"], "http/1.1");
     }
 
     #[test]

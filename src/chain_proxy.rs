@@ -15,8 +15,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 use uuid::Uuid;
 
-use crate::h2mux::H2MuxOptions;
-use crate::utils;
+use crate::{client::VMESS_WS_TLS_CIPHER, h2mux::H2MuxOptions, utils};
 
 mod state;
 #[allow(unused_imports)]
@@ -324,12 +323,16 @@ fn parse_vmess(input: &str) -> Result<ChainNode> {
             .and_then(serde_json::Value::as_str)
             .with_context(|| format!("VMess 分享链接缺少 {key}"))
     };
+    let cipher = match field("scy")? {
+        "auto" | "" => "any",
+        VMESS_WS_TLS_CIPHER => VMESS_WS_TLS_CIPHER,
+        _ => bail!("VMess 链式导入仅支持空值、auto 或 aes-128-gcm 加密方式"),
+    };
     if value.get("v").and_then(serde_json::Value::as_u64) != Some(2)
         || !matches!(
             value.get("aid").and_then(serde_json::Value::as_u64),
             Some(0)
         )
-        || !matches!(field("scy")?, "auto" | "")
         || field("net")? != "ws"
         || field("type")? != "none"
         || field("tls")? != "tls"
@@ -384,7 +387,7 @@ fn parse_vmess(input: &str) -> Result<ChainNode> {
             matching_headers: (!ws_host.is_empty())
                 .then(|| BTreeMap::from([("Host".to_owned(), ws_host.to_owned())])),
             protocol: Box::new(ShoesClientProtocol::Vmess {
-                cipher: "any".to_owned(),
+                cipher: cipher.to_owned(),
                 user_id,
                 udp_enabled: true,
             }),
@@ -1171,11 +1174,24 @@ mod tests {
         node.h2mux.enabled = true;
         let rendered = node.shoes_value().unwrap();
         assert_eq!(
+            rendered["protocol"]["protocol"]["protocol"]["cipher"],
+            "any"
+        );
+        assert_eq!(
             rendered["protocol"]["protocol"]["protocol"]["h2mux"]["max_connections"].as_u64(),
             Some(4)
         );
+        let mut explicit = payload.clone();
+        explicit["scy"] = serde_json::json!("aes-128-gcm");
+        let uri = format!("vmess://{}", STANDARD.encode(explicit.to_string()));
+        let rendered = parse_share_uri(&uri).unwrap().shoes_value().unwrap();
+        assert_eq!(
+            rendered["protocol"]["protocol"]["protocol"]["cipher"],
+            "aes-128-gcm"
+        );
         for (field, replacement) in [
             ("aid", serde_json::json!(1)),
+            ("scy", serde_json::json!("zero")),
             ("net", serde_json::json!("tcp")),
             ("tls", serde_json::json!("none")),
             ("insecure", serde_json::json!("maybe")),
