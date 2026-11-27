@@ -753,7 +753,16 @@ mod tests {
             .spawn()
             .unwrap();
         let executable = std::path::PathBuf::from(format!("/proc/{}/exe", child.id()));
-        let uses_system_shell = same_executable(&executable, Path::new("/bin/sh"));
+        // spawn 返回时 /proc/<pid>/exe 偶尔还没指向 sh（#164），等它稳定后再比较，
+        // 断言本身不放宽：超时仍不是系统 sh 就失败。
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let uses_system_shell = loop {
+            let same = same_executable(&executable, Path::new("/bin/sh"));
+            if matches!(same, Ok(true)) || std::time::Instant::now() >= deadline {
+                break same;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
         let shell = fs::read_link(&executable).unwrap();
         std::os::unix::fs::symlink(&shell, &installed).unwrap();
         let matched = check_socks5_restart_executable(&executable, &installed);
@@ -770,7 +779,11 @@ mod tests {
         let same_inode = same_executable(&deleted_link, &installed);
         drop(child.stdin.take());
         assert!(child.wait().unwrap().success());
-        assert!(uses_system_shell.unwrap(), "测试必须直接由系统 sh 执行脚本");
+        assert!(
+            uses_system_shell.unwrap(),
+            "测试必须直接由系统 sh 执行脚本，实际为 {}",
+            shell.display()
+        );
         assert!(same_inode.unwrap());
         matched.unwrap();
         for result in [replaced, deleted] {
