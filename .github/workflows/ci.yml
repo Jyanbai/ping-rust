@@ -608,6 +608,43 @@ jobs:
           path: ${{ runner.temp }}/ping-rust-external-clients/logs
           if-no-files-found: warn
 
+  tls-clients:
+    # #156：七种自签 TLS 协议用固定 sing-box v1.14.2 做真实连通、错误凭据和证书校验对照。
+    name: Seven TLS protocols with sing-box client
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Check acceptance harness unit tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B scripts/ci/test_tls_client_acceptance.py
+          python3 -B scripts/ci/test_socks5_secure_acceptance.py
+          python3 -B scripts/ci/test_legacy_upgrade.py
+      - name: Build current ping-rust release binary
+        shell: bash
+        run: cargo build --locked --release
+      - name: Run seven-protocol TLS client acceptance
+        shell: bash
+        run: |
+          set -euo pipefail
+          PING_RUST="$PWD/target/release/ping-rust" \
+          TLS_ACCEPTANCE_PRIVATE_DIR="$RUNNER_TEMP/tls-private" \
+          TLS_ACCEPTANCE_RESULTS_DIR="$RUNNER_TEMP/tls-results" \
+            bash scripts/ci/tls-client-acceptance.sh
+      - name: Upload TLS client acceptance results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: tls-client-acceptance-results
+          # 只上传公开结果，私有目录（配置、证书、凭据）不上传。
+          path: ${{ runner.temp }}/tls-results/results.jsonl
+          if-no-files-found: warn
+
   menu-input:
     name: Menu input terminal regression
     runs-on: ubuntu-24.04

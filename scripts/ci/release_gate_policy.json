@@ -21,6 +21,12 @@
       "Run pinned Xray and Mihomo acceptance",
       "Upload external client records"
     ],
+    "Seven TLS protocols with sing-box client": [
+      "Check acceptance harness unit tests",
+      "Build current ping-rust release binary",
+      "Run seven-protocol TLS client acceptance",
+      "Upload TLS client acceptance results"
+    ],
     "Debian 12 v0.2.2 to shoes v0.3.6 migration": [
       "Build Debian 12 systemd test image",
       "Start clean Debian 12 systemd container",
