@@ -174,7 +174,9 @@ trap 'kill "$shoes_pid" "$origin_pid" "$shadowtls_client_pid" "$naive_client_pid
 for _ in {1..40}; do
   tcp_ports="$(ss -H -lnt | awk '{print $4}')"
   udp_ports="$(ss -H -lun | awk '{print $4}')"
-  if grep -Eq '(^|:)1443$' <<<"$tcp_ports" \
+  # 代理目标 http.server 也要已在监听，否则 SOCKS5 转发会得到 connection refused（#161）。
+  if grep -Eq '^127\.0\.0\.1:18080$' <<<"$tcp_ports" \
+    && grep -Eq '(^|:)1443$' <<<"$tcp_ports" \
     && grep -Eq '(^|:)4388$' <<<"$tcp_ports" \
     && grep -Eq '(^|:)4389$' <<<"$tcp_ports" \
     && grep -Eq '(^|:)5443$' <<<"$tcp_ports" \
