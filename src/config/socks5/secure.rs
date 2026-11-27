@@ -3,7 +3,6 @@ use std::{
     fmt::Write as _,
     io::{self, Read},
     net::{Ipv4Addr, Ipv6Addr, TcpStream},
-    process::Command as SystemCommand,
     thread,
     time::{Duration, Instant},
 };
@@ -274,31 +273,7 @@ fn verify_running(profile: &ManagedProfile) -> Result<()> {
 fn wait_for_listener(expected: SocketAddr, pid: u32) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        let mut listeners = Vec::new();
-        for (family, wildcard) in [("-4", "0.0.0.0"), ("-6", "[::]")] {
-            let output = SystemCommand::new("ss")
-                .args([
-                    family,
-                    "-H",
-                    "-ltnp",
-                    &format!("sport = :{}", expected.port()),
-                ])
-                .output()
-                .context("无法执行 ss 检查监听；请安装 iproute2")?;
-            if !output.status.success() {
-                bail!("ss 无法读取 TCP 监听（退出码 {}）", output.status);
-            }
-            listeners.extend(parse_listeners(
-                &String::from_utf8_lossy(&output.stdout),
-                wildcard,
-                pid,
-            )?);
-        }
-        if !listeners.is_empty()
-            && listeners
-                .iter()
-                .all(|listener| *listener == (expected, true))
-        {
+        if service::has_exclusive_tcp_listener(pid, expected)? {
             return Ok(());
         }
         if Instant::now() >= deadline {
@@ -306,24 +281,6 @@ fn wait_for_listener(expected: SocketAddr, pid: u32) -> Result<()> {
         }
         thread::sleep(Duration::from_millis(100));
     }
-}
-
-fn parse_listeners(output: &str, wildcard: &str, pid: u32) -> Result<Vec<(SocketAddr, bool)>> {
-    let owner = format!(",pid={pid},");
-    output
-        .lines()
-        .map(|line| {
-            let local = line
-                .split_whitespace()
-                .nth(3)
-                .context("ss 输出缺少本地监听地址")?;
-            let local = local
-                .strip_prefix('*')
-                .map_or_else(|| local.to_owned(), |port| format!("{wildcard}{port}"));
-            let address = local.parse().context("ss 返回了无法解析的监听地址")?;
-            Ok((address, line.contains(&owner)))
-        })
-        .collect()
 }
 
 fn connect_probe(target: SocketAddr, method: u8) -> Result<TcpStream> {
@@ -392,22 +349,34 @@ mod listener_tests {
     use super::*;
 
     #[test]
-    fn parses_exact_listen_address_and_owner_from_ss() {
-        let output = concat!(
-            "LISTEN 0 1024 127.0.0.1:1080 0.0.0.0:* users:((\"shoes\",pid=123,fd=8))\n",
-            "LISTEN 0 1024 203.0.113.8:1080 0.0.0.0:* users:((\"shoes\",pid=1234,fd=8))\n",
-        );
-        assert_eq!(
-            parse_listeners(output, "0.0.0.0", 123).unwrap(),
-            [
-                ("127.0.0.1:1080".parse().unwrap(), true),
-                ("203.0.113.8:1080".parse().unwrap(), false)
-            ]
-        );
-        let output = "LISTEN 0 1024 *:1080 *:* users:((\"shoes\",pid=123,fd=8))";
-        assert_eq!(
-            parse_listeners(output, "[::]", 123).unwrap(),
-            [("[::]:1080".parse().unwrap(), true)]
+    #[cfg(target_os = "linux")]
+    fn listener_check_works_without_external_commands() {
+        const CHILD: &str = "PING_RUST_TEST_SOCKS5_LISTENER_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let expected = "127.0.0.1:1080".parse().unwrap();
+            let error = wait_for_listener(expected, u32::MAX).unwrap_err();
+            let message = format!("{error:#}");
+            assert!(
+                message.contains(&format!("/proc/{}/fd", u32::MAX)),
+                "{message}"
+            );
+            return;
+        }
+
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "config::socks5::secure::listener_tests::listener_check_works_without_external_commands",
+            ])
+            .env(CHILD, "1")
+            .env("PATH", "")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
         );
     }
 }
