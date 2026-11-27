@@ -174,6 +174,26 @@ pub fn exclusive_lock(path: &Path) -> Result<ExclusiveLock> {
     Ok(ExclusiveLock(file))
 }
 
+pub(crate) fn try_exclusive_lock(path: &Path, create: bool) -> Result<Option<ExclusiveLock>> {
+    let mut options = File::options();
+    options.read(true).write(create).create(create);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = match options.open(path) {
+        Ok(file) => file,
+        Err(error) if !create && error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| format!("打开锁文件 {} 失败", path.display()))
+        }
+    };
+    file.try_lock_exclusive()
+        .context("无法取得 ping-rust 配置锁；请确认没有其他配置操作后重试")?;
+    Ok(Some(ExclusiveLock(file)))
+}
+
 impl Drop for ExclusiveLock {
     fn drop(&mut self) {
         let _ = self.0.unlock();
@@ -181,6 +201,17 @@ impl Drop for ExclusiveLock {
 }
 
 pub fn atomic_write(destination: &Path, contents: &[u8], mode: u32) -> Result<()> {
+    persist_replace(
+        stage_atomic_write(destination, contents, mode)?,
+        destination,
+    )
+}
+
+pub(crate) fn stage_atomic_write(
+    destination: &Path,
+    contents: &[u8],
+    mode: u32,
+) -> Result<tempfile::NamedTempFile> {
     let parent = destination.parent().context("目标路径没有父目录")?;
     let parent = if parent.as_os_str().is_empty() {
         Path::new(".")
@@ -193,7 +224,7 @@ pub fn atomic_write(destination: &Path, contents: &[u8], mode: u32) -> Result<()
     temp.write_all(contents).context("写入临时文件失败")?;
     temp.as_file().sync_all().context("同步临时文件失败")?;
     set_mode(temp.path(), mode)?;
-    persist_replace(temp, destination)
+    Ok(temp)
 }
 
 pub fn ensure_directory(path: &Path, mode: u32) -> Result<()> {
@@ -206,7 +237,7 @@ pub fn atomic_copy(source: &Path, destination: &Path, mode: u32) -> Result<()> {
     atomic_write(destination, &bytes, mode)
 }
 
-fn persist_replace(temp: tempfile::NamedTempFile, destination: &Path) -> Result<()> {
+pub(crate) fn persist_replace(temp: tempfile::NamedTempFile, destination: &Path) -> Result<()> {
     #[cfg(target_os = "windows")]
     if destination.exists() {
         fs::remove_file(destination)
@@ -311,6 +342,20 @@ mod tests {
         let path = dir.path().join("lock");
         drop(exclusive_lock(&path).unwrap());
         drop(exclusive_lock(&path).unwrap());
+    }
+
+    #[test]
+    fn socks5_lock_fails_immediately_when_held_and_read_only_open_does_not_create() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("lock");
+        assert!(try_exclusive_lock(&path, false).unwrap().is_none());
+        assert!(!path.exists());
+        let held = exclusive_lock(&path).unwrap();
+        assert!(try_exclusive_lock(&path, true).is_err());
+        assert!(try_exclusive_lock(&path, false).is_err());
+        drop(held);
+        assert!(try_exclusive_lock(&path, false).unwrap().is_some());
+        assert!(try_exclusive_lock(&path, true).unwrap().is_some());
     }
 
     #[cfg(unix)]

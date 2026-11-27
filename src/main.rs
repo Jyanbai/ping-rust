@@ -31,6 +31,9 @@ mod shoes_e2e_tests;
 use anyhow::Result;
 use clap::Parser;
 use std::future::Future;
+use tokio::sync::Mutex;
+
+static INTERRUPT_EXIT: Mutex<()> = Mutex::const_new(());
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -45,8 +48,10 @@ async fn main() -> Result<()> {
     })
     .await?;
     tokio::spawn(async {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            restore_cursor_and_exit();
+        while tokio::signal::ctrl_c().await.is_ok() {
+            if let Ok(_guard) = INTERRUPT_EXIT.try_lock() {
+                restore_cursor_and_exit();
+            }
         }
     });
     if cli::is_version_request(std::env::args()) {

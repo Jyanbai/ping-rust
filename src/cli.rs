@@ -55,6 +55,11 @@ pub enum Command {
         #[command(subcommand)]
         command: crate::sni::Command,
     },
+    /// 管理现有 SOCKS5 节点
+    Socks5 {
+        #[command(subcommand)]
+        command: Socks5Command,
+    },
     /// 打开数字菜单（不带子命令时的默认行为）
     Menu,
     /// 首次安装时零输入部署默认 VLESS-REALITY
@@ -172,6 +177,27 @@ pub enum Command {
     Uninstall {
         #[arg(long)]
         purge: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum Socks5Command {
+    /// 加固旧版无认证公网 SOCKS5 节点
+    Secure {
+        /// 节点名称或 UUID
+        profile: String,
+        /// 生成随机用户名和密码，保留原监听地址
+        #[arg(long, conflicts_with = "local")]
+        auth: bool,
+        /// 改为仅监听本机回环地址
+        #[arg(long)]
+        local: bool,
+        /// 预览脱敏后的配置差异
+        #[arg(long)]
+        dry_run: bool,
+        /// 使用非交互模式，必须显式指定 --auth 或 --local
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -339,6 +365,46 @@ pub enum PortKind {
 pub async fn run(cli: Cli) -> Result<()> {
     match cli.command.unwrap_or(Command::Menu) {
         Command::Sni { command } => crate::sni::run(command).await,
+        Command::Socks5 {
+            command:
+                Socks5Command::Secure {
+                    profile,
+                    auth,
+                    local,
+                    dry_run,
+                    yes,
+                },
+        } => {
+            let mode = match (auth, local) {
+                (true, _) => Some(config::Socks5SecureMode::Auth),
+                (_, true) => Some(config::Socks5SecureMode::Local),
+                _ => None,
+            };
+            if mode.is_none() && (yes || !io::stdin().is_terminal() || !io::stdout().is_terminal())
+            {
+                bail!("非交互模式必须显式指定 --auth 或 --local");
+            }
+            config::secure_socks5(&profile, dry_run, || {
+                if mode.is_some() {
+                    return Ok(mode);
+                }
+                println!("1) 启用用户名密码认证：保留监听地址，远端客户端需更新凭据。");
+                println!("2) 仅监听回环地址：远端连接将中断。");
+                println!("0) 取消");
+                let choice =
+                    match input::read_menu_choice(&mut io::stdin().lock(), &mut io::stdout(), 2) {
+                        Ok(choice) => choice,
+                        Err(error) if error.is::<input::MenuEof>() => return Ok(None),
+                        Err(error) => return Err(error),
+                    };
+                Ok(match choice.trim().parse::<u8>()? {
+                    1 => Some(config::Socks5SecureMode::Auth),
+                    2 => Some(config::Socks5SecureMode::Local),
+                    _ => None,
+                })
+            })
+            .await
+        }
         Command::Menu => menu::run().await,
         Command::Bootstrap => {
             if !bootstrap_default_reality().await? {

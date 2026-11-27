@@ -1,4 +1,14 @@
-use std::{collections::BTreeSet, fs, path::Path, process::Command, thread, time::Duration};
+use std::{
+    collections::BTreeSet,
+    fmt::Write as _,
+    fs,
+    io::ErrorKind,
+    net::{IpAddr, SocketAddr},
+    path::Path,
+    process::Command,
+    thread,
+    time::Duration,
+};
 
 use anyhow::{bail, Context, Result};
 use clap::ValueEnum;
@@ -219,6 +229,59 @@ pub fn restart_and_verify() -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn check_socks5_restart_scope() -> Result<()> {
+    ensure_systemctl()?;
+    if fs::read(utils::SERVICE_FILE).context("无法读取受管 shoes.service unit")?
+        != unit_contents().as_bytes()
+        || systemctl_show_value("FragmentPath")? != utils::SERVICE_FILE
+        || !systemctl_show_value("DropInPaths")?.is_empty()
+        || systemctl_show_value("NeedDaemonReload")? != "no"
+    {
+        bail!("SOCKS5 加固要求已加载的标准受管 shoes.service；请检查 unit、自定义 drop-in 或待重载配置");
+    }
+    check_restart_dependencies(systemctl_show_value)?;
+    let pid = main_pid()?.context("shoes.service 缺少 MainPID")?;
+    check_socks5_restart_executable(
+        Path::new(&format!("/proc/{pid}/exe")),
+        Path::new(utils::SHOES_BIN),
+    )
+}
+
+fn check_restart_dependencies(
+    mut property_value: impl FnMut(&str) -> Result<String>,
+) -> Result<()> {
+    // systemd 可在 unit 文件和 drop-in 之外添加 .requires / .wants 依赖。
+    // 允许标准 unit 的网络和 PrivateTmp 依赖，以及 systemd 的默认依赖。
+    let mounts = ["-.mount", "tmp.mount", "var.mount", "var-tmp.mount"];
+    let requires = [mounts.as_slice(), &["sysinit.target", "system.slice"]].concat();
+    let wants = [mounts.as_slice(), &["network-online.target"]].concat();
+    for (property, allowed) in [
+        ("Requires", requires.as_slice()),
+        ("Wants", wants.as_slice()),
+        ("Conflicts", &["shutdown.target"]),
+        ("ConflictedBy", &["shutdown.target"]),
+        ("RequiredBy", &[]),
+        ("RequisiteOf", &[]),
+        ("BindsTo", &[]),
+        ("BoundBy", &[]),
+        ("ConsistsOf", &[]),
+        ("PropagatesStopTo", &[]),
+        ("OnFailure", &[]),
+        ("OnSuccess", &[]),
+        ("TriggeredBy", &[]),
+        ("Upholds", &[]),
+        ("UpheldBy", &[]),
+    ] {
+        if property_value(property)?
+            .split_whitespace()
+            .any(|unit| !allowed.contains(&unit))
+        {
+            bail!("shoes.service 存在伴随服务或依赖关系（{property}），无法单独安全重启");
+        }
+    }
+    Ok(())
+}
+
 fn verify_active_stable(
     mut probe: impl FnMut() -> Result<bool>,
     mut pause: impl FnMut(),
@@ -309,6 +372,16 @@ fn same_executable(running: &Path, installed: &Path) -> Result<bool> {
     }
 }
 
+fn check_socks5_restart_executable(running: &Path, installed: &Path) -> Result<()> {
+    let advice = "无法确认运行中的 shoes 与磁盘上的二进制一致；请先重启服务或完成升级";
+    let target = fs::read_link(running).context(advice)?;
+    let target = target.as_os_str().as_encoded_bytes();
+    if target.ends_with(b" (deleted)") || !same_executable(running, installed).context(advice)? {
+        bail!("{advice}");
+    }
+    Ok(())
+}
+
 pub fn hot_reload_and_verify(
     snapshot: HotReloadSnapshot,
     expected_ports: &BTreeSet<u16>,
@@ -391,7 +464,7 @@ fn systemctl_show_value(property: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
-fn listening_ports(pid: u32) -> Result<BTreeSet<u16>> {
+fn process_socket_inodes(pid: u32) -> Result<BTreeSet<u64>> {
     let fd_dir = format!("/proc/{pid}/fd");
     let mut socket_inodes = BTreeSet::new();
     for entry in fs::read_dir(&fd_dir).with_context(|| format!("读取 {fd_dir} 失败"))? {
@@ -410,6 +483,81 @@ fn listening_ports(pid: u32) -> Result<BTreeSet<u16>> {
             socket_inodes.insert(inode);
         }
     }
+    Ok(socket_inodes)
+}
+
+pub(crate) fn has_exclusive_tcp_listener(pid: u32, expected: SocketAddr) -> Result<bool> {
+    let socket_inodes = process_socket_inodes(pid)?;
+    // Both tables list all sockets in the process's network namespace. The fd
+    // inodes identify the ones held by the target process.
+    let tcp_path = format!("/proc/{pid}/net/tcp");
+    let tcp = fs::read_to_string(&tcp_path).with_context(|| format!("读取 {tcp_path} 失败"))?;
+    let tcp6_path = format!("/proc/{pid}/net/tcp6");
+    let tcp6 = match fs::read_to_string(&tcp6_path) {
+        // Linux without IPv6 support does not expose this table.
+        Err(error) if error.kind() == ErrorKind::NotFound => String::new(),
+        result => result.with_context(|| format!("读取 {tcp6_path} 失败"))?,
+    };
+    tcp_listeners_match(&tcp, &tcp6, &socket_inodes, expected)
+}
+
+fn tcp_listeners_match(
+    tcp: &str,
+    tcp6: &str,
+    socket_inodes: &BTreeSet<u64>,
+    expected: SocketAddr,
+) -> Result<bool> {
+    let expected_ip = match expected.ip() {
+        IpAddr::V4(ip) => format!("{:08X}", u32::from_ne_bytes(ip.octets())),
+        IpAddr::V6(ip) => {
+            // /proc prints each 32-bit word in host byte order.
+            let mut address = String::with_capacity(32);
+            for &bytes in ip.octets().as_chunks::<4>().0 {
+                let word = u32::from_ne_bytes(bytes);
+                write!(address, "{word:08X}").unwrap();
+            }
+            address
+        }
+    };
+    let expected_port = format!("{:04X}", expected.port());
+    let mapped_word = u32::from_ne_bytes([0, 0, 255, 255]);
+    let ipv4_mapped_prefix = format!("0000000000000000{mapped_word:08X}");
+    let mut found = false;
+    for line in tcp.lines().skip(1).chain(tcp6.lines().skip(1)) {
+        let columns: Vec<_> = line.split_whitespace().collect();
+        if *columns.get(3).context("TCP 监听表缺少状态")? != "0A" {
+            continue;
+        }
+        let (ip, port) = columns[1].split_once(':').context("TCP 监听地址无效")?;
+        if port != expected_port {
+            continue;
+        }
+        let inode = columns
+            .get(9)
+            .context("TCP 监听表缺少 socket inode")?
+            .parse::<u64>()
+            .context("TCP 监听的 socket inode 无效")?;
+        let owned = socket_inodes.contains(&inode);
+        // A foreign native IPv6 bind cannot serve IPv4. An IPv6 wildcard may
+        // be dual-stack, and /proc does not report IPV6_V6ONLY.
+        if !owned
+            && expected.is_ipv4()
+            && ip.len() == 32
+            && ip != "00000000000000000000000000000000"
+            && !ip.starts_with(&ipv4_mapped_prefix)
+        {
+            continue;
+        }
+        if ip != expected_ip || !owned {
+            return Ok(false);
+        }
+        found = true;
+    }
+    Ok(found)
+}
+
+fn listening_ports(pid: u32) -> Result<BTreeSet<u16>> {
+    let socket_inodes = process_socket_inodes(pid)?;
     let mut ports = BTreeSet::new();
     for (name, tcp) in [
         ("tcp", true),
@@ -590,6 +738,45 @@ fn ensure_systemctl() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn socks5_restart_rejects_replaced_or_deleted_executable() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path();
+        let installed = path.join("shoes");
+        let script = path.join("hold.sh");
+        fs::write(&script, "read -r line || :\n").unwrap();
+        let mut child = Command::new("/bin/sh")
+            .arg(&script)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let executable = std::path::PathBuf::from(format!("/proc/{}/exe", child.id()));
+        let uses_system_shell = same_executable(&executable, Path::new("/bin/sh"));
+        let shell = fs::read_link(&executable).unwrap();
+        std::os::unix::fs::symlink(&shell, &installed).unwrap();
+        let matched = check_socks5_restart_executable(&executable, &installed);
+        fs::remove_file(&installed).unwrap();
+        std::os::unix::fs::symlink(std::env::current_exe().unwrap(), &installed).unwrap();
+        let replaced = check_socks5_restart_executable(&executable, &installed);
+        fs::remove_file(&installed).unwrap();
+        std::os::unix::fs::symlink(&shell, &installed).unwrap();
+        let deleted_target = path.join("running (deleted)");
+        std::os::unix::fs::symlink(&executable, &deleted_target).unwrap();
+        let deleted_link = path.join("proc-exe");
+        std::os::unix::fs::symlink(&deleted_target, &deleted_link).unwrap();
+        let deleted = check_socks5_restart_executable(&deleted_link, &installed);
+        let same_inode = same_executable(&deleted_link, &installed);
+        drop(child.stdin.take());
+        assert!(child.wait().unwrap().success());
+        assert!(uses_system_shell.unwrap(), "测试必须直接由系统 sh 执行脚本");
+        assert!(same_inode.unwrap());
+        matched.unwrap();
+        for result in [replaced, deleted] {
+            assert!(format!("{:#}", result.unwrap_err()).contains("先重启服务或完成升级"));
+        }
+    }
 
     #[cfg(unix)]
     #[test]
@@ -798,5 +985,109 @@ mod tests {
         let table = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n  0: 0100007F:1F90 00000000:0000 0A 00000000:0000 00:00000000 00000000   0        0 7001 1 0000000000000000 100 0 0 10 0\n  1: 0100007F:1F91 00000000:0000 01 00000000:0000 00:00000000 00000000   0        0 7002 1 0000000000000000 100 0 0 10 0\n";
         let ports = parse_proc_net_ports(table, &BTreeSet::from([7001, 7002]), true);
         assert_eq!(ports, BTreeSet::from([8080]));
+    }
+
+    #[test]
+    fn proc_net_requires_the_exact_tcp_listener_and_owner() {
+        let header = "sl local_address rem_address st tx_queue tr retrnsmt uid timeout inode";
+        let row = |address: &str, port, state, inode| {
+            format!("0: {address}:{port:04X} 00000000:0000 {state} 0:0 0:0 0 0 0 {inode}")
+        };
+        let loopback = format!("{:08X}", u32::from_ne_bytes([127, 0, 0, 1]));
+        let public = format!("{:08X}", u32::from_ne_bytes([203, 0, 113, 8]));
+        let ipv6_loopback = format!("{:032X}", u32::from_ne_bytes([0, 0, 0, 1]));
+        let ipv6_wildcard = "00000000000000000000000000000000";
+        let inodes = BTreeSet::from([7001]);
+        let expected = "127.0.0.1:1080".parse().unwrap();
+        let good = row(&loopback, 1080, "0A", 7001);
+        let established = row(&public, 1080, "01", 7002);
+        let other_port = row(&public, 1081, "0A", 7002);
+        let wrong_owner = row(&loopback, 1080, "0A", 7002);
+        let wrong_address = row(&public, 1080, "0A", 7001);
+        let wildcard = row(ipv6_wildcard, 1080, "0A", 7001);
+        let loopback6 = row(&ipv6_loopback, 1080, "0A", 7001);
+        let tcp = format!("{header}\n{good}\n{established}\n{other_port}");
+        assert!(tcp_listeners_match(&tcp, header, &inodes, expected).unwrap());
+        for bad in [&wrong_owner, &wrong_address] {
+            assert!(
+                !tcp_listeners_match(&format!("{tcp}\n{bad}"), header, &inodes, expected).unwrap()
+            );
+        }
+        assert!(
+            !tcp_listeners_match(&tcp, &format!("{header}\n{wildcard}"), &inodes, expected)
+                .unwrap()
+        );
+        assert!(!tcp_listeners_match(
+            &format!("{header}\n{established}\n{other_port}"),
+            header,
+            &inodes,
+            expected
+        )
+        .unwrap());
+        for (row, expected) in [(wildcard, "[::]:1080"), (loopback6, "[::1]:1080")] {
+            assert!(tcp_listeners_match(
+                header,
+                &format!("{header}\n{row}"),
+                &inodes,
+                expected.parse().unwrap()
+            )
+            .unwrap());
+        }
+    }
+
+    #[test]
+    fn proc_net_ignores_unrelated_native_ipv6_for_ipv4_socks5() {
+        let header = "sl local_address rem_address st tx_queue tr retrnsmt uid timeout inode";
+        let address6 = |word, last| format!("0000000000000000{word:08X}{last:08X}");
+        let ipv6_loopback = address6(0u32, u32::from_ne_bytes([0, 0, 0, 1]));
+        let ipv6_mapped = address6(
+            u32::from_ne_bytes([0, 0, 255, 255]),
+            u32::from_ne_bytes([127, 0, 0, 1]),
+        );
+        let ipv6_wildcard = address6(0, 0);
+        let row = |ip: &str, inode| {
+            format!("{header}\n0: {ip}:0438 00000000:0000 0A 0:0 0:0 0 0 0 {inode}")
+        };
+        let inodes = BTreeSet::from([7001]);
+        for (octets, expected) in [
+            ([0, 0, 0, 0], "0.0.0.0:1080"),
+            ([127, 0, 0, 1], "127.0.0.1:1080"),
+        ] {
+            let expected = expected.parse().unwrap();
+            let tcp = row(&format!("{:08X}", u32::from_ne_bytes(octets)), 7001);
+            assert!(
+                tcp_listeners_match(&tcp, &row(&ipv6_loopback, 7002), &inodes, expected).unwrap()
+            );
+            for ambiguous in [&ipv6_mapped, &ipv6_wildcard] {
+                assert!(
+                    !tcp_listeners_match(&tcp, &row(ambiguous, 7002), &inodes, expected).unwrap()
+                );
+            }
+            assert!(
+                !tcp_listeners_match(&tcp, &row(&ipv6_loopback, 7001), &inodes, expected).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn socks5_restart_allows_default_dependencies_and_rejects_companion_units() {
+        let defaults = |property: &str| match property {
+            "Requires" => "sysinit.target system.slice -.mount",
+            "Wants" => "network-online.target tmp.mount",
+            "Conflicts" => "shutdown.target",
+            _ => "",
+        };
+        check_restart_dependencies(|property| Ok(defaults(property).to_owned())).unwrap();
+        for property in ["RequiredBy", "PropagatesStopTo", "OnFailure", "Wants"] {
+            let error = check_restart_dependencies(|queried| {
+                if queried == property {
+                    Ok(format!("{} companion.service", defaults(queried)))
+                } else {
+                    Ok(defaults(queried).to_owned())
+                }
+            })
+            .unwrap_err();
+            assert!(error.to_string().contains(property));
+        }
     }
 }

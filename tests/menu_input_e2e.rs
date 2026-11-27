@@ -2,12 +2,20 @@
 //! sudo env PING_RUST_MENU_E2E=1 cargo test --offline --test menu_input_e2e -- --nocapture
 //!
 //! 需要 Linux、root、expect，以及 /etc/shoes 下至少一份已初始化且节点文件齐全的
-//! 当前版本受管配置（使用专用测试机）。本测试不负责部署节点；只有取消/无效输入，
-//! 不需要 shoes 运行或 systemd 可用，也不访问网络。若需迁移节点文件则先在测试机
+//! 当前版本受管配置（使用专用测试机），含一个绑定 IPv4 通配地址的 SOCKS5 节点。
+//! 加固回归在 shoes 停止时临时写入旧版无认证格式并恢复。测试只发送取消或无效输入，
+//! 无需 systemd，也不访问网络。若需迁移节点文件则先在测试机
 //! 完成迁移（那一步需要 shoes）。测试前后逐字节比较聚合配置、state 和节点文件。
 #![cfg(target_os = "linux")]
 
-use std::{collections::BTreeMap, fs, path::Path, process::Command};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::Path,
+    process::{Command, Stdio},
+};
+
+use serde_json::Value;
 
 fn snapshot(directory: &Path) -> BTreeMap<std::path::PathBuf, Vec<u8>> {
     let mut files = BTreeMap::new();
@@ -20,6 +28,79 @@ fn snapshot(directory: &Path) -> BTreeMap<std::path::PathBuf, Vec<u8>> {
         }
     }
     files
+}
+
+struct RestoreSocks5Files<'a>([(&'a Path, &'a [u8]); 3]);
+
+impl Drop for RestoreSocks5Files<'_> {
+    fn drop(&mut self) {
+        for (path, bytes) in self.0 {
+            if let Err(error) = fs::write(path, bytes) {
+                eprintln!("恢复 {} 失败：{error}", path.display());
+            }
+        }
+    }
+}
+
+fn check_socks5_secure_cancellation(
+    directory: &Path,
+    original: &BTreeMap<std::path::PathBuf, Vec<u8>>,
+) {
+    let shoes = Command::new("pgrep")
+        .args(["-x", "shoes"])
+        .stdout(Stdio::null())
+        .status()
+        .expect("检查 shoes 进程");
+    assert_eq!(shoes.code(), Some(1), "请先停止测试机的 shoes 进程");
+    let state_path = directory.join("ping-rust-state.json");
+    let config_path = directory.join("config.yaml");
+    let mut state: Value = serde_json::from_slice(&original[&state_path]).unwrap();
+    let node = state["profiles"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|profile| profile["credentials"]["Socks5"]["listen"]["address"] == "0.0.0.0")
+        .expect("请预置一个监听 0.0.0.0 的 SOCKS5 测试节点");
+    let selector = node["id"].as_str().unwrap().to_owned();
+    let port = node["port"].as_u64().unwrap();
+    let creds = node["credentials"]["Socks5"].as_object_mut().unwrap();
+    for key in ["listen", "username", "password"] {
+        creds.remove(key);
+    }
+    let profile_path = directory.join(format!("profiles/SOCKS5-{port}.yaml"));
+    let mut servers: Vec<Value> =
+        serde_saphyr::from_str(std::str::from_utf8(&original[&config_path]).unwrap()).unwrap();
+    let address = format!("0.0.0.0:{port}");
+    let server = servers
+        .iter_mut()
+        .find(|server| server["address"] == address)
+        .unwrap();
+    let protocol = server["protocol"].as_object_mut().unwrap();
+    protocol.remove("username");
+    protocol.remove("password");
+    let _restore = RestoreSocks5Files([
+        (&profile_path, &original[&profile_path]),
+        (&config_path, &original[&config_path]),
+        (&state_path, &original[&state_path]),
+    ]);
+    fs::write(&profile_path, serde_json::to_vec(server).unwrap()).unwrap();
+    fs::write(&config_path, serde_json::to_vec(&servers).unwrap()).unwrap();
+    fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+    let before = snapshot(directory);
+    let output = Command::new("expect")
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/menu_input.exp"))
+        .arg(env!("CARGO_BIN_EXE_ping-rust"))
+        .arg(selector)
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("运行 SOCKS5 加固终端回归");
+    assert!(snapshot(directory) == before, "加固取消改动了受管文件");
+    assert!(
+        output.status.success(),
+        "加固终端回归失败：\n{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -90,5 +171,10 @@ fn menu_input_returns_retries_defaults_to_no_and_handles_eof() {
         output.status.success(),
         "menu_input.exp 失败：{}",
         output.status
+    );
+    check_socks5_secure_cancellation(directory, &before);
+    assert!(
+        snapshot(directory) == before,
+        "旧版 SOCKS5 测试文件未完整恢复"
     );
 }
