@@ -13,6 +13,7 @@ auth_port=24451
 local_node=legacy-socks-local
 local_port=24452
 asset=ping-rust-x86_64-unknown-linux-musl.tar.gz
+state_file=/etc/shoes/ping-rust-state.json
 
 : "${NEW_PING_RUST:?NEW_PING_RUST must point to the current build}"
 . /etc/os-release
@@ -165,8 +166,8 @@ fetch_release "$old_tag" "$work/old"
 old="$work/old/ping-rust"
 run_command install-old 0 "$old" install --method release
 for spec in "$auth_node:$auth_port" "$local_node:$local_port"; do
-  run_command "add-${spec%%:*}" 0 "$old" add socks5 --no-auth \
-    --name "${spec%%:*}" --port "${spec##*:}" --server-address 127.0.0.1 --yes --plain
+  run_command "generate-${spec%%:*}" 0 "$old" generate socks5 --no-auth \
+    --name "${spec%%:*}" --port "${spec##*:}"
 done
 assert_active
 wait_listening '0\.0\.0\.0|\*|\[::\]' "$auth_port"
@@ -232,8 +233,25 @@ record 'rerun: both nodes report no fix needed; files and MainPID unchanged'
 fetch_release "$compat_tag" "$work/compat"
 run_command v021-info-auth 0 "$work/compat/ping-rust" info "$auth_node"
 run_command v021-info-local 0 "$work/compat/ping-rust" info "$local_node"
-grep -Fq '用户名 (username)' "$work/v021-info-auth.stdout" \
-  || { record 'v0.2.1 info does not show credentials for the auth node'; exit 1; }
-record 'v0.2.1 info: reads both secured profiles; auth node shows credentials'
+if ! python3 - "$auth_node" "$state_file" "$work/v021-info-auth.stdout" 2>/dev/null <<'PY'
+import json, pathlib, sys
+
+name, state_path, info_path = sys.argv[1:]
+state = json.loads(pathlib.Path(state_path).read_text(encoding='utf-8'))
+matches = [profile for profile in state['profiles'] if profile.get('name') == name]
+if len(matches) != 1:
+    sys.exit(1)
+creds = matches[0]['credentials']['Socks5']
+lines = [line.lstrip() for line in pathlib.Path(info_path).read_text(encoding='utf-8').splitlines()]
+for field, label in (('username', '用户名：'), ('password', '密码：')):
+    value = creds.get(field)
+    if not value or [line for line in lines if line.startswith(label)] != [label + value]:
+        sys.exit(1)
+PY
+then
+  record 'v0.2.1 info credentials do not match state for the auth node'
+  exit 1
+fi
+record 'v0.2.1 info: reads both secured profiles; auth credentials match state'
 
 record "SOCKS5 secure on real systemd: PASS"
