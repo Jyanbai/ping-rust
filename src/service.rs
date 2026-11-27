@@ -522,6 +522,13 @@ fn tcp_listeners_match(
     let expected_port = format!("{:04X}", expected.port());
     let mapped_word = u32::from_ne_bytes([0, 0, 255, 255]);
     let ipv4_mapped_prefix = format!("0000000000000000{mapped_word:08X}");
+    let ipv4_mapped_wildcard = format!("{ipv4_mapped_prefix}00000000");
+    let is_wildcard = |ip: &str| {
+        matches!(ip, "*" | "00000000" | "00000000000000000000000000000000")
+            || ip == ipv4_mapped_wildcard
+    };
+    let expected_is_wildcard = is_wildcard(&expected_ip);
+    let expected_is_mapped = expected_ip.starts_with(&ipv4_mapped_prefix);
     let mut found = false;
     for line in tcp.lines().skip(1).chain(tcp6.lines().skip(1)) {
         let columns: Vec<_> = line.split_whitespace().collect();
@@ -538,13 +545,19 @@ fn tcp_listeners_match(
             .parse::<u64>()
             .context("TCP 监听的 socket inode 无效")?;
         let owned = socket_inodes.contains(&inode);
+        let is_mapped = ip.starts_with(&ipv4_mapped_prefix);
+        let wildcard = is_wildcard(ip);
         // A foreign native IPv6 bind cannot serve IPv4. An IPv6 wildcard may
         // be dual-stack, and /proc does not report IPV6_V6ONLY.
+        if !owned && expected.is_ipv4() && ip.len() == 32 && !wildcard && !is_mapped {
+            continue;
+        }
         if !owned
-            && expected.is_ipv4()
-            && ip.len() == 32
-            && ip != "00000000000000000000000000000000"
-            && !ip.starts_with(&ipv4_mapped_prefix)
+            && ip != expected_ip
+            && ip.len() == expected_ip.len()
+            && is_mapped == expected_is_mapped
+            && !wildcard
+            && !expected_is_wildcard
         {
             continue;
         }
@@ -1045,6 +1058,74 @@ mod tests {
                 expected.parse().unwrap()
             )
             .unwrap());
+        }
+    }
+
+    #[test]
+    fn proc_net_only_rejects_overlapping_foreign_listeners_in_the_same_family() {
+        let header = "sl local_address rem_address st tx_queue tr retrnsmt uid timeout inode";
+        let row =
+            |ip: &str, inode| format!("\n0: {ip}:0438 00000000:0000 0A 0:0 0:0 0 0 0 {inode}");
+        let address4 = |octets| format!("{:08X}", u32::from_ne_bytes(octets));
+        let address6 = |last| {
+            format!(
+                "{}0000000000000000{}",
+                address4([0x20, 1, 0x0d, 0xb8]),
+                address4(last)
+            )
+        };
+        let mapped = |octets| {
+            format!(
+                "0000000000000000{}{}",
+                address4([0, 0, 255, 255]),
+                address4(octets)
+            )
+        };
+        let inodes = BTreeSet::from([7001]);
+        for (expected, any, local, disjoint, wildcard) in [
+            (
+                "203.0.113.8:1080",
+                "0.0.0.0:1080",
+                address4([203, 0, 113, 8]),
+                address4([127, 0, 0, 2]),
+                "00000000".to_string(),
+            ),
+            (
+                "[2001:db8::8]:1080",
+                "[::]:1080",
+                address6([0, 0, 0, 8]),
+                address6([0, 0, 0, 9]),
+                "00000000000000000000000000000000".to_string(),
+            ),
+            (
+                "[::ffff:203.0.113.8]:1080",
+                "[::ffff:0.0.0.0]:1080",
+                mapped([203, 0, 113, 8]),
+                mapped([127, 0, 0, 2]),
+                mapped([0, 0, 0, 0]),
+            ),
+        ] {
+            let matches = |rows: String, expected: &str| {
+                let table = format!("{header}{rows}");
+                let (tcp, tcp6) = if local.len() == 8 {
+                    (table.as_str(), header)
+                } else {
+                    (header, table.as_str())
+                };
+                tcp_listeners_match(tcp, tcp6, &inodes, expected.parse().unwrap()).unwrap()
+            };
+            assert!(
+                matches(row(&local, 7001) + &row(&disjoint, 7002), expected),
+                "{expected}: 外部不相交的监听不应冲突"
+            );
+            assert!(!matches(row(&disjoint, 7002), expected));
+            for overlapping in [local.as_str(), wildcard.as_str(), "*"] {
+                assert!(!matches(
+                    row(&local, 7001) + &row(overlapping, 7002),
+                    expected
+                ));
+            }
+            assert!(!matches(row(&wildcard, 7001) + &row(&local, 7002), any));
         }
     }
 
