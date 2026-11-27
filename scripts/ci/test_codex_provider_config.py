@@ -651,6 +651,9 @@ class DispatchCollectTest(unittest.TestCase):
         git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.test"]
         subprocess.run(["git", "init", "-q", str(tree)], check=True)
         (tree / "README.md").write_text("base\n")
+        # 目标分支里原本就有同一地址（如旧的默认基址），模型没动它时不能算泄露。
+        (tree / "old-guide.md").write_text(f"旧默认：{BASE_URL}\n主机 CPA.INVALID\n")
+        (tree / "old.bin").write_bytes(b"\x00cpa.invalid\x00")
         subprocess.run([*git, "-C", str(tree), "add", "-A"], check=True)
         subprocess.run([*git, "-C", str(tree), "commit", "-q", "-m", "base"], check=True)
         subprocess.run(["cp", "-a", str(tree / ".git"), str(self.work / "pristine.git")], check=True)
@@ -696,9 +699,40 @@ class DispatchCollectTest(unittest.TestCase):
                 self.assertFalse((self.work / "codex-result").exists())
                 target.unlink()
 
+    def test_address_already_in_target_branch_is_not_a_leak(self):
+        # 改了别的文件、也改了含旧地址的文件的其他行：补丁上下文里出现旧地址也照常收集。
+        (self.tree / "src.rs").write_text("fn main() {}\n")
+        with (self.tree / "old-guide.md").open("a") as guide:
+            guide.write("新增一行无关说明\n")
+        (self.tree / "old.bin").write_bytes(b"\x00cpa.invalid\x00\x01")
+        result = self.collect()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("has_diff=true", (self.work / "output").read_text())
+        self.assertIn("cpa.invalid", (self.work / "codex-result/task.patch").read_text(errors="replace"))
+
+    def test_new_copy_of_existing_address_is_rejected(self):
+        for change in ("append", "binary", "rename", "name"):
+            with self.subTest(change=change):
+                subprocess.run(["git", "-C", str(self.tree), "checkout", "-q", "--", "."], check=True)
+                subprocess.run(["git", "-C", str(self.tree), "clean", "-qfd"], check=True)
+                if change == "append":
+                    with (self.tree / "old-guide.md").open("a") as guide:
+                        guide.write("再写一次 HTTPS://Cpa.Invalid/v1\n")
+                elif change == "binary":
+                    (self.tree / "old.bin").write_bytes(b"\x00cpa.invalid\x00CPA.invalid")
+                elif change == "rename":
+                    (self.tree / "old-guide.md").rename(self.tree / "moved.md")
+                else:
+                    (self.tree / "Cpa.Invalid.txt").write_text("x\n")
+                result = self.collect()
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("CPA 地址", result.stdout)
+                self.assertNotIn("cpa.invalid", (result.stdout + result.stderr).lower())
+                self.assertFalse((self.work / "codex-result").exists())
+
     def test_base_url_in_summary_is_rejected(self):
         (self.tree / "notes.txt").write_text("ok\n")
-        (self.work / "last-message.md").write_text("连到了 cpa.invalid\n")
+        (self.work / "last-message.md").write_text("连到了 CPA.Invalid\n")
         result = self.collect()
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertFalse((self.work / "codex-result").exists())

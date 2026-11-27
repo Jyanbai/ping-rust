@@ -585,7 +585,7 @@ jobs:
             echo '::error::审查输出包含登录凭据，拒绝发布'
             exit 1
           fi
-          # CPA 密钥和 base_url（含主机名）都不得出现在审查输出里；检查失败时不打印地址。
+          # CPA 密钥和 base_url（含主机名，不区分大小写）都不得出现在审查输出里；检查失败时不打印地址。
           cpa_base="${CODEX_API_BASE_URL:-}"
           cpa_base="${cpa_base#"${cpa_base%%[![:space:]]*}"}"
           cpa_base="${cpa_base%"${cpa_base##*[![:space:]]}"}"
@@ -597,7 +597,7 @@ jobs:
           [ -z "${CODEX_CPA_API_KEY:-}" ] || cpa_needles+=(-e "$CODEX_CPA_API_KEY")
           [ -z "$cpa_base" ] || cpa_needles+=(-e "$cpa_base")
           [ "${#cpa_host}" -lt 4 ] || cpa_needles+=(-e "$cpa_host")
-          if [ "${#cpa_needles[@]}" -gt 0 ] && /usr/bin/grep -qF "${cpa_needles[@]}" "$RUNNER_TEMP/review.md"; then
+          if [ "${#cpa_needles[@]}" -gt 0 ] && /usr/bin/grep -qiF "${cpa_needles[@]}" "$RUNNER_TEMP/review.md"; then
             echo '::error::审查输出包含 CPA 密钥或 CPA 地址，拒绝发布'
             exit 1
           fi

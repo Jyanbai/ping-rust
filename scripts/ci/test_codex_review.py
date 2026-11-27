@@ -394,14 +394,14 @@ class ReviewScriptsTest(unittest.TestCase):
 
     def test_cpa_key_and_base_url_are_never_posted(self):
         key, base = "fake-cpa-key-0123456789abcdef", "https://cpa.invalid:8443/v1"
-        for leaked in (key, base, "cpa.invalid", "cpa.invalid:8443"):
+        for leaked in (key, base, "cpa.invalid", "cpa.invalid:8443", "HTTPS://CPA.Invalid:8443/v1", "Cpa.INVALID"):
             with self.subTest(leaked=leaked):
                 self.prepare_review(f"审查里出现了 {leaked}")
                 self.env.update({"CODEX_CPA_API_KEY": key, "CODEX_API_BASE_URL": f" {base}\n"})
                 result = self.run_step("Publish review")
                 self.assertNotEqual(result.returncode, 0, result.stdout)
                 self.assertIn("CPA 密钥或 CPA 地址", result.stdout)
-                self.assertNotIn("cpa.invalid", result.stdout + result.stderr)
+                self.assertNotIn("cpa.invalid", (result.stdout + result.stderr).lower())
                 self.assertFalse((self.work / "posted.json").exists())
         self.prepare_review("未发现有充分证据的代码问题。")
         result = self.run_step("Publish review")

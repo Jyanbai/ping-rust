@@ -495,7 +495,7 @@ class PlanStepTest(unittest.TestCase):
 
     def test_cpa_key_and_base_url_are_never_posted(self):
         key, base = "fake-cpa-key-0123456789abcdef", "https://cpa.invalid:8443/v1"
-        for leaked in (key, base, "cpa.invalid", "cpa.invalid:8443"):
+        for leaked in (key, base, "cpa.invalid", "cpa.invalid:8443", "HTTPS://CPA.Invalid:8443/v1", "Cpa.INVALID"):
             with self.subTest(leaked=leaked):
                 self.prepare_plan()
                 self.assertEqual(self.run_step("Render plan").returncode, 0)
@@ -505,7 +505,7 @@ class PlanStepTest(unittest.TestCase):
                 result = self.run_step("Publish plan")
                 self.assertNotEqual(result.returncode, 0, result.stdout)
                 self.assertIn("CPA 密钥或 CPA 地址", result.stdout)
-                self.assertNotIn("cpa.invalid", result.stdout + result.stderr)
+                self.assertNotIn("cpa.invalid", (result.stdout + result.stderr).lower())
                 self.assertFalse((self.work / "posted.json").exists())
         # chatgpt 时两项都为空，照常发布。
         self.prepare_plan()

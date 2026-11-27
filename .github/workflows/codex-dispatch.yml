@@ -774,7 +774,7 @@ jobs:
             /usr/bin/rm -rf "$out_dir"
             exit 1
           fi
-          # CPA 密钥和 base_url（含主机名）都不得出现在改动和总结里；检查失败时不打印地址。
+          # CPA 密钥和 base_url（含主机名，不区分大小写）都不得出现在改动和总结里；检查失败时不打印地址。
           cpa_base="${CODEX_API_BASE_URL:-}"
           cpa_base="${cpa_base#"${cpa_base%%[![:space:]]*}"}"
           cpa_base="${cpa_base%"${cpa_base##*[![:space:]]}"}"
@@ -787,10 +787,46 @@ jobs:
           [ -z "$cpa_base" ] || cpa_needles+=(-e "$cpa_base")
           [ "${#cpa_host}" -lt 4 ] || cpa_needles+=(-e "$cpa_host")
           if [ "${#cpa_needles[@]}" -gt 0 ]; then
-            # 二进制文件在 --binary 补丁里是编码后的内容，还要按原始内容检查暂存区里的每个文件。
-            staged_rc=0
-            "${g[@]}" grep --cached -q -a -F "${cpa_needles[@]}" || staged_rc=$?
-            if [ "$staged_rc" -ne 1 ] || /usr/bin/grep -rqF "${cpa_needles[@]}" "$out_dir"; then
+            # 只拦本次改动新带进来的内容：目标分支里原本就有的同一地址不算泄露。
+            # 每个改动的文件按原始内容（含二进制）比较改动前后的出现次数，文件名和总结整段检查；
+            # 不区分大小写（主机名大小写不同仍是同一地址）。检查本身出错也按失败处理。
+            if ! CPA_KEY="${CODEX_CPA_API_KEY:-}" CPA_BASE="$cpa_base" CPA_HOST="$cpa_host" \
+              CPA_GIT_DIR="$RUNNER_TEMP/pristine.git" CPA_WORK_TREE="$GITHUB_WORKSPACE/work" \
+              /usr/bin/python3 -I - "$out_dir/summary.md" <<'PY' 2>/dev/null; then
+          import os
+          import subprocess
+          import sys
+
+          git = ["/usr/bin/git", "--git-dir=" + os.environ["CPA_GIT_DIR"], "--work-tree=" + os.environ["CPA_WORK_TREE"],
+                 "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"]
+          host = os.environ.get("CPA_HOST", "")
+          needles = [v.lower().encode("utf-8", "surrogateescape")
+                     for v in (os.environ.get("CPA_KEY", ""), os.environ.get("CPA_BASE", ""), host if len(host) >= 4 else "")
+                     if v]
+
+
+          def counts(data):
+              data = data.lower()
+              return [data.count(n) for n in needles]
+
+
+          def blob(spec):
+              result = subprocess.run(git + ["cat-file", "blob", spec], capture_output=True)
+              return result.stdout if result.returncode == 0 else b""
+
+
+          names = subprocess.run(git + ["diff", "--cached", "--name-only", "-z", "--no-renames", "HEAD"],
+                                 capture_output=True, check=True).stdout.split(b"\0")
+          for name in filter(None, names):
+              if any(counts(name)):
+                  sys.exit(1)
+              path = os.fsdecode(name)
+              if any(a > b for a, b in zip(counts(blob(":" + path)), counts(blob("HEAD:" + path)))):
+                  sys.exit(1)
+          with open(sys.argv[1], "rb") as summary:
+              if any(counts(summary.read())):
+                  sys.exit(1)
+          PY
               echo "::error::Codex 的输出里包含 CPA 密钥或 CPA 地址（或无法完成检查），已中止。"
               /usr/bin/rm -rf "$out_dir"
               exit 1
