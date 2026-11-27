@@ -397,7 +397,7 @@ class ReviewScriptsTest(unittest.TestCase):
         for leaked in (key, base, "cpa.invalid", "cpa.invalid:8443", "HTTPS://CPA.Invalid:8443/v1", "Cpa.INVALID"):
             with self.subTest(leaked=leaked):
                 self.prepare_review(f"审查里出现了 {leaked}")
-                self.env.update({"CODEX_CPA_API_KEY": key, "CODEX_API_BASE_URL": f" {base}\n"})
+                self.env.update({"CODEX_CPA_API_KEY_V2": key, "CODEX_API_BASE_URL": f" {base}\n"})
                 result = self.run_step("Publish review")
                 self.assertNotEqual(result.returncode, 0, result.stdout)
                 self.assertIn("CPA 密钥或 CPA 地址", result.stdout)

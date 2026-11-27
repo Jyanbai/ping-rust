@@ -150,7 +150,7 @@ Dispatch（含 `/codex` 和回修）、Code Review 和 Architecture Plan 共用 
 
 | 名称 | 类型 | 用途 |
 |---|---|---|
-| `CODEX_CPA_API_KEY` | Secret | CPA 密钥。见下文「设置 `CODEX_CPA_API_KEY`」 |
+| `CODEX_CPA_API_KEY_V2` | Secret | CPA 密钥。见下文「设置 `CODEX_CPA_API_KEY_V2`」 |
 | `CODEX_API_BASE_URL` | Secret | CPA 的 HTTPS 基址，通常以 `/v1` 结尾。用 secret 是因为变量会在步骤开头的 env 里先于遮蔽出现在日志中；secret 全程自动遮蔽 |
 | `CODEX_MODEL` | Variable | 三条流程共用的模型名。`CODEX_DISPATCH_MODEL`、`CODEX_REVIEW_MODEL`、`CODEX_PLAN_MODEL` 分别优先于它。若留空，必须设置这三个专用变量 |
 
@@ -214,17 +214,19 @@ Remove-Item Env:CODEX_HOME
 
 这条通路走的是 CPA 的 API Key。它是否仍消耗 ChatGPT / Codex 套餐额度，取决于 CPA 账号背后接的是哪一套服务；如果还是同一个 ChatGPT 账号，额度仍可能被用掉。
 
-### 设置 `CODEX_CPA_API_KEY`
+### 设置 `CODEX_CPA_API_KEY_V2`
 
-本自检**只**读取名为 `CODEX_CPA_API_KEY` 的 secret。请**只**在 environment `codex` 里设置它，不要在仓库或组织级创建同名 secret。GitHub Actions 会按名称把环境、仓库、组织的 secret 合并到同一个 `secrets` 上下文，工作流无法分辨来源：如果环境里没有这项、但仓库或组织有同名 secret，缺失检查会通过，上层凭据会被发给 CPA。仓库或组织级的 `CODEX_API_KEY` 不会被本自检使用。
+密钥 secret 更名为 `CODEX_CPA_API_KEY_V2`。
+
+本自检**只**读取名为 `CODEX_CPA_API_KEY_V2` 的 secret。请**只**在 environment `codex` 里设置它，不要在仓库或组织级创建同名 secret。GitHub Actions 会按名称把环境、仓库、组织的 secret 合并到同一个 `secrets` 上下文，工作流无法分辨来源：如果环境里没有这项、但仓库或组织有同名 secret，缺失检查会通过，上层凭据会被发给 CPA。仓库或组织级的 `CODEX_API_KEY` 不会被本自检使用。
 
 在本机 PowerShell 里写入（运行后按提示把密钥粘贴给 `gh`，不要发到聊天或写进仓库、PR 描述）：
 
 ```powershell
-gh secret set CODEX_CPA_API_KEY --env codex --repo Jyanbai/ping-rust
+gh secret set CODEX_CPA_API_KEY_V2 --env codex --repo Jyanbai/ping-rust
 ```
 
-没装 `gh` 的话：到 Settings → Environments → codex → Add environment secret，名字填 `CODEX_CPA_API_KEY`，把密钥粘进去。
+没装 `gh` 的话：到 Settings → Environments → codex → Add environment secret，名字填 `CODEX_CPA_API_KEY_V2`，把密钥粘进去。
 
 基址同样只放 environment `codex`，作为 secret `CODEX_API_BASE_URL`（命令同上，把名字换成 `CODEX_API_BASE_URL`，按提示粘贴 https 基址，不要发到聊天或写进仓库）。
 
@@ -239,7 +241,7 @@ Codex CLI 0.166.0 会把 `/responses` 拼到 `base_url` 后面，因此基址应
 
 ### 怎么跑
 
-合并到 `main` 并写好 environment `codex` 的 `CODEX_CPA_API_KEY` 之后：Actions → Codex CPA Smoke → Run workflow。只有仓库所有者能启动和重跑。成功时模型的最终回复必须是单独一行 `OK`，且必须有完整事件流（含完成事件）、其中不能有命令执行；这只说明 CPA 的 Responses 调用可用，日志只记录请求的模型名，不证明 CPA 实际用了该模型。调用失败时日志会给出白名单类别或 HTTP 状态（例如 401 请检查密钥；404 若提示模型未部署则检查请求的模型，否则检查基址），不会打印原始响应或密钥。缺环境级密钥 `CODEX_CPA_API_KEY`、沙箱检查失败（含沙箱外 DNS 或出网不通）或无法确认 shell/命令工具已关闭（`features.shell_tool = false`）会直接报错并停止，不调用模型。
+合并到 `main` 并写好 environment `codex` 的 `CODEX_CPA_API_KEY_V2` 之后：Actions → Codex CPA Smoke → Run workflow。只有仓库所有者能启动和重跑。成功时模型的最终回复必须是单独一行 `OK`，且必须有完整事件流（含完成事件）、其中不能有命令执行；这只说明 CPA 的 Responses 调用可用，日志只记录请求的模型名，不证明 CPA 实际用了该模型。调用失败时日志会给出白名单类别或 HTTP 状态（例如 401 请检查密钥；404 若提示模型未部署则检查请求的模型，否则检查基址），不会打印原始响应或密钥。缺环境级密钥 `CODEX_CPA_API_KEY_V2`、沙箱检查失败（含沙箱外 DNS 或出网不通）或无法确认 shell/命令工具已关闭（`features.shell_tool = false`）会直接报错并停止，不调用模型。
 
 ## ChatGPT 登录凭据怎么保持有效
 

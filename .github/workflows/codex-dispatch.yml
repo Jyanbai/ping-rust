@@ -400,7 +400,7 @@ jobs:
           # CODEX_PROVIDER=cpa（默认）时 CODEX_AUTH_JSON 不传入本步骤；chatgpt 时 CPA 密钥和基址不传入，也不使用流程专用模型变量。
           CODEX_PROVIDER: ${{ vars.CODEX_PROVIDER }}
           CODEX_AUTH_JSON: ${{ vars.CODEX_PROVIDER == 'chatgpt' && secrets.CODEX_AUTH_JSON || '' }}
-          CODEX_CPA_API_KEY: ${{ (vars.CODEX_PROVIDER || 'cpa') == 'cpa' && secrets.CODEX_CPA_API_KEY || '' }}
+          CODEX_CPA_API_KEY_V2: ${{ (vars.CODEX_PROVIDER || 'cpa') == 'cpa' && secrets.CODEX_CPA_API_KEY_V2 || '' }}
           CODEX_API_BASE_URL: ${{ (vars.CODEX_PROVIDER || 'cpa') == 'cpa' && secrets.CODEX_API_BASE_URL || '' }}
           CODEX_MODEL: ${{ vars.CODEX_PROVIDER != 'chatgpt' && vars.CODEX_DISPATCH_MODEL || vars.CODEX_MODEL }}
           CODEX_REASONING_EFFORT: ${{ vars.CODEX_REASONING_EFFORT }}
@@ -417,7 +417,7 @@ jobs:
             cpa|chatgpt) ;;
             *) echo '::error::CODEX_PROVIDER 只能是 cpa 或 chatgpt'; exit 1 ;;
           esac
-          [ -z "${CODEX_CPA_API_KEY:-}" ] || printf '::add-mask::%s\n' "$CODEX_CPA_API_KEY"
+          [ -z "${CODEX_CPA_API_KEY_V2:-}" ] || printf '::add-mask::%s\n' "$CODEX_CPA_API_KEY_V2"
           if [ "$provider" = chatgpt ] && [ -z "$CODEX_AUTH_JSON" ]; then
             echo "::error::environment codex 里没有 CODEX_AUTH_JSON，请按 docs/CODEX_DISPATCH.md 配置"
             exit 1
@@ -454,10 +454,10 @@ jobs:
         if: steps.auth.outputs.ok == 'true'
         shell: bash
         env:
-          CODEX_CPA_API_KEY: ${{ steps.auth.outputs.provider == 'cpa' && secrets.CODEX_CPA_API_KEY || '' }}
+          CODEX_CPA_API_KEY_V2: ${{ steps.auth.outputs.provider == 'cpa' && secrets.CODEX_CPA_API_KEY_V2 || '' }}
         run: |
           set -euo pipefail
-          [ -z "${CODEX_CPA_API_KEY:-}" ] || printf '::add-mask::%s\n' "$CODEX_CPA_API_KEY"
+          [ -z "${CODEX_CPA_API_KEY_V2:-}" ] || printf '::add-mask::%s\n' "$CODEX_CPA_API_KEY_V2"
           # chatgpt 时探测登录文件；cpa 时没有 auth.json，探测 config.toml，并确认沙箱里读不到 CPA 密钥。
           secret_file="$CODEX_HOME/auth.json"
           [ "${CODEX_PROVIDER_RESOLVED:-chatgpt}" != cpa ] || secret_file="$CODEX_HOME/config.toml"
@@ -481,7 +481,7 @@ jobs:
           codex sandbox -P ci -C "$GITHUB_WORKSPACE" -- bash -c '
             fail=0
             if cat "$1" >/dev/null 2>&1; then echo "凭据文件可读"; fail=1; fi
-            if [ -n "${CODEX_CPA_API_KEY:-}" ]; then echo "沙箱里能读到 CODEX_CPA_API_KEY"; fail=1; fi
+            if [ -n "${CODEX_CPA_API_KEY_V2:-}" ]; then echo "沙箱里能读到 CODEX_CPA_API_KEY_V2"; fail=1; fi
             if ls "$2" >/dev/null 2>&1; then echo "RUNNER_TEMP 可列出"; fail=1; fi
             if curl -s --max-time 10 -o /dev/null https://github.com; then
               echo "沙箱里能访问外网（域名）"; fail=1
@@ -508,7 +508,7 @@ jobs:
         env:
           CODEX_MODEL: ${{ steps.auth.outputs.provider != 'chatgpt' && vars.CODEX_DISPATCH_MODEL || vars.CODEX_MODEL }}
           CODEX_REASONING_EFFORT: ${{ vars.CODEX_REASONING_EFFORT }}
-          CODEX_CPA_API_KEY: ${{ steps.auth.outputs.provider == 'cpa' && secrets.CODEX_CPA_API_KEY || '' }}
+          CODEX_CPA_API_KEY_V2: ${{ steps.auth.outputs.provider == 'cpa' && secrets.CODEX_CPA_API_KEY_V2 || '' }}
           CARGO_NET_OFFLINE: 'true'
         run: |
           set -uo pipefail
@@ -534,11 +534,11 @@ jobs:
           # `shell: bash` 实际是 `bash -eo pipefail`：失败时必须用 `|| rc=$?` 接住，
           # 否则脚本在这里直接退出，后面的 token 遮蔽和失败原因都不会执行。
           # cpa：Codex 只通过 env_key 从本步骤的环境变量读取密钥；启动前先登记遮蔽。
-          if [ "${CODEX_PROVIDER_RESOLVED:-}" = cpa ] && [ -z "${CODEX_CPA_API_KEY:-}" ]; then
-            echo '::error::environment codex 里没有环境级密钥 CODEX_CPA_API_KEY，已停止，不调用模型。'
+          if [ "${CODEX_PROVIDER_RESOLVED:-}" = cpa ] && [ -z "${CODEX_CPA_API_KEY_V2:-}" ]; then
+            echo '::error::environment codex 里没有环境级密钥 CODEX_CPA_API_KEY_V2，已停止，不调用模型。'
             exit 1
           fi
-          [ -z "${CODEX_CPA_API_KEY:-}" ] || printf '::add-mask::%s\n' "$CODEX_CPA_API_KEY"
+          [ -z "${CODEX_CPA_API_KEY_V2:-}" ] || printf '::add-mask::%s\n' "$CODEX_CPA_API_KEY_V2"
           rc=0
           codex "${args[@]}" - < "$RUNNER_TEMP/prompt.txt" \
             > "$RUNNER_TEMP/codex-events.jsonl" 2> "$RUNNER_TEMP/codex-stderr.log" || rc=$?
@@ -752,7 +752,7 @@ jobs:
         if: steps.run.outcome == 'success'
         shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
         env:
-          CODEX_CPA_API_KEY: ${{ steps.auth.outputs.provider == 'cpa' && secrets.CODEX_CPA_API_KEY || '' }}
+          CODEX_CPA_API_KEY_V2: ${{ steps.auth.outputs.provider == 'cpa' && secrets.CODEX_CPA_API_KEY_V2 || '' }}
           CODEX_API_BASE_URL: ${{ steps.auth.outputs.provider == 'cpa' && secrets.CODEX_API_BASE_URL || '' }}
         run: |
           # Codex 之后的步骤：PATH 写死为系统目录，命令用绝对路径，不会调用沙箱可写目录（如 ~/.cargo/bin）里的同名程序。
@@ -783,8 +783,8 @@ jobs:
           cpa_host="${cpa_host%%/*}"
           cpa_host="${cpa_host##*@}"
           cpa_host="${cpa_host%:*}"
-          if [ -n "${CODEX_CPA_API_KEY:-}" ] || [ -n "$cpa_base" ] || [ "${#cpa_host}" -ge 4 ]; then
-            if ! CPA_KEY="${CODEX_CPA_API_KEY:-}" CPA_BASE="$cpa_base" CPA_HOST="$cpa_host" \
+          if [ -n "${CODEX_CPA_API_KEY_V2:-}" ] || [ -n "$cpa_base" ] || [ "${#cpa_host}" -ge 4 ]; then
+            if ! CPA_KEY="${CODEX_CPA_API_KEY_V2:-}" CPA_BASE="$cpa_base" CPA_HOST="$cpa_host" \
               CPA_GIT_DIR="$RUNNER_TEMP/pristine.git" CPA_WORK_TREE="$GITHUB_WORKSPACE/work" \
               /usr/bin/python3 -I - "$out_dir/task.patch" "$out_dir/summary.md" <<'PY' 2>/dev/null; then
           import os
@@ -933,14 +933,14 @@ jobs:
         if: steps.req.outputs.mode == 'maintenance' && steps.auth.outputs.ok == 'true'
         shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
         env:
-          CODEX_CPA_API_KEY: ${{ steps.auth.outputs.provider == 'cpa' && secrets.CODEX_CPA_API_KEY || '' }}
+          CODEX_CPA_API_KEY_V2: ${{ steps.auth.outputs.provider == 'cpa' && secrets.CODEX_CPA_API_KEY_V2 || '' }}
         run: |
           # Codex 之后的步骤：PATH 写死为系统目录，命令用绝对路径，不会调用沙箱可写目录（如 ~/.cargo/bin）里的同名程序。
           PATH=/usr/bin:/bin
           export PATH
           set -uo pipefail
           # 一次最小的调用：验证登录（或 CPA 密钥）可用；chatgpt 时让 Codex 按需刷新 token。
-          [ -z "${CODEX_CPA_API_KEY:-}" ] || printf '::add-mask::%s\n' "$CODEX_CPA_API_KEY"
+          [ -z "${CODEX_CPA_API_KEY_V2:-}" ] || printf '::add-mask::%s\n' "$CODEX_CPA_API_KEY_V2"
           # 沿用已探测过的 ci 权限配置（default_permissions）；不能传 -s，否则会切回旧沙箱设置。
           # 调用前先确认 shell/命令工具已关闭，否则模型返回的工具调用会在沙箱里执行。
           # 用与下面 exec 相同的 -c 覆盖查询，确认实际生效的值（正式 Run Codex 步骤的配置不关这个工具）。
@@ -968,7 +968,7 @@ jobs:
           fi
           if [ "$rc" -ne 0 ]; then
             if [ "${CODEX_PROVIDER_RESOLVED:-chatgpt}" = cpa ]; then
-              echo "::error::Codex CPA 调用不可用（exit $rc），请检查 environment codex 的 CODEX_CPA_API_KEY 和 CPA 变量"
+              echo "::error::Codex CPA 调用不可用（exit $rc），请检查 environment codex 的 CODEX_CPA_API_KEY_V2 和 CPA 变量"
             else
               echo "::error::Codex 登录不可用（exit $rc），可能需要重新 seed CODEX_AUTH_JSON"
               /usr/bin/tail -n 5 "$RUNNER_TEMP/selfcheck.err" || true

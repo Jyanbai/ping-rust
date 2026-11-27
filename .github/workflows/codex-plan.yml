@@ -133,7 +133,7 @@ jobs:
           # CODEX_PROVIDER=cpa（默认）时 CODEX_AUTH_JSON 不传入本步骤；chatgpt 时 CPA 密钥和基址不传入，也不使用流程专用模型变量。
           CODEX_PROVIDER: ${{ vars.CODEX_PROVIDER }}
           CODEX_AUTH_JSON: ${{ vars.CODEX_PROVIDER == 'chatgpt' && secrets.CODEX_AUTH_JSON || '' }}
-          CODEX_CPA_API_KEY: ${{ (vars.CODEX_PROVIDER || 'cpa') == 'cpa' && secrets.CODEX_CPA_API_KEY || '' }}
+          CODEX_CPA_API_KEY_V2: ${{ (vars.CODEX_PROVIDER || 'cpa') == 'cpa' && secrets.CODEX_CPA_API_KEY_V2 || '' }}
           CODEX_API_BASE_URL: ${{ (vars.CODEX_PROVIDER || 'cpa') == 'cpa' && secrets.CODEX_API_BASE_URL || '' }}
           CODEX_MODEL: ${{ vars.CODEX_PROVIDER != 'chatgpt' && vars.CODEX_PLAN_MODEL || vars.CODEX_MODEL }}
           CODEX_REASONING_EFFORT: ${{ vars.CODEX_REASONING_EFFORT }}
@@ -147,7 +147,7 @@ jobs:
             cpa|chatgpt) ;;
             *) echo '::error::CODEX_PROVIDER 只能是 cpa 或 chatgpt'; exit 1 ;;
           esac
-          [ -z "${CODEX_CPA_API_KEY:-}" ] || printf '::add-mask::%s\n' "$CODEX_CPA_API_KEY"
+          [ -z "${CODEX_CPA_API_KEY_V2:-}" ] || printf '::add-mask::%s\n' "$CODEX_CPA_API_KEY_V2"
           plan_home="$RUNNER_TEMP/codex-home"
           mkdir -p "$plan_home"
           if [ "$provider" = chatgpt ]; then
@@ -187,10 +187,10 @@ jobs:
         if: steps.auth.outputs.ok == 'true'
         shell: bash
         env:
-          CODEX_CPA_API_KEY: ${{ steps.auth.outputs.provider == 'cpa' && secrets.CODEX_CPA_API_KEY || '' }}
+          CODEX_CPA_API_KEY_V2: ${{ steps.auth.outputs.provider == 'cpa' && secrets.CODEX_CPA_API_KEY_V2 || '' }}
         run: |
           set -euo pipefail
-          [ -z "${CODEX_CPA_API_KEY:-}" ] || printf '::add-mask::%s\n' "$CODEX_CPA_API_KEY"
+          [ -z "${CODEX_CPA_API_KEY_V2:-}" ] || printf '::add-mask::%s\n' "$CODEX_CPA_API_KEY_V2"
           # chatgpt 时探测登录文件；cpa 时没有 auth.json，探测 config.toml，并确认沙箱里读不到 CPA 密钥。
           secret_file="$CODEX_HOME/auth.json"
           [ "${CODEX_PROVIDER_RESOLVED:-chatgpt}" != cpa ] || secret_file="$CODEX_HOME/config.toml"
@@ -207,7 +207,7 @@ jobs:
             test -r work/Cargo.toml
             fail=0
             if cat "$1" >/dev/null 2>&1; then echo "凭据文件可读"; fail=1; fi
-            if [ -n "${CODEX_CPA_API_KEY:-}" ]; then echo "沙箱里能读到 CODEX_CPA_API_KEY"; fail=1; fi
+            if [ -n "${CODEX_CPA_API_KEY_V2:-}" ]; then echo "沙箱里能读到 CODEX_CPA_API_KEY_V2"; fail=1; fi
             if ls "$2" >/dev/null 2>&1; then echo "RUNNER_TEMP 可列出"; fail=1; fi
             if touch work/.codex-plan-write-probe 2>/dev/null; then echo "源码工作区可写"; fail=1; fi
             if curl -s --max-time 10 -o /dev/null https://github.com; then
@@ -229,7 +229,7 @@ jobs:
           FORCE_PLAN: ${{ steps.target.outputs.force }}
           CODEX_MODEL: ${{ steps.auth.outputs.provider != 'chatgpt' && vars.CODEX_PLAN_MODEL || vars.CODEX_MODEL }}
           CODEX_REASONING_EFFORT: ${{ vars.CODEX_REASONING_EFFORT }}
-          CODEX_CPA_API_KEY: ${{ steps.auth.outputs.provider == 'cpa' && secrets.CODEX_CPA_API_KEY || '' }}
+          CODEX_CPA_API_KEY_V2: ${{ steps.auth.outputs.provider == 'cpa' && secrets.CODEX_CPA_API_KEY_V2 || '' }}
         run: |
           set -euo pipefail
           git -C work cat-file -e "$MAIN_SHA^{commit}"
@@ -320,11 +320,11 @@ jobs:
             args+=(-c "model_reasoning_effort=\"$CODEX_REASONING_EFFORT\"")
           fi
           # cpa：Codex 只通过 env_key 从本步骤的环境变量读取密钥；启动前先登记遮蔽。
-          if [ "${CODEX_PROVIDER_RESOLVED:-}" = cpa ] && [ -z "${CODEX_CPA_API_KEY:-}" ]; then
-            echo '::error::environment codex 里没有环境级密钥 CODEX_CPA_API_KEY，已停止，不调用模型。'
+          if [ "${CODEX_PROVIDER_RESOLVED:-}" = cpa ] && [ -z "${CODEX_CPA_API_KEY_V2:-}" ]; then
+            echo '::error::environment codex 里没有环境级密钥 CODEX_CPA_API_KEY_V2，已停止，不调用模型。'
             exit 1
           fi
-          [ -z "${CODEX_CPA_API_KEY:-}" ] || printf '::add-mask::%s\n' "$CODEX_CPA_API_KEY"
+          [ -z "${CODEX_CPA_API_KEY_V2:-}" ] || printf '::add-mask::%s\n' "$CODEX_CPA_API_KEY_V2"
           rc=0
           codex "${args[@]}" - < "$RUNNER_TEMP/plan-prompt.txt" \
             > "$RUNNER_TEMP/codex-events.jsonl" 2> "$RUNNER_TEMP/codex-stderr.log" || rc=$?
@@ -332,8 +332,8 @@ jobs:
           PATH=/usr/bin:/bin
           export PATH
           echo "codex exit code: $rc"
-          if [ -n "${CODEX_CPA_API_KEY:-}" ] && [ -f "$RUNNER_TEMP/plan.json" ] && \
-            /usr/bin/grep -qF -e "$CODEX_CPA_API_KEY" "$RUNNER_TEMP/plan.json"; then
+          if [ -n "${CODEX_CPA_API_KEY_V2:-}" ] && [ -f "$RUNNER_TEMP/plan.json" ] && \
+            /usr/bin/grep -qF -e "$CODEX_CPA_API_KEY_V2" "$RUNNER_TEMP/plan.json"; then
             echo '::error::规划输出包含 CPA 密钥，拒绝继续'
             /usr/bin/rm -f "$RUNNER_TEMP/plan.json"
             exit 1
@@ -618,7 +618,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           NUMBER: ${{ steps.target.outputs.number }}
           MAIN_SHA: ${{ steps.target.outputs.main_sha }}
-          CODEX_CPA_API_KEY: ${{ steps.auth.outputs.provider == 'cpa' && secrets.CODEX_CPA_API_KEY || '' }}
+          CODEX_CPA_API_KEY_V2: ${{ steps.auth.outputs.provider == 'cpa' && secrets.CODEX_CPA_API_KEY_V2 || '' }}
           CODEX_API_BASE_URL: ${{ steps.auth.outputs.provider == 'cpa' && secrets.CODEX_API_BASE_URL || '' }}
           PLAN_RUN_ID: ${{ github.run_id }}
           PLAN_RUN_ATTEMPT: ${{ github.run_attempt }}
@@ -652,7 +652,7 @@ jobs:
           cpa_host="${cpa_host##*@}"
           cpa_host="${cpa_host%:*}"
           cpa_needles=()
-          [ -z "${CODEX_CPA_API_KEY:-}" ] || cpa_needles+=(-e "$CODEX_CPA_API_KEY")
+          [ -z "${CODEX_CPA_API_KEY_V2:-}" ] || cpa_needles+=(-e "$CODEX_CPA_API_KEY_V2")
           [ -z "$cpa_base" ] || cpa_needles+=(-e "$cpa_base")
           [ "${#cpa_host}" -lt 4 ] || cpa_needles+=(-e "$cpa_host")
           if [ "${#cpa_needles[@]}" -gt 0 ] && /usr/bin/grep -qiF "${cpa_needles[@]}" "$RUNNER_TEMP/plan.md"; then

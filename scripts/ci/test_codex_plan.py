@@ -60,7 +60,7 @@ def render_config(flow, provider):
     with tempfile.TemporaryDirectory() as temporary:
         env = {**os.environ, "CODEX_API_BASE_URL": "https://cpa.invalid/v1",
                "CODEX_MODEL": "gpt-test", "CODEX_REASONING_EFFORT": "high",
-               "CODEX_CPA_API_KEY": "fake-cpa-key-for-policy-test"}
+               "CODEX_CPA_API_KEY_V2": "fake-cpa-key-for-policy-test"}
         result = subprocess.run(
             ["python3", str(ROOT / "scripts/ci/codex_provider_config.py"), "--flow", flow,
              "--provider", provider, "--home", temporary, "--runner-temp", "/tmp/runner-temp"],
@@ -167,8 +167,8 @@ class WorkflowPolicyTest(unittest.TestCase):
         block = self.text[self.text.index("      - name: Run Codex plan"):
                           self.text.index("      - name: Render plan")]
         # 模型步骤只拿得到 cpa 时 Codex 必需的 CPA 密钥，拿不到 GitHub token 或 ChatGPT 登录。
-        self.assertEqual(re.findall(r"secrets\.\w+", block), ["secrets.CODEX_CPA_API_KEY"])
-        self.assertIn("steps.auth.outputs.provider == 'cpa' && secrets.CODEX_CPA_API_KEY || ''", block)
+        self.assertEqual(re.findall(r"secrets\.\w+", block), ["secrets.CODEX_CPA_API_KEY_V2"])
+        self.assertIn("steps.auth.outputs.provider == 'cpa' && secrets.CODEX_CPA_API_KEY_V2 || ''", block)
         self.assertNotIn("github.token", block)
         # CODEX_BOT_TOKEN 只出现在写回刷新登录的步骤里。
         self.assertEqual(self.text.count("secrets.CODEX_BOT_TOKEN"), 1)
@@ -318,7 +318,7 @@ class PlanStepTest(unittest.TestCase):
     def test_cpa_restore_skips_chatgpt_login_and_refresh_guard(self):
         secret = "fake-chatgpt-login-for-cpa-test"
         key = "fake-cpa-key-for-plan-test"
-        self.env.update(CODEX_PROVIDER="", CODEX_AUTH_JSON=secret, CODEX_CPA_API_KEY=key,
+        self.env.update(CODEX_PROVIDER="", CODEX_AUTH_JSON=secret, CODEX_CPA_API_KEY_V2=key,
                         CODEX_API_BASE_URL="https://cpa.invalid/v1",
                         CODEX_MODEL="gpt-test-astra", CODEX_REASONING_EFFORT="high")
         (self.work / "output").write_text("")
@@ -329,7 +329,7 @@ class PlanStepTest(unittest.TestCase):
         self.assertFalse((self.work / "codex-home/auth.json").exists())
         config = (self.work / "codex-home/config.toml").read_text()
         self.assertIn('model = "gpt-test-astra"', config)
-        self.assertIn('env_key = "CODEX_CPA_API_KEY"', config)
+        self.assertIn('env_key = "CODEX_CPA_API_KEY_V2"', config)
         self.assertNotIn(secret, config)
         self.assertNotIn(key, config)
         self.assertNotIn("cli_auth_credentials_store", config)
@@ -501,7 +501,7 @@ class PlanStepTest(unittest.TestCase):
                 self.assertEqual(self.run_step("Render plan").returncode, 0)
                 with (self.work / "plan.md").open("a", encoding="utf-8") as plan:
                     plan.write(f"\n地址 {leaked}\n")
-                self.env.update({"CODEX_CPA_API_KEY": key, "CODEX_API_BASE_URL": f" {base}\n"})
+                self.env.update({"CODEX_CPA_API_KEY_V2": key, "CODEX_API_BASE_URL": f" {base}\n"})
                 result = self.run_step("Publish plan")
                 self.assertNotEqual(result.returncode, 0, result.stdout)
                 self.assertIn("CPA 密钥或 CPA 地址", result.stdout)
@@ -510,7 +510,7 @@ class PlanStepTest(unittest.TestCase):
         # chatgpt 时两项都为空，照常发布。
         self.prepare_plan()
         self.assertEqual(self.run_step("Render plan").returncode, 0)
-        self.env.update({"CODEX_CPA_API_KEY": "", "CODEX_API_BASE_URL": ""})
+        self.env.update({"CODEX_CPA_API_KEY_V2": "", "CODEX_API_BASE_URL": ""})
         self.assertEqual(self.run_step("Publish plan").returncode, 0)
         self.assertTrue((self.work / "posted.json").exists())
 

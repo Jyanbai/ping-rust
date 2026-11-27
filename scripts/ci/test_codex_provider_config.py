@@ -103,7 +103,7 @@ class RestoreStepTest(unittest.TestCase):
             "CODEX_PROVIDER": provider,
             # 与 workflow 的表达式一致：只有 chatgpt 拿到登录，只有 cpa 拿到 CPA 密钥。
             "CODEX_AUTH_JSON": AUTH_JSON if provider == "chatgpt" else "",
-            "CODEX_CPA_API_KEY": CPA_KEY if provider in ("", "cpa") else "",
+            "CODEX_CPA_API_KEY_V2": CPA_KEY if provider in ("", "cpa") else "",
             # 基址是 secret，只在 cpa 时传入。
             "CODEX_API_BASE_URL": BASE_URL if provider in ("", "cpa") else "",
             "CODEX_MODEL": f"gpt-test-{flow}",
@@ -130,13 +130,13 @@ class RestoreStepTest(unittest.TestCase):
         # 与 codex-cpa-smoke.yml 相同的 provider 段：cpa、Responses API、密钥只走 env_key。
         self.assertIn(
             '[model_providers.cpa]\nname = "CPA"\n'
-            f'base_url = "{BASE_URL}"\nenv_key = "CODEX_CPA_API_KEY"\nwire_api = "responses"\n',
+            f'base_url = "{BASE_URL}"\nenv_key = "CODEX_CPA_API_KEY_V2"\nwire_api = "responses"\n',
             config,
         )
         self.assertTrue(config.startswith(
             f'model = "gpt-test-{flow}"\nmodel_provider = "cpa"\nmodel_reasoning_effort = "high"\n'))
         self.assertIn("ignore_default_excludes = false", config)
-        self.assertIn('"CODEX_CPA_API_KEY"', config.split("[shell_environment_policy]")[1])
+        self.assertIn('"CODEX_CPA_API_KEY_V2"', config.split("[shell_environment_policy]")[1])
         self.assertNotIn("cli_auth_credentials_store", config)
         # 走 cpa 时不读、不写 CODEX_AUTH_JSON，密钥不进文件但会登记遮蔽。
         self.assertFalse((self.work / "codex-home/auth.json").exists())
@@ -192,7 +192,7 @@ class RestoreStepTest(unittest.TestCase):
 
     def test_cpa_without_key_base_url_or_model_stops(self):
         for flow in FLOWS:
-            for missing in ("CODEX_CPA_API_KEY", "CODEX_API_BASE_URL", "CODEX_MODEL"):
+            for missing in ("CODEX_CPA_API_KEY_V2", "CODEX_API_BASE_URL", "CODEX_MODEL"):
                 with self.subTest(flow=flow, missing=missing):
                     result, config = self.restore(flow, "cpa", **{missing: ""})
                     self.assertNotEqual(result.returncode, 0)
@@ -226,7 +226,7 @@ class ScriptValidationTest(unittest.TestCase):
                 "CODEX_API_BASE_URL": BASE_URL,
                 "CODEX_MODEL": "gpt-test",
                 "CODEX_REASONING_EFFORT": "high",
-                "CODEX_CPA_API_KEY": CPA_KEY,
+                "CODEX_CPA_API_KEY_V2": CPA_KEY,
                 **env,
             }
             result = subprocess.run(
@@ -264,7 +264,7 @@ class ScriptValidationTest(unittest.TestCase):
         self.assertNotIn("model_reasoning_effort", config)
 
     def test_key_never_reaches_config_or_output(self):
-        result, config = self.render(CODEX_CPA_API_KEY="gpt-test")
+        result, config = self.render(CODEX_CPA_API_KEY_V2="gpt-test")
         # 密钥恰好出现在配置中（这里与模型名相同）时必须拒绝写入。
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(config, "")
@@ -302,7 +302,7 @@ class ConfigurationGuideTest(unittest.TestCase):
         guide = (ROOT / "docs/CODEX_DISPATCH.md").read_text(encoding="utf-8")
         setup = guide.split("\n## 一次性配置\n", 1)[1].split("\n### 4. 自检\n", 1)[0]
         for setting in (
-            "CODEX_PROVIDER=cpa", "CODEX_CPA_API_KEY", "CODEX_API_BASE_URL", "CODEX_MODEL",
+            "CODEX_PROVIDER=cpa", "CODEX_CPA_API_KEY_V2", "CODEX_API_BASE_URL", "CODEX_MODEL",
             "CODEX_DISPATCH_MODEL", "CODEX_REVIEW_MODEL", "CODEX_PLAN_MODEL",
             "CODEX_PROVIDER=chatgpt", "CODEX_AUTH_JSON",
         ):
@@ -329,10 +329,10 @@ class WorkflowWiringTest(unittest.TestCase):
                     re.findall(r"\$\{\{[^}]*secrets\.CODEX_AUTH_JSON[^}]*\}\}", text),
                     ["${{ vars.CODEX_PROVIDER == 'chatgpt' && secrets.CODEX_AUTH_JSON || '' }}"],
                 )
-                for expression in re.findall(r"\$\{\{[^}]*secrets\.CODEX_CPA_API_KEY[^}]*\}\}", text):
+                for expression in re.findall(r"\$\{\{[^}]*secrets\.CODEX_CPA_API_KEY_V2[^}]*\}\}", text):
                     self.assertIn(expression, (
-                        "${{ (vars.CODEX_PROVIDER || 'cpa') == 'cpa' && secrets.CODEX_CPA_API_KEY || '' }}",
-                        "${{ steps.auth.outputs.provider == 'cpa' && secrets.CODEX_CPA_API_KEY || '' }}",
+                        "${{ (vars.CODEX_PROVIDER || 'cpa') == 'cpa' && secrets.CODEX_CPA_API_KEY_V2 || '' }}",
+                        "${{ steps.auth.outputs.provider == 'cpa' && secrets.CODEX_CPA_API_KEY_V2 || '' }}",
                     ))
                 block = step_block(workflow, restore)
                 # chatgpt 时不使用流程专用变量（它可能是只有 CPA 认识的别名），回到原来的 CODEX_MODEL。
@@ -359,7 +359,7 @@ class WorkflowWiringTest(unittest.TestCase):
         for flow, (workflow, _, _, _, run) in FLOWS.items():
             with self.subTest(flow=flow):
                 script = step_script(workflow, run)
-                mask = script.index("printf '::add-mask::%s\\n' \"$CODEX_CPA_API_KEY\"")
+                mask = script.index("printf '::add-mask::%s\\n' \"$CODEX_CPA_API_KEY_V2\"")
                 start = re.search(r'^codex "\$\{args\[@\]\}"', script, re.M).start()
                 self.assertLess(mask, start)
 
@@ -413,7 +413,7 @@ class WorkflowWiringTest(unittest.TestCase):
                "RUNNER_TEMP": str(work), "GITHUB_WORKSPACE": str(workspace),
                "CODEX_HOME": str(work / "codex-home"), "CODEX_LOG": str(log),
                "CODEX_PROVIDER_RESOLVED": provider, "REPLY_TEXT": reply, "SHELL_TOOL": shell_tool_state,
-               "CODEX_CPA_API_KEY": CPA_KEY if provider == "cpa" else ""}
+               "CODEX_CPA_API_KEY_V2": CPA_KEY if provider == "cpa" else ""}
         if record_codex:
             # Install Codex CLI 记录的绝对路径：node 解释器和 Codex 入口脚本（这里用 bash 跑假 codex）。
             env.update({"CODEX_NODE_BIN": "/usr/bin/bash", "CODEX_JS": str(codex)})
@@ -604,7 +604,7 @@ class PostCodexHardeningTest(unittest.TestCase):
             "TRUSTED_LOG": str(work / "trusted.log"), "CODEX_NODE_BIN": "/usr/bin/bash",
             "CODEX_JS": str(trusted / "codex"), "GH_TOKEN": "fake-gh-token", "REPO": "owner/example",
             "OWNER": "owner", "NUMBER": "7", "HEAD_SHA": "a" * 40, "BASE_SHA": "b" * 40, "MAIN_SHA": "c" * 40,
-            "RUN_URL": "https://example.com/run/1", "CODEX_CPA_API_KEY": CPA_KEY, "CODEX_API_BASE_URL": BASE_URL,
+            "RUN_URL": "https://example.com/run/1", "CODEX_CPA_API_KEY_V2": CPA_KEY, "CODEX_API_BASE_URL": BASE_URL,
             "MAX_ATTEMPTS": "2", "MODE": "task", "RESULT": "failure", "REVIEW_RUN_ID": "1", "REVIEW_RUN_ATTEMPT": "1",
             "PLAN_RUN_ID": "1", "PLAN_RUN_ATTEMPT": "1", "HAS_DIFF": "false", "COMMENT_ID": "5",
         }
@@ -665,7 +665,7 @@ class DispatchCollectTest(unittest.TestCase):
             "GITHUB_WORKSPACE": str(workspace),
             "GITHUB_OUTPUT": str(self.work / "output"),
             "GITHUB_STEP_SUMMARY": str(self.work / "summary"),
-            "CODEX_CPA_API_KEY": CPA_KEY,
+            "CODEX_CPA_API_KEY_V2": CPA_KEY,
             "CODEX_API_BASE_URL": BASE_URL,
         }
         (self.work / "seed-tokens.txt").write_text("")
@@ -738,7 +738,7 @@ class DispatchCollectTest(unittest.TestCase):
         self.assertFalse((self.work / "codex-result").exists())
 
     def test_chatgpt_collect_has_no_cpa_needles(self):
-        self.env.update({"CODEX_CPA_API_KEY": "", "CODEX_API_BASE_URL": ""})
+        self.env.update({"CODEX_CPA_API_KEY_V2": "", "CODEX_API_BASE_URL": ""})
         (self.tree / "notes.txt").write_text("ok\n")
         result = self.collect()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

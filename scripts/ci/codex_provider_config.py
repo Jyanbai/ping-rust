@@ -2,14 +2,14 @@
 """为 Codex Dispatch / Code Review / Plan 生成 CI 专用的 $CODEX_HOME/config.toml。
 
 CODEX_PROVIDER=cpa（默认）：沿用 codex-cpa-smoke.yml 已验证的写法，provider 名为 cpa，
-走 Responses API，密钥只通过 env_key=CODEX_CPA_API_KEY 从环境变量读取，不写进任何文件，
+走 Responses API，密钥只通过 env_key=CODEX_CPA_API_KEY_V2 从环境变量读取，不写进任何文件，
 也不读、不写 CODEX_AUTH_JSON。模型名来自 environment 变量、base_url 来自 environment secret，没有内置默认值。
 CODEX_PROVIDER=chatgpt：生成与切换前逐字相同的配置，auth.json 由工作流里原有的逻辑负责。
 
 用法：codex_provider_config.py --flow review|plan|dispatch --provider cpa|chatgpt \
         --home DIR --runner-temp DIR [--cargo-home DIR]
 读取的环境变量（仅 cpa；CODEX_API_BASE_URL 来自 secret，不打印）：CODEX_API_BASE_URL、CODEX_MODEL、CODEX_REASONING_EFFORT、
-CODEX_CPA_API_KEY（只检查是否为空，以及生成的文件里没有它）。
+CODEX_CPA_API_KEY_V2（只检查是否为空，以及生成的文件里没有它）。
 出错时只输出 ::error:: 说明，不打印密钥、base_url 或模型返回。
 """
 
@@ -21,7 +21,7 @@ from pathlib import Path
 
 PROVIDERS = ("cpa", "chatgpt")
 FLOWS = ("review", "plan", "dispatch")
-KEY_ENV = "CODEX_CPA_API_KEY"
+KEY_ENV = "CODEX_CPA_API_KEY_V2"
 # 与 codex-cpa-smoke.yml 相同的校验：只接受 https 基址，避免写入 config.toml 时注入其他配置。
 BASE_RE = re.compile(r"^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._~/-]*)?$")
 MODEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]*")
@@ -31,7 +31,7 @@ SHELL_POLICY = (
     "[shell_environment_policy]\n"
     'inherit = "all"\n'
     "ignore_default_excludes = false\n"
-    'exclude = ["CODEX_CPA_API_KEY", "CODEX_API_KEY", "GITHUB_TOKEN", "GH_TOKEN"]\n'
+    'exclude = ["CODEX_CPA_API_KEY_V2", "CODEX_API_KEY", "GITHUB_TOKEN", "GH_TOKEN"]\n'
 )
 
 
@@ -92,8 +92,8 @@ def cpa_settings(env):
         raise ConfigError("CODEX_REASONING_EFFORT 只能是小写字母（如 high），当前值无效")
     if not env.get(KEY_ENV):
         raise ConfigError(
-            "environment codex 里没有环境级密钥 CODEX_CPA_API_KEY，已停止，不调用模型。"
-            "请在本机执行 gh secret set CODEX_CPA_API_KEY --env codex（密钥粘贴给 gh，不要发到聊天里），"
+            "environment codex 里没有环境级密钥 CODEX_CPA_API_KEY_V2，已停止，不调用模型。"
+            "请在本机执行 gh secret set CODEX_CPA_API_KEY_V2 --env codex（密钥粘贴给 gh，不要发到聊天里），"
             "不要在仓库或组织级创建同名 secret。"
         )
     return base, model, effort

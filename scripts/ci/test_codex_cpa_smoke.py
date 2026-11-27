@@ -158,10 +158,10 @@ class WorkflowPolicyTest(unittest.TestCase):
         self.assertNotIn("gh secret set CODEX_AUTH_JSON", self.text)
         self.assertNotIn("secrets.CODEX_AUTH_JSON", self.text)
         self.assertNotIn("secrets.CODEX_BOT_TOKEN", self.text)
-        self.assertIn("secrets.CODEX_CPA_API_KEY", self.text)
+        self.assertIn("secrets.CODEX_CPA_API_KEY_V2", self.text)
         self.assertNotIn("secrets.CODEX_API_KEY", self.text)
-        self.assertEqual(self.text.count("secrets.CODEX_CPA_API_KEY"), 3)
-        hint = "CODEX_CPA_API_KEY 必须只在 environment codex 中设置；不要在仓库或组织级创建同名 secret"
+        self.assertEqual(self.text.count("secrets.CODEX_CPA_API_KEY_V2"), 3)
+        hint = "CODEX_CPA_API_KEY_V2 必须只在 environment codex 中设置；不要在仓库或组织级创建同名 secret"
         self.assertIn(hint, self.text)
         docs = (ROOT / "docs" / "CODEX_DISPATCH.md").read_text(encoding="utf-8")
         self.assertIn("请**只**在 environment `codex` 里设置", docs)
@@ -286,7 +286,7 @@ class ReplyAndFailureTest(unittest.TestCase):
             "RUNNER_TEMP": str(runner_temp),
             "GITHUB_STEP_SUMMARY": str(summary),
             "CODEX_API_KEY": key,
-            "CODEX_CPA_API_KEY": key,
+            "CODEX_CPA_API_KEY_V2": key,
             "CPA_MODEL": "gpt-6.2-sol",
             "CPA_EFFORT": "high",
             "FAKE_CODEX_LAST": str(last),
@@ -445,7 +445,7 @@ class ReplyAndFailureTest(unittest.TestCase):
             "GITHUB_ENV": str(files["env"]),
             "GITHUB_OUTPUT": str(files["output"]),
             "GITHUB_STEP_SUMMARY": str(files["summary"]),
-            "CODEX_CPA_API_KEY": "test-cpa-key-not-real",
+            "CODEX_CPA_API_KEY_V2": "test-cpa-key-not-real",
             "CODEX_API_BASE_URL": "https://cpa.invalid/v1",
             "CODEX_MODEL": "",
             "CODEX_REASONING_EFFORT": "",
@@ -479,7 +479,7 @@ class ReplyAndFailureTest(unittest.TestCase):
             "GITHUB_ENV": str(work / "env"),
             "GITHUB_OUTPUT": str(work / "output"),
             "GITHUB_STEP_SUMMARY": str(work / "summary"),
-            "CODEX_CPA_API_KEY": "test-cpa-key-not-real",
+            "CODEX_CPA_API_KEY_V2": "test-cpa-key-not-real",
             "CODEX_API_BASE_URL": "https://cpa.invalid/v1",
             "CODEX_MODEL": "",
             "CODEX_REASONING_EFFORT": "",
@@ -534,7 +534,7 @@ class ReplyAndFailureTest(unittest.TestCase):
             "GITHUB_OUTPUT": str(files["output"]),
             "GITHUB_STEP_SUMMARY": str(files["summary"]),
             "CODEX_API_KEY": leaked,
-            "CODEX_CPA_API_KEY": "",
+            "CODEX_CPA_API_KEY_V2": "",
             "CODEX_API_BASE_URL": "",
             "CODEX_MODEL": "",
             "CODEX_REASONING_EFFORT": "",
@@ -548,7 +548,7 @@ class ReplyAndFailureTest(unittest.TestCase):
         )
         self.assertNotEqual(result.returncode, 0, result.stdout)
         combined = result.stdout + result.stderr
-        self.assertIn("CODEX_CPA_API_KEY", combined)
+        self.assertIn("CODEX_CPA_API_KEY_V2", combined)
         self.assertIn("environment codex", combined)
         self.assertNotIn("ok=true", files["output"].read_text(encoding="utf-8"))
         self.assertFalse((runner_temp / "codex-home" / "config.toml").exists())
@@ -605,7 +605,7 @@ class ReplyAndFailureTest(unittest.TestCase):
         errors = "\n".join(self.error_lines(result))
         self.assertIn("密钥无效或被拒绝", errors)
         self.assertIn("HTTP 状态：401", errors)
-        self.assertIn("CODEX_CPA_API_KEY", errors)
+        self.assertIn("CODEX_CPA_API_KEY_V2", errors)
         self.assertNotIn("的 CODEX_API_KEY", errors)
         self.assertNotIn("接口不存在", errors)
         self.assertNotIn("secret-token-value", errors)
@@ -653,7 +653,7 @@ class ReplyAndFailureTest(unittest.TestCase):
     def test_unexpected_status_form_is_classified(self):
         cases = (
             ("unexpected status 401 Unauthorized: {\"error\":\"bad key\",\"token\":\"leak-me-401\"}\n",
-             "401", "密钥无效或被拒绝", "CODEX_CPA_API_KEY", "leak-me-401"),
+             "401", "密钥无效或被拒绝", "CODEX_CPA_API_KEY_V2", "leak-me-401"),
             ("unexpected status 404 Not Found: <html>route /v1/responses missing leak-me-404</html>\n",
              "404", "接口不存在", "CODEX_API_BASE_URL", "leak-me-404"),
         )
@@ -716,7 +716,7 @@ class SandboxProbeDnsTest(unittest.TestCase):
             "RUNNER_TEMP": str(runner_temp),
             "GITHUB_OUTPUT": str(output),
             "CODEX_HOME": str(codex_home),
-            "CODEX_CPA_API_KEY": "test-cpa-key-not-real",
+            "CODEX_CPA_API_KEY_V2": "test-cpa-key-not-real",
         }
         result = subprocess.run(
             ["bash", "-o", "pipefail", "-c", step_script("Verify read-only sandbox")],
