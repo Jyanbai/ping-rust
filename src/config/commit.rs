@@ -3,28 +3,14 @@ use std::{collections::BTreeMap, fs, path::Path};
 use anyhow::{anyhow, bail, Context, Result};
 
 use super::{
-    ensure_servers_match_state, save_state_to,
+    ensure_servers_match_state,
+    managed_yaml::PreparedYaml,
+    save_state_to,
     schema::ServerConfig,
-    transaction::{read_optional, restore_snapshot, ProfileDirectorySnapshot},
+    transaction::{read_optional, restore_snapshot, ManagedRollback, ProfileDirectorySnapshot},
     ManagedProfile, ManagedState,
 };
 use crate::{performance, utils};
-
-pub(super) fn commit_managed(
-    config_path: &Path,
-    state_path: &Path,
-    servers: &[ServerConfig],
-    state: &ManagedState,
-) -> Result<()> {
-    commit_managed_with_state_writer(
-        config_path,
-        state_path,
-        Path::new(utils::PROFILES_DIR),
-        servers,
-        state,
-        save_state_to,
-    )
-}
 
 pub(super) fn commit_managed_with_state_writer<F>(
     config_path: &Path,
@@ -37,18 +23,73 @@ pub(super) fn commit_managed_with_state_writer<F>(
 where
     F: FnOnce(&Path, &ManagedState) -> Result<()>,
 {
+    let yaml = render_legacy(servers, &state.profiles)?;
+    commit_yaml_with_state_writer(
+        config_path,
+        state_path,
+        profiles_path,
+        &yaml,
+        state,
+        None,
+        write_state,
+    )
+}
+
+pub(super) fn render_legacy(
+    servers: &[ServerConfig],
+    profiles: &[ManagedProfile],
+) -> Result<PreparedYaml> {
+    let documents = profile_documents(servers, profiles)?;
+    let aggregate = aggregate_profile_documents(&documents, profiles)?;
+    Ok(PreparedYaml {
+        aggregate,
+        profiles: documents,
+    })
+}
+
+pub(super) fn commit_prepared(
+    directory: &Path,
+    yaml: &PreparedYaml,
+    state: &ManagedState,
+    original: &ManagedRollback,
+) -> Result<()> {
+    commit_yaml_with_state_writer(
+        &directory.join("config.yaml"),
+        &directory.join("ping-rust-state.json"),
+        &directory.join("profiles"),
+        yaml,
+        state,
+        Some(original),
+        save_state_to,
+    )
+}
+
+fn commit_yaml_with_state_writer(
+    config_path: &Path,
+    state_path: &Path,
+    profiles_path: &Path,
+    yaml: &PreparedYaml,
+    state: &ManagedState,
+    original: Option<&ManagedRollback>,
+    write_state: impl FnOnce(&Path, &ManagedState) -> Result<()>,
+) -> Result<()> {
     let _timer = performance::stage("config_commit");
     let old_config = read_optional(config_path)?;
     let old_state = read_optional(state_path)?;
     let old_profiles = ProfileDirectorySnapshot::capture(profiles_path)?;
-    let documents = profile_documents(servers, &state.profiles)?;
-    let aggregate_yaml = aggregate_profile_documents(&documents, &state.profiles)?;
-    let runtime_unchanged = old_config.as_deref() == Some(aggregate_yaml.as_bytes());
+    if original.is_some_and(|original| {
+        old_config != original.config
+            || old_state != original.state
+            || old_profiles != original.profiles
+    }) {
+        bail!("受管配置在校验期间已变更，请重试");
+    }
+    let runtime_unchanged = old_config.as_deref() == Some(yaml.aggregate.as_bytes());
     let commit = (|| {
-        write_profile_documents(profiles_path, &documents)?;
+        write_profile_documents(profiles_path, &yaml.profiles)?;
         write_state(state_path, state)?;
         if !runtime_unchanged {
-            utils::atomic_write(config_path, aggregate_yaml.as_bytes(), 0o600)?;
+            utils::atomic_write(config_path, yaml.aggregate.as_bytes(), 0o600)?;
         }
         Ok::<(), anyhow::Error>(())
     })();
@@ -204,17 +245,19 @@ pub(super) fn aggregate_profile_documents(
     profiles: &[ManagedProfile],
 ) -> Result<String> {
     let mut servers = Vec::with_capacity(profiles.len());
+    let mut entries = Vec::with_capacity(profiles.len());
     for profile in profiles {
         let name = profile.config_file_name();
         let contents = documents
             .get(&name)
             .with_context(|| format!("缺少节点文件 {name}"))?;
-        let server: ServerConfig = crate::yaml::from_slice(contents)
-            .with_context(|| format!("解析节点文件 {name} 失败"))?;
-        servers.push(server);
+        let invalid = || anyhow!("解析节点文件 {name} 失败");
+        servers.push(crate::yaml::from_slice(contents).map_err(|_| invalid())?);
+        entries
+            .push(crate::yaml::from_slice::<serde_json::Value>(contents).map_err(|_| invalid())?);
     }
     ensure_servers_match_state(&servers, profiles)?;
-    crate::yaml::to_string(&servers).context("聚合节点配置失败")
+    crate::yaml::to_string(&entries).context("聚合节点配置失败")
 }
 
 pub(super) fn write_profile_documents(
