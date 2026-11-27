@@ -38,6 +38,7 @@ sudo prs socks5 secure <节点名称或 UUID> --local
 
 ## 已知问题
 
+- **菜单自更新后仍在运行旧版本**（#168）：从 v0.3.3 或更早版本的菜单升级时，磁盘上的程序会更新，但当前菜单仍是旧进程。菜单内自更新后请退出并重新运行 `sudo prs`。
 - **未受管字段会被覆盖**（#145）：添加、编辑、删除或加固任意节点时，ping-rust 会按自己建模的字段重新生成全部节点配置，手工写进 profile 或运行配置、ping-rust 不认识的 shoes 字段（例如 VLESS-ENC 节点手工添加的 `encryption_limits`）会丢失。该问题 v0.3.2 已存在，计划在 v0.3.4 修复；手工改过配置的用户操作前请先备份 `/etc/shoes`。
 - **自签证书节点的客户端导出仍跳过证书验证**（#155）：未提供 `--cert`/`--key` 的 TLS 节点使用自签证书，导出时带 `insecure` / `allowInsecure` / `skip-cert-verify`，客户端不校验证书，存在中间人风险。对安全有要求时请用 `--cert`/`--key` 提供真实证书；计划在 v0.3.4 改为证书固定。
 - **监听检查把不相交地址上的同号端口当成冲突**（#146）：若同一端口在另一具体地址上被其他服务监听，`socks5 secure` 会超时并保持原配置，不会损坏节点。
@@ -61,7 +62,7 @@ sudo prs socks5 secure <节点名称或 UUID> --local
 sudo ping-rust self-update --version v0.3.3
 ```
 
-自更新成功后旧进程会退出。可用 `/usr/local/bin/shoes --version` 检查已安装的内核版本。已使用 shoes v0.3.7 时，只需更新 ping-rust；不要执行内核更新，以免重装同版本并重启共享的 `shoes.service`。
+命令行自更新成功后会退出。可用 `/usr/local/bin/shoes --version` 检查已安装的内核版本。已使用 shoes v0.3.7 时，只需更新 ping-rust；不要执行内核更新，以免重装同版本并重启共享的 `shoes.service`。
 
 仅在已安装的 shoes 低于 v0.3.7 且确需升级时，才在自更新成功后执行以下命令；升级会重启正在运行的 `shoes.service`，请安排维护窗口：
 

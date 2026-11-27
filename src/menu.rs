@@ -1,4 +1,8 @@
-use std::{io, time::Duration};
+use std::{
+    io::{self, IsTerminal},
+    path::PathBuf,
+    time::Duration,
+};
 
 use anyhow::{bail, Context, Result};
 use colored::Colorize;
@@ -377,7 +381,6 @@ fn node_summary(state: Result<config::ManagedState>) -> String {
 }
 
 pub async fn run() -> Result<()> {
-    use std::io::IsTerminal;
     let bootstrap = cli::bootstrap_default_reality_for_menu().await;
     let pause = bootstrap_result_needs_pause(&bootstrap, std::io::stdin().is_terminal());
     if control_after_bootstrap(bootstrap)? == MenuControl::Exit {
@@ -2170,6 +2173,45 @@ async fn advanced_add_protocol(protocol: Protocol) -> Result<()> {
     Ok(())
 }
 
+fn control_after_self_update(
+    updated: bool,
+    pause: impl FnOnce() -> Result<()>,
+    restart: impl FnOnce() -> Result<()>,
+) -> Result<MenuControl> {
+    if !updated {
+        return Ok(MenuControl::Continue);
+    }
+    let result = match control_after_pause(pause()) {
+        Ok(MenuControl::Exit) => return Ok(MenuControl::Exit),
+        Ok(_) => restart(),
+        Err(error) if crate::is_interrupted(&error) => return Err(error),
+        Err(error) => Err(error),
+    };
+    if let Err(error) = result {
+        eprintln!("自动切换失败：{error:#}；请手动重新运行 sudo prs");
+    }
+    Ok(MenuControl::Exit)
+}
+
+fn exec_updated_menu(executable_before_update: io::Result<PathBuf>) -> Result<()> {
+    crate::restore_cursor(&mut io::stdout()).context("恢复终端光标失败")?;
+    let executable = executable_before_update.context("无法确定新版本 ping-rust 路径")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+
+        Err(std::process::Command::new(executable)
+            .args(std::env::args_os().skip(1))
+            .exec()
+            .into())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = executable;
+        bail!("当前平台不支持自动切换");
+    }
+}
+
 async fn update_menu() -> Result<MenuControl> {
     loop {
         let Some(selected) = select_numbered("更新中心", &UPDATE_CENTER_ITEMS)? else {
@@ -2177,7 +2219,15 @@ async fn update_menu() -> Result<MenuControl> {
         };
         match selected {
             0 => {
-                cli::run_self_update(None, false).await?;
+                let executable_before_update = std::env::current_exe();
+                let updated = cli::run_self_update(None, false).await?;
+                if updated && !io::stdin().is_terminal() {
+                    println!("已更新到新版本；请手动重新运行 sudo prs");
+                    return Ok(MenuControl::Exit);
+                }
+                return control_after_self_update(updated, input::pause_enter_updated_menu, || {
+                    exec_updated_menu(executable_before_update)
+                });
             }
             1 => shoes_update_menu().await?,
             2 => cli::print_update_status().await?,
@@ -2261,6 +2311,52 @@ fn uninstall_menu() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn self_update_without_replacement_continues_without_pausing_or_restarting() {
+        assert_eq!(
+            control_after_self_update(
+                false,
+                || panic!("未更新时不额外暂停"),
+                || panic!("未更新时不重启"),
+            )
+            .unwrap(),
+            MenuControl::Continue
+        );
+    }
+
+    #[test]
+    fn self_update_with_replacement_exits_when_restart_fails() {
+        let paused = std::cell::Cell::new(false);
+        let mut restarted = false;
+        assert_eq!(
+            control_after_self_update(
+                true,
+                || {
+                    paused.set(true);
+                    Ok(())
+                },
+                || {
+                    assert!(paused.get());
+                    restarted = true;
+                    Err(anyhow::anyhow!("无法执行新程序"))
+                },
+            )
+            .unwrap(),
+            MenuControl::Exit
+        );
+        assert!(restarted);
+    }
+
+    #[test]
+    fn self_update_with_replacement_exits_without_restart_on_eof() {
+        let pause = || Err(MenuEof.into());
+        let restart = || panic!("输入结束时不重启");
+        assert_eq!(
+            control_after_self_update(true, pause, restart).unwrap(),
+            MenuControl::Exit
+        );
+    }
 
     #[test]
     fn first_deployment_result_pauses_before_main_menu_clear() {

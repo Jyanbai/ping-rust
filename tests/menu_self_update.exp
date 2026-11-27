@@ -1,0 +1,49 @@
+#!/usr/bin/expect -f
+set timeout 30
+if {$argc != 3 || [lindex $argv 1] eq [lindex $argv 2]} {
+    puts stderr "usage: expect menu_self_update.exp <disposable-ping-rust> <from-version> <to-version>"
+    exit 2
+}
+lassign $argv binary from_version to_version
+
+proc expect_or_fail {pattern stage} {
+    global timeout
+    expect {
+        -re $pattern { return $expect_out(0,string) }
+        eof { error "menu ended during $stage" }
+        timeout { error "menu timed out during $stage" }
+    }
+}
+
+proc check_banner {version} {
+    set banner [expect_or_fail {------------- ping-rust v[^\r\n]+ -------------} "version banner"]
+    if {$banner ne "------------- ping-rust v$version -------------"} {
+        error "expected version $version, got $banner"
+    }
+    expect_or_fail {请选择 \[0-10\]: } "main menu"
+}
+
+spawn $binary menu
+check_banner $from_version
+send -- "6\r"
+expect_or_fail {更新中心:} "update center"
+expect_or_fail {请选择 \[0-3\]: } "update center prompt"
+send -- "1\r"
+set timeout 600
+set prompt [expect_or_fail {已更新到新版本，按回车进入新版本菜单|按回车返回主菜单} "self-update confirmation"]
+if {$prompt eq "按回车返回主菜单"} {
+    error "self-update returned to the old menu"
+}
+set timeout 30
+send -- "\r"
+check_banner $to_version
+send -- "0\r"
+expect_or_fail {已退出。} "menu exit"
+expect {
+    eof {}
+    timeout { error "menu did not exit" }
+}
+set result [wait]
+if {[lindex $result 2] != 0 || [lindex $result 3] != 0 || [llength $result] != 4} {
+    error "menu exited unsuccessfully: $result"
+}
