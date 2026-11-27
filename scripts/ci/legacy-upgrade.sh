@@ -15,10 +15,13 @@ test -n "$pinned_shoes"
 test "$ID" = ubuntu
 test "$VERSION_ID" = 24.04
 test "$(uname -m)" = x86_64
-test ! -e /usr/local/bin/shoes
-test ! -e /var/lib/ping-rust/shoes-install.json
-test ! -e /etc/shoes
-test ! -e /etc/systemd/system/shoes.service
+assert_clean_install() {
+  test ! -e /usr/local/bin/shoes &&
+    test ! -e /var/lib/ping-rust/shoes-install.json &&
+    test ! -e /etc/shoes &&
+    test ! -e /etc/systemd/system/shoes.service
+}
+assert_clean_install
 export NO_COLOR=1 TERM=dumb
 work="$(mktemp -d)"
 chmod 0700 "$work"
@@ -32,7 +35,7 @@ record "### $scenario: $old_tag → current source"
 # Keep node material in the private temporary directory, never in Actions output.
 # On failure print sanitized diagnostics only; never upload runtime state/config.
 trap 'status=$?; if (( status != 0 )); then
-  record "FAILED: exit=$status; no retry performed"
+  record "FAILED: exit=$status"
   python3 - "$work" <<"PY"
 import pathlib, re, sys
 for path in sorted(pathlib.Path(sys.argv[1]).glob("*.stderr")):
@@ -61,6 +64,25 @@ run_command() {
   record "$label: exit=$status"
   if [[ "$expected" == nonzero ]]; then test "$status" -ne 0
   else test "$status" -eq "$expected"; fi
+}
+run_install_old() {
+  local attempt=0 delay status rate_limited
+  for delay in 30 60 120 0; do
+    attempt=$((attempt + 1))
+    status=0
+    run_command install-old 0 "$old" install --method release || status=$?
+    rate_limited=false
+    if (( status != 0 )) && grep -qw '403' "$work/install-old.stderr" &&
+      grep -Fqi 'rate limit' "$work/install-old.stderr"; then
+      rate_limited=true
+    fi
+    record "install-old: attempt=$attempt; rate-limit=$rate_limited"
+    if [[ "$rate_limited" == false ]] || (( delay == 0 )); then
+      return "$status"
+    fi
+    assert_clean_install || return 1
+    sleep "$delay"
+  done
 }
 assert_runtime() {
   local label="$1" listening=false
@@ -98,7 +120,7 @@ assert p['binary_sha256'] == hashlib.sha256(open('/usr/local/bin/shoes', 'rb').r
 PY
   record 'provenance assertions: mode=0600; source=github-release; binary SHA-256 matches'
 }
-run_command install-old 0 "$old" install --method release
+run_install_old
 # The old installer may resolve the then-current upstream latest: record, do not assume.
 version="$(grep -Eo -m 1 'v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?' "$work/install-old.stdout")"
 test -n "$version"
