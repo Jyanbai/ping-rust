@@ -30,12 +30,14 @@ work="$(mktemp -d)"
 chmod 0700 "$work"
 summary="${GITHUB_STEP_SUMMARY:?}"
 http_pid=
+loopback_pid=
 record() { printf '%s\n' "$*" | tee -a "$summary"; }
 record "### SOCKS5 secure: $old_tag public no-auth → current source (#153)"
 
 # 失败时只打印脱敏后的 stderr 末尾；stdout（含凭据、链接）一律不打印、不上传。
 trap 'status=$?
 if [[ -n "$http_pid" ]]; then kill "$http_pid" 2>/dev/null || true; fi
+if [[ -n "$loopback_pid" ]]; then kill "$loopback_pid" 2>/dev/null || true; fi
 if (( status != 0 )); then
   record "FAILED: exit=$status; no retry performed"
   python3 - "$work" <<"PY"
@@ -194,6 +196,41 @@ cmp -s "$work/before.sha256" "$work/after-dry-run.sha256" \
 test "$(main_pid)" = "$pid_before" || { record 'dry-run restarted shoes'; exit 1; }
 expect_probe 'after dry-run: auth-node still open' ok "$public_ip" "$auth_port"
 record 'dry-run: managed files and MainPID unchanged'
+
+local_profile="/etc/shoes/profiles/SOCKS5-$local_port.yaml"
+bind_files=(/etc/shoes/config.yaml)
+if [[ -f "$local_profile" ]]; then bind_files+=("$local_profile"); fi
+for path in "${bind_files[@]}"; do cp -p "$path" "$work/before-specific-${path##*/}"; done
+sed -i -E "s/^((- )?address: ).*:${local_port}$/\1${public_ip}:${local_port}/" "${bind_files[@]}"
+systemctl restart shoes.service
+assert_active
+wait_listening "${public_ip//./\\.}" "$local_port"
+expect_probe 'specific local-node before attempted hardening' ok "$public_ip" "$local_port"
+
+python3 -m http.server "$local_port" --bind 127.0.0.1 --directory "$work/http" \
+  >"$work/loopback-listener.log" 2>&1 &
+loopback_pid=$!
+wait_listening '127\.0\.0\.1' "$local_port"
+kill -0 "$loopback_pid"
+pid_before="$(main_pid)"
+snapshot "$work/before-occupied-loopback.sha256"
+run_command secure-local-occupied nonzero "$new" socks5 secure "$local_node" --local --yes
+assert_active
+test "$(main_pid)" = "$pid_before" || { record 'occupied loopback restarted shoes'; exit 1; }
+snapshot "$work/after-occupied-loopback.sha256"
+cmp -s "$work/before-occupied-loopback.sha256" "$work/after-occupied-loopback.sha256" \
+  || { record 'occupied loopback changed managed files'; exit 1; }
+grep -Fq "目标回环 TCP 监听 127.0.0.1:$local_port 已被其他进程占用" "$work/secure-local-occupied.stderr"
+expect_probe 'specific local-node after rejected hardening' ok "$public_ip" "$local_port"
+record 'occupied loopback: rejected with managed files and MainPID unchanged'
+
+kill "$loopback_pid"
+wait "$loopback_pid" || true
+loopback_pid=
+for path in "${bind_files[@]}"; do cp -p "$work/before-specific-${path##*/}" "$path"; done
+systemctl restart shoes.service
+assert_active
+wait_listening '0\.0\.0\.0|\*|\[::\]' "$local_port"
 
 # 4. --auth：保留公网监听，无凭据被拒，新凭据可用；另一个节点不受影响。
 run_command secure-auth 0 "$new" socks5 secure "$auth_node" --auth --yes

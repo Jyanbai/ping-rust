@@ -35,7 +35,7 @@ pub(crate) async fn secure(
         Path::new(utils::LOCK_FILE),
         dry_run,
         choose,
-        verify_running,
+        |profile| verify_running(profile).map(|_| ()),
     )?
     else {
         return Ok(());
@@ -46,19 +46,27 @@ pub(crate) async fn secure(
     }
 
     service::check_socks5_restart_scope()?;
-    verify_running(&plan.original).context("无法确认原服务正常，请恢复原监听后重试")?;
+    let pid = verify_running(&plan.original).context("无法确认原服务正常，请恢复原监听后重试")?;
     validate_candidate_with_shoes(&plan.runtime, directory)
         .await
         .map_err(|_| {
             anyhow::anyhow!("shoes --dry-run 校验失败，配置未提交；请检查 shoes 安装和当前受管配置")
         })?;
+    if plan.mode == SecureMode::Local {
+        let target = socket_address(plan.profile())?;
+        if !service::tcp_listener_available_after_restart(pid, target)
+            .context("无法检查目标回环 TCP 监听，配置未提交；请检查 shoes.service 后重试")?
+        {
+            bail!("目标回环 TCP 监听 {target} 已被其他进程占用，配置未提交；请释放该监听后重试");
+        }
+    }
 
     eprintln!("将重启受管 shoes.service，同机节点的连接可能短暂中断。");
     let mode = plan.mode;
     let profile = commit_with_signal_protection(move || {
         plan.commit(directory, |profile| {
             service::restart_and_verify()?;
-            verify_running(profile)
+            verify_running(profile).map(|_| ())
         })
     })
     .await?;
@@ -476,7 +484,7 @@ fn socket_address(profile: &ManagedProfile) -> Result<SocketAddr> {
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
-fn verify_running(profile: &ManagedProfile) -> Result<()> {
+fn verify_running(profile: &ManagedProfile) -> Result<u32> {
     if !service::is_active()? {
         bail!("shoes.service 未处于 active 状态");
     }
@@ -495,7 +503,7 @@ fn verify_running(profile: &ManagedProfile) -> Result<()> {
     if !service::is_active()? || service::main_pid()? != Some(pid) {
         bail!("监听验证过程中 shoes.service 退出或重启");
     }
-    Ok(())
+    Ok(pid)
 }
 
 fn wait_for_listener(expected: SocketAddr, pid: u32) -> Result<()> {
