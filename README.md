@@ -615,6 +615,21 @@ sudo /usr/local/bin/shoes --dry-run /etc/shoes/config.yaml
 
 本地门禁：`cargo fmt --all -- --check`、`cargo clippy --locked --all-targets --all-features -- -D warnings`、`cargo test --locked --all-targets`。CI、systemd acceptance、实机 VPS 与未验证范围的逐项证据见 [COMPLETION_AUDIT.md](COMPLETION_AUDIT.md)。
 
+### 受管 TLS 节点客户端验收
+
+`bash scripts/ci/tls-client-acceptance.sh --list` 列出七种协议及三个验收用例。实际验收只在干净、一次性的 Ubuntu 24.04 x86_64 systemd runner 上执行，从普通用户调用（需免交互 `sudo`、Python 3、`curl` 和 `ss`）。脚本安装 shoes，创建受管节点，退出时停止并禁用测试服务，保留受管文件供 runner 销毁；不在已有 shoes 服务、二进制、非空 `/etc/shoes` 或端口冲突的机器上执行。
+
+```bash
+PING_RUST="$PWD/target/release/ping-rust" \
+TLS_ACCEPTANCE_PRIVATE_DIR="$RUNNER_TEMP/tls-private" \
+TLS_ACCEPTANCE_RESULTS_DIR="$RUNNER_TEMP/tls-results" \
+  bash scripts/ci/tls-client-acceptance.sh
+```
+
+两个目录须为绝对路径、互不包含且尚未创建。只上传结果目录的 `results.jsonl`，不要上传私有目录或 systemd 日志。全部 21 行用例通过才退出 `0`；准备失败、用例缺失、纯超时或拒绝证据不足均退出 `1`，可按 `phase` 排查。TUIC 的错误凭据行要求密码和 UUID 两种独立变体都被拒。正例只证明自签证书在**未校验证书**时连通；证书负例保留正确凭据和 SNI，启用校验但不提供信任材料。
+
+验收固定 shoes v0.3.7（x86_64 Linux musl）和 sing-box v1.14.2（Linux amd64），下载有限时和重试，提取前校验 SHA-256。更新版本时同步更新脚本中的摘要、拒绝预期和本节说明。
+
 ## 仓库结构
 
 ```text
