@@ -774,7 +774,8 @@ jobs:
             /usr/bin/rm -rf "$out_dir"
             exit 1
           fi
-          # CPA 密钥和 base_url（含主机名，不区分大小写）都不得出现在改动和总结里；检查失败时不打印地址。
+          # CPA 密钥不得出现在待上传补丁、总结或暂存原始内容里（含删除行）；
+          # base_url（含主机名）只拦本次新引入的出现。均不区分大小写，失败时不打印地址或密钥。
           cpa_base="${CODEX_API_BASE_URL:-}"
           cpa_base="${cpa_base#"${cpa_base%%[![:space:]]*}"}"
           cpa_base="${cpa_base%"${cpa_base##*[![:space:]]}"}"
@@ -782,50 +783,124 @@ jobs:
           cpa_host="${cpa_host%%/*}"
           cpa_host="${cpa_host##*@}"
           cpa_host="${cpa_host%:*}"
-          cpa_needles=()
-          [ -z "${CODEX_CPA_API_KEY:-}" ] || cpa_needles+=(-e "$CODEX_CPA_API_KEY")
-          [ -z "$cpa_base" ] || cpa_needles+=(-e "$cpa_base")
-          [ "${#cpa_host}" -lt 4 ] || cpa_needles+=(-e "$cpa_host")
-          if [ "${#cpa_needles[@]}" -gt 0 ]; then
-            # 只拦本次改动新带进来的内容：目标分支里原本就有的同一地址不算泄露。
-            # 每个改动的文件按原始内容（含二进制）比较改动前后的出现次数，文件名和总结整段检查；
-            # 不区分大小写（主机名大小写不同仍是同一地址）。检查本身出错也按失败处理。
+          if [ -n "${CODEX_CPA_API_KEY:-}" ] || [ -n "$cpa_base" ] || [ "${#cpa_host}" -ge 4 ]; then
             if ! CPA_KEY="${CODEX_CPA_API_KEY:-}" CPA_BASE="$cpa_base" CPA_HOST="$cpa_host" \
               CPA_GIT_DIR="$RUNNER_TEMP/pristine.git" CPA_WORK_TREE="$GITHUB_WORKSPACE/work" \
-              /usr/bin/python3 -I - "$out_dir/summary.md" <<'PY' 2>/dev/null; then
+              /usr/bin/python3 -I - "$out_dir/task.patch" "$out_dir/summary.md" <<'PY' 2>/dev/null; then
           import os
           import subprocess
           import sys
 
           git = ["/usr/bin/git", "--git-dir=" + os.environ["CPA_GIT_DIR"], "--work-tree=" + os.environ["CPA_WORK_TREE"],
                  "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"]
-          host = os.environ.get("CPA_HOST", "")
-          needles = [v.lower().encode("utf-8", "surrogateescape")
-                     for v in (os.environ.get("CPA_KEY", ""), os.environ.get("CPA_BASE", ""), host if len(host) >= 4 else "")
-                     if v]
 
 
-          def counts(data):
+          def enc(value):
+              return value.lower().encode("utf-8", "surrogateescape")
+
+
+          def has_needle(data, needle):
+              return needle in data.lower()
+
+
+          def counts(data, needles):
               data = data.lower()
               return [data.count(n) for n in needles]
 
 
-          def blob(spec):
-              result = subprocess.run(git + ["cat-file", "blob", spec], capture_output=True)
-              return result.stdout if result.returncode == 0 else b""
+          def is_null_oid(oid):
+              return oid and set(oid) <= set("0")
 
 
-          names = subprocess.run(git + ["diff", "--cached", "--name-only", "-z", "--no-renames", "HEAD"],
-                                 capture_output=True, check=True).stdout.split(b"\0")
-          for name in filter(None, names):
-              if any(counts(name)):
+          def read_blob(oid):
+              # 全 0 的对象 ID 表示这一侧没有文件（新增或删除），内容视为空。
+              # 其它读取失败必须中止，不能当成空内容放过。
+              text = oid.decode("ascii")
+              if is_null_oid(text):
+                  return b""
+              result = subprocess.run(git + ["cat-file", "blob", text], capture_output=True)
+              if result.returncode != 0:
                   sys.exit(1)
-              path = os.fsdecode(name)
-              if any(a > b for a, b in zip(counts(blob(":" + path)), counts(blob("HEAD:" + path)))):
+              return result.stdout
+
+
+          def parse_raw_z(data):
+              # git diff --raw -z：":<oldmode> <newmode> <oldoid> <newoid> <status>\0<path>\0"
+              # 重命名/复制还有第二个路径。
+              records = []
+              parts = data.split(b"\0")
+              i, n = 0, len(parts)
+              while i < n:
+                  header = parts[i]
+                  i += 1
+                  if header == b"":
+                      continue
+                  if not header.startswith(b":"):
+                      sys.exit(1)
+                  fields = header[1:].split()
+                  if len(fields) != 5:
+                      sys.exit(1)
+                  old_oid, new_oid, status = fields[2], fields[3], fields[4]
+                  if i >= n:
+                      sys.exit(1)
+                  first = parts[i]
+                  i += 1
+                  second = None
+                  if status.startswith(b"R") or status.startswith(b"C"):
+                      if i >= n:
+                          sys.exit(1)
+                      second = parts[i]
+                      i += 1
+                  records.append((old_oid, new_oid, status, first, second))
+              return records
+
+
+          key = enc(os.environ["CPA_KEY"]) if os.environ.get("CPA_KEY") else None
+          addr = [enc(v) for v in (os.environ.get("CPA_BASE", ""),) if v]
+          host = os.environ.get("CPA_HOST", "")
+          if len(host) >= 4:
+              addr.append(enc(host))
+
+          raw = subprocess.run(
+              git + ["diff", "--cached", "--raw", "-z", "--abbrev=64", "HEAD"],
+              capture_output=True)
+          # git diff 在有差异时退出码为 1。
+          if raw.returncode not in (0, 1):
+              sys.exit(1)
+          records = parse_raw_z(raw.stdout)
+
+          with open(sys.argv[1], "rb") as fh:
+              patch = fh.read()
+          with open(sys.argv[2], "rb") as fh:
+              summary = fh.read()
+          if key and (has_needle(patch, key) or has_needle(summary, key)):
+              sys.exit(1)
+          if addr and any(c > 0 for c in counts(summary, addr)):
+              sys.exit(1)
+
+          for old_oid, new_oid, status, first, second in records:
+              paths = [first] + ([second] if second is not None else [])
+              old_data = read_blob(old_oid)
+              new_data = read_blob(new_oid)
+              if key and (
+                  any(has_needle(path, key) for path in paths)
+                  or has_needle(old_data, key)
+                  or has_needle(new_data, key)
+              ):
                   sys.exit(1)
-          with open(sys.argv[1], "rb") as summary:
-              if any(counts(summary.read())):
-                  sys.exit(1)
+              if not addr:
+                  continue
+              # 地址：只拦本次新引入的出现。把含地址的文件改到新路径也视为新引入。
+              if second is not None:
+                  if any(c > 0 for c in counts(second, addr) + counts(new_data, addr)):
+                      sys.exit(1)
+              else:
+                  old_path = b"" if status.startswith(b"A") else first
+                  new_path = b"" if status.startswith(b"D") else first
+                  if any(a > b for a, b in zip(counts(new_path, addr), counts(old_path, addr))):
+                      sys.exit(1)
+                  if any(a > b for a, b in zip(counts(new_data, addr), counts(old_data, addr))):
+                      sys.exit(1)
           PY
               echo "::error::Codex 的输出里包含 CPA 密钥或 CPA 地址（或无法完成检查），已中止。"
               /usr/bin/rm -rf "$out_dir"

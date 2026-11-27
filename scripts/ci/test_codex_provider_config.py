@@ -756,6 +756,64 @@ class DispatchCollectTest(unittest.TestCase):
         result = self.collect()
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertFalse((self.work / "codex-result").exists())
+        self.assertNotIn(CPA_KEY, result.stdout + result.stderr)
+
+    def _reset_tree(self):
+        subprocess.run(["git", "-C", str(self.tree), "checkout", "-q", "--", "."], check=True)
+        subprocess.run(["git", "-C", str(self.tree), "clean", "-qfd"], check=True)
+
+    def _commit_on_target(self):
+        git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.test"]
+        subprocess.run([*git, "-C", str(self.tree), "add", "-A"], check=True)
+        subprocess.run([*git, "-C", str(self.tree), "commit", "-q", "-m", "target"], check=True)
+        subprocess.run(["rm", "-rf", str(self.work / "pristine.git")], check=True)
+        subprocess.run(["cp", "-a", str(self.tree / ".git"), str(self.work / "pristine.git")], check=True)
+
+    def test_key_in_special_filenames_is_rejected(self):
+        # 这些文件名曾被 git cat-file 的 ":" + path 解析成索引阶段；必须按 blob ID 读取。
+        names = ("0:key.txt", "1:key.txt", "2:key.txt", "3:key.txt", "a:b:c", "has space", "has\nnewline")
+        for name in names:
+            for binary in (False, True):
+                with self.subTest(name=name, binary=binary):
+                    self._reset_tree()
+                    path = self.tree / name
+                    if binary:
+                        path.write_bytes(b"\x00\x01" + CPA_KEY.encode() + b"\x00\xff")
+                    else:
+                        path.write_text(f"key={CPA_KEY}\n")
+                    result = self.collect()
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn("CPA 密钥", result.stdout)
+                    self.assertNotIn(CPA_KEY, result.stdout + result.stderr)
+                    self.assertFalse((self.work / "codex-result").exists())
+
+    def test_special_filenames_without_key_are_collected(self):
+        (self.tree / "0:ok.txt").write_text("hello\n")
+        (self.tree / "3:still ok").write_bytes(b"\x00clean\xff")
+        (self.tree / "has\nnewline").write_text("ok\n")
+        result = self.collect()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("has_diff=true", (self.work / "output").read_text())
+
+    def test_deleting_existing_key_is_rejected(self):
+        # 目标分支已有密钥时，只删除它也会把密钥写进补丁，必须拦截且日志不含密钥。
+        for kind in ("text", "binary"):
+            with self.subTest(kind=kind):
+                self._reset_tree()
+                if kind == "text":
+                    (self.tree / "leaked.txt").write_text(f"keep\nkey={CPA_KEY}\nend\n")
+                else:
+                    (self.tree / "leaked.bin").write_bytes(b"\x00" + CPA_KEY.encode() + b"\xff")
+                self._commit_on_target()
+                if kind == "text":
+                    (self.tree / "leaked.txt").write_text("keep\nend\n")
+                else:
+                    (self.tree / "leaked.bin").unlink()
+                result = self.collect()
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("CPA 密钥", result.stdout)
+                self.assertNotIn(CPA_KEY, result.stdout + result.stderr)
+                self.assertFalse((self.work / "codex-result").exists())
 
     def test_clean_change_is_collected(self):
         (self.tree / "notes.txt").write_text("ok\n")
