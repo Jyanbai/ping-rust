@@ -495,7 +495,7 @@ class ReplyAndFailureTest(unittest.TestCase):
     def test_base_url_is_a_secret_without_default_and_never_printed(self):
         text = WORKFLOW.read_text(encoding="utf-8")
         # 工作流里没有任何内置的 CPA 基址：除 github.com 和 base_re 正则外不出现 https:// 地址。
-        hosts = [m for m in re.findall(r"https://[^\s'\"\\^]+", text) if not m.startswith("https://github.com")]
+        hosts = [m for m in re.findall(r"https://[^\s'\"\\^]+", text) if not m.startswith(("https://github.com", "https://[A-Za-z0-9"))]
         self.assertEqual(hosts, [], hosts)
         self.assertIn("CODEX_API_BASE_URL: ${{ secrets.CODEX_API_BASE_URL }}", text)
         self.assertNotIn("vars.CODEX_API_BASE_URL", text)
