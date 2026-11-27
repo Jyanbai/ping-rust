@@ -1,5 +1,17 @@
 use super::*;
 
+fn prepare_locked(
+    directory: &Path,
+    selector: &str,
+    lock_path: &Path,
+    dry_run: bool,
+    choose: impl FnOnce() -> Result<Option<SecureMode>>,
+) -> Result<Option<(SecurePlan, Option<utils::ExclusiveLock>)>> {
+    super::prepare_locked(directory, selector, lock_path, dry_run, choose, |_| {
+        panic!("没有待同步的状态，无需验证服务")
+    })
+}
+
 async fn legacy(directory: &Path, port: u16, address: &str) -> ManagedProfile {
     let mut request =
         crate::config::tests::request(Protocol::Socks5, directory.join("config.yaml"));
@@ -67,6 +79,31 @@ async fn choosing_socks5_mode_does_not_hold_config_lock() {
     .unwrap();
     assert!(prepared.is_some());
     assert!(utils::try_exclusive_lock(&lock_path, true).is_err());
+}
+
+#[tokio::test]
+async fn already_safe_socks5_still_requires_config_lock() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path();
+    let profile = legacy(path, 1080, "0.0.0.0").await;
+    let plan = prepare(path, &profile, SecureMode::Local);
+    let lock_path = path.join("lock");
+    let held = utils::try_exclusive_lock(&lock_path, true)
+        .unwrap()
+        .unwrap();
+    plan.commit(path, |_| Ok(())).unwrap();
+    for dry_run in [false, true] {
+        let result = prepare_locked(path, &profile.name, &lock_path, dry_run, || {
+            panic!("安全节点无需选择")
+        });
+        assert!(format!("{:#}", result.err().unwrap()).contains("无法取得 ping-rust 配置锁"));
+    }
+    drop(held);
+    assert!(prepare_locked(path, &profile.name, &lock_path, false, || {
+        panic!("安全节点无需选择")
+    })
+    .unwrap()
+    .is_none());
 }
 
 #[tokio::test]
@@ -263,9 +300,9 @@ async fn restart_failure_restores_exact_files_before_restarting_original_service
             restarts.push(address.clone());
             if address == "127.0.0.1:1080" {
                 let after = snapshot();
-                for (updated, original) in after[..3].iter().zip(&before[..3]) {
-                    assert_ne!(updated, original);
-                }
+                assert_ne!(after[0], before[0]);
+                assert_eq!(after[1], before[1], "服务验证前不能写入 state");
+                assert_ne!(after[2], before[2]);
                 assert_eq!(after[3], before[3]);
                 bail!("模拟服务重启失败");
             }
@@ -278,6 +315,107 @@ async fn restart_failure_restores_exact_files_before_restarting_original_service
     assert_eq!(snapshot(), before);
     assert!(format!("{error:#}").contains("模拟服务重启失败"));
     assert!(format!("{error:#}").contains("原配置已恢复"));
+}
+
+#[tokio::test]
+#[cfg(target_os = "linux")]
+async fn interrupted_socks5_commit_recovers_from_hardened_config_and_old_state() {
+    use std::process::Command;
+
+    const CHILD: &str = "PING_RUST_TEST_SOCKS5_INTERRUPTED_DIR";
+    const MODE: &str = "PING_RUST_TEST_SOCKS5_INTERRUPTED_MODE";
+    const INTERRUPTED: i32 = 83;
+    if let Some(path) = std::env::var_os(CHILD) {
+        let path = PathBuf::from(path);
+        let mode = if std::env::var(MODE).unwrap() == "auth" {
+            SecureMode::Auth
+        } else {
+            SecureMode::Local
+        };
+        let state = load_state_from(&path.join("ping-rust-state.json")).unwrap();
+        let plan = prepare(&path, &state.profiles[0], mode);
+        let _lock = utils::try_exclusive_lock(&path.join("lock"), true).unwrap();
+        plan.commit(&path, |_| std::process::exit(INTERRUPTED))
+            .unwrap();
+        panic!("应在激活阶段中止提交");
+    }
+
+    for (mode, explicit_listen) in [("auth", false), ("local", false), ("local", true)] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path();
+        let profile = legacy(path, 1080, "0.0.0.0").await;
+        let config = path.join("config.yaml");
+        let state = path.join("ping-rust-state.json");
+        let profile_file = profile_path(path, &profile);
+        if explicit_listen {
+            let mut explicit = load_state_from(&state).unwrap();
+            explicit.profiles[0].server_address = Some("127.0.0.1".to_owned());
+            save_state_to(&state, &explicit).unwrap();
+        }
+        let before = fs::read(&state).unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "config::socks5::secure::tests::interrupted_socks5_commit_recovers_from_hardened_config_and_old_state",
+            ])
+            .env(CHILD, path)
+            .env(MODE, mode)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(INTERRUPTED), "{output:?}");
+        let servers = load_servers(&config).unwrap();
+        let on_disk: ServerConfig =
+            crate::yaml::from_slice(&fs::read(&profile_file).unwrap()).unwrap();
+        assert!(
+            crate::yaml::to_string(&on_disk).unwrap()
+                == crate::yaml::to_string(&servers[0]).unwrap()
+        );
+        if mode == "auth" {
+            assert_eq!(servers[0].address, "0.0.0.0:1080");
+            assert!(matches!(&servers[0].protocol, ServerProtocol::Socks {
+                username: Some(username), password: Some(password), ..
+            } if !username.is_empty() && !password.is_empty()));
+        } else {
+            assert_eq!(servers[0].address, "127.0.0.1:1080");
+        }
+        assert!(
+            fs::read(&state).unwrap() == before,
+            "中断时 state 必须仍是旧值"
+        );
+        let lock = path.join("lock");
+        let choose = || panic!("已加固的磁盘配置无需重新选择");
+        assert!(prepare_locked(path, &profile.name, &lock, true, choose)
+            .unwrap()
+            .is_none());
+        let result = super::prepare_locked(path, &profile.name, &lock, false, choose, |_| {
+            bail!("模拟中断后服务仍在使用旧配置")
+        });
+        assert!(format!("{:#}", result.err().unwrap()).contains("未能确认服务已加载"));
+        assert!(
+            fs::read(&state).unwrap() == before,
+            "未验证服务时不得改写 state"
+        );
+
+        assert!(
+            super::prepare_locked(path, &profile.name, &lock, false, choose, |recovered| {
+                assert!(utils::try_exclusive_lock(&lock, false).is_err());
+                assert!(recovered.socks5_risk_warning().is_none());
+                ensure_servers_match_state(&servers, std::slice::from_ref(recovered))
+            })
+            .unwrap()
+            .is_none()
+        );
+        let recovered = load_state_from(&state).unwrap();
+        assert_eq!(recovered.profiles[0].id, profile.id);
+        assert!(recovered.profiles[0].socks5_risk_warning().is_none());
+        if mode == "local" {
+            assert_eq!(
+                recovered.profiles[0].server_address.as_deref(),
+                Some("127.0.0.1")
+            );
+        }
+        ensure_servers_match_state(&servers, &recovered.profiles).unwrap();
+    }
 }
 
 #[tokio::test]

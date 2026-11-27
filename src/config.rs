@@ -2725,6 +2725,24 @@ pub fn load_state() -> Result<ManagedState> {
 }
 
 fn load_state_from(path: &Path) -> Result<ManagedState> {
+    let mut state = load_state_before_socks5_migration(path)?;
+    if state.profiles.iter().any(|profile| {
+        matches!(
+            profile.credentials,
+            Credentials::Socks5 { listen: None, .. }
+        )
+    }) {
+        let servers = load_servers(&path.with_file_name("config.yaml"))
+            .context("迁移 SOCKS5 监听地址需要原有聚合配置；请恢复 config.yaml 后重试")?;
+        socks5::migrate_listen(&mut state, &servers)?;
+    }
+    for profile in &state.profiles {
+        profile.validate_socks5_listen()?;
+    }
+    Ok(state)
+}
+
+fn load_state_before_socks5_migration(path: &Path) -> Result<ManagedState> {
     let json = fs::read_to_string(path)
         .with_context(|| format!("读取管理状态 {} 失败", path.display()))?;
     let mut state: ManagedState = serde_json::from_str(&json).context("管理状态 JSON 已损坏")?;
@@ -2747,18 +2765,7 @@ fn load_state_from(path: &Path) -> Result<ManagedState> {
             .context("迁移旧版链式代理状态失败")?;
     }
     state.chain_proxy.validate().context("链式代理状态无效")?;
-    if state.profiles.iter().any(|profile| {
-        matches!(
-            profile.credentials,
-            Credentials::Socks5 { listen: None, .. }
-        )
-    }) {
-        let servers = load_servers(&path.with_file_name("config.yaml"))
-            .context("迁移 SOCKS5 监听地址需要原有聚合配置；请恢复 config.yaml 后重试")?;
-        socks5::migrate_listen(&mut state, &servers)?;
-    }
     for profile in &state.profiles {
-        profile.validate_socks5_listen()?;
         profile
             .validate_h2mux()
             .with_context(|| format!("配置 {} 的 H2MUX 状态无效", profile.name))?;

@@ -92,6 +92,9 @@ pub(super) fn commit_profile_with_activation(
 ) -> Result<()> {
     let profiles = directory.join("profiles");
     let had_profiles = managed_profile_directory_exists(&profiles)?;
+    let state_path = directory.join("ping-rust-state.json");
+    read_managed_file(&state_path)?
+        .with_context(|| format!("受管文件 {} 已不存在", state_path.display()))?;
     let state_json = serde_json::to_vec_pretty(state).context("序列化管理状态失败")?;
     let mut files = Vec::new();
     for (name, bytes) in documents {
@@ -101,15 +104,10 @@ pub(super) fn commit_profile_with_activation(
             files.push((path, bytes.as_slice(), original));
         }
     }
-    for (name, bytes) in [
-        ("ping-rust-state.json", state_json.as_slice()),
-        ("config.yaml", runtime.as_bytes()),
-    ] {
-        let path = directory.join(name);
-        let original = read_managed_file(&path)?
-            .with_context(|| format!("受管文件 {} 已不存在", path.display()))?;
-        files.push((path, bytes, Some(original)));
-    }
+    let config_path = directory.join("config.yaml");
+    let original = read_managed_file(&config_path)?
+        .with_context(|| format!("受管文件 {} 已不存在", config_path.display()))?;
+    files.push((config_path, runtime.as_bytes(), Some(original)));
 
     let mut committed = 0;
     let mut created_profiles = false;
@@ -131,7 +129,8 @@ pub(super) fn commit_profile_with_activation(
                 after_replace();
             }
         }
-        activate(false)
+        activate(false)?;
+        utils::atomic_write(&state_path, &state_json, 0o600)
     })();
     let Err(error) = update else {
         return Ok(());

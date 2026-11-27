@@ -35,6 +35,7 @@ pub(crate) async fn secure(
         Path::new(utils::LOCK_FILE),
         dry_run,
         choose,
+        verify_running,
     )?
     else {
         return Ok(());
@@ -83,25 +84,54 @@ fn prepare_locked(
     lock_path: &Path,
     dry_run: bool,
     choose: impl FnOnce() -> Result<Option<SecureMode>>,
+    verify_pending: impl FnOnce(&ManagedProfile) -> Result<()>,
 ) -> Result<Option<(SecurePlan, Option<utils::ExclusiveLock>)>> {
-    let before = SecureTarget::load(directory, selector)?;
-    if before.profile().socks5_risk_warning().is_none() {
-        println!("该 SOCKS5 节点已有认证或仅监听回环地址，无需修复。");
-        return Ok(None);
-    }
-    let Some(mode) = choose()? else {
-        println!("已取消 SOCKS5 加固。");
-        return Ok(None);
+    let load_locked = || {
+        let mut lock = utils::try_exclusive_lock(lock_path, !dry_run)?;
+        let mut target = SecureTarget::load(directory, selector)?;
+        if lock.is_none() && target.profile().socks5_risk_warning().is_none() {
+            lock = utils::try_exclusive_lock(lock_path, true)?;
+            target = SecureTarget::load(directory, selector)?;
+        }
+        Ok::<_, anyhow::Error>((target, lock))
     };
-
-    let lock = utils::try_exclusive_lock(lock_path, !dry_run)?;
-    let changed = "所选 SOCKS5 节点已变更，请重新运行加固命令";
-    let after = SecureTarget::load(directory, selector).context(changed)?;
-    if !before.matches(&after)? {
-        bail!("{changed}");
+    let (before, lock) = load_locked()?;
+    let (target, _lock) = if before.profile().socks5_risk_warning().is_some() {
+        drop(lock);
+        let Some(mode) = choose()? else {
+            println!("已取消 SOCKS5 加固。");
+            return Ok(None);
+        };
+        let changed = "所选 SOCKS5 节点已变更，请重新运行加固命令";
+        let (after, lock) = load_locked().context(changed)?;
+        if before.profile().id != after.profile().id {
+            bail!("{changed}");
+        }
+        if after.profile().socks5_risk_warning().is_some() {
+            if !before.matches(&after)? {
+                bail!("{changed}");
+            }
+            return Ok(Some((after.build(mode)?, lock)));
+        }
+        (after, lock)
+    } else {
+        (before, lock)
+    };
+    if target.pending_state {
+        if dry_run {
+            println!("磁盘上的 SOCKS5 配置已加固，管理状态待同步；预览未验证运行中的服务，也未写入状态。");
+            return Ok(None);
+        }
+        verify_pending(target.profile()).context(
+            "磁盘上的 SOCKS5 配置已加固，但未能确认服务已加载；请核对配置、重启 shoes.service 后重试",
+        )?;
+        save_state_to(&directory.join("ping-rust-state.json"), &target.state)
+            .context("已验证运行中的 SOCKS5 加固，但同步管理状态失败，请重试")?;
+        println!("SOCKS5 加固已生效，管理状态已同步，无需修复。");
+    } else {
+        println!("该 SOCKS5 节点已有认证或仅监听回环地址，无需修复。");
     }
-    let plan = after.build(mode)?;
-    Ok(Some((plan, lock)))
+    Ok(None)
 }
 
 async fn commit_with_signal_protection(
@@ -166,6 +196,7 @@ struct SecureTarget {
     servers: Vec<ServerConfig>,
     index: usize,
     document: Option<Vec<u8>>,
+    pending_state: bool,
 }
 
 impl SecureTarget {
@@ -176,7 +207,7 @@ impl SecureTarget {
             commit::read_managed_file(path)?
                 .with_context(|| format!("未找到受管配置文件 {}", path.display()))?;
         }
-        let state = load_state_from(&state_path)?;
+        let mut state = load_state_before_socks5_migration(&state_path)?;
         let original = crate::client::select_profile(&state.profiles, Some(selector))?;
         if original.protocol() != Protocol::Socks5 {
             bail!("所选节点不是 SOCKS5");
@@ -187,13 +218,23 @@ impl SecureTarget {
             .position(|profile| profile.id == original.id)
             .context("未找到所选 SOCKS5 节点")?;
         let servers = load_servers(&config_path)?;
-        ensure_servers_match_state(&servers, &state.profiles)
-            .context("聚合配置与管理状态不一致，无法安全加固")?;
-        ensure_chain_proxy_matches_state(&servers, &state)?;
-        let mut document = None;
-        if original.socks5_risk_warning().is_some() {
+        let server = servers.get(index).context("聚合配置缺少所选 SOCKS5 节点")?;
+        let read_document = |profile: &ManagedProfile| {
             commit::managed_profile_directory_exists(&directory.join("profiles"))?;
-            document = commit::read_managed_file(&profile_path(directory, original))?;
+            commit::read_managed_file(&profile_path(directory, profile))
+        };
+        let mut document = None;
+        if let Some(recovered) = recover_profile(original, server)? {
+            document = read_document(original)?;
+            if document.is_some() {
+                state.profiles[index] = recovered;
+            }
+        }
+        let pending_state = document.is_some();
+        migrate_listen(&mut state, &servers).context("聚合配置与管理状态不一致，无法安全加固")?;
+        ensure_chain_proxy_matches_state(&servers, &state)?;
+        if state.profiles[index].socks5_risk_warning().is_some() {
+            document = read_document(&state.profiles[index])?;
         }
         if let Some(bytes) = &document {
             let on_disk: ServerConfig = crate::yaml::from_slice(bytes)
@@ -207,6 +248,7 @@ impl SecureTarget {
             servers,
             index,
             document,
+            pending_state,
         })
     }
 
@@ -261,6 +303,71 @@ impl SecureTarget {
             runtime,
         })
     }
+}
+
+fn recover_profile(
+    original: &ManagedProfile,
+    server: &ServerConfig,
+) -> Result<Option<ManagedProfile>> {
+    let Credentials::Socks5 {
+        username: None,
+        password: None,
+        listen,
+        ..
+    } = &original.credentials
+    else {
+        return Ok(None);
+    };
+    if listen.is_some() && original.socks5_risk_warning().is_none() {
+        return Ok(None);
+    }
+    if listen.is_some() {
+        original.validate_socks5_listen()?;
+    }
+    let ServerProtocol::Socks {
+        username, password, ..
+    } = &server.protocol
+    else {
+        return Ok(None);
+    };
+    let Ok(address) = server.address.parse::<SocketAddr>() else {
+        return Ok(None);
+    };
+    let previous = listen
+        .as_ref()
+        .map(|_| socket_address(original))
+        .transpose()?;
+    let (host, _) = server.address.rsplit_once(':').expect("已解析监听地址");
+    let mut recovered = original.clone();
+    match (username, password) {
+        (Some(user), Some(secret))
+            if !address.ip().is_loopback()
+                && previous.is_none_or(|previous| previous == address) =>
+        {
+            validate_socks5_component("用户名", user)?;
+            validate_socks5_component("密码", secret)?;
+        }
+        (None, None)
+            if matches!(host, "127.0.0.1" | "[::1]")
+                && previous.is_none_or(|previous| previous.is_ipv4() == address.is_ipv4()) =>
+        {
+            recovered.server_address = Some(host.trim_matches(['[', ']']).to_owned());
+        }
+        _ => return Ok(None),
+    }
+    let Credentials::Socks5 {
+        listen,
+        username: stored_user,
+        password: stored_password,
+        ..
+    } = &mut recovered.credentials
+    else {
+        unreachable!("已验证 SOCKS5 协议");
+    };
+    *listen = Some(Socks5Listen::new(host.trim_matches(['[', ']'])));
+    stored_user.clone_from(username);
+    stored_password.clone_from(password);
+    Ok(Some(recovered))
 }
 
 struct SecurePlan {

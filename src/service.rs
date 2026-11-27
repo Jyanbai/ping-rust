@@ -745,26 +745,32 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path();
         let installed = path.join("shoes");
-        let running = path.join("running");
-        fs::copy("/bin/sh", &running).unwrap();
-        fs::hard_link(&running, &installed).unwrap();
-        let mut child = Command::new(&running)
-            .args(["-c", "read -r line || :"])
+        let script = path.join("hold.sh");
+        fs::write(&script, "read -r line || :\n").unwrap();
+        let mut child = Command::new("/bin/sh")
+            .arg(&script)
             .stdin(std::process::Stdio::piped())
             .spawn()
             .unwrap();
         let executable = std::path::PathBuf::from(format!("/proc/{}/exe", child.id()));
+        let uses_system_shell = same_executable(&executable, Path::new("/bin/sh"));
+        let shell = fs::read_link(&executable).unwrap();
+        std::os::unix::fs::symlink(&shell, &installed).unwrap();
         let matched = check_socks5_restart_executable(&executable, &installed);
         fs::remove_file(&installed).unwrap();
-        fs::copy("/bin/sh", &installed).unwrap();
+        std::os::unix::fs::symlink(std::env::current_exe().unwrap(), &installed).unwrap();
         let replaced = check_socks5_restart_executable(&executable, &installed);
         fs::remove_file(&installed).unwrap();
-        fs::hard_link(&running, &installed).unwrap();
-        fs::remove_file(&running).unwrap();
-        let deleted = check_socks5_restart_executable(&executable, &installed);
-        let same_inode = same_executable(&executable, &installed);
+        std::os::unix::fs::symlink(&shell, &installed).unwrap();
+        let deleted_target = path.join("running (deleted)");
+        std::os::unix::fs::symlink(&executable, &deleted_target).unwrap();
+        let deleted_link = path.join("proc-exe");
+        std::os::unix::fs::symlink(&deleted_target, &deleted_link).unwrap();
+        let deleted = check_socks5_restart_executable(&deleted_link, &installed);
+        let same_inode = same_executable(&deleted_link, &installed);
         drop(child.stdin.take());
         assert!(child.wait().unwrap().success());
+        assert!(uses_system_shell.unwrap(), "测试必须直接由系统 sh 执行脚本");
         assert!(same_inode.unwrap());
         matched.unwrap();
         for result in [replaced, deleted] {
