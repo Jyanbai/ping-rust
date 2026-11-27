@@ -77,6 +77,11 @@ where
     Ok(())
 }
 
+#[cfg(test)]
+std::thread_local! {
+    pub(super) static AFTER_PROFILE_REPLACE: std::cell::Cell<Option<fn()>> = const { std::cell::Cell::new(None) };
+}
+
 pub(super) fn commit_profile_with_activation(
     directory: &Path,
     documents: &BTreeMap<String, Vec<u8>>,
@@ -121,6 +126,10 @@ pub(super) fn commit_profile_with_activation(
         for ((path, _, _), temp) in files.iter().zip(staged) {
             utils::persist_replace(temp, path)?;
             committed += 1;
+            #[cfg(test)]
+            if let Some(after_replace) = AFTER_PROFILE_REPLACE.take() {
+                after_replace();
+            }
         }
         activate(false)
     })();

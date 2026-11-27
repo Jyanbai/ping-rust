@@ -156,6 +156,19 @@ capture_anonymous_socks5 "$NEW" "$WORK/socks5-new"
 capture_anonymous_socks5 "$OLD" "$WORK/socks5-old"
 diff -u "$WORK/socks5-new/url" "$WORK/socks5-old/url"
 diff -u "$WORK/socks5-new/qr" "$WORK/socks5-old/qr"
+socks5_id="$(jq -er '.profiles[] | select(.name == "compat-socks5-no-auth") | .id' \
+  /etc/shoes/ping-rust-state.json)"
+for server in "$SERVER" 127.0.0.1; do
+  "$OLD" export clash-meta --profile "$socks5_id" --server "$server" >"$WORK/socks5-old/clash"
+  "$OLD" export sing-box --profile "$socks5_id" --server "$server" >"$WORK/socks5-old/sing-box"
+  python3 - "$WORK/socks5-old/clash" "$server" <<'PY'
+import sys
+import yaml
+with open(sys.argv[1]) as source:
+    assert yaml.safe_load(source)['proxies'][0]['server'] == sys.argv[2]
+PY
+  jq -e --arg server "$server" '.outbounds[0].server == $server' "$WORK/socks5-old/sing-box" >/dev/null
+done
 find /etc/shoes -type f -exec sha256sum {} + | sort -k2 >"$WORK/hash-socks5-after"
 diff -u "$WORK/hash-socks5-before" "$WORK/hash-socks5-after"
 echo 'v0.2.1: anonymous SOCKS5 URL/QR/info preserve loopback address: PASS'
