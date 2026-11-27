@@ -562,6 +562,8 @@ sudo ping-rust export nekobox --profile <配置-UUID> --server 203.0.113.10
 
 只有一个配置时可以省略 `--profile`。SOCKS5 可导出 percent-encoded `socks5://` URI、终端 QR、sing-box `type: socks` 和 Clash Meta/Mihomo `type: socks5`；IPv6 地址会使用方括号。NekoBox 没有在本项目核实到稳定、明确的专用 SOCKS5 导入 schema，因此 `export nekobox` 会明确拒绝，不把普通 URI 冒充已验证的 NekoBox 格式。
 
+sing-box 导出为自签 TLS 节点写入 `tls.certificate_public_key_sha256`：它是节点叶证书的公钥（DER SubjectPublicKeyInfo）的 SHA-256，按标准 Base64 编码。请使用支持该字段的客户端；更换证书密钥后要重新导出。公有证书缺失、不可读或无法解析时，导出会报错，不会回退到 `insecure`。NaiveProxy 仍嵌入公有 PEM；`--cert`/`--key` 提供的证书仍走正常证书验证。Clash Meta、NekoBox、分享链接和二维码不在本阶段改动范围内，对自签节点仍可能跳过证书验证。
+
 VMess-WS-TLS 导出明确使用 `aes-128-gcm`，不再依赖客户端的 `auto` 模式。已有受管节点不需要重建、修改服务端配置或重启 shoes；升级后重新导出并导入客户端，或重新生成分享链接、二维码。
 
 Snell v3 使用 shoes 原生服务端，新节点默认 `aes-128-gcm`；`aes-256-gcm` 和 `chacha20-ietf-poly1305` 保留为可选 cipher，选择时提示客户端兼容性。CI 的 Mihomo v1.19.33 实测仅 `aes-128-gcm` 可用；Mihomo/Clash Meta 仅对该 cipher 开放无损导出 `type: snell`、`version: 3`、`psk` 和 `udp`。已有节点的 cipher 不会自动修改；若已有 chacha20 或 aes-256 Snell 节点使用 Mihomo 客户端，请将节点改为 `aes-128-gcm` 并重新导出客户端配置。当前 sing-box Snell 只支持 v4/v6，NekoBox 也没有已核实的 v3 导入能力，因此两者明确拒绝。Snell v3 没有统一、跨客户端的标准 URI，`url`、`qr` 和 `--plain` 不会生成伪 `snell://`。链式代理 outbound 尚未实现 Snell。Mihomo 同样不支持 AnyTLS+Reality，标准 AnyTLS URI也无法表达 Reality 公钥；所有不兼容情况都会返回中文错误。所有 Reality 导出只包含公钥，永远不包含服务器私钥。
@@ -619,7 +621,7 @@ sudo /usr/local/bin/shoes --dry-run /etc/shoes/config.yaml
 
 ### 受管 TLS 节点客户端验收
 
-`bash scripts/ci/tls-client-acceptance.sh --list` 列出七种协议及三个验收用例。实际验收只在干净、一次性的 Ubuntu 24.04 x86_64 systemd runner 上执行，从普通用户调用（需免交互 `sudo`、Python 3、`curl` 和 `ss`）。脚本安装 shoes，创建受管节点，退出时停止并禁用测试服务，保留受管文件供 runner 销毁；不在已有 shoes 服务、二进制、非空 `/etc/shoes` 或端口冲突的机器上执行。
+`bash scripts/ci/tls-client-acceptance.sh --list` 列出七种协议及四个验收用例。实际验收只在干净、一次性的 Ubuntu 24.04 x86_64 systemd runner 上执行，从普通用户调用（需免交互 `sudo`、Python 3、`curl`、`ss` 和 `openssl`）。脚本安装 shoes，创建受管节点，退出时停止并禁用测试服务，保留受管文件供 runner 销毁；不在已有 shoes 服务、二进制、非空 `/etc/shoes` 或端口冲突的机器上执行。
 
 ```bash
 PING_RUST="$PWD/target/release/ping-rust" \
@@ -628,7 +630,7 @@ TLS_ACCEPTANCE_RESULTS_DIR="$RUNNER_TEMP/tls-results" \
   bash scripts/ci/tls-client-acceptance.sh
 ```
 
-两个目录须为绝对路径、互不包含且尚未创建。只上传结果目录的 `results.jsonl`，不要上传私有目录或 systemd 日志。全部 21 行用例通过才退出 `0`；准备失败、用例缺失、纯超时或拒绝证据不足均退出 `1`，可按 `phase` 排查。TUIC 的错误凭据行要求密码和 UUID 两种独立变体都被拒。正例只证明自签证书在**未校验证书**时连通；证书负例保留正确凭据和 SNI，启用校验但不提供信任材料。
+两个目录须为绝对路径、互不包含且尚未创建。只上传结果目录的 `results.jsonl`，不要上传私有目录或 systemd 日志。全部 28 行用例通过才退出 `0`；准备失败、用例缺失、纯超时或拒绝证据不足均退出 `1`，可按 `phase` 排查。正例要求原样导出可通，且用 OpenSSL 独立核对公钥指纹。错误凭据用例中，TUIC 的密码和 UUID 两种独立变体都必须被拒；未知证书用例移除固定字段且不提供信任材料；异钥用例保留原始导出、SNI 和凭据，仅替换服务端自签证书及密钥，要求因公钥不匹配被拒。任一负例收到 marker 或命中 HTTP 源站都是失败。
 
 验收固定 shoes v0.3.7（x86_64 Linux musl）和 sing-box v1.14.2（Linux amd64），下载有限时和重试，提取前校验 SHA-256。更新版本时同步更新脚本中的摘要、拒绝预期和本节说明。
 

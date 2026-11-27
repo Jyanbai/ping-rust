@@ -1,5 +1,6 @@
 """Managed TLS client acceptance on a fresh Ubuntu systemd runner."""
 
+import base64
 import copy
 import hashlib
 import json
@@ -30,7 +31,10 @@ SHOES_BIN = Path("/usr/local/bin/shoes")
 CONFIG_DIR = Path("/etc/shoes")
 UNIT = "shoes.service"
 SUDO = ("sudo", "-n")
-POSITIVE, AUTH, CERTIFICATE = CASES = ("self-signed-insecure", "wrong-credentials", "untrusted-certificate")
+PIN_FIELD = "certificate_public_key_sha256"
+POSITIVE, AUTH, CERTIFICATE, DIFFERENT_KEY = CASES = (
+    "self-signed-pinned", "wrong-credentials", "untrusted-certificate", "different-key-certificate",
+)
 
 
 @dataclass(frozen=True)
@@ -53,7 +57,8 @@ PHASES = {
     "preflight", "missing-binary", "port-conflict", "download-shoes", "download-sing-box",
     "install", "origin", "generate", "service-health", "server-ready", "export",
     "positive-control", "check", "client-ready", "request-timeout", "request", "unexpected-traffic",
-    "rejection-unconfirmed", "acceptance", "cleanup", "interrupted", "internal",
+    "rejection-unconfirmed", "replace-certificate", "restore-certificate",
+    "acceptance", "cleanup", "interrupted", "internal",
 }
 
 
@@ -104,6 +109,7 @@ def negative_copy(wrapped, field):
     config = copy.deepcopy(wrapped)
     outbound = config["outbounds"][0]
     if field == "certificate":
+        del outbound["tls"][PIN_FIELD]
         outbound["tls"]["insecure"] = False
     elif field == "uuid":
         outbound[field] = str(uuid.UUID(int=uuid.UUID(outbound[field]).int ^ 1))
@@ -140,7 +146,7 @@ def verdict(case, observed):
                 and observed.marker_received and observed.origin_hits == 1):
             return 1, "request"
     else:
-        expected = "credentials" if case == AUTH else "certificate"
+        expected = {AUTH: "credentials", CERTIFICATE: "certificate", DIFFERENT_KEY: "pin-mismatch"}[case]
         if not (observed.curl_code in {35, 52, 55, 56, 97} and observed.outbound_attempt
                 and observed.rejection == expected):
             return 1, "rejection-unconfirmed"
@@ -148,6 +154,9 @@ def verdict(case, observed):
 
 
 def rejection_signal(client_log, curl_error):
+    if re.search(r"(?:unmatched|no matching|unrecognized) (?:remote |peer )?certificate public key|"
+                 r"certificate public key[^\r\n]*(?:mismatch|did not match|does not match)", client_log, re.I):
+        return "pin-mismatch"
     if "x509: certificate signed by unknown authority" in client_log:
         return "certificate"
     if re.search(
@@ -215,7 +224,7 @@ def sockets(phase, privileged=False):
 
 def preflight(ping_rust):
     if not ping_rust.is_file() or not os.access(ping_rust, os.X_OK) or any(
-        shutil.which(tool) is None for tool in ("curl", "sudo", "ss", "systemctl", "pgrep")
+        shutil.which(tool) is None for tool in ("curl", "sudo", "ss", "systemctl", "pgrep", "openssl")
     ):
         raise Failure("missing-binary")
     if (os.geteuid() == 0 or platform.machine() != "x86_64" or sys.platform != "linux"
@@ -268,6 +277,54 @@ def service_pid():
     return pid[1]
 
 
+def certificate_files(profile):
+    suffix = uuid.UUID(profile).hex[:8]
+    return CONFIG_DIR / f"cert-{suffix}.pem", CONFIG_DIR / f"key-{suffix}.pem"
+
+
+def public_key_pin(cert, phase):
+    pem = checked([*SUDO, "openssl", "x509", "-in", cert, "-pubkey", "-noout"], phase)
+    try:
+        begin, *body, end = pem.splitlines()
+        if begin != "-----BEGIN PUBLIC KEY-----" or end != "-----END PUBLIC KEY-----":
+            raise ValueError
+        spki = base64.b64decode("".join(body), validate=True)
+        if not spki:
+            raise ValueError
+    except ValueError:
+        raise Failure(phase) from None
+    return base64.b64encode(hashlib.sha256(spki).digest()).decode("ascii")
+
+
+@contextmanager
+def different_certificate(work, profile, protocol, port):
+    phase = "replace-certificate"
+    cert, key = certificate_files(profile)
+    replacement_cert, replacement_key = work / "alternate-cert.pem", work / "alternate-key.pem"
+    checked(["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256",
+             "-config", os.devnull, "-noenc", "-days", "1", "-subj", f"/CN={SERVER_NAME}",
+             "-addext", f"subjectAltName=DNS:{SERVER_NAME}",
+             "-out", replacement_cert, "-keyout", replacement_key], phase, log=work / phase)
+    if public_key_pin(cert, phase) == public_key_pin(replacement_cert, phase):
+        raise Failure(phase)
+    backups = []
+    try:
+        for destination, source in ((cert, replacement_cert), (key, replacement_key)):
+            backup = destination.with_suffix(".pin-test-original")
+            checked([*SUDO, "mv", "--", destination, backup], phase)
+            backups.append((backup, destination))
+            checked([*SUDO, "install", "-m", "0600", source, destination], phase)
+        checked([*SUDO, "systemctl", "restart", UNIT], phase)
+        pid = service_pid()
+        wait_port(protocol.network, port, pid, "server-ready", privileged=True)
+        yield pid
+    finally:
+        for backup, destination in reversed(backups):
+            checked([*SUDO, "mv", "--", backup, destination], "restore-certificate")
+        if backups:
+            checked([*SUDO, "systemctl", "restart", UNIT], "restore-certificate")
+
+
 def managed_export(ping_rust, work, slug, protocol, port):
     name = f"tls-e2e-{slug}-{secrets.token_hex(5)}"
     options = ["--anytls-mode", "tls"] if slug == "anytls" else []
@@ -284,17 +341,19 @@ def managed_export(ping_rust, work, slug, protocol, port):
         wrapped = wrap_export(exported, SOCKS_PORT)
         outbound, = wrapped["outbounds"]
         tls = outbound["tls"]
+        cert, _ = certificate_files(profile)
         if (outbound["type"] != protocol.outbound_type or outbound["tag"] != name
                 or outbound["server"] != LOOPBACK or outbound["server_port"] != port
-                or "detour" in outbound or set(tls) - {"enabled", "server_name", "insecure", "alpn"}
-                or tls["enabled"] is not True or tls["insecure"] is not True or tls["server_name"] != SERVER_NAME
+                or "detour" in outbound or set(tls) - {"enabled", "server_name", PIN_FIELD, "alpn"}
+                or tls["enabled"] is not True or tls["server_name"] != SERVER_NAME
+                or tls[PIN_FIELD] != [public_key_pin(cert, "export")]
                 or not all(isinstance(outbound[field], str) and outbound[field] for field in protocol.auth_fields)
                 or (slug == "vless-tls" and outbound.get("flow") != "xtls-rprx-vision")
                 or (slug.endswith("-ws-tls") and outbound["transport"]["type"] != "ws")):
             raise Failure("export")
     except (KeyError, ValueError, TypeError):
         raise Failure("export") from None
-    return wrapped, pid
+    return wrapped, pid, profile
 
 
 class Origin(ThreadingHTTPServer):
@@ -401,19 +460,27 @@ def run_protocol(slug, protocol, port, ping_rust, work, sing_box, server, result
     started = time.monotonic()
     work.mkdir(mode=0o700)
     try:
-        config, pid = managed_export(ping_rust, work, slug, protocol, port)
+        config, pid, profile = managed_export(ping_rust, work, slug, protocol, port)
     except Failure as error:
         if str(error) == "port-conflict":
             raise
         results.record(slug, POSITIVE, str(error), started, 1)
-        for case in (AUTH, CERTIFICATE):
+        for case in CASES[1:]:
             results.record(slug, case, "positive-control", started, 1)
         return
     positive_ok = False
     for case in CASES:
         started = time.monotonic()
         status, phase = verdict(case, Observation(positive_ok=False))
-        if case == POSITIVE or positive_ok:
+        if case == DIFFERENT_KEY and positive_ok:
+            try:
+                with different_certificate(work, profile, protocol, port) as alternate_pid:
+                    status, phase = probe(case, config, work, case, sing_box, server, alternate_pid)
+            except Failure as error:
+                if str(error) == "port-conflict":
+                    raise
+                status, phase = 1, str(error)
+        elif case != DIFFERENT_KEY and (case == POSITIVE or positive_ok):
             fields = {POSITIVE: (None,), AUTH: protocol.auth_fields, CERTIFICATE: ("certificate",)}[case]
             status, phase = 0, "acceptance"
             for field in fields:

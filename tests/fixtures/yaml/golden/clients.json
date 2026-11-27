@@ -51,8 +51,10 @@
           "alpn": [
             "h3"
           ],
+          "certificate_public_key_sha256": [
+            "D/lae0s9n5SmUSmF60tlNBHKv68taHjTkVQ53Wh8yxo="
+          ],
           "enabled": true,
-          "insecure": true,
           "server_name": "www.cloudflare.com"
         },
         "type": "hysteria2"
@@ -305,8 +307,10 @@
             "h2",
             "http/1.1"
           ],
+          "certificate_public_key_sha256": [
+            "D/lae0s9n5SmUSmF60tlNBHKv68taHjTkVQ53Wh8yxo="
+          ],
           "enabled": true,
-          "insecure": true,
           "server_name": "www.cloudflare.com"
         },
         "type": "trojan"
@@ -346,8 +350,10 @@
           "alpn": [
             "h3"
           ],
+          "certificate_public_key_sha256": [
+            "D/lae0s9n5SmUSmF60tlNBHKv68taHjTkVQ53Wh8yxo="
+          ],
           "enabled": true,
-          "insecure": true,
           "server_name": "www.cloudflare.com"
         },
         "type": "tuic",
@@ -391,8 +397,10 @@
             "h2",
             "http/1.1"
           ],
+          "certificate_public_key_sha256": [
+            "D/lae0s9n5SmUSmF60tlNBHKv68taHjTkVQ53Wh8yxo="
+          ],
           "enabled": true,
-          "insecure": true,
           "server_name": "www.cloudflare.com"
         },
         "type": "vless",
@@ -437,8 +445,10 @@
           "alpn": [
             "http/1.1"
           ],
+          "certificate_public_key_sha256": [
+            "D/lae0s9n5SmUSmF60tlNBHKv68taHjTkVQ53Wh8yxo="
+          ],
           "enabled": true,
-          "insecure": true,
           "server_name": "www.cloudflare.com"
         },
         "transport": {
@@ -494,8 +504,10 @@
           "alpn": [
             "http/1.1"
           ],
+          "certificate_public_key_sha256": [
+            "D/lae0s9n5SmUSmF60tlNBHKv68taHjTkVQ53Wh8yxo="
+          ],
           "enabled": true,
-          "insecure": true,
           "server_name": "www.cloudflare.com"
         },
         "transport": {
