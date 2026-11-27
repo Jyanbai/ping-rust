@@ -239,7 +239,12 @@ pub(crate) fn check_socks5_restart_scope() -> Result<()> {
     {
         bail!("SOCKS5 加固要求已加载的标准受管 shoes.service；请检查 unit、自定义 drop-in 或待重载配置");
     }
-    check_restart_dependencies(systemctl_show_value)
+    check_restart_dependencies(systemctl_show_value)?;
+    let pid = main_pid()?.context("shoes.service 缺少 MainPID")?;
+    check_socks5_restart_executable(
+        Path::new(&format!("/proc/{pid}/exe")),
+        Path::new(utils::SHOES_BIN),
+    )
 }
 
 fn check_restart_dependencies(
@@ -365,6 +370,16 @@ fn same_executable(running: &Path, installed: &Path) -> Result<bool> {
         let _ = (running, installed);
         Ok(false)
     }
+}
+
+fn check_socks5_restart_executable(running: &Path, installed: &Path) -> Result<()> {
+    let advice = "无法确认运行中的 shoes 与磁盘上的二进制一致；请先重启服务或完成升级";
+    let target = fs::read_link(running).context(advice)?;
+    let target = target.as_os_str().as_encoded_bytes();
+    if target.ends_with(b" (deleted)") || !same_executable(running, installed).context(advice)? {
+        bail!("{advice}");
+    }
+    Ok(())
 }
 
 pub fn hot_reload_and_verify(
@@ -723,6 +738,39 @@ fn ensure_systemctl() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn socks5_restart_rejects_replaced_or_deleted_executable() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path();
+        let installed = path.join("shoes");
+        let running = path.join("running");
+        fs::copy("/bin/sh", &running).unwrap();
+        fs::hard_link(&running, &installed).unwrap();
+        let mut child = Command::new(&running)
+            .args(["-c", "read -r line || :"])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let executable = std::path::PathBuf::from(format!("/proc/{}/exe", child.id()));
+        let matched = check_socks5_restart_executable(&executable, &installed);
+        fs::remove_file(&installed).unwrap();
+        fs::copy("/bin/sh", &installed).unwrap();
+        let replaced = check_socks5_restart_executable(&executable, &installed);
+        fs::remove_file(&installed).unwrap();
+        fs::hard_link(&running, &installed).unwrap();
+        fs::remove_file(&running).unwrap();
+        let deleted = check_socks5_restart_executable(&executable, &installed);
+        let same_inode = same_executable(&executable, &installed);
+        drop(child.stdin.take());
+        assert!(child.wait().unwrap().success());
+        assert!(same_inode.unwrap());
+        matched.unwrap();
+        for result in [replaced, deleted] {
+            assert!(format!("{:#}", result.unwrap_err()).contains("先重启服务或完成升级"));
+        }
+    }
 
     #[cfg(unix)]
     #[test]

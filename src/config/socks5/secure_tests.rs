@@ -41,9 +41,47 @@ async fn legacy(directory: &Path, port: u16, address: &str) -> ManagedProfile {
 }
 
 fn prepare(directory: &Path, profile: &ManagedProfile, mode: SecureMode) -> SecurePlan {
-    SecurePlan::load(directory, &profile.id.to_string(), || Ok(Some(mode)))
-        .unwrap()
-        .expect("应生成加固计划")
+    prepare_locked(
+        directory,
+        &profile.id.to_string(),
+        &directory.join("lock"),
+        true,
+        || Ok(Some(mode)),
+    )
+    .unwrap()
+    .expect("应生成加固计划")
+    .0
+}
+
+#[tokio::test]
+async fn choosing_socks5_mode_does_not_hold_config_lock() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path();
+    let profile = legacy(path, 1080, "0.0.0.0").await;
+    let lock_path = path.join("lock");
+    let _ = utils::try_exclusive_lock(&lock_path, true).unwrap();
+    let prepared = prepare_locked(path, &profile.name, &lock_path, false, || {
+        let _other = utils::try_exclusive_lock(&lock_path, false)?.unwrap();
+        Ok(Some(SecureMode::Local))
+    })
+    .unwrap();
+    assert!(prepared.is_some());
+    assert!(utils::try_exclusive_lock(&lock_path, true).is_err());
+}
+
+#[tokio::test]
+async fn rejects_socks5_state_changed_during_prompt() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path();
+    let profile = legacy(path, 1080, "0.0.0.0").await;
+    let state_path = path.join("ping-rust-state.json");
+    let result = prepare_locked(path, &profile.name, &path.join("lock"), false, || {
+        let mut state = load_state_from(&state_path)?;
+        state.profiles[0].server_address = Some("other.example.com".to_owned());
+        save_state_to(&state_path, &state)?;
+        Ok(Some(SecureMode::Local))
+    });
+    assert!(format!("{:#}", result.err().unwrap()).contains("所选 SOCKS5 节点已变更"));
 }
 
 #[tokio::test]
@@ -105,14 +143,25 @@ async fn dry_run_redacts_specific_ipv4_and_ipv6_bindings() {
 
 #[tokio::test]
 #[cfg(target_os = "linux")]
-async fn sigterm_does_not_interrupt_socks5_rollback() {
+async fn signals_do_not_interrupt_socks5_rollback() {
     use std::{
         io::BufRead,
         process::{Command, Stdio},
         sync::mpsc,
     };
 
-    const CHILD: &str = "PING_RUST_TEST_SOCKS5_SIGTERM_DIR";
+    const CHILD: &str = "PING_RUST_TEST_SOCKS5_SIGNAL_DIR";
+    const SIGNAL: &str = "PING_RUST_TEST_SOCKS5_SIGNAL";
+    fn signal_and_wait() {
+        assert!(Command::new("/bin/sh")
+            .args(["-c", "kill -s \"$1\" \"$2\"", "sh"])
+            .arg(std::env::var(SIGNAL).unwrap())
+            .arg(std::process::id().to_string())
+            .status()
+            .unwrap()
+            .success());
+        io::stdin().read_line(&mut String::new()).unwrap();
+    }
     if let Some(path) = std::env::var_os(CHILD) {
         let path = PathBuf::from(path);
         let profile = load_state_from(&path.join("ping-rust-state.json"))
@@ -121,17 +170,16 @@ async fn sigterm_does_not_interrupt_socks5_rollback() {
             .remove(0);
         let plan = prepare(&path, &profile, SecureMode::Local);
         let result = commit_with_signal_protection(move || {
+            let terminate = std::env::var(SIGNAL).unwrap() == "TERM";
+            if !terminate {
+                commit::AFTER_PROFILE_REPLACE.set(Some(signal_and_wait));
+            }
             plan.commit(&path, |profile| {
                 if profile.socks5_loopback().is_some() {
-                    assert!(Command::new("/bin/sh")
-                        .args(["-c", "kill -s TERM \"$1\"", "sh"])
-                        .arg(std::process::id().to_string())
-                        .status()
-                        .unwrap()
-                        .success());
-                    // The parent closes the pipe once it sees SIGTERM has been received.
-                    io::stdin().read_line(&mut String::new())?;
-                    bail!("模拟收到 SIGTERM 后的服务启动失败");
+                    if terminate {
+                        signal_and_wait();
+                    }
+                    bail!("模拟收到信号后的服务启动失败");
                 }
                 Ok(())
             })
@@ -151,37 +199,46 @@ async fn sigterm_does_not_interrupt_socks5_rollback() {
     ];
     let snapshot = || files.each_ref().map(|file| fs::read(file).unwrap());
     let before = snapshot();
-    let mut child = Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "config::socks5::secure::tests::sigterm_does_not_interrupt_socks5_rollback",
-            "--nocapture",
-        ])
-        .env(CHILD, path)
-        // Reproduce a minimal container without an external kill executable.
-        .env("PATH", path)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut stderr = io::BufReader::new(child.stderr.take().unwrap());
-    let (notify, observed) = mpsc::channel();
-    let log = thread::spawn(move || {
-        let mut log = String::new();
-        stderr.read_line(&mut log).unwrap();
-        let _ = notify.send(log.contains("收到 SIGTERM"));
-        stderr.read_to_string(&mut log).unwrap();
-        log
-    });
-    let signal_received = observed.recv_timeout(Duration::from_secs(10));
-    drop(child.stdin.take());
-    let status = child.wait().unwrap();
-    let log = log.join().unwrap();
-    assert!(snapshot() == before, "SIGTERM 导致配置未完整回滚：{log}");
-    assert_eq!(signal_received, Ok(true), "{log}");
-    assert_eq!(status.code(), Some(143));
-    assert!(log.contains("原配置已恢复"), "{log}");
+    for (signal, code) in [("HUP", 129), ("INT", 130), ("TERM", 143)] {
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "config::socks5::secure::tests::signals_do_not_interrupt_socks5_rollback",
+                "--nocapture",
+            ])
+            .env(CHILD, path)
+            .env(SIGNAL, signal)
+            .env("PATH", path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stderr = io::BufReader::new(child.stderr.take().unwrap());
+        let (notify, observed) = mpsc::channel();
+        let log = thread::spawn(move || {
+            let mut log = String::new();
+            stderr.read_line(&mut log).unwrap();
+            let _ = notify.send(log.contains(&format!("收到 SIG{signal}")));
+            stderr.read_to_string(&mut log).unwrap();
+            log
+        });
+        let signal_received = observed.recv_timeout(Duration::from_secs(10));
+        let during = snapshot();
+        drop(child.stdin.take());
+        let status = child.wait().unwrap();
+        let log = log.join().unwrap();
+        assert!(
+            snapshot() == before,
+            "SIG{signal} 导致配置未完整回滚：{log}"
+        );
+        assert_eq!(signal_received, Ok(true), "SIG{signal}: {log}");
+        assert_eq!(status.code(), Some(code));
+        assert!(log.contains("原配置已恢复"), "{log}");
+        if signal != "TERM" {
+            assert!(during[..2] == before[..2] && during[2] != before[2]);
+        }
+    }
 }
 
 #[tokio::test]
@@ -242,9 +299,11 @@ async fn repaired_socks5_stays_safe_after_port_edit_and_profile_rebuild() {
         let mut state = load_state_from(&saved_state).unwrap();
         let mut servers = load_servers(&config).unwrap();
         assert!(
-            SecurePlan::load(path, &original.name, || panic!("安全节点无需选择"))
-                .unwrap()
-                .is_none()
+            prepare_locked(path, &original.name, &path.join("lock"), true, || panic!(
+                "安全节点无需选择"
+            ))
+            .unwrap()
+            .is_none()
         );
 
         let profile = &mut state.profiles[0];

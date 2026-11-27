@@ -30,16 +30,10 @@ mod shoes_e2e_tests;
 
 use anyhow::Result;
 use clap::Parser;
-use std::{
-    future::Future,
-    sync::{Mutex, MutexGuard},
-};
+use std::future::Future;
+use tokio::sync::Mutex;
 
-static INTERRUPT_EXIT: Mutex<()> = Mutex::new(());
-
-pub(crate) fn defer_interrupt_exit() -> MutexGuard<'static, ()> {
-    INTERRUPT_EXIT.lock().expect("退出保护锁不可用")
-}
+static INTERRUPT_EXIT: Mutex<()> = Mutex::const_new(());
 
 #[tokio::main]
 async fn main() -> Result<()> {

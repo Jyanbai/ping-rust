@@ -9,6 +9,8 @@ use std::{
 
 use super::*;
 use crate::service;
+#[cfg(target_os = "linux")]
+use tokio::signal::unix::{signal, Signal, SignalKind};
 
 #[cfg(test)]
 #[path = "secure_tests.rs"]
@@ -26,9 +28,15 @@ pub(crate) async fn secure(
     choose: impl FnOnce() -> Result<Option<SecureMode>>,
 ) -> Result<()> {
     utils::require_linux_root()?;
-    let _lock = utils::try_exclusive_lock(Path::new(utils::LOCK_FILE), !dry_run)?;
     let directory = Path::new(utils::CONFIG_DIR);
-    let Some(plan) = SecurePlan::load(directory, selector, choose)? else {
+    let Some((plan, _lock)) = prepare_locked(
+        directory,
+        selector,
+        Path::new(utils::LOCK_FILE),
+        dry_run,
+        choose,
+    )?
+    else {
         return Ok(());
     };
     if dry_run {
@@ -69,69 +77,107 @@ pub(crate) async fn secure(
     Ok(())
 }
 
+fn prepare_locked(
+    directory: &Path,
+    selector: &str,
+    lock_path: &Path,
+    dry_run: bool,
+    choose: impl FnOnce() -> Result<Option<SecureMode>>,
+) -> Result<Option<(SecurePlan, Option<utils::ExclusiveLock>)>> {
+    let before = SecureTarget::load(directory, selector)?;
+    if before.profile().socks5_risk_warning().is_none() {
+        println!("该 SOCKS5 节点已有认证或仅监听回环地址，无需修复。");
+        return Ok(None);
+    }
+    let Some(mode) = choose()? else {
+        println!("已取消 SOCKS5 加固。");
+        return Ok(None);
+    };
+
+    let lock = utils::try_exclusive_lock(lock_path, !dry_run)?;
+    let changed = "所选 SOCKS5 节点已变更，请重新运行加固命令";
+    let after = SecureTarget::load(directory, selector).context(changed)?;
+    if !before.matches(&after)? {
+        bail!("{changed}");
+    }
+    let plan = after.build(mode)?;
+    Ok(Some((plan, lock)))
+}
+
 async fn commit_with_signal_protection(
     commit: impl FnOnce() -> Result<ManagedProfile> + Send + 'static,
 ) -> Result<ManagedProfile> {
     #[cfg(target_os = "linux")]
-    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        .context("无法安装 SIGTERM 处理，配置未提交")?;
-    let task = tokio::task::spawn_blocking(move || {
-        let _guard = crate::defer_interrupt_exit();
-        commit()
-    });
-    #[cfg(target_os = "linux")]
     let result = {
-        let mut task = task;
+        let install = |kind| signal(kind).context("无法安装加固信号处理，配置未提交");
+        let mut terminate = install(SignalKind::terminate())?;
+        let mut hangup = install(SignalKind::hangup())?;
+        let mut interrupt = install(SignalKind::interrupt())?;
+        let _guard = crate::INTERRUPT_EXIT.lock().await;
+        let mut task = tokio::task::spawn_blocking(commit);
         let result = tokio::select! {
             biased;
-            _ = terminate.recv() => {
-                eprintln!("收到 SIGTERM，等待 SOCKS5 加固完成或回滚。");
-                match task.await {
-                    Ok(Ok(_)) => eprintln!("SOCKS5 加固已提交并验证，请用 sudo prs info 查看结果。"),
-                    Ok(Err(error)) => eprintln!("{error:#}"),
-                    Err(error) => eprintln!("SOCKS5 配置提交任务异常结束：{error}"),
-                }
-                std::process::exit(143);
+            (name, code) = next_commit_signal(&mut terminate, &mut hangup, &mut interrupt) => {
+                let _ = writeln!(io::stderr(), "收到 {name}，等待 SOCKS5 加固完成或回滚。");
+                let _ = match task.await {
+                    Ok(Ok(_)) => writeln!(io::stderr(), "SOCKS5 加固已提交并验证，请用 sudo prs info 查看结果。"),
+                    Ok(Err(error)) => writeln!(io::stderr(), "{error:#}"),
+                    Err(error) => writeln!(io::stderr(), "SOCKS5 配置提交任务异常结束：{error}"),
+                };
+                exit_after_signal(code);
             }
             result = &mut task => result,
         };
         // Tokio keeps the signal handler installed after dropping the receiver.
-        // Let SIGTERM exit normally while the caller prints the finished result.
         tokio::spawn(async move {
-            terminate.recv().await;
-            std::process::exit(143);
+            let (_, code) = next_commit_signal(&mut terminate, &mut hangup, &mut interrupt).await;
+            exit_after_signal(code);
         });
         result
     };
     #[cfg(not(target_os = "linux"))]
-    let result = task.await;
+    let result = tokio::task::spawn_blocking(commit).await;
     result.context("SOCKS5 配置提交任务异常结束")?
 }
 
-struct SecurePlan {
-    mode: SecureMode,
-    original: ManagedProfile,
-    state: ManagedState,
-    index: usize,
-    documents: BTreeMap<String, Vec<u8>>,
-    runtime: String,
+#[cfg(target_os = "linux")]
+async fn next_commit_signal(
+    terminate: &mut Signal,
+    hangup: &mut Signal,
+    interrupt: &mut Signal,
+) -> (&'static str, i32) {
+    tokio::select! {
+        _ = terminate.recv() => ("SIGTERM", 143),
+        _ = hangup.recv() => ("SIGHUP", 129),
+        _ = interrupt.recv() => ("SIGINT", 130),
+    }
 }
 
-impl SecurePlan {
-    fn load(
-        directory: &Path,
-        selector: &str,
-        choose: impl FnOnce() -> Result<Option<SecureMode>>,
-    ) -> Result<Option<Self>> {
+#[cfg(target_os = "linux")]
+fn exit_after_signal(code: i32) -> ! {
+    if code == 130 {
+        crate::restore_cursor_and_exit();
+    }
+    std::process::exit(code)
+}
+
+struct SecureTarget {
+    state: ManagedState,
+    servers: Vec<ServerConfig>,
+    index: usize,
+    document: Option<Vec<u8>>,
+}
+
+impl SecureTarget {
+    fn load(directory: &Path, selector: &str) -> Result<Self> {
         let config_path = directory.join("config.yaml");
         let state_path = directory.join("ping-rust-state.json");
-        let profiles = directory.join("profiles");
         for path in [&config_path, &state_path] {
             commit::read_managed_file(path)?
                 .with_context(|| format!("未找到受管配置文件 {}", path.display()))?;
         }
-        let mut state = load_state_from(&state_path)?;
-        let original = crate::client::select_profile(&state.profiles, Some(selector))?.clone();
+        let state = load_state_from(&state_path)?;
+        let original = crate::client::select_profile(&state.profiles, Some(selector))?;
         if original.protocol() != Protocol::Socks5 {
             bail!("所选节点不是 SOCKS5");
         }
@@ -140,28 +186,50 @@ impl SecurePlan {
             .iter()
             .position(|profile| profile.id == original.id)
             .context("未找到所选 SOCKS5 节点")?;
-        let mut servers = load_servers(&config_path)?;
+        let servers = load_servers(&config_path)?;
         ensure_servers_match_state(&servers, &state.profiles)
             .context("聚合配置与管理状态不一致，无法安全加固")?;
         ensure_chain_proxy_matches_state(&servers, &state)?;
-        if original.socks5_risk_warning().is_none() {
-            println!("该 SOCKS5 节点已有认证或仅监听回环地址，无需修复。");
-            return Ok(None);
+        let mut document = None;
+        if original.socks5_risk_warning().is_some() {
+            commit::managed_profile_directory_exists(&directory.join("profiles"))?;
+            document = commit::read_managed_file(&profile_path(directory, original))?;
         }
-        commit::managed_profile_directory_exists(&profiles)?;
-        if let Some(bytes) = commit::read_managed_file(&profile_path(directory, &original))? {
-            let on_disk: ServerConfig = crate::yaml::from_slice(&bytes)
+        if let Some(bytes) = &document {
+            let on_disk: ServerConfig = crate::yaml::from_slice(bytes)
                 .map_err(|_| anyhow::anyhow!("所选 SOCKS5 profile 无法解析"))?;
             if crate::yaml::to_string(&on_disk)? != crate::yaml::to_string(&servers[index])? {
                 bail!("所选 SOCKS5 profile 与聚合配置不一致，请先恢复一致后重试");
             }
         }
-        let Some(mode) = choose()? else {
-            println!("已取消 SOCKS5 加固。");
-            return Ok(None);
-        };
+        Ok(Self {
+            state,
+            servers,
+            index,
+            document,
+        })
+    }
 
+    fn profile(&self) -> &ManagedProfile {
+        &self.state.profiles[self.index]
+    }
+
+    fn matches(&self, other: &Self) -> Result<bool> {
+        Ok(self.document == other.document
+            && serde_json::to_value(self.profile())? == serde_json::to_value(other.profile())?
+            && crate::yaml::to_string(&self.servers[self.index])?
+                == crate::yaml::to_string(&other.servers[other.index])?)
+    }
+
+    fn build(self, mode: SecureMode) -> Result<SecurePlan> {
+        let Self {
+            mut state,
+            mut servers,
+            index,
+            ..
+        } = self;
         let profile = &mut state.profiles[index];
+        let original = profile.clone();
         let server = &mut servers[index];
         match mode {
             SecureMode::Auth => {
@@ -184,16 +252,27 @@ impl SecurePlan {
         }
         let documents = profile_documents(&servers, &state.profiles)?;
         let runtime = commit::aggregate_profile_documents(&documents, &state.profiles)?;
-        Ok(Some(Self {
+        Ok(SecurePlan {
             mode,
             original,
             state,
             index,
             documents,
             runtime,
-        }))
+        })
     }
+}
 
+struct SecurePlan {
+    mode: SecureMode,
+    original: ManagedProfile,
+    state: ManagedState,
+    index: usize,
+    documents: BTreeMap<String, Vec<u8>>,
+    runtime: String,
+}
+
+impl SecurePlan {
     fn profile(&self) -> &ManagedProfile {
         &self.state.profiles[self.index]
     }
