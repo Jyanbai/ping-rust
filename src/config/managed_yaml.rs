@@ -8,9 +8,12 @@ use serde_json::Value;
 
 use super::{
     commit::{is_managed_profile_file_name, read_managed_file},
-    ensure_servers_match_state, finish_state_load, parse_state, socks5,
+    ensure_servers_match_state, finish_state_load, parse_state,
+    routing::render_mask,
+    schema::RuleMask,
+    socks5,
     transaction::{ManagedRollback, ProfileDirectorySnapshot},
-    ManagedProfile, ManagedState, ServerConfig,
+    ManagedProfile, ManagedState, ServerConfig, ServerRule,
 };
 use crate::yaml;
 
@@ -30,7 +33,15 @@ pub(super) struct PreparedYaml {
 
 impl ManagedYaml {
     pub(super) fn load(directory: &Path) -> Result<Self> {
-        let config = read_managed_file(&directory.join("config.yaml"))?;
+        Self::load_from(
+            &directory.join("config.yaml"),
+            &directory.join("ping-rust-state.json"),
+        )
+    }
+
+    pub(super) fn load_from(config_path: &Path, state_path: &Path) -> Result<Self> {
+        let directory = config_path.parent().context("配置没有父目录")?;
+        let config = read_managed_file(config_path)?;
         let (servers, entries) = match &config {
             Some(bytes) => (
                 yaml::from_slice(bytes).map_err(|_| anyhow!("config.yaml 不是可管理的配置"))?,
@@ -44,7 +55,7 @@ impl ManagedYaml {
             changed: false,
             original: ManagedRollback {
                 config,
-                state: read_managed_file(&directory.join("ping-rust-state.json"))?,
+                state: read_managed_file(state_path)?,
                 profiles: ProfileDirectorySnapshot::capture(&directory.join("profiles"))?,
                 generated_certificate: None,
                 generated_certificate_key: None,
@@ -53,13 +64,17 @@ impl ManagedYaml {
     }
 
     pub(super) fn state(&self, required: bool) -> Result<ManagedState> {
+        finish_state_load(self.state_before_listen(required)?, |state| {
+            socks5::migrate_listen(state, &self.servers)
+        })
+    }
+
+    pub(super) fn state_before_listen(&self, required: bool) -> Result<ManagedState> {
         if required && self.original.config.is_none() {
             bail!("未找到聚合配置 config.yaml");
         }
         match self.original.state.as_deref() {
-            Some(bytes) => finish_state_load(parse_state(bytes)?, |state| {
-                socks5::migrate_listen(state, &self.servers)
-            }),
+            Some(bytes) => parse_state(bytes),
             None if self.original.config.is_some() => {
                 bail!("检测到非 ping-rust 管理的 config.yaml；为避免覆盖，请先备份或改用 --output")
             }
@@ -72,27 +87,47 @@ impl ManagedYaml {
         &mut self.original
     }
 
-    pub(super) fn into_legacy(
-        self,
-        required: bool,
-    ) -> Result<(Vec<ServerConfig>, ManagedState, ManagedRollback, bool)> {
-        let state = self.state(required)?;
-        let complete = self.guard_legacy(&state.profiles)?;
-        ensure_servers_match_state(&self.servers, &state.profiles)?;
-        Ok((self.servers, state, self.original, complete))
+    pub(super) fn entry(&self, index: usize) -> Option<&Value> {
+        self.entries.get(index)
+    }
+
+    pub(super) fn profile_document(&self, profile: &ManagedProfile) -> Option<&[u8]> {
+        self.original
+            .profiles
+            .files
+            .get(&profile.config_file_name())
+            .map(Vec::as_slice)
     }
 
     pub(super) fn check_copies(&self, profiles: &[ManagedProfile]) -> Result<bool> {
+        self.compare_copies(profiles, false)
+    }
+
+    pub(super) fn check_copies_for_migration(&self, profiles: &[ManagedProfile]) -> Result<bool> {
+        self.compare_copies(profiles, true)
+    }
+
+    fn compare_copies(
+        &self,
+        profiles: &[ManagedProfile],
+        allow_legacy_alias: bool,
+    ) -> Result<bool> {
         let mut matched = BTreeSet::new();
+        let mut needs_sync = false;
         for (index, (entry, profile)) in self.entries.iter().zip(profiles).enumerate() {
             let name = profile.config_file_name();
             if let Some(bytes) = self.original.profiles.files.get(&name) {
                 let ordinal = index + 1;
-                let copy = yaml::from_slice(bytes)
+                let copy: Value = yaml::from_slice(bytes)
                     .map_err(|_| anyhow!("{name} 无法解析（config.yaml 第 {ordinal} 项）"))?;
                 if entry != &copy {
-                    let field = differing_path(entry, &copy);
-                    bail!("config.yaml 第 {ordinal} 项与 {name} 不一致（字段路径：${field}）");
+                    if allow_legacy_alias && same_after_alias_migration(entry.clone(), copy.clone())
+                    {
+                        needs_sync = true;
+                    } else {
+                        let field = differing_path(entry, &copy);
+                        bail!("config.yaml 第 {ordinal} 项与 {name} 不一致（字段路径：${field}）");
+                    }
                 }
                 matched.insert(name);
             }
@@ -102,33 +137,86 @@ impl ManagedYaml {
                 bail!("节点文件 {name} 缺少对应的 config.yaml 条目，请先备份并恢复一致后重试");
             }
         }
-        Ok(matched.len() == profiles.len() && matched.len() == self.original.profiles.files.len())
+        Ok(!needs_sync
+            && matched.len() == profiles.len()
+            && matched.len() == self.original.profiles.files.len())
     }
 
-    pub(super) fn guard_legacy(&self, profiles: &[ManagedProfile]) -> Result<bool> {
-        let complete = self.check_copies(profiles)?;
-        self.ensure_lossless_legacy_write()?;
-        Ok(complete)
-    }
-
-    pub(super) fn ensure_lossless_legacy_write(&self) -> Result<()> {
-        if self.entries.len() != self.servers.len() {
-            bail!("{LOSSY_WRITE}");
+    pub(super) fn migrate_rule_syntax(&mut self, upgrade_masks: bool) -> Result<bool> {
+        let mut changed = false;
+        for (index, (entry, server)) in self.entries.iter_mut().zip(&mut self.servers).enumerate() {
+            let Some(rules) = entry.get_mut("rules") else {
+                continue;
+            };
+            let before = rules.clone();
+            normalize_rule_aliases(rules);
+            if upgrade_masks {
+                normalize_wildcard_masks(rules);
+                let mut modeled = yaml::to_value(&server.rules)?;
+                normalize_wildcard_masks(&mut modeled);
+                let ordinal = index + 1;
+                server.rules = serde_json::from_value(modeled).map_err(|_| {
+                    anyhow!("config.yaml 第 {ordinal} 项规则语法迁移失败（字段路径：$.rules）")
+                })?;
+            }
+            changed |= before != *rules;
         }
-        for (entry, server) in self.entries.iter().zip(&self.servers) {
-            let modeled = yaml::to_value(server)?;
-            if entry == &modeled {
+        self.changed |= changed;
+        Ok(changed)
+    }
+
+    pub(super) fn replace_rules(&mut self, rules: &[ServerRule]) -> Result<bool> {
+        let mut changed = false;
+        let replacement = yaml::to_value(rules)?;
+        let replacement = replacement.as_array().expect("规则序列");
+        for (index, (entry, server)) in self.entries.iter_mut().zip(&mut self.servers).enumerate() {
+            if server.rules == rules {
                 continue;
             }
-            let mut normalized = entry.clone();
-            if let Some(rules) = normalized.get_mut("rules") {
-                normalize_rule_aliases(rules);
+            let mut previous = yaml::to_value(&server.rules)?;
+            let mut normalized = entry
+                .get("rules")
+                .cloned()
+                .unwrap_or_else(|| Value::Array(Vec::new()));
+            normalize_rule_aliases(&mut normalized);
+            normalize_wildcard_masks(&mut normalized);
+            normalize_wildcard_masks(&mut previous);
+            let previous = previous.as_array().expect("规则序列");
+            let ordinal = index + 1;
+            let old = normalized
+                .as_array()
+                .filter(|old| old.len() == previous.len())
+                .with_context(|| {
+                    format!("config.yaml 第 {ordinal} 项（字段路径：$.rules）：{LOSSY_WRITE}")
+                })?;
+            let mut next = replacement.clone();
+            for (rule_index, (raw, modeled)) in old.iter().zip(previous).enumerate() {
+                if raw == modeled {
+                    continue;
+                }
+                let mut candidates = replacement
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, rule)| *rule == modeled);
+                let target = candidates.next();
+                if let Some((target, _)) = target {
+                    if candidates.next().is_none()
+                        && previous.iter().filter(|rule| *rule == modeled).count() == 1
+                    {
+                        next[target] = raw.clone();
+                        continue;
+                    }
+                }
+                bail!(
+                    "config.yaml 第 {ordinal} 项（字段路径：$.rules[{rule_index}]）：{LOSSY_WRITE}"
+                );
             }
-            if normalized != modeled {
-                bail!("{LOSSY_WRITE}");
-            }
+            entry["rules"] = Value::Array(next);
+            server.rules = rules.to_vec();
+            changed = true;
         }
-        Ok(())
+        self.changed |= changed;
+        Ok(changed)
     }
 
     pub(super) fn append(&mut self, server: ServerConfig, rerender_rules: bool) -> Result<()> {
@@ -203,6 +291,15 @@ impl ManagedYaml {
     }
 }
 
+fn same_after_alias_migration(mut left: Value, mut right: Value) -> bool {
+    for entry in [&mut left, &mut right] {
+        if let Some(rules) = entry.get_mut("rules") {
+            normalize_rule_aliases(rules);
+        }
+    }
+    left == right
+}
+
 fn normalize_rule_aliases(rules: &mut Value) {
     if let Some(rules) = rules.as_array_mut() {
         for rule in rules.iter_mut().filter_map(Value::as_object_mut) {
@@ -211,6 +308,28 @@ fn normalize_rule_aliases(rules: &mut Value) {
                     rule.insert("client_chains".to_owned(), client);
                 }
             }
+        }
+    }
+}
+
+fn normalize_wildcard_masks(rules: &mut Value) {
+    fn normalize(mask: &mut Value) {
+        if let Some(RuleMask::DomainPattern { domain_pattern }) = mask.as_str().map(render_mask) {
+            *mask = serde_json::json!({"domain_pattern": domain_pattern});
+        }
+    }
+    for masks in rules
+        .as_array_mut()
+        .into_iter()
+        .flatten()
+        .filter_map(|rule| rule.get_mut("masks"))
+    {
+        if let Some(masks) = masks.as_array_mut() {
+            for mask in masks {
+                normalize(mask);
+            }
+        } else {
+            normalize(masks);
         }
     }
 }

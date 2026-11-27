@@ -2,16 +2,17 @@ use std::{collections::BTreeMap, fs, path::Path};
 
 use anyhow::{anyhow, bail, Context, Result};
 
+#[cfg(test)]
+use super::{ensure_servers_match_state, schema::ServerConfig, ManagedProfile};
 use super::{
-    ensure_servers_match_state,
     managed_yaml::PreparedYaml,
     save_state_to,
-    schema::ServerConfig,
     transaction::{read_optional, restore_snapshot, ManagedRollback, ProfileDirectorySnapshot},
-    ManagedProfile, ManagedState,
+    ManagedState,
 };
 use crate::{performance, utils};
 
+#[cfg(test)]
 pub(super) fn commit_managed_with_state_writer<F>(
     config_path: &Path,
     state_path: &Path,
@@ -23,28 +24,20 @@ pub(super) fn commit_managed_with_state_writer<F>(
 where
     F: FnOnce(&Path, &ManagedState) -> Result<()>,
 {
-    let yaml = render_legacy(servers, &state.profiles)?;
+    let profiles = profile_documents(servers, &state.profiles)?;
+    let aggregate = aggregate_profile_documents(&profiles, &state.profiles)?;
     commit_yaml_with_state_writer(
         config_path,
         state_path,
         profiles_path,
-        &yaml,
+        &PreparedYaml {
+            aggregate,
+            profiles,
+        },
         state,
         None,
         write_state,
     )
-}
-
-pub(super) fn render_legacy(
-    servers: &[ServerConfig],
-    profiles: &[ManagedProfile],
-) -> Result<PreparedYaml> {
-    let documents = profile_documents(servers, profiles)?;
-    let aggregate = aggregate_profile_documents(&documents, profiles)?;
-    Ok(PreparedYaml {
-        aggregate,
-        profiles: documents,
-    })
 }
 
 pub(super) fn commit_prepared(
@@ -53,6 +46,16 @@ pub(super) fn commit_prepared(
     state: &ManagedState,
     original: &ManagedRollback,
 ) -> Result<()> {
+    commit_prepared_with_state_writer(directory, yaml, state, original, save_state_to)
+}
+
+pub(super) fn commit_prepared_with_state_writer(
+    directory: &Path,
+    yaml: &PreparedYaml,
+    state: &ManagedState,
+    original: &ManagedRollback,
+    write_state: impl FnOnce(&Path, &ManagedState) -> Result<()>,
+) -> Result<()> {
     commit_yaml_with_state_writer(
         &directory.join("config.yaml"),
         &directory.join("ping-rust-state.json"),
@@ -60,7 +63,7 @@ pub(super) fn commit_prepared(
         yaml,
         state,
         Some(original),
-        save_state_to,
+        write_state,
     )
 }
 
@@ -125,35 +128,39 @@ std::thread_local! {
 
 pub(super) fn commit_profile_with_activation(
     directory: &Path,
-    documents: &BTreeMap<String, Vec<u8>>,
+    yaml: &PreparedYaml,
     target: &str,
-    runtime: &str,
     state: &ManagedState,
+    original: &ManagedRollback,
     mut activate: impl FnMut(bool) -> Result<()>,
 ) -> Result<()> {
     let profiles = directory.join("profiles");
-    let had_profiles = managed_profile_directory_exists(&profiles)?;
     let state_path = directory.join("ping-rust-state.json");
-    read_managed_file(&state_path)?
-        .with_context(|| format!("受管文件 {} 已不存在", state_path.display()))?;
+    let config_path = directory.join("config.yaml");
+    if read_managed_file(&config_path)? != original.config
+        || read_managed_file(&state_path)? != original.state
+        || ProfileDirectorySnapshot::capture(&profiles)? != original.profiles
+    {
+        bail!("受管配置在校验期间已变更，请重试");
+    }
     let state_json = serde_json::to_vec_pretty(state).context("序列化管理状态失败")?;
     let mut files = Vec::new();
-    for (name, bytes) in documents {
-        let path = profiles.join(name);
-        let original = read_managed_file(&path)?;
-        if name == target || original.is_none() {
-            files.push((path, bytes.as_slice(), original));
+    for (name, bytes) in &yaml.profiles {
+        let previous = original.profiles.files.get(name).map(Vec::as_slice);
+        if name == target || previous.is_none() {
+            files.push((profiles.join(name), bytes.as_slice(), previous));
         }
     }
-    let config_path = directory.join("config.yaml");
-    let original = read_managed_file(&config_path)?
-        .with_context(|| format!("受管文件 {} 已不存在", config_path.display()))?;
-    files.push((config_path, runtime.as_bytes(), Some(original)));
+    files.push((
+        config_path,
+        yaml.aggregate.as_bytes(),
+        original.config.as_deref(),
+    ));
 
     let mut committed = 0;
     let mut created_profiles = false;
     let update = (|| {
-        if !had_profiles {
+        if !original.profiles.existed {
             fs::create_dir(&profiles).context("创建节点配置目录失败")?;
             created_profiles = true;
             utils::set_mode(&profiles, 0o700).context("设置节点配置目录权限失败")?;
@@ -179,7 +186,7 @@ pub(super) fn commit_profile_with_activation(
 
     let mut recovery_errors = Vec::new();
     for (path, _, original) in files.iter().take(committed).rev() {
-        if let Err(error) = restore_snapshot(path, original.as_deref(), 0o600) {
+        if let Err(error) = restore_snapshot(path, *original, 0o600) {
             recovery_errors.push(format!("恢复 {} 失败：{error:#}", path.display()));
         }
     }
@@ -205,15 +212,6 @@ pub(super) fn commit_profile_with_activation(
     Err(error.context("SOCKS5 加固失败；原配置已恢复，服务已重启并验证"))
 }
 
-pub(super) fn managed_profile_directory_exists(path: &Path) -> Result<bool> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.is_dir() => Ok(true),
-        Ok(_) => bail!("节点目录不是普通目录：{}", path.display()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error).with_context(|| format!("读取节点目录 {} 失败", path.display())),
-    }
-}
-
 pub(super) fn read_managed_file(path: &Path) -> Result<Option<Vec<u8>>> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_file() => read_optional(path),
@@ -223,6 +221,7 @@ pub(super) fn read_managed_file(path: &Path) -> Result<Option<Vec<u8>>> {
     }
 }
 
+#[cfg(test)]
 pub(super) fn profile_documents(
     servers: &[ServerConfig],
     profiles: &[ManagedProfile],
@@ -240,6 +239,7 @@ pub(super) fn profile_documents(
     Ok(documents)
 }
 
+#[cfg(test)]
 pub(super) fn aggregate_profile_documents(
     documents: &BTreeMap<String, Vec<u8>>,
     profiles: &[ManagedProfile],
@@ -293,17 +293,6 @@ pub(super) fn write_profile_documents(
         }
     }
     Ok(())
-}
-
-pub(super) fn profile_documents_are_current(
-    path: &Path,
-    documents: &BTreeMap<String, Vec<u8>>,
-) -> Result<bool> {
-    let snapshot = ProfileDirectorySnapshot::capture(path)?;
-    if !snapshot.existed {
-        return Ok(documents.is_empty());
-    }
-    Ok(snapshot.files == *documents)
 }
 
 pub(super) fn is_managed_profile_file_name(name: &str) -> bool {
