@@ -102,7 +102,8 @@ class RestoreStepTest(unittest.TestCase):
             # 与 workflow 的表达式一致：只有 chatgpt 拿到登录，只有 cpa 拿到 CPA 密钥。
             "CODEX_AUTH_JSON": AUTH_JSON if provider == "chatgpt" else "",
             "CODEX_CPA_API_KEY": CPA_KEY if provider in ("", "cpa") else "",
-            "CODEX_API_BASE_URL": BASE_URL,
+            # 基址是 secret，只在 cpa 时传入。
+            "CODEX_API_BASE_URL": BASE_URL if provider in ("", "cpa") else "",
             "CODEX_MODEL": f"gpt-test-{flow}",
             "CODEX_REASONING_EFFORT": "high",
             **extra,
@@ -140,7 +141,7 @@ class RestoreStepTest(unittest.TestCase):
         self.assertNotIn(CPA_KEY, config)
         self.assertEqual((self.work / "seed-tokens.txt").read_text(), "")
         self.assertIn(f"::add-mask::{CPA_KEY}", result.stdout)
-        self.assertIn(f"::add-mask::{BASE_URL}", result.stdout)
+        self.assertNotIn(BASE_URL, result.stdout + result.stderr)
         # 权限配置（沙箱）与切换前完全相同。
         legacy = legacy_config(flow, self.work, self.home)
         self.assertIn(legacy.split("\n\n", 1)[1], config)
@@ -305,9 +306,18 @@ class WorkflowWiringTest(unittest.TestCase):
                         "${{ steps.auth.outputs.provider == 'cpa' && secrets.CODEX_CPA_API_KEY || '' }}",
                     ))
                 block = step_block(workflow, restore)
-                self.assertIn(f"CODEX_MODEL: ${{{{ vars.{model_var} || vars.CODEX_MODEL }}}}", block)
-                self.assertIn(f"CODEX_MODEL: ${{{{ vars.{model_var} || vars.CODEX_MODEL }}}}", step_block(workflow, run))
-                self.assertIn("CODEX_API_BASE_URL: ${{ vars.CODEX_API_BASE_URL }}", block)
+                # chatgpt 时不使用流程专用变量（它可能是只有 CPA 认识的别名），回到原来的 CODEX_MODEL。
+                self.assertIn(
+                    f"CODEX_MODEL: ${{{{ vars.CODEX_PROVIDER != 'chatgpt' && vars.{model_var} || vars.CODEX_MODEL }}}}", block)
+                self.assertIn(
+                    f"CODEX_MODEL: ${{{{ steps.auth.outputs.provider != 'chatgpt' && vars.{model_var} || vars.CODEX_MODEL }}}}",
+                    step_block(workflow, run))
+                self.assertEqual(text.count(model_var), 2)
+                # 基址是 secret，只在 cpa 时传入；不再有同名变量。
+                self.assertIn(
+                    "CODEX_API_BASE_URL: ${{ (vars.CODEX_PROVIDER || 'cpa') == 'cpa' && secrets.CODEX_API_BASE_URL || '' }}", block)
+                self.assertNotIn("vars.CODEX_API_BASE_URL", text)
+                self.assertEqual(text.count("secrets.CODEX_API_BASE_URL"), 1)
                 self.assertIn(f"codex_provider_config.py --flow {flow}", block)
                 self.assertNotIn("cli_auth_credentials_store", text)
 
@@ -338,27 +348,95 @@ class WorkflowWiringTest(unittest.TestCase):
         # 审查规则仍取 main，不随共用脚本改变。
         self.assertIn("ref: main", step_block("codex-code-review.yml", "Checkout review policy"))
 
-    def test_dispatch_self_check_does_not_print_cpa_reply(self):
+    def run_self_check(self, provider, shell_tool_state="false"):
         reply = "SECRET-REPLY-FRAGMENT-" + "x" * 40
-        with tempfile.TemporaryDirectory() as temporary:
-            work = Path(temporary)
-            (work / "bin").mkdir()
-            codex = work / "bin/codex"
-            codex.write_text('#!/usr/bin/env bash\nwhile [ "$#" -gt 0 ]; do\n'
-                             '  if [ "$1" = -o ]; then printf %s "$REPLY_TEXT" > "$2"; fi; shift\ndone\n')
-            codex.chmod(0o755)
-            for provider, printed in (("cpa", False), ("chatgpt", True)):
-                with self.subTest(provider=provider):
-                    env = {"PATH": f"{work / 'bin'}{os.pathsep}{os.environ['PATH']}",
-                           "RUNNER_TEMP": str(work), "CODEX_HOME": str(work / "codex-home"),
-                           "CODEX_PROVIDER_RESOLVED": provider, "REPLY_TEXT": reply,
-                           "CODEX_CPA_API_KEY": CPA_KEY if provider == "cpa" else ""}
-                    result = subprocess.run(
-                        ["bash", "-c", step_script("codex-dispatch.yml", "Self-check (auth and write-back)")],
-                        env=env, text=True, capture_output=True, check=False)
-                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                    self.assertEqual("SECRET-REPLY" in result.stdout, printed)
-                    self.assertNotIn(CPA_KEY, result.stdout.replace(f"::add-mask::{CPA_KEY}", ""))
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        work = Path(temporary.name)
+        (work / "bin").mkdir()
+        log = work / "codex.log"
+        codex = work / "bin/codex"
+        codex.write_text(
+            '#!/usr/bin/env bash\n'
+            'printf "%s\\n" "$*" >> "$CODEX_LOG"\n'
+            'if printf "%s " "$@" | grep -q "features list"; then\n'
+            '  if printf "%s " "$@" | grep -q "features.shell_tool=false"; then\n'
+            '    echo "shell_tool                               stable             $SHELL_TOOL"\n'
+            '  else echo "shell_tool                               stable             true"; fi\n'
+            '  exit 0\nfi\n'
+            'while [ "$#" -gt 0 ]; do\n'
+            '  if [ "$1" = -o ]; then printf %s "$REPLY_TEXT" > "$2"; fi; shift\ndone\n')
+        codex.chmod(0o755)
+        workspace = work / "workspace"
+        workspace.mkdir()
+        env = {"PATH": f"{work / 'bin'}{os.pathsep}{os.environ['PATH']}",
+               "RUNNER_TEMP": str(work), "GITHUB_WORKSPACE": str(workspace),
+               "CODEX_HOME": str(work / "codex-home"), "CODEX_LOG": str(log),
+               "CODEX_PROVIDER_RESOLVED": provider, "REPLY_TEXT": reply, "SHELL_TOOL": shell_tool_state,
+               "CODEX_CPA_API_KEY": CPA_KEY if provider == "cpa" else ""}
+        result = subprocess.run(
+            ["bash", "-c", step_script("codex-dispatch.yml", "Self-check (auth and write-back)")],
+            env=env, text=True, capture_output=True, check=False)
+        calls = log.read_text().splitlines() if log.exists() else []
+        return result, calls, workspace
+
+    def test_dispatch_self_check_does_not_print_cpa_reply(self):
+        for provider, printed in (("cpa", False), ("chatgpt", True)):
+            with self.subTest(provider=provider):
+                result, _, _ = self.run_self_check(provider)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual("SECRET-REPLY" in result.stdout, printed)
+                self.assertNotIn(CPA_KEY, result.stdout.replace(f"::add-mask::{CPA_KEY}", ""))
+
+    def test_dispatch_self_check_uses_ci_sandbox_and_disables_shell_tool(self):
+        # 手动空白派发和 3 天定时自检都走这一步；两种 provider 一样。
+        for provider in ("cpa", "chatgpt"):
+            with self.subTest(provider=provider):
+                result, calls, workspace = self.run_self_check(provider)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(len(calls), 2, calls)
+                features, run = calls
+                self.assertIn("features.shell_tool=false features list", features)
+                self.assertTrue(run.startswith("exec "), run)
+                self.assertIn("features.shell_tool=false", run)
+                self.assertNotRegex(run, r"(^| )(-s|--sandbox)( |$)")
+                self.assertIn("approval_policy=\"never\"", run)
+                # 工作目录在 GITHUB_WORKSPACE 下（ci 配置允许写），用完即删。
+                self.assertIn(f"-C {workspace}/selfcheck-work", run)
+                self.assertFalse((workspace / "selfcheck-work").exists())
+
+    def test_dispatch_self_check_stops_if_shell_tool_cannot_be_confirmed_off(self):
+        for state in ("true", ""):
+            with self.subTest(state=state):
+                result, calls, _ = self.run_self_check("cpa", shell_tool_state=state)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(len(calls), 1, calls)
+                self.assertTrue(calls[0].find("features list") >= 0)
+
+    def test_chatgpt_ignores_per_flow_model_vars_and_cpa_uses_them(self):
+        def evaluate(expression, variables):
+            # 只实现这里用到的写法：A != 'x' && V || F，按 Actions 的真假值规则求值。
+            match = re.fullmatch(
+                r"\$\{\{ (?:vars\.CODEX_PROVIDER|steps\.auth\.outputs\.provider) != 'chatgpt' && "
+                r"vars\.(\w+) \|\| vars\.(\w+) \}\}", expression)
+            self.assertIsNotNone(match, expression)
+            provider = variables.get("provider", "")
+            first, fallback = variables.get(match.group(1), ""), variables.get(match.group(2), "")
+            value = first if provider != "chatgpt" else False
+            return (value or fallback)
+        for flow, (workflow, restore, _, model_var, run) in FLOWS.items():
+            text = (WORKFLOWS / workflow).read_text(encoding="utf-8")
+            expressions = re.findall(r"CODEX_MODEL: (\$\{\{[^\n]*\}\})", text)
+            self.assertEqual(len(expressions), 2, expressions)
+            for expression in expressions:
+                for provider, expected in (("chatgpt", "gpt-original"), ("cpa", "cpa-only-alias"), ("", "cpa-only-alias")):
+                    with self.subTest(flow=flow, provider=provider):
+                        got = evaluate(expression, {"provider": provider, model_var: "cpa-only-alias",
+                                                    "CODEX_MODEL": "gpt-original"})
+                        self.assertEqual(got, expected)
+                # 专用变量未设置时两种 provider 都回退到 CODEX_MODEL。
+                self.assertEqual(evaluate(expression, {"provider": "cpa", "CODEX_MODEL": "m"}), "m")
+                self.assertEqual(evaluate(expression, {"provider": "chatgpt", "CODEX_MODEL": ""}), "")
 
 
 class DispatchCollectTest(unittest.TestCase):

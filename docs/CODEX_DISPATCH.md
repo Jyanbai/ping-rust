@@ -151,14 +151,14 @@ Dispatch（含 `/codex` 和回修）、Code Review 和 Architecture Plan 共用 
 | 名称 | 类型 | 用途 |
 |---|---|---|
 | `CODEX_CPA_API_KEY` | Secret | CPA 密钥。见下文「设置 `CODEX_CPA_API_KEY`」 |
-| `CODEX_API_BASE_URL` | Variable | CPA 的 HTTPS 基址，通常以 `/v1` 结尾 |
+| `CODEX_API_BASE_URL` | Secret | CPA 的 HTTPS 基址，通常以 `/v1` 结尾。用 secret 是因为变量会在步骤开头的 env 里先于遮蔽出现在日志中；secret 全程自动遮蔽 |
 | `CODEX_MODEL` | Variable | 三条流程共用的模型名。`CODEX_DISPATCH_MODEL`、`CODEX_REVIEW_MODEL`、`CODEX_PLAN_MODEL` 分别优先于它。若留空，必须设置这三个专用变量 |
 
-独立的 **Codex CPA Smoke** 有内置基址和模型。它通过后，仍需在 environment `codex` 给这三条流程配置基址和模型。
+独立的 **Codex CPA Smoke** 同样读取 secret `CODEX_API_BASE_URL`，没有内置基址；未设置会直接停止，不打印任何地址。它的模型和推理强度有内置默认值，所以它通过后，仍需给这三条流程配置模型变量。
 
 #### ChatGPT 登录
 
-要继续使用 ChatGPT 登录，在 environment `codex` 设置变量 `CODEX_PROVIDER=chatgpt`，并准备 CI 专用的 secret `CODEX_AUTH_JSON`。已有有效登录凭据时可沿用。
+要继续使用 ChatGPT 登录，在 environment `codex` 设置变量 `CODEX_PROVIDER=chatgpt`，并准备 CI 专用的 secret `CODEX_AUTH_JSON`。已有有效登录凭据时可沿用。走 chatgpt 时不会使用 `CODEX_DISPATCH_MODEL`、`CODEX_REVIEW_MODEL`、`CODEX_PLAN_MODEL`（它们可能是只有 CPA 认识的模型别名），只使用 `CODEX_MODEL`，也不会传入 CPA 密钥和基址。
 
 在自己的电脑上做一次（Windows PowerShell，需要已安装 Node.js）：
 
@@ -226,11 +226,12 @@ gh secret set CODEX_CPA_API_KEY --env codex --repo Jyanbai/ping-rust
 
 没装 `gh` 的话：到 Settings → Environments → codex → Add environment secret，名字填 `CODEX_CPA_API_KEY`，把密钥粘进去。
 
+基址同样只放 environment `codex`，作为 secret `CODEX_API_BASE_URL`（命令同上，把名字换成 `CODEX_API_BASE_URL`，按提示粘贴 https 基址，不要发到聊天或写进仓库）。
+
 ### 可选变量与模型
 
 | 变量 | 默认 | 作用 |
 |---|---|---|
-| `CODEX_API_BASE_URL` | `https://api.moio.cn/v1` | CPA 的 HTTPS 基址。可在 environment `codex` 里设置同名变量覆盖。 |
 | `CODEX_MODEL` | 若未设置，本自检使用 `gpt-6.2-sol` | 与正式流程共用的模型变量 |
 | `CODEX_REASONING_EFFORT` | 若未设置，本自检使用 `high` | 与现有通路共用的推理强度变量；只能是小写字母 |
 

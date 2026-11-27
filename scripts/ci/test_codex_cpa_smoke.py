@@ -289,7 +289,6 @@ class ReplyAndFailureTest(unittest.TestCase):
             "CODEX_CPA_API_KEY": key,
             "CPA_MODEL": "gpt-6.2-sol",
             "CPA_EFFORT": "high",
-            "CPA_BASE_URL": "https://api.moio.cn/v1",
             "FAKE_CODEX_LAST": str(last),
             "FAKE_CODEX_EVENTS": str(events_file),
             "FAKE_CODEX_STDERR": str(stderr_file),
@@ -447,7 +446,7 @@ class ReplyAndFailureTest(unittest.TestCase):
             "GITHUB_OUTPUT": str(files["output"]),
             "GITHUB_STEP_SUMMARY": str(files["summary"]),
             "CODEX_CPA_API_KEY": "test-cpa-key-not-real",
-            "CODEX_API_BASE_URL": "",
+            "CODEX_API_BASE_URL": "https://cpa.example.test/v1",
             "CODEX_MODEL": "",
             "CODEX_REASONING_EFFORT": "",
         }
@@ -465,6 +464,55 @@ class ReplyAndFailureTest(unittest.TestCase):
         self.assertNotRegex(raw, r"(?m)^shell_tool = true")
         self.assertRegex(raw, r'(?m)^model_provider = "cpa"$')
         self.assertNotIn("test-cpa-key-not-real", raw)
+
+    def prepare(self, **overrides):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        work = Path(temporary.name)
+        runner_temp = work / "runner-temp"
+        runner_temp.mkdir()
+        for name in ("env", "output", "summary"):
+            (work / name).touch()
+        env = {
+            **os.environ,
+            "RUNNER_TEMP": str(runner_temp),
+            "GITHUB_ENV": str(work / "env"),
+            "GITHUB_OUTPUT": str(work / "output"),
+            "GITHUB_STEP_SUMMARY": str(work / "summary"),
+            "CODEX_CPA_API_KEY": "test-cpa-key-not-real",
+            "CODEX_API_BASE_URL": "https://cpa.example.test/v1",
+            "CODEX_MODEL": "",
+            "CODEX_REASONING_EFFORT": "",
+            **overrides,
+        }
+        result = subprocess.run(
+            ["bash", "-o", "pipefail", "-c", step_script("Prepare CPA config")],
+            env=env, capture_output=True, text=True, check=False,
+        )
+        summary = (work / "summary").read_text(encoding="utf-8")
+        return result, summary, runner_temp
+
+    def test_base_url_is_a_secret_without_default_and_never_printed(self):
+        text = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("CODEX_API_BASE_URL: ${{ secrets.CODEX_API_BASE_URL }}", text)
+        self.assertNotIn("vars.CODEX_API_BASE_URL", text)
+        for missing in ("", "   "):
+            with self.subTest(missing=repr(missing)):
+                result, summary, runner_temp = self.prepare(CODEX_API_BASE_URL=missing)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("secret CODEX_API_BASE_URL", result.stdout)
+                self.assertFalse((runner_temp / "codex-home/config.toml").exists())
+        url = "https://cpa.example.test/v1"
+        result, summary, runner_temp = self.prepare()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("cpa.example.test", result.stdout + result.stderr + summary)
+        self.assertIn(f'base_url = "{url}"', (runner_temp / "codex-home/config.toml").read_text())
+        for bad in ("http://cpa.example.test/v1", 'https://x"\nmodel = "evil'):
+            with self.subTest(bad=bad):
+                result, _, runner_temp = self.prepare(CODEX_API_BASE_URL=bad)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("evil", result.stdout + result.stderr)
+                self.assertFalse((runner_temp / "codex-home/config.toml").exists())
 
     def test_repo_level_api_key_is_not_accepted_without_env_scoped_secret(self):
         temporary = tempfile.TemporaryDirectory()

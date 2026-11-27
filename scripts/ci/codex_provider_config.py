@@ -3,12 +3,12 @@
 
 CODEX_PROVIDER=cpa（默认）：沿用 codex-cpa-smoke.yml 已验证的写法，provider 名为 cpa，
 走 Responses API，密钥只通过 env_key=CODEX_CPA_API_KEY 从环境变量读取，不写进任何文件，
-也不读、不写 CODEX_AUTH_JSON。模型名和 base_url 只来自 environment 变量，没有内置默认值。
+也不读、不写 CODEX_AUTH_JSON。模型名来自 environment 变量、base_url 来自 environment secret，没有内置默认值。
 CODEX_PROVIDER=chatgpt：生成与切换前逐字相同的配置，auth.json 由工作流里原有的逻辑负责。
 
 用法：codex_provider_config.py --flow review|plan|dispatch --provider cpa|chatgpt \
         --home DIR --runner-temp DIR [--cargo-home DIR]
-读取的环境变量（仅 cpa）：CODEX_API_BASE_URL、CODEX_MODEL、CODEX_REASONING_EFFORT、
+读取的环境变量（仅 cpa；CODEX_API_BASE_URL 来自 secret，不打印）：CODEX_API_BASE_URL、CODEX_MODEL、CODEX_REASONING_EFFORT、
 CODEX_CPA_API_KEY（只检查是否为空，以及生成的文件里没有它）。
 出错时只输出 ::error:: 说明，不打印密钥、base_url 或模型返回。
 """
@@ -77,7 +77,7 @@ def permissions(flow, runner_temp, cargo_home):
 def cpa_settings(env):
     base = (env.get("CODEX_API_BASE_URL") or "").strip()
     if not base:
-        raise ConfigError("CODEX_PROVIDER=cpa 需要 environment codex 的变量 CODEX_API_BASE_URL（https 基址），当前未设置")
+        raise ConfigError("CODEX_PROVIDER=cpa 需要 environment codex 的 secret CODEX_API_BASE_URL（https 基址），当前未设置")
     if not BASE_RE.match(base):
         raise ConfigError("CODEX_API_BASE_URL 必须是 https 基址（主机名、可选端口和路径）")
     # 启动步骤用原始值传 -m，这里也不去空白，避免恢复成功而启动时用了另一个值。

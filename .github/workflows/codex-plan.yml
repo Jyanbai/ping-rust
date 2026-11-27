@@ -130,12 +130,12 @@ jobs:
         if: steps.target.outputs.plan == 'true'
         shell: bash
         env:
-          # CODEX_PROVIDER=cpa（默认）时 CODEX_AUTH_JSON 不传入本步骤；chatgpt 时 CPA 密钥不传入。
+          # CODEX_PROVIDER=cpa（默认）时 CODEX_AUTH_JSON 不传入本步骤；chatgpt 时 CPA 密钥和基址不传入，也不使用流程专用模型变量。
           CODEX_PROVIDER: ${{ vars.CODEX_PROVIDER }}
           CODEX_AUTH_JSON: ${{ vars.CODEX_PROVIDER == 'chatgpt' && secrets.CODEX_AUTH_JSON || '' }}
           CODEX_CPA_API_KEY: ${{ (vars.CODEX_PROVIDER || 'cpa') == 'cpa' && secrets.CODEX_CPA_API_KEY || '' }}
-          CODEX_API_BASE_URL: ${{ vars.CODEX_API_BASE_URL }}
-          CODEX_MODEL: ${{ vars.CODEX_PLAN_MODEL || vars.CODEX_MODEL }}
+          CODEX_API_BASE_URL: ${{ (vars.CODEX_PROVIDER || 'cpa') == 'cpa' && secrets.CODEX_API_BASE_URL || '' }}
+          CODEX_MODEL: ${{ vars.CODEX_PROVIDER != 'chatgpt' && vars.CODEX_PLAN_MODEL || vars.CODEX_MODEL }}
           CODEX_REASONING_EFFORT: ${{ vars.CODEX_REASONING_EFFORT }}
           ALLOW_REFRESH: ${{ inputs.allow_refresh }}
           REFRESH_GUARD_SECONDS: '604800'
@@ -148,10 +148,6 @@ jobs:
             *) echo '::error::CODEX_PROVIDER 只能是 cpa 或 chatgpt'; exit 1 ;;
           esac
           [ -z "${CODEX_CPA_API_KEY:-}" ] || printf '::add-mask::%s\n' "$CODEX_CPA_API_KEY"
-          # base_url 不是 secret，但也不进公开日志。
-          if [ "$provider" = cpa ] && [ -n "${CODEX_API_BASE_URL:-}" ]; then
-            printf '::add-mask::%s\n' "$CODEX_API_BASE_URL"
-          fi
           plan_home="$RUNNER_TEMP/codex-home"
           mkdir -p "$plan_home"
           if [ "$provider" = chatgpt ]; then
@@ -231,7 +227,7 @@ jobs:
           MAIN_SHA: ${{ steps.target.outputs.main_sha }}
           TRUSTED: ${{ steps.target.outputs.trusted }}
           FORCE_PLAN: ${{ steps.target.outputs.force }}
-          CODEX_MODEL: ${{ vars.CODEX_PLAN_MODEL || vars.CODEX_MODEL }}
+          CODEX_MODEL: ${{ steps.auth.outputs.provider != 'chatgpt' && vars.CODEX_PLAN_MODEL || vars.CODEX_MODEL }}
           CODEX_REASONING_EFFORT: ${{ vars.CODEX_REASONING_EFFORT }}
           CODEX_CPA_API_KEY: ${{ steps.auth.outputs.provider == 'cpa' && secrets.CODEX_CPA_API_KEY || '' }}
         run: |
@@ -490,6 +486,17 @@ jobs:
                   f'"status": {c}',
                   f'"status":{c}',
               )
+          def has_status(line, needle):
+              # 状态码两侧不能紧挨数字：status 40301、"status":4290 都不是 HTTP 状态码。
+              start = line.find(needle)
+              while start != -1:
+                  end = start + len(needle)
+                  before = line[start - 1] if start > 0 else ""
+                  after = line[end] if end < len(line) else ""
+                  if not before.isdigit() and not after.isdigit():
+                      return True
+                  start = line.find(needle, start + 1)
+              return False
           def classify(lines):
               hits = set()
               for raw in lines:
@@ -505,7 +512,7 @@ jobs:
                               hits.add(label)
                               break
                   for code, reason in REASONS.items():
-                      if any(needle in line for needle in status_needles(code, reason)):
+                      if any(has_status(line, needle) for needle in status_needles(code, reason)):
                           hits.add(f"http_{code}")
                           if code == 429:
                               hits.add("rate_limit")

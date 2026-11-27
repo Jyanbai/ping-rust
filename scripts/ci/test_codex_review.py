@@ -781,6 +781,31 @@ cp "$FAKE_CODEX_ARCHIVE" "$output"
                 with self.subTest(workflow=workflow.name, sample=sample):
                     self.assert_classifies(sample, ["auth_401_403"], workflow)
 
+    def test_status_code_needs_digit_boundary(self):
+        # 较长的业务码不是 HTTP 状态码；三条流程的归类块行为一致。
+        for workflow in (WORKFLOW, PLAN_WORKFLOW, DISPATCH_WORKFLOW):
+            for sample in (
+                '{"status":40301,"error":"model not deployed"}',
+                '{"status": 40301, "error": "x"}',
+                "status 4290", "status=4001", "HTTP 4031", "unexpected status 4011",
+                "1403 Forbidden", "14290 Too Many Requests", "api error 4010",
+            ):
+                with self.subTest(workflow=workflow.name, sample=sample):
+                    out, _ = self.classify(sample + "\n", workflow)
+                    labels = self.class_labels(out)
+                    # 关键词标签（如 forbidden）仍可命中，但不能出现 http_NNN。
+                    self.assertEqual([x for x in labels if x.startswith("http_")], [], labels)
+            for sample, label in (
+                ('{"status":403,"error":"x"}', "http_403"),
+                ('{"status": 401}', "http_401"),
+                ("status 429.", "http_429"),
+                ("(HTTP 503)", "http_503"),
+                ("status=404,", "http_404"),
+            ):
+                with self.subTest(workflow=workflow.name, sample=sample):
+                    out, _ = self.classify(sample + "\n", workflow)
+                    self.assertIn(label, self.class_labels(out))
+
     def test_http_status_code_prefix(self):
         out, _ = self.classify("HTTP status code: 429\n")
         self.assertEqual(self.class_labels(out), ["rate_limit", "http_429"])

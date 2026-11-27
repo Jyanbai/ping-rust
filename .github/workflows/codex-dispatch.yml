@@ -389,12 +389,12 @@ jobs:
         if: steps.req.outputs.mode != 'skip' && steps.req.outputs.empty != 'true'
         shell: bash
         env:
-          # CODEX_PROVIDER=cpa（默认）时 CODEX_AUTH_JSON 不传入本步骤；chatgpt 时 CPA 密钥不传入。
+          # CODEX_PROVIDER=cpa（默认）时 CODEX_AUTH_JSON 不传入本步骤；chatgpt 时 CPA 密钥和基址不传入，也不使用流程专用模型变量。
           CODEX_PROVIDER: ${{ vars.CODEX_PROVIDER }}
           CODEX_AUTH_JSON: ${{ vars.CODEX_PROVIDER == 'chatgpt' && secrets.CODEX_AUTH_JSON || '' }}
           CODEX_CPA_API_KEY: ${{ (vars.CODEX_PROVIDER || 'cpa') == 'cpa' && secrets.CODEX_CPA_API_KEY || '' }}
-          CODEX_API_BASE_URL: ${{ vars.CODEX_API_BASE_URL }}
-          CODEX_MODEL: ${{ vars.CODEX_DISPATCH_MODEL || vars.CODEX_MODEL }}
+          CODEX_API_BASE_URL: ${{ (vars.CODEX_PROVIDER || 'cpa') == 'cpa' && secrets.CODEX_API_BASE_URL || '' }}
+          CODEX_MODEL: ${{ vars.CODEX_PROVIDER != 'chatgpt' && vars.CODEX_DISPATCH_MODEL || vars.CODEX_MODEL }}
           CODEX_REASONING_EFFORT: ${{ vars.CODEX_REASONING_EFFORT }}
           HAS_BOT_TOKEN: ${{ secrets.CODEX_BOT_TOKEN != '' }}
         run: |
@@ -410,10 +410,6 @@ jobs:
             *) echo '::error::CODEX_PROVIDER 只能是 cpa 或 chatgpt'; exit 1 ;;
           esac
           [ -z "${CODEX_CPA_API_KEY:-}" ] || printf '::add-mask::%s\n' "$CODEX_CPA_API_KEY"
-          # base_url 不是 secret，但也不进公开日志。
-          if [ "$provider" = cpa ] && [ -n "${CODEX_API_BASE_URL:-}" ]; then
-            printf '::add-mask::%s\n' "$CODEX_API_BASE_URL"
-          fi
           if [ "$provider" = chatgpt ] && [ -z "$CODEX_AUTH_JSON" ]; then
             echo "::error::environment codex 里没有 CODEX_AUTH_JSON，请按 docs/CODEX_DISPATCH.md 配置"
             exit 1
@@ -502,7 +498,7 @@ jobs:
         if: steps.prep.outcome == 'success' && steps.sandbox.outputs.ok == 'true'
         shell: bash
         env:
-          CODEX_MODEL: ${{ vars.CODEX_DISPATCH_MODEL || vars.CODEX_MODEL }}
+          CODEX_MODEL: ${{ steps.auth.outputs.provider != 'chatgpt' && vars.CODEX_DISPATCH_MODEL || vars.CODEX_MODEL }}
           CODEX_REASONING_EFFORT: ${{ vars.CODEX_REASONING_EFFORT }}
           CODEX_CPA_API_KEY: ${{ steps.auth.outputs.provider == 'cpa' && secrets.CODEX_CPA_API_KEY || '' }}
           CARGO_NET_OFFLINE: 'true'
@@ -692,6 +688,17 @@ jobs:
                   f'"status": {c}',
                   f'"status":{c}',
               )
+          def has_status(line, needle):
+              # 状态码两侧不能紧挨数字：status 40301、"status":4290 都不是 HTTP 状态码。
+              start = line.find(needle)
+              while start != -1:
+                  end = start + len(needle)
+                  before = line[start - 1] if start > 0 else ""
+                  after = line[end] if end < len(line) else ""
+                  if not before.isdigit() and not after.isdigit():
+                      return True
+                  start = line.find(needle, start + 1)
+              return False
           def classify(lines):
               hits = set()
               for raw in lines:
@@ -707,7 +714,7 @@ jobs:
                               hits.add(label)
                               break
                   for code, reason in REASONS.items():
-                      if any(needle in line for needle in status_needles(code, reason)):
+                      if any(has_status(line, needle) for needle in status_needles(code, reason)):
                           hits.add(f"http_{code}")
                           if code == 429:
                               hits.add("rate_limit")
@@ -793,9 +800,22 @@ jobs:
           set -uo pipefail
           # 一次最小的调用：验证登录（或 CPA 密钥）可用；chatgpt 时让 Codex 按需刷新 token。
           [ -z "${CODEX_CPA_API_KEY:-}" ] || printf '::add-mask::%s\n' "$CODEX_CPA_API_KEY"
+          # 沿用已探测过的 ci 权限配置（default_permissions）；不能传 -s，否则会切回旧沙箱设置。
+          # 调用前先确认 shell/命令工具已关闭，否则模型返回的工具调用会在沙箱里执行。
+          # 用与下面 exec 相同的 -c 覆盖查询，确认实际生效的值（正式 Run Codex 步骤的配置不关这个工具）。
+          features_out="$(codex -c features.shell_tool=false features list 2>/dev/null)" || features_out=""
+          shell_tool_state="$(printf '%s\n' "$features_out" | awk '$1 == "shell_tool" { print $NF }')"
+          if [ "$shell_tool_state" != "false" ]; then
+            echo '::error::无法确认 Codex 的 shell/命令工具已关闭（features.shell_tool），已停止，不调用模型。'
+            exit 1
+          fi
+          work="$GITHUB_WORKSPACE/selfcheck-work"
+          mkdir -p "$work"
           rc=0
-          codex exec -s read-only --skip-git-repo-check --ephemeral \
+          codex exec -C "$work" --skip-git-repo-check --ephemeral --ignore-rules \
+            -c approval_policy='"never"' -c features.shell_tool=false \
             -o "$RUNNER_TEMP/selfcheck.txt" "只回复 OK" > /dev/null 2> "$RUNNER_TEMP/selfcheck.err" || rc=$?
+          rm -rf "$work"
           if [ -f "$CODEX_HOME/auth.json" ]; then
             jq -r '.tokens // {} | .[] | strings | select(length >= 16)' "$CODEX_HOME/auth.json" \
               | while IFS= read -r t; do printf '::add-mask::%s\n' "$t"; done
