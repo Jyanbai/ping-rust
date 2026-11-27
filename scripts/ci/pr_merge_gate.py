@@ -12,8 +12,7 @@ import zipfile
 CONTEXT = "PR Merge Gate"
 REVIEW_STEPS = ["Verify read-only sandbox", "Run Codex review", "Render review", "Publish review", "Upload review attestation"]
 VERDICT = re.compile(r"^<!-- codex-review-verdict sha=([0-9a-f]{40}) base=([0-9a-f]{40}) findings=([0-9]+) blocking=([0-9]+) run=([0-9]+) attempt=([0-9]+) -->$", re.M)
-# 所有者豁免：评论第一行必须是 `/accept F<编号> <理由>`，理由不能为空。只解析编号，理由不进入任何 prompt 或日志。
-ACCEPT = re.compile(r"/accept[ \t]+(F[1-9][0-9]{0,3})[ \t]+\S[^\r\n]*")
+ACCEPT = re.compile(r"/accept[ \t]+(F[1-9][0-9]{0,3})[ \t]+review=([1-9][0-9]*)[ \t]+\S[^\r\n]*")
 FINDING_ID = re.compile(r"F[1-9][0-9]{0,3}")
 BLOCKING_PRIORITY = 1  # P0/P1 阻塞合并；P2/P3 只是建议
 
@@ -91,28 +90,26 @@ def review_evidence(sha, base, comments):
     return max(same, key=lambda e: e[4])
 
 
-def accepted_ids(comments, owner, after_comment_id):
-    """仓库所有者本人在该审查评论之后发出的 `/accept F<n> <理由>`。
-
-    审查评论绑定 head/base/run/attempt；有新提交或重新审查时会有新的审查评论，
-    早于它的豁免自然失效。只返回编号，不返回理由文本。
-    """
-    accepted = set()
-    if not owner:
-        return accepted
-    for c in comments:
-        user = c.get("user", {})
+def accepted_ids(comments, owner, review_comment_id, blocking_ids, unedited_comment_ids):
+    """只认所有者在当前审查评论之后发出的未编辑首行命令，不返回理由。"""
+    candidates = []
+    findings = {}
+    if not owner or not blocking_ids or unedited_comment_ids is None:
+        return set()
+    for comment in comments:
+        user = comment.get("user") or {}
         if (user.get("login") != owner or user.get("type") != "User"
-                or c.get("author_association") != "OWNER"):
+                or comment.get("author_association") != "OWNER"):
             continue
-        cid = c.get("id")
-        if not isinstance(cid, int) or cid <= after_comment_id:
+        comment_id = comment.get("id")
+        if type(comment_id) is not int or comment_id <= review_comment_id:
             continue
-        lines = (c.get("body") or "").strip().splitlines()
-        match = ACCEPT.fullmatch(lines[0].strip()) if lines else None
-        if match:
-            accepted.add(match.group(1))
-    return accepted
+        first_line, newline, _ = (comment.get("body") or "").partition("\n")
+        match = ACCEPT.fullmatch(first_line.removesuffix("\r") if newline else first_line)
+        if match and match.group(2) == str(review_comment_id) and match.group(1) in blocking_ids:
+            candidates.append(comment)
+            findings[comment_id] = match.group(1)
+    return {findings[comment_id] for comment_id in unedited_comment_ids(candidates)} if candidates else set()
 
 
 def attestation_blocking(attestation, expected):
@@ -162,7 +159,7 @@ def run_jobs(api, run):
     return [job for matches in latest.values() for job in matches]
 
 
-def review_verdict(sha, base, comments, runs, jobs, owner=""):
+def review_verdict(sha, base, comments, runs, jobs, owner="", unedited_comment_ids=None):
     evidence = review_evidence(sha, base, comments)
     if not evidence:
         return ["缺失匹配当前 head/base 的独立 Codex 审查证明"]
@@ -178,10 +175,11 @@ def review_verdict(sha, base, comments, runs, jobs, owner=""):
     if blocking_ids is None:
         return ["缺失可信 Review 运行的证明产物，或产物与当前 head/base 不匹配"]
     errors = check_jobs({"review": REVIEW_STEPS}, jobs.get(run_id, []))
-    # 只拦未豁免的 P0/P1；豁免必须是所有者在这条审查评论之后发出的。
-    remaining = sorted(blocking_ids - accepted_ids(comments, owner, comment_id), key=lambda k: int(k[1:]))
+    accepted = accepted_ids(comments, owner, comment_id, blocking_ids, unedited_comment_ids)
+    remaining = sorted(blocking_ids - accepted, key=lambda k: int(k[1:]))
     if remaining:
-        errors.append(f"独立 Codex 审查有 {len(remaining)} 条未豁免的阻塞发现：{', '.join(remaining)}")
+        errors.append(f"独立 Codex 审查有 {len(remaining)} 条未豁免的阻塞发现：{', '.join(remaining)}；"
+                      f"所有者可新发 `/accept F<编号> review={comment_id} <理由>`")
     return errors
 
 
@@ -189,16 +187,39 @@ class GitHub:
     def __init__(self):
         self.repo = os.environ["GITHUB_REPOSITORY"]
         self.root = os.environ.get("GITHUB_API_URL", "https://api.github.com")
+        self.graphql = os.environ.get("GITHUB_GRAPHQL_URL", self.root + "/graphql")
         self.token = os.environ["GH_TOKEN"]
 
     def request(self, path, data=None):
-        req = urllib.request.Request(self.root + "/repos/" + self.repo + "/" + path,
+        return self._request(self.root + "/repos/" + self.repo + "/" + path, data)
+
+    def _request(self, url, data):
+        req = urllib.request.Request(url,
                                      data=None if data is None else json.dumps(data).encode(),
                                      headers={"Authorization": "Bearer " + self.token,
                                               "Accept": "application/vnd.github+json",
+                                              "Content-Type": "application/json",
                                               "X-GitHub-Api-Version": "2022-11-28"})
         with urllib.request.urlopen(req, timeout=60) as response:
             return json.load(response)
+
+    def unedited_comment_ids(self, comments):
+        """REST 时间戳无法区分同秒编辑；再核对 GraphQL 编辑标记和同一份正文。"""
+        by_node = {comment["node_id"]: comment for comment in comments if comment.get("node_id")}
+        node_ids = list(by_node)
+        unedited = set()
+        query = "query($ids: [ID!]!) { nodes(ids: $ids) { ... on IssueComment { id body lastEditedAt } } }"
+        for offset in range(0, len(node_ids), 100):
+            response = self._request(self.graphql, {"query": query, "variables": {"ids": node_ids[offset:offset + 100]}})
+            if response.get("errors"):
+                continue
+            for node in (response.get("data") or {}).get("nodes") or []:
+                if not node or node.get("lastEditedAt", "missing") is not None:
+                    continue
+                comment = by_node.get(node.get("id"))
+                if comment is not None and node.get("body") == comment["body"]:
+                    unedited.add(comment["id"])
+        return unedited
 
     def pages(self, path, key=None):
         result = []
@@ -314,7 +335,8 @@ def inspect_pr(api, number, policy, publish=True):
         elif evidence:
             errors.append("最新独立审查未提供同 run/attempt 的证明，旧证明不可复用")
         errors += review_verdict(sha, base, comments, review_runs, jobs,
-                                 owner=getattr(api, "repo", "").partition("/")[0])
+                                 owner=getattr(api, "repo", "").partition("/")[0],
+                                 unedited_comment_ids=getattr(api, "unedited_comment_ids", None))
         # 运行可能在取完 jobs 后被重新运行；只允许本次快照仍是最新 attempt。
         if not errors:
             fresh_runs = api.pages(f"actions/runs?head_sha={sha}&event=pull_request", "workflow_runs")

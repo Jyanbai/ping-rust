@@ -10,6 +10,7 @@ from pr_merge_gate import evaluate, review_verdict, accepted_ids, step_aliases, 
 class CollectorAPI:
     """离线模拟多 attempt 和自动审查去重，未知请求直接失败。"""
     repo = 'owner/example'
+    graphql = 'https://api.example.com/graphql'
 
     def __init__(self, case):
         self.sha = case.sha
@@ -25,6 +26,7 @@ class CollectorAPI:
         self.proof = {'head': self.sha, 'base': self.base, 'findings': 0, 'blocking': 0, 'ids': {}, 'run': 99, 'attempt': 1}
         self.comments = [{'id': 1000, 'user': {'login': 'github-actions[bot]', 'type': 'Bot'},
                           'body': f'<!-- codex-review-verdict sha={self.sha} base={self.base} findings=0 blocking=0 run=99 attempt=1 -->'}]
+        self.comment_nodes = {}
         self.fresh = {}
         self.statuses = []
         self.calls = []
@@ -60,6 +62,14 @@ class CollectorAPI:
     def attestation(self, run):
         assert run['id'] == self.proof['run']
         return copy.deepcopy(self.proof)
+
+    def unedited_comment_ids(self, comments):
+        return GitHub.unedited_comment_ids(self, comments)
+
+    def _request(self, url, data):
+        assert url == self.graphql, url
+        assert 'lastEditedAt' in data['query'], data
+        return {'data': {'nodes': [self.comment_nodes.get(node_id) for node_id in data['variables']['ids']]}}
 
     def status(self, sha, state, description):
         self.statuses.append(state)
@@ -593,7 +603,7 @@ class GateTests(unittest.TestCase):
 
 
 class BlockingAndAcceptTests(unittest.TestCase):
-    """门禁只拦未豁免的 P0/P1；/accept 只认所有者在当前审查评论之后的评论。"""
+    """门禁只认所有者在当前审查评论之后发出的、明确绑定该评论的原始命令。"""
     SHA, BASE, OWNER = 'a' * 40, 'b' * 40, 'owner'
 
     def review(self, ids, sha=None, comment_id=1000, run=99, blocking=None, findings=None):
@@ -616,8 +626,13 @@ class BlockingAndAcceptTests(unittest.TestCase):
         return {'id': comment_id, 'user': {'login': login or self.OWNER, 'type': kind},
                 'author_association': association, 'body': body}
 
+    @staticmethod
+    def unedited(candidates):
+        return {candidate['id'] for candidate in candidates}
+
     def verdict(self, comments, runs, jobs, sha=None):
-        return review_verdict(sha or self.SHA, self.BASE, comments, runs, jobs, owner=self.OWNER)
+        return review_verdict(sha or self.SHA, self.BASE, comments, runs, jobs, owner=self.OWNER,
+                              unedited_comment_ids=self.unedited)
 
     def test_only_suggestions_give_blocking_zero_and_pass(self):
         comment, runs, jobs = self.review({'F1': 2, 'F2': 3})
@@ -630,53 +645,74 @@ class BlockingAndAcceptTests(unittest.TestCase):
         self.assertTrue(errors)
         self.assertIn('F1', errors[-1])
         reason = '这一条已经人工确认是误报-SECRET-REASON'
-        accepted = [comment, self.accept(f'/accept F1 {reason}')]
-        self.assertEqual(self.verdict(accepted, runs, jobs), [])
+        waiver = self.accept(f'/accept F1 review=1000 {reason}')
+        self.assertEqual(self.verdict([comment, waiver], runs, jobs), [])
         # P0 同样阻塞，同样可以豁免；理由文本不出现在门禁输出里。
         comment, runs, jobs = self.review({'F1': 0, 'F2': 1})
-        errors = self.verdict([comment, self.accept(f'/accept F1 {reason}')], runs, jobs)
+        errors = self.verdict([comment, waiver], runs, jobs)
         self.assertTrue(errors)
         self.assertIn('F2', errors[-1])
         self.assertNotIn(reason, ''.join(errors))
-        self.assertEqual(self.verdict([comment, self.accept('/accept F1 a'), self.accept('/accept F2 b', 1101)],
+        self.assertEqual(self.verdict([comment, self.accept('/accept F1 review=1000 a'),
+                                       self.accept('/accept F2 review=1000 b', 1101)],
                                       runs, jobs), [])
 
     def test_accept_requires_owner_reason_exact_id_and_later_comment(self):
         comment, runs, jobs = self.review({'F1': 1, 'F2': 2})
         invalid = [
-            self.accept('/accept F1 理由', login='someone-else', association='COLLABORATOR'),
-            self.accept('/accept F1 理由', association='COLLABORATOR'),
-            self.accept('/accept F1 理由', login='owner', kind='Bot'),
-            self.accept('/accept F1 理由', login='github-actions[bot]', kind='Bot', association='NONE'),
-            self.accept('/accept F1'),
-            self.accept('/accept F1   '),
-            self.accept('/accept F1\n理由写在第二行'),
-            self.accept('/accept F2 只豁免了建议项'),
-            self.accept('/accept F01 编号不合法'),
-            self.accept('/accept f1 小写'),
-            self.accept('/accept F1,F2 多个'),
-            self.accept('请处理 /accept F1 不在行首'),
-            self.accept('/accept F1 理由', comment_id=999),  # 早于审查评论
-            dict(self.accept('/accept F1 理由'), id='1100'),
+            self.accept('/accept F1 review=1000 理由', login='someone-else', association='COLLABORATOR'),
+            self.accept('/accept F1 review=1000 理由', association='COLLABORATOR'),
+            self.accept('/accept F1 review=1000 理由', login='owner', kind='Bot'),
+            self.accept('/accept F1 review=1000 理由', login='github-actions[bot]', kind='Bot', association='NONE'),
+            self.accept('/accept F1 review=1000'),
+            self.accept('/accept F1 review=1000   '),
+            self.accept('/accept F1 review=1000\n理由写在第二行'),
+            self.accept('/accept F2 review=1000 只豁免了建议项'),
+            self.accept('/accept F01 review=1000 编号不合法'),
+            self.accept('/accept f1 review=1000 小写'),
+            self.accept('/accept F1,F2 review=1000 多个'),
+            self.accept('请处理 /accept F1 review=1000 不在行首'),
+            self.accept('/accept F1 review=9999 指向其他审查'),
+            self.accept('/accept F1 没有绑定审查'),
+            self.accept('/accept F1 review=1000 理由', comment_id=999),  # 早于审查评论
+            dict(self.accept('/accept F1 review=1000 理由'), id='1100'),
         ]
         for bad in invalid:
             with self.subTest(bad=bad):
                 self.assertTrue(self.verdict([comment, bad], runs, jobs))
-        self.assertEqual(accepted_ids([self.accept('/accept F1 理由')], '', 0), set())
-        self.assertEqual(accepted_ids([self.accept('  /accept F12 理由\n补充说明')], self.OWNER, 0), {'F12'})
+        self.assertEqual(accepted_ids([self.accept('/accept F1 review=1000 理由')], '', 1000, {'F1'}, self.unedited),
+                         set())
+        self.assertEqual(accepted_ids([self.accept('/accept F12 review=1000 理由\r\n补充说明')], self.OWNER,
+                                      1000, {'F12'}, self.unedited), {'F12'})
 
     def test_new_commit_invalidates_old_accept(self):
         old_comment, _, _ = self.review({'F1': 1}, sha='c' * 40, comment_id=1000)
-        old_accept = self.accept('/accept F1 针对旧提交的豁免', comment_id=1100)
+        old_accept = self.accept('/accept F1 review=1000 针对旧提交的豁免', comment_id=1100)
         new_comment, runs, jobs = self.review({'F1': 1}, comment_id=1200, run=100)
         # 新 head 的审查评论在旧豁免之后，旧豁免不再生效。
         self.assertTrue(self.verdict([old_comment, old_accept, new_comment], runs, jobs))
         self.assertEqual(self.verdict([old_comment, old_accept, new_comment,
-                                       self.accept('/accept F1 重新确认', comment_id=1300)], runs, jobs), [])
+                                       self.accept('/accept F1 review=1200 重新确认', comment_id=1300)], runs, jobs), [])
         # 同一 head 重新审查（新 run）后，之前的豁免同样失效。
         rerun, rerun_runs, rerun_jobs = self.review({'F1': 1}, comment_id=1400, run=101)
-        self.assertTrue(self.verdict([new_comment, self.accept('/accept F1 旧', comment_id=1300), rerun],
+        self.assertTrue(self.verdict([new_comment, self.accept('/accept F1 review=1200 旧', comment_id=1300), rerun],
                                      rerun_runs, rerun_jobs))
+
+    def test_accept_sent_after_rerun_cannot_waive_the_new_f1(self):
+        old_comment, _, _ = self.review({'F1': 1}, comment_id=1000, run=99)
+        rerun, runs, jobs = self.review({'F1': 1}, comment_id=1100, run=100)
+        stale = self.accept('/accept F1 review=1000 针对上一轮 F1', comment_id=1200)
+        comments = [old_comment, rerun, stale]
+        self.assertIn('F1', ' '.join(self.verdict(comments, runs, jobs)))
+        current = self.accept('/accept F1 review=1100 明确豁免新 F1', comment_id=1201)
+        self.assertEqual(self.verdict(comments + [current], runs, jobs), [])
+
+    def test_accept_cannot_start_with_markdown_indent_or_a_blank_line(self):
+        comment, runs, jobs = self.review({'F1': 1})
+        for prefix in (' ', '    ', '\t', '\n', '\r\n'):
+            with self.subTest(prefix=prefix):
+                errors = self.verdict([comment, self.accept(f'{prefix}/accept F1 review=1000 示例')], runs, jobs)
+                self.assertIn('F1', ' '.join(errors))
 
     def test_blocking_must_match_attestation(self):
         comment, runs, jobs = self.review({'F1': 1, 'F2': 3})
@@ -689,6 +725,7 @@ class BlockingAndAcceptTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertTrue(self.verdict([bad], runs, jobs))
         attestation = runs[99]['attestation']
+        comments = [comment, self.accept('/accept F1 review=1000 理由')]
         for name, change in [('priority lowered', {'ids': {'F1': 2, 'F2': 3}}),
                              ('blocking lowered', {'blocking': 0}),
                              ('id gap', {'ids': {'F1': 1, 'F3': 3}}),
@@ -697,19 +734,19 @@ class BlockingAndAcceptTests(unittest.TestCase):
                              ('extra key', {'accepted': ['F1']})]:
             with self.subTest(name=name):
                 runs[99]['attestation'] = dict(attestation, **change)
-                self.assertTrue(self.verdict([comment, self.accept('/accept F1 理由')], runs, jobs))
+                self.assertTrue(self.verdict(comments, runs, jobs))
         runs[99]['attestation'] = attestation
-        self.assertEqual(self.verdict([comment, self.accept('/accept F1 理由')], runs, jobs), [])
+        self.assertEqual(self.verdict(comments, runs, jobs), [])
         # 运行来源、run/attempt、head/base 的校验保持不变。
         for key, value in [('head_branch', 'feature'), ('path', '.github/workflows/other.yml'),
                            ('run_attempt', 2), ('conclusion', 'failure')]:
             with self.subTest(key=key):
                 bad_runs = {99: dict(runs[99], **{key: value})}
-                self.assertTrue(self.verdict([comment, self.accept('/accept F1 理由')], bad_runs, jobs))
+                self.assertTrue(self.verdict(comments, bad_runs, jobs))
         for key, value in [('head', 'c' * 40), ('base', 'c' * 40), ('run', 98), ('attempt', 2)]:
             with self.subTest(attestation=key):
                 bad_runs = {99: dict(runs[99], attestation=dict(attestation, **{key: value}))}
-                self.assertTrue(self.verdict([comment, self.accept('/accept F1 理由')], bad_runs, jobs))
+                self.assertTrue(self.verdict(comments, bad_runs, jobs))
 
     def test_collector_blocks_p1_until_owner_accept(self):
         case = GateTests('test_success')
@@ -720,8 +757,23 @@ class BlockingAndAcceptTests(unittest.TestCase):
         errors = inspect_pr(api, 7, case.policy)
         self.assertTrue(any('F1' in e for e in errors), errors)
         self.assertEqual(api.statuses[-1], 'failure')
-        api.comments.append({'id': 1001, 'user': {'login': 'owner', 'type': 'User'},
-                             'author_association': 'OWNER', 'body': '/accept F1 已确认可接受'})
+        node_id = 'issue-comment-1001'
+        accepted = self.accept('/accept F1 review=1000 已确认可接受', comment_id=1001)
+        timestamp = '2026-11-14T00:00:00Z'
+        api.comments.append(dict(accepted, node_id=node_id, created_at=timestamp, updated_at=timestamp))
+        node = {'id': node_id, 'body': accepted['body'], 'lastEditedAt': None}
+        for name, unverifiable in (
+            ('same-second edit', dict(node, lastEditedAt=timestamp)),
+            ('body changed between reads', dict(node, body='未发布豁免')),
+            ('missing edit metadata', {'id': node_id, 'body': accepted['body']}),
+            ('missing node', None),
+        ):
+            with self.subTest(name=name):
+                api.comment_nodes[node_id] = unverifiable
+                errors = inspect_pr(api, 7, case.policy)
+                self.assertTrue(any('F1' in error for error in errors), errors)
+                self.assertEqual(api.statuses[-1], 'failure')
+        api.comment_nodes[node_id] = node
         api.statuses.clear()
         self.assertEqual(inspect_pr(api, 7, case.policy), [])
         self.assertEqual(api.statuses, ['pending', 'success'])
