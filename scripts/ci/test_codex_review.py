@@ -10,6 +10,7 @@ import os
 import re
 import subprocess
 import tempfile
+import time
 import tarfile
 import textwrap
 import unittest
@@ -69,6 +70,67 @@ def step_script(name, workflow=WORKFLOW):
             break
         body.append(line)
     return textwrap.dedent("\n".join(body)) + "\n"
+
+PLAN_WORKFLOW = ROOT / ".github/workflows/codex-plan.yml"
+DISPATCH_WORKFLOW = ROOT / ".github/workflows/codex-dispatch.yml"
+OLD_REVIEW_FAILURE = textwrap.dedent("""\
+    echo "codex exit code: $rc"
+    [ "$rc" -eq 0 ] || { echo '::error::Codex 审查失败，请检查登录状态或额度后手动重试'; exit "$rc"; }
+""")
+CLASS_MARK_START = "# begin-codex-failure-class"
+CLASS_MARK_END = "\n            # end-codex-failure-class"
+HTTP_STATUS_LABELS = tuple(
+    f"http_{code}" for code in (400, 401, 403, 404, 408, 429, 500, 502, 503, 504)
+)
+ALLOWED_CLASS_LINES = frozenset((
+    "::group::Codex 失败归类",
+    "::endgroup::",
+    "rate_limit",
+    "auth_401_403",
+    "stream_disconnected",
+    "context_window",
+    "unknown",
+    *HTTP_STATUS_LABELS,
+))
+SECRET_JWT = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0In0.dGVzdHNpZ25hdHVyZQ"
+SECRET_UUID = "123e4567-e89b-12d3-a456-426614174000"
+SECRET_LONG = "UnlabeledCredential" + ("A" * 240)
+SECRET_STDERR = (
+    r'{"error": "nested {\"password\": \"leak\"inner\"}"}' + "\n"
+    "password:\n"
+    '  "multiline-secret-value"\n'
+    "Authorization: Basic YTpi\n"
+    f"user {SECRET_UUID}\n"
+    "got sk-xxx and Bearer xxx\n"
+    f"jwt {SECRET_JWT}\n"
+    f"{SECRET_LONG}\n"
+)
+SECRET_LEAKS = (
+    "leak", "inner", "multiline-secret-value", "YTpi", SECRET_UUID,
+    "sk-xxx", "Bearer xxx", SECRET_JWT, SECRET_LONG, SECRET_LONG[:240],
+)
+
+
+def failure_class_script(workflow=WORKFLOW):
+    text = workflow.read_text(encoding="utf-8")
+    start = text.index(CLASS_MARK_START)
+    end = text.index(CLASS_MARK_END, start)
+    raw = text[text.rfind("\n", 0, start) + 1:end]
+    return textwrap.dedent(raw) + "\n"
+
+
+def artifact_blocks(workflow):
+    lines = workflow.read_text(encoding="utf-8").splitlines()
+    blocks = []
+    for index, line in enumerate(lines):
+        if "actions/upload-artifact@" in line:
+            block = []
+            for body in lines[index:index + 16]:
+                block.append(body)
+                if body.strip() and not body.startswith(" ") and index != lines.index(body):
+                    break
+            blocks.append("\n".join(block))
+    return blocks
 
 
 class WorkflowMigrationTest(unittest.TestCase):
@@ -546,6 +608,336 @@ cp "$FAKE_CODEX_ARCHIVE" "$output"
         self.assertIn("人工", posted)
         self.assertIn(HEAD, posted)
         self.assertNotIn(secret, posted + result.stdout + result.stderr)
+
+    def test_old_review_failure_path_prints_nothing_from_stderr(self):
+        (self.work / "codex-stderr.log").write_text(SECRET_STDERR, encoding="utf-8")
+        result = subprocess.run(
+            ["bash", "-e", "-o", "pipefail", "-c", "rc=1\n" + OLD_REVIEW_FAILURE],
+            env=self.env, text=True, capture_output=True, check=False,
+        )
+        out = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Codex 审查失败", out)
+        self.assertNotIn("429 Too Many Requests", out)
+        self.assertNotIn("stream disconnected", out)
+
+    def classify(self, fixture="", workflow=WORKFLOW, events=None):
+        if isinstance(fixture, str):
+            fixture = fixture.encode("utf-8")
+        (self.work / "codex-stderr.log").write_bytes(fixture)
+        events_path = self.work / "codex-events.jsonl"
+        if events is None:
+            events_path.unlink(missing_ok=True)
+        else:
+            events_path.write_text(events, encoding="utf-8")
+        result = subprocess.run(
+            ["bash", "-e", "-o", "pipefail", "-c", failure_class_script(workflow)],
+            env=self.env, text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout, result.stderr
+
+    def class_labels(self, out):
+        lines = [line for line in out.splitlines() if line]
+        self.assertTrue(set(lines) <= ALLOWED_CLASS_LINES, lines)
+        return [line for line in lines if line not in (
+            "::group::Codex 失败归类", "::endgroup::",
+        )]
+
+    def assert_classifies(self, sample, expected, workflow=WORKFLOW):
+        out, err = self.classify(sample if sample.endswith("\n") else sample + "\n", workflow)
+        labels = self.class_labels(out)
+        for label in expected:
+            self.assertIn(label, labels)
+        self.assertNotIn("unknown", labels)
+        self.assertEqual(err.strip(), "")
+
+    def test_rate_limit_classification(self):
+        for sample in (
+            "HTTP 429", "rate limit exceeded", "Too Many Requests",
+            "usage limit reached", "quota exhausted",
+        ):
+            with self.subTest(sample=sample):
+                self.assert_classifies(sample, ["rate_limit"])
+
+    def test_auth_401_403_classification(self):
+        for sample in (
+            "401 Unauthorized", "403 Forbidden", "request unauthorized",
+            "access forbidden", "invalid token", "expired token", "refresh failed",
+        ):
+            with self.subTest(sample=sample):
+                self.assert_classifies(sample, ["auth_401_403"])
+
+    def test_stream_disconnected_classification(self):
+        for sample in (
+            "stream disconnected", "connection reset", "connection closed",
+            "read timeout", "unexpected EOF",
+        ):
+            with self.subTest(sample=sample):
+                self.assert_classifies(sample, ["stream_disconnected"])
+
+    def test_context_window_classification(self):
+        for sample in (
+            "context window exceeded", "context length", "too many tokens",
+        ):
+            with self.subTest(sample=sample):
+                self.assert_classifies(sample, ["context_window"])
+
+    def test_unknown_when_no_keyword_matches(self):
+        out, err = self.classify("model stalled\n")
+        self.assertEqual(self.class_labels(out), ["unknown"])
+        self.assertEqual(err.strip(), "")
+
+    def test_missing_log_is_unknown(self):
+        result = subprocess.run(
+            ["bash", "-e", "-o", "pipefail", "-c", failure_class_script()],
+            env=self.env, text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.class_labels(result.stdout), ["unknown"])
+
+    def test_multiple_labels_and_http_status_constants(self):
+        out, _ = self.classify("429 Too Many Requests; stream disconnected\n")
+        self.assertEqual(
+            self.class_labels(out),
+            ["rate_limit", "stream_disconnected", "http_429"],
+        )
+
+    def test_turn_failed_event_classifies_when_stderr_is_empty(self):
+        events = (
+            '{"type":"turn.started"}\n'
+            '{"type":"turn.failed","error":{"message":"stream disconnected before completion"}}\n'
+        )
+        out, err = self.classify("", events=events)
+        self.assertEqual(self.class_labels(out), ["stream_disconnected"])
+        self.assertEqual(err.strip(), "")
+
+    def test_error_event_message_is_classified(self):
+        events = '{"type":"error","message":"Failed to refresh token: expired"}\n'
+        out, _ = self.classify("", events=events)
+        self.assertEqual(self.class_labels(out), ["auth_401_403"])
+
+    def test_source_line_number_is_not_an_http_status(self):
+        out, _ = self.classify("connection reset at transport.rs:429:17\n")
+        self.assertEqual(self.class_labels(out), ["stream_disconnected"])
+
+    def test_http_status_requires_context(self):
+        cases = (
+            ("status 429", ["rate_limit", "http_429"]),
+            ("status: 429", ["rate_limit", "http_429"]),
+            ("status=429", ["rate_limit", "http_429"]),
+            ("HTTP 429", ["rate_limit", "http_429"]),
+            ("HTTP/1.1 429", ["rate_limit", "http_429"]),
+            ("429 Too Many Requests", ["rate_limit", "http_429"]),
+            ("unexpected status 429", ["rate_limit", "http_429"]),
+            (":429", ["unknown"]),
+            ("id 429 was allocated", ["unknown"]),
+        )
+        for sample, expected in cases:
+            with self.subTest(sample=sample):
+                out, _ = self.classify(sample + "\n")
+                self.assertEqual(self.class_labels(out), expected)
+
+    def test_failed_to_refresh_token_wording(self):
+        self.assert_classifies("Failed to refresh token", ["auth_401_403"])
+        self.assert_classifies("Failed to refresh token: login expired", ["auth_401_403"])
+
+    def test_token_refresh_failed_wording(self):
+        self.assert_classifies("token refresh failed", ["auth_401_403"])
+
+    def test_refresh_token_expired_or_invalid_wording(self):
+        self.assert_classifies("refresh token has expired", ["auth_401_403"])
+        self.assert_classifies("refresh token invalid", ["auth_401_403"])
+
+    def test_context_window_underscore_and_maximum_wording(self):
+        self.assert_classifies("context_window_exceeded", ["context_window"])
+        self.assert_classifies("context_length_exceeded", ["context_window"])
+        self.assert_classifies("context window", ["context_window"])
+        self.assert_classifies("maximum context length", ["context_window"])
+
+    def test_pinned_cli_context_window_sentence(self):
+        self.assert_classifies(
+            "Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying.",
+            ["context_window"],
+        )
+
+    def test_refresh_token_reused_wording(self):
+        self.assert_classifies("refresh_token_reused", ["auth_401_403"])
+
+    def test_not_signed_in_wording(self):
+        self.assert_classifies("Not signed in", ["auth_401_403"])
+
+    def test_http_status_code_prefix(self):
+        out, _ = self.classify("HTTP status code: 429\n")
+        self.assertEqual(self.class_labels(out), ["rate_limit", "http_429"])
+
+    def test_long_token_identifier_classifies_quickly(self):
+        # 只防止正则回溯被加回来；子串匹配本身远低于 2 秒，runner 偶发卡顿不应误报。
+        sample = "token " + "_".join(["id"] * 26) + "\n"
+        self.classify("warmup\n")
+        start = time.perf_counter()
+        out, err = self.classify(sample)
+        elapsed = time.perf_counter() - start
+        self.assertEqual(self.class_labels(out), ["unknown"])
+        self.assertEqual(err.strip(), "")
+        self.assertLess(elapsed, 2.0, f"workflow block took {elapsed:.4f}s")
+        print(f"long_token_identifier_elapsed={elapsed:.4f}s", flush=True)
+
+    def test_classifier_stays_bounded_on_huge_input(self):
+        out, _ = self.classify(b"rate limit\n" + b"x" * (80 * 1024))
+        self.assertEqual(self.class_labels(out), ["unknown"])
+        out, _ = self.classify(b"x" * (80 * 1024) + b"\nrate limit\n")
+        self.assertEqual(self.class_labels(out), ["rate_limit"])
+        out, _ = self.classify(b"x" * 5000 + b"rate limit\n")
+        self.assertEqual(self.class_labels(out), ["unknown"])
+        out, _ = self.classify(b"rate limit " + b"x" * 8000 + b"\n")
+        self.assertEqual(self.class_labels(out), ["rate_limit"])
+        pad = '{"type":"item.completed","x":"' + ("y" * 200) + '"}\n'
+        early = '{"type":"turn.failed","error":{"message":"stream disconnected"}}\n'
+        events = early + pad * ((70 * 1024) // len(pad) + 1)
+        out, _ = self.classify("", events=events)
+        self.assertEqual(self.class_labels(out), ["unknown"])
+        events = pad * ((70 * 1024) // len(pad) + 1) + '{"type":"error","message":"Not signed in"}\n'
+        out, _ = self.classify("", events=events)
+        self.assertEqual(self.class_labels(out), ["auth_401_403"])
+        events = '{"type":"error","message":' + json.dumps("x" * 5000 + "rate limit") + "}\n"
+        out, _ = self.classify("", events=events)
+        self.assertEqual(self.class_labels(out), ["unknown"])
+
+    def classifier_python_namespace(self):
+        block = failure_class_script()
+        start = block.index("import sys\n")
+        end = block.rindex("\ntry:")
+        namespace = {}
+        exec(block[start:end], namespace)
+        return namespace
+
+    def test_megabyte_stderr_reads_only_64kb_and_classifies_tail(self):
+        payload = b"rate limit\n" + b"x" * (4 * 1024 * 1024) + b"\nstream disconnected\n"
+        out, err = self.classify(payload)
+        self.assertEqual(self.class_labels(out), ["stream_disconnected"])
+        self.assertEqual(err.strip(), "")
+
+        reads = []
+        real_open = open
+        def tracking_open(path, mode="r", *args, **kwargs):
+            handle = real_open(path, mode, *args, **kwargs)
+            if "b" in str(mode):
+                orig = handle.read
+                def tracked_read(n=-1):
+                    data = orig() if n is None or n < 0 else orig(n)
+                    reads.append(len(data))
+                    return data
+                handle.read = tracked_read
+            return handle
+
+        namespace = self.classifier_python_namespace()
+        namespace["open"] = tracking_open
+        lines = namespace["load"](str(self.work / "codex-stderr.log"))
+        self.assertEqual(sum(reads), 64 * 1024)
+        self.assertTrue(any("stream disconnected" in line.lower() for line in lines))
+        self.assertFalse(any("rate limit" in line.lower() for line in lines))
+
+    def test_classifier_does_not_use_regex(self):
+        block = failure_class_script()
+        self.assertNotIn("import re", block)
+        self.assertNotIn("re.search", block)
+        self.assertNotIn("re.sub", block)
+        self.assertNotIn("re.compile", block)
+
+    def test_event_secrets_do_not_appear_in_output(self):
+        events = (
+            '{"type":"turn.failed","error":{"message":'
+            + json.dumps("password: \"multiline-secret-value\" sk-xxx " + SECRET_JWT)
+            + "}}\n"
+        )
+        out, err = self.classify("", events=events)
+        combined = out + err
+        lines = [line for line in combined.splitlines() if line]
+        self.assertTrue(set(lines) <= ALLOWED_CLASS_LINES, lines)
+        for secret in ("multiline-secret-value", "sk-xxx", SECRET_JWT):
+            self.assertNotIn(secret, combined)
+        self.assertEqual(self.class_labels(out), ["unknown"])
+
+    def test_secret_stderr_emits_only_allowed_constants(self):
+
+        for workflow in (WORKFLOW, PLAN_WORKFLOW, DISPATCH_WORKFLOW):
+            with self.subTest(workflow=workflow.name):
+                out, err = self.classify(SECRET_STDERR, workflow)
+                lines = [line for line in (out + err).splitlines() if line]
+                self.assertTrue(set(lines) <= ALLOWED_CLASS_LINES, lines)
+                combined = out + err
+                for secret in SECRET_LEAKS:
+                    self.assertNotIn(secret, combined)
+                self.assertEqual(self.class_labels(out), ["unknown"])
+
+    def test_ansi_colored_status_still_classifies(self):
+        out, _ = self.classify(b"\x1b[31m429 Too Many Requests\x1b[0m\n")
+        self.assertEqual(self.class_labels(out), ["rate_limit", "http_429"])
+
+    def run_failing_review(self, stderr_text):
+        policy = self.work / "policy"
+        policy.mkdir(exist_ok=True)
+        (policy / "AGENTS.md").write_text((ROOT / "AGENTS.md").read_text(encoding="utf-8"), encoding="utf-8")
+        (self.work / "review-pr.json").write_text(json.dumps(PR), encoding="utf-8")
+        self.mock_command("git", "exit 0\n")
+        (self.work / "fake-stderr.txt").write_text(stderr_text, encoding="utf-8")
+        self.mock_command("codex", textwrap.dedent("""\
+            cat >/dev/null
+            cat "$RUNNER_TEMP/fake-stderr.txt" >&2
+            exit 1
+        """))
+        return subprocess.run(
+            ["bash", "-e", "-o", "pipefail", "-c", step_script("Run Codex review")],
+            cwd=self.work, env={**self.env, "CODEX_MODEL": "", "CODEX_REASONING_EFFORT": ""},
+            text=True, capture_output=True, check=False,
+        )
+
+    def test_failed_review_prints_classification_not_stderr(self):
+        result = self.run_failing_review(SECRET_STDERR + "429 Too Many Requests\nstream disconnected\n")
+        out = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0, out)
+        self.assertIn("::error::Codex 审查失败，请检查登录状态或额度后手动重试", out)
+        self.assertIn("::group::Codex 失败归类", out)
+        self.assertIn("::endgroup::", out)
+        start = out.index("::group::Codex 失败归类")
+        end = out.index("::endgroup::", start) + len("::endgroup::")
+        group = out[start:end]
+        lines = [line for line in group.splitlines() if line]
+        self.assertTrue(set(lines) <= ALLOWED_CLASS_LINES, lines)
+        self.assertEqual(
+            self.class_labels(group),
+            ["rate_limit", "stream_disconnected", "http_429"],
+        )
+        for secret in SECRET_LEAKS:
+            self.assertNotIn(secret, out)
+
+    def test_classification_blocks_match_across_codex_workflows(self):
+        blocks = [failure_class_script(item) for item in (WORKFLOW, PLAN_WORKFLOW, DISPATCH_WORKFLOW)]
+        self.assertEqual(blocks[0], blocks[1])
+        self.assertEqual(blocks[0], blocks[2])
+        dispatch = DISPATCH_WORKFLOW.read_text(encoding="utf-8")
+        self.assertNotIn('tail -n 20 "$RUNNER_TEMP/codex-stderr.log"', dispatch)
+        self.assertIn(CLASS_MARK_START, PLAN_WORKFLOW.read_text(encoding="utf-8"))
+        run = step_script("Run Codex", DISPATCH_WORKFLOW)
+        mask = run.index('jq -r \'.tokens // {} | .[] | strings | select(length >= 16)\' "$CODEX_HOME/auth.json"')
+        classify = run.index(CLASS_MARK_START)
+        self.assertLess(mask, classify)
+
+    def test_stderr_log_is_not_uploaded_as_artifact(self):
+        for workflow in (WORKFLOW, PLAN_WORKFLOW, DISPATCH_WORKFLOW):
+            with self.subTest(workflow=workflow.name):
+                for block in artifact_blocks(workflow):
+                    self.assertNotIn("codex-stderr.log", block)
+                    self.assertNotIn("codex-events.jsonl", block)
+        review_blocks = artifact_blocks(WORKFLOW)
+        self.assertEqual(len(review_blocks), 1)
+        self.assertIn("review-attestation.json", review_blocks[0])
+        self.assertEqual(artifact_blocks(PLAN_WORKFLOW), [])
+        dispatch_blocks = artifact_blocks(DISPATCH_WORKFLOW)
+        self.assertEqual(len(dispatch_blocks), 1)
+        self.assertIn("codex-result", dispatch_blocks[0])
+        self.assertNotIn("codex-stderr.log", DISPATCH_WORKFLOW.read_text(encoding="utf-8").split("Upload result")[1].split("Self-check")[0])
 
 
 if __name__ == "__main__":
