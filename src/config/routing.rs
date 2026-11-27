@@ -81,7 +81,7 @@ fn rule_for_target(state: &ChainProxyState, masks: RuleMasks, target: &RouteTarg
     })
 }
 
-fn render_mask(mask: &str) -> RuleMask {
+pub(super) fn render_mask(mask: &str) -> RuleMask {
     if let Some(pattern) = mask.strip_prefix("*.") {
         RuleMask::DomainPattern {
             domain_pattern: vec![format!("*.{pattern}")],

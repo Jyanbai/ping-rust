@@ -1,5 +1,4 @@
 use std::{
-    collections::BTreeMap,
     fmt::Write as _,
     io::{self, Read},
     net::{Ipv4Addr, Ipv6Addr, TcpStream},
@@ -8,6 +7,7 @@ use std::{
 };
 
 use super::*;
+use crate::config::managed_yaml::PreparedYaml;
 use crate::service;
 #[cfg(target_os = "linux")]
 use tokio::signal::unix::{signal, Signal, SignalKind};
@@ -47,7 +47,7 @@ pub(crate) async fn secure(
 
     service::check_socks5_restart_scope()?;
     let pid = verify_running(&plan.original).context("无法确认原服务正常，请恢复原监听后重试")?;
-    validate_candidate_with_shoes(&plan.runtime, directory)
+    validate_candidate_with_shoes(&plan.yaml.aggregate, directory)
         .await
         .map_err(|_| {
             anyhow::anyhow!("shoes --dry-run 校验失败，配置未提交；请检查 shoes 安装和当前受管配置")
@@ -201,21 +201,15 @@ fn exit_after_signal(code: i32) -> ! {
 
 struct SecureTarget {
     state: ManagedState,
-    servers: Vec<ServerConfig>,
+    snapshot: ManagedYaml,
     index: usize,
-    document: Option<Vec<u8>>,
     pending_state: bool,
 }
 
 impl SecureTarget {
     fn load(directory: &Path, selector: &str) -> Result<Self> {
-        let config_path = directory.join("config.yaml");
-        let state_path = directory.join("ping-rust-state.json");
-        for path in [&config_path, &state_path] {
-            commit::read_managed_file(path)?
-                .with_context(|| format!("未找到受管配置文件 {}", path.display()))?;
-        }
-        let mut state = load_state_before_socks5_migration(&state_path)?;
+        let snapshot = ManagedYaml::load(directory)?;
+        let mut state = snapshot.state_before_listen(true)?;
         let original = crate::client::select_profile(&state.profiles, Some(selector))?;
         if original.protocol() != Protocol::Socks5 {
             bail!("所选节点不是 SOCKS5");
@@ -225,35 +219,25 @@ impl SecureTarget {
             .iter()
             .position(|profile| profile.id == original.id)
             .context("未找到所选 SOCKS5 节点")?;
-        let snapshot = ManagedYaml::load(directory)?;
-        snapshot.guard_legacy(&state.profiles)?;
+        snapshot.check_copies(&state.profiles)?;
         let server = snapshot
             .servers
             .get(index)
             .context("聚合配置缺少所选 SOCKS5 节点")?;
-        let read_document = |profile: &ManagedProfile| {
-            commit::managed_profile_directory_exists(&directory.join("profiles"))?;
-            commit::read_managed_file(&profile_path(directory, profile))
-        };
-        let mut document = None;
+        let mut pending_state = false;
         if let Some(recovered) = recover_profile(original, server)? {
-            document = read_document(original)?;
-            if document.is_some() {
+            if snapshot.profile_document(original).is_some() {
                 state.profiles[index] = recovered;
+                pending_state = true;
             }
         }
-        let pending_state = document.is_some();
         migrate_listen(&mut state, &snapshot.servers)
             .context("聚合配置与管理状态不一致，无法安全加固")?;
         ensure_chain_proxy_matches_state(&snapshot.servers, &state)?;
-        if state.profiles[index].socks5_risk_warning().is_some() {
-            document = read_document(&state.profiles[index])?;
-        }
         Ok(Self {
             state,
-            servers: snapshot.servers,
+            snapshot,
             index,
-            document,
             pending_state,
         })
     }
@@ -263,25 +247,29 @@ impl SecureTarget {
     }
 
     fn matches(&self, other: &Self) -> Result<bool> {
-        Ok(self.document == other.document
+        Ok(self.snapshot.profile_document(self.profile())
+            == other.snapshot.profile_document(other.profile())
             && serde_json::to_value(self.profile())? == serde_json::to_value(other.profile())?
-            && crate::yaml::to_string(&self.servers[self.index])?
-                == crate::yaml::to_string(&other.servers[other.index])?)
+            && self.snapshot.entry(self.index) == other.snapshot.entry(other.index))
     }
 
     fn build(self, mode: SecureMode) -> Result<SecurePlan> {
         let Self {
             mut state,
-            mut servers,
+            mut snapshot,
             index,
             ..
         } = self;
         let profile = &mut state.profiles[index];
         let original = profile.clone();
-        let server = &mut servers[index];
+        let mut server = snapshot.servers[index].clone();
         match mode {
             SecureMode::Auth => {
-                apply_profile_change(server, profile, ProfileChange::Socks5Authentication(true))?;
+                apply_profile_change(
+                    &mut server,
+                    profile,
+                    ProfileChange::Socks5Authentication(true),
+                )?;
             }
             SecureMode::Local => {
                 let address = socket_address(&original)?;
@@ -298,14 +286,15 @@ impl SecureTarget {
                 server.address = profile.listen_address()?;
             }
         }
-        let yaml = render_legacy(&servers, &state.profiles)?;
+        snapshot.edit(index, server)?;
+        let (yaml, original_files) = snapshot.prepare(&state.profiles)?;
         Ok(SecurePlan {
             mode,
             original,
             state,
             index,
-            documents: yaml.profiles,
-            runtime: yaml.aggregate,
+            yaml,
+            original_files,
         })
     }
 }
@@ -380,8 +369,8 @@ struct SecurePlan {
     original: ManagedProfile,
     state: ManagedState,
     index: usize,
-    documents: BTreeMap<String, Vec<u8>>,
-    runtime: String,
+    yaml: PreparedYaml,
+    original_files: ManagedRollback,
 }
 
 impl SecurePlan {
@@ -418,7 +407,7 @@ impl SecurePlan {
                 }
             }
         }
-        for name in self.documents.keys().filter(|name| **name != filename) {
+        for name in self.yaml.profiles.keys().filter(|name| **name != filename) {
             if !directory.join("profiles").join(name).exists() {
                 writeln!(
                     output,
@@ -435,14 +424,13 @@ impl SecurePlan {
         directory: &Path,
         mut restart_and_verify: impl FnMut(&ManagedProfile) -> Result<()>,
     ) -> Result<ManagedProfile> {
-        ManagedYaml::load(directory)?.guard_legacy(&self.state.profiles)?;
         let profile = self.profile();
         commit::commit_profile_with_activation(
             directory,
-            &self.documents,
+            &self.yaml,
             &profile.config_file_name(),
-            &self.runtime,
             &self.state,
+            &self.original_files,
             |restore| restart_and_verify(if restore { &self.original } else { profile }),
         )?;
         Ok(profile.clone())

@@ -83,20 +83,6 @@ pub(super) fn hashes(directory: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     output
 }
 
-pub(super) fn assert_refused_without_writes(
-    error: anyhow::Error,
-    directory: &Path,
-    before: &BTreeMap<PathBuf, Vec<u8>>,
-) {
-    let error = format!("{error:#}");
-    assert!(
-        error.contains("该操作暂不支持保留手工添加的字段"),
-        "{error}"
-    );
-    assert!(!error.contains(MARKER));
-    assert_eq!(&hashes(directory), before);
-}
-
 #[tokio::test]
 async fn aggregating_profiles_keeps_their_unmodeled_fields() {
     let directory = tempfile::tempdir().unwrap();
@@ -111,12 +97,21 @@ async fn aggregating_profiles_keeps_their_unmodeled_fields() {
 }
 
 #[tokio::test]
-async fn managed_restore_preparation_refuses_unmodeled_fields() {
+async fn managed_restore_rebuilds_profile_with_unmodeled_fields() {
     let directory = tempfile::tempdir().unwrap();
-    write_fixture(directory.path()).await;
-    let before = hashes(directory.path());
-    let error = prepare_managed_snapshot(directory.path()).unwrap_err();
-    assert_refused_without_writes(error, directory.path(), &before);
+    let path = directory.path();
+    let (state, entries) = write_fixture(path).await;
+    let missing = profile_file(path, &state.profiles[0]);
+    fs::remove_file(&missing).unwrap();
+    assert!(prepare_managed_snapshot(path).unwrap());
+    validate_managed_snapshot(
+        &path.join("config.yaml"),
+        &path.join("ping-rust-state.json"),
+    )
+    .unwrap();
+    assert!(read_entries(path) == entries);
+    assert!(read_yaml::<Value>(&missing) == entries[0]);
+    assert!(!prepare_managed_snapshot(path).unwrap());
 }
 
 #[tokio::test]
@@ -194,28 +189,43 @@ async fn conflicting_profile_copies_are_refused_without_exposing_values() {
         } else {
             write_yaml(&profile_file(path, profile), &servers[0]);
         }
-        let lock = lock(path);
+        let held = lock(path);
         let before = hashes(path);
-        let result = update_profile_at(
+        let edit = update_profile_at(
             path,
             state.profiles[1].id,
             ProfileChange::Port(1081),
-            lock,
+            held,
             false,
         )
-        .await;
-        let error = format!("{:#}", result.err().unwrap());
-        assert!(error.contains("config.yaml"));
-        assert!(error.contains(&profile.config_file_name()));
-        assert!(error.contains("第 1 项"));
-        assert!(error.contains("protocol.encryption_limits"));
-        assert!(!error.contains(MARKER));
+        .await
+        .err()
+        .unwrap();
+        let chain =
+            update_chain_proxy_at(path, ChainProxyChange::SetEnabled(true), lock(path), false)
+                .await
+                .err()
+                .unwrap();
+        let ensure = ensure_profile_files_at(path, false).await.unwrap_err();
+        let restore = prepare_managed_snapshot(path).unwrap_err();
+        let upgrade = migrate_managed_config_at(path, &path.join("no-shoes"))
+            .await
+            .err()
+            .unwrap();
+        for error in [edit, chain, ensure, restore, upgrade] {
+            let error = format!("{error:#}");
+            assert!(error.contains("config.yaml"));
+            assert!(error.contains(&profile.config_file_name()));
+            assert!(error.contains("第 1 项"));
+            assert!(error.contains("protocol.encryption_limits"));
+            assert!(!error.contains(MARKER));
+        }
         assert_eq!(hashes(path), before);
     }
 }
 
 #[tokio::test]
-async fn legacy_singular_client_chain_can_be_migrated() {
+async fn restoring_legacy_singular_client_chain_allows_adding_a_node() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path();
     let (mut server, profile) = tests::reality_server_and_profile(53453);
@@ -243,43 +253,82 @@ async fn legacy_singular_client_chain_can_be_migrated() {
     .unwrap();
 
     let before = hashes(path);
-    assert!(!ensure_profile_files_at(path).await.unwrap());
+    assert!(!ensure_profile_files_at(path, true).await.unwrap());
     assert_eq!(hashes(path), before);
 
-    let (servers, state, _, complete) = ManagedYaml::load(path).unwrap().into_legacy(true).unwrap();
-    assert!(complete);
-    assert!(state.chain_proxy.legacy_layout);
-    assert!(crate::yaml::to_value(&servers[0]).unwrap() == expected);
-
-    #[cfg(unix)]
-    {
-        let binary = path.join("mock-shoes");
-        utils::atomic_write(
-            &binary,
-            b"#!/bin/sh\ntest \"$1\" = --dry-run && grep -q 'client_chains:' \"$2\" && ! grep -q 'client_chain:' \"$2\"\n",
-            0o700,
-        )
-        .unwrap();
-        migrate_managed_config_at(path, &binary)
-            .await
+    fs::remove_file(&profile_path).unwrap();
+    let original_state = fs::read(&state_path).unwrap();
+    assert!(prepare_managed_snapshot(path).unwrap());
+    validate_managed_snapshot(&path.join("config.yaml"), &state_path).unwrap();
+    assert_eq!(fs::read(&state_path).unwrap(), original_state);
+    assert!(
+        load_state_from(&state_path)
             .unwrap()
-            .finish();
-        assert!(read_entries(path) == [expected.clone()]);
-        assert!(read_yaml::<Value>(&profile_path) == expected);
-        assert!(
-            load_state_from(&state_path)
-                .unwrap()
-                .chain_proxy
-                .legacy_layout
-        );
-    }
-
-    legacy["rules"][0]["hand_added"] = json!({"nested": MARKER});
+            .chain_proxy
+            .legacy_layout
+    );
+    assert!(read_yaml::<Value>(&profile_path) == read_entries(path)[0]);
+    assert!(read_entries(path) == [expected]);
     write_yaml(&profile_path, &legacy);
-    write_yaml(&path.join("config.yaml"), &[&legacy]);
-    let before = hashes(path);
-    let result = ManagedYaml::load(path).unwrap().into_legacy(true);
-    assert_refused_without_writes(result.err().unwrap(), path, &before);
+    assert!(prepare_managed_snapshot(path).unwrap());
+    assert!(read_yaml::<Value>(&profile_path) == read_entries(path)[0]);
+    let added = generate_inner_with_lock(socks5_request(path, 3080), false, Some(lock(path)), path)
+        .await
+        .unwrap();
+    assert_eq!(read_entries(path).len(), 2);
+    drop(added);
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn shoes_migration_changes_only_legacy_aliases_and_wildcard_masks() {
+    use crate::chain_proxy::{RouteTarget, RoutingRule};
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path();
+    let (mut state, mut entries) = write_fixture(path).await;
+    state.chain_proxy.enabled = true;
+    state.chain_proxy.rules.push(RoutingRule {
+        id: Uuid::new_v4(),
+        name: "wildcard".to_owned(),
+        enabled: true,
+        masks: vec!["*.example.com".to_owned(), "203.0.113.0/24".to_owned()],
+        target: RouteTarget::Direct,
+    });
+    let mut rules = crate::yaml::to_value(render_legacy_rules(&state.chain_proxy)).unwrap();
+    let rule = rules[0].as_object_mut().unwrap();
+    let client = rule.remove("client_chains").unwrap();
+    rule.insert("client_chain".to_owned(), client.clone());
+    rule.insert("hand_added".to_owned(), json!({"nested": MARKER}));
+    for (entry, profile) in entries.iter_mut().zip(&state.profiles) {
+        entry["rules"] = rules.clone();
+        write_yaml(&profile_file(path, profile), entry);
+    }
+    write_yaml(&path.join("config.yaml"), &entries);
+    let state_path = path.join("ping-rust-state.json");
+    save_state_to(&state_path, &state).unwrap();
+    let binary = path.join("mock-shoes");
+    utils::atomic_write(
+        &binary,
+        b"#!/bin/sh\ntest \"$1\" = --dry-run && grep -q 'client_chains:' \"$2\" && ! grep -q 'client_chain:' \"$2\" && grep -q 'domain_pattern:' \"$2\" && grep -q 'encryption_limits:' \"$2\"\n",
+        0o700,
+    )
+    .unwrap();
+    migrate_managed_config_at(path, &binary)
+        .await
+        .unwrap()
+        .finish();
+
+    let rule = rules[0].as_object_mut().unwrap();
+    rule.remove("client_chain");
+    rule.insert("client_chains".to_owned(), client);
+    rules[0]["masks"][0] = json!({"domain_pattern": ["*.example.com"]});
+    for (entry, profile) in entries.iter_mut().zip(&state.profiles) {
+        entry["rules"] = rules.clone();
+        assert!(read_yaml::<Value>(&profile_file(path, profile)) == *entry);
+    }
+    assert!(read_entries(path) == entries);
+    validate_managed_snapshot(&path.join("config.yaml"), &state_path).unwrap();
 }
 
 #[tokio::test]
@@ -349,7 +398,7 @@ async fn current_profile_copies_with_unmodeled_fields_need_no_writes() {
             .set_modified(timestamp)
             .unwrap();
     }
-    assert!(!ensure_profile_files_at(path).await.unwrap());
+    assert!(!ensure_profile_files_at(path, true).await.unwrap());
     assert_eq!(hashes(path), before);
     for file in before.keys() {
         assert_eq!(fs::metadata(file).unwrap().modified().unwrap(), timestamp);
@@ -357,19 +406,108 @@ async fn current_profile_copies_with_unmodeled_fields_need_no_writes() {
 }
 
 #[tokio::test]
-async fn legacy_chain_and_profile_migration_refuse_unmodeled_fields() {
+async fn chain_update_changes_only_rules_and_keeps_unmodeled_fields() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path();
-    write_fixture(path).await;
-    let lock = lock(path);
+    let (state, mut entries) = write_fixture(path).await;
+    let result = update_chain_proxy_at(path, ChainProxyChange::SetEnabled(true), lock(path), false)
+        .await
+        .unwrap();
+    assert!(result.configuration_changed);
+    let rules = crate::yaml::to_value(render_rules(&result.state.chain_proxy)).unwrap();
+    for (entry, profile) in entries.iter_mut().zip(&state.profiles) {
+        assert_ne!(entry["rules"], rules);
+        entry["rules"] = rules.clone();
+        assert!(read_yaml::<Value>(&profile_file(path, profile)) == *entry);
+    }
+    assert!(read_entries(path) == entries);
+}
+
+#[tokio::test]
+async fn chain_update_preserves_unique_rules_and_rejects_ambiguous_ones() {
+    use crate::chain_proxy::{RouteTarget, RoutingRule};
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path();
+    let (mut state, mut entries) = write_fixture(path).await;
+    let pinned = RoutingRule {
+        id: Uuid::new_v4(),
+        name: "annotated".to_owned(),
+        enabled: true,
+        masks: vec!["203.0.113.0/24".to_owned()],
+        target: RouteTarget::Direct,
+    };
+    let second = RoutingRule {
+        id: Uuid::new_v4(),
+        name: "another".to_owned(),
+        masks: vec!["example.com".to_owned()],
+        ..pinned.clone()
+    };
+    state.chain_proxy.enabled = true;
+    state.chain_proxy.rules = vec![pinned.clone(), second.clone()];
+    let mut rules = crate::yaml::to_value(render_rules(&state.chain_proxy)).unwrap();
+    rules[0]["hand_added"] = json!(MARKER);
+    for (entry, profile) in entries.iter_mut().zip(&state.profiles) {
+        entry["rules"] = rules.clone();
+        write_yaml(&profile_file(path, profile), entry);
+    }
+    write_yaml(&path.join("config.yaml"), &entries);
+    save_state_to(&path.join("ping-rust-state.json"), &state).unwrap();
+    let result = update_chain_proxy_at(
+        path,
+        ChainProxyChange::SetRules(vec![second.clone(), pinned.clone()]),
+        lock(path),
+        false,
+    )
+    .await
+    .unwrap();
+    assert!(result.configuration_changed);
+    drop(result);
+    rules.as_array_mut().unwrap().swap(0, 1);
+    for (entry, profile) in read_entries(path).iter().zip(&state.profiles) {
+        assert!(entry["rules"] == rules);
+        assert!(read_yaml::<Value>(&profile_file(path, profile)) == *entry);
+    }
+
+    let held = lock(path);
     let before = hashes(path);
-    let result = update_chain_proxy_at(path, ChainProxyChange::SetRules(Vec::new()), lock).await;
-    assert_refused_without_writes(result.err().unwrap(), path, &before);
-    assert!(socks5::listen_migration_pending(&path.join("ping-rust-state.json")).unwrap());
-    let error = ensure_profile_files_at(path).await.unwrap_err();
-    assert_refused_without_writes(error, path, &before);
-    let migration = ManagedYaml::load(path).unwrap().into_legacy(true);
-    assert_refused_without_writes(migration.err().unwrap(), path, &before);
+    let duplicate = RoutingRule {
+        id: Uuid::new_v4(),
+        name: "duplicate".to_owned(),
+        ..pinned.clone()
+    };
+    let error = update_chain_proxy_at(
+        path,
+        ChainProxyChange::SetRules(vec![second, pinned, duplicate]),
+        held,
+        false,
+    )
+    .await
+    .err()
+    .unwrap();
+    let error = format!("{error:#}");
+    assert!(
+        error.contains("config.yaml 第 1 项（字段路径：$.rules[1]）"),
+        "{error}"
+    );
+    assert!(!error.contains(MARKER));
+    assert_eq!(hashes(path), before);
+}
+
+#[tokio::test]
+async fn ensure_profiles_rebuilds_missing_copy_with_unmodeled_fields() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path();
+    let (state, entries) = write_fixture(path).await;
+    let missing = profile_file(path, &state.profiles[0]);
+    fs::remove_file(&missing).unwrap();
+    let original = fs::read(path.join("config.yaml")).unwrap();
+    let state_path = path.join("ping-rust-state.json");
+    assert!(socks5::listen_migration_pending(&state_path).unwrap());
+    assert!(ensure_profile_files_at(path, false).await.unwrap());
+    assert!(!socks5::listen_migration_pending(&state_path).unwrap());
+    assert_eq!(fs::read(path.join("config.yaml")).unwrap(), original);
+    assert!(read_yaml::<Value>(&missing) == entries[0]);
 }
 
 fn lock(directory: &Path) -> utils::ExclusiveLock {

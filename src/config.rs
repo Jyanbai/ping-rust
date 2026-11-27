@@ -60,11 +60,9 @@ mod yaml_fixture_tests;
 #[cfg(test)]
 use commit::{
     aggregate_profile_documents, commit_managed_with_state_writer, is_managed_profile_file_name,
+    profile_documents, write_profile_documents,
 };
-use commit::{
-    commit_prepared, profile_documents, profile_documents_are_current, render_legacy,
-    write_profile_documents,
-};
+use commit::{commit_prepared, commit_prepared_with_state_writer};
 use managed_yaml::ManagedYaml;
 pub(crate) use routing::chain_value;
 use routing::{render_legacy_rules, render_rules};
@@ -845,8 +843,8 @@ fn chain_rules(client: &ShoesClientConfig) -> Vec<ServerRule> {
     })]
 }
 
-fn apply_chain_proxy_rules(servers: &mut [ServerConfig], state: &ManagedState) {
-    let rules = if state.chain_proxy.legacy_layout {
+fn chain_proxy_rules(state: &ManagedState) -> Vec<ServerRule> {
+    if state.chain_proxy.legacy_layout {
         state
             .chain_proxy
             .effective()
@@ -854,7 +852,11 @@ fn apply_chain_proxy_rules(servers: &mut [ServerConfig], state: &ManagedState) {
             .unwrap_or_else(direct_rules)
     } else {
         render_rules(&state.chain_proxy)
-    };
+    }
+}
+
+fn apply_chain_proxy_rules(servers: &mut [ServerConfig], state: &ManagedState) {
+    let rules = chain_proxy_rules(state);
     for server in servers {
         server.rules.clone_from(&rules);
     }
@@ -917,9 +919,7 @@ impl ConfigMigrationResult {
     }
 }
 
-/// Rewrite a v0.2.x managed configuration from state using the current shoes
-/// schema, validate it with the newly installed binary, and commit it as one
-/// managed configuration transaction.
+/// Migrate legacy rule syntax and validate it with the newly installed shoes.
 pub(crate) async fn migrate_managed_config_with_binary(
     binary: &Path,
 ) -> Result<ConfigMigrationResult> {
@@ -931,11 +931,11 @@ async fn migrate_managed_config_at(
     directory: &Path,
     binary: &Path,
 ) -> Result<ConfigMigrationResult> {
-    let (mut servers, state, rollback, _) = ManagedYaml::load(directory)?.into_legacy(true)?;
-    if state.chain_proxy.enabled {
-        apply_chain_proxy_rules(&mut servers, &state);
-    }
-    let yaml = render_legacy(&servers, &state.profiles)?;
+    let mut snapshot = ManagedYaml::load(directory)?;
+    let state = snapshot.state(true)?;
+    snapshot.check_copies_for_migration(&state.profiles)?;
+    snapshot.migrate_rule_syntax(true)?;
+    let (yaml, rollback) = snapshot.prepare(&state.profiles)?;
     validate_yaml(&yaml.aggregate)?;
     #[cfg(feature = "ci-fault-injection")]
     let dry_run_yaml = if std::env::var("PING_RUST_CI_UPGRADE_FAULT").as_deref() == Ok("dry-run") {
@@ -954,7 +954,10 @@ async fn migrate_managed_config_at(
 
 pub(crate) fn preflight_shoes_migration() -> Result<()> {
     if Path::new(utils::CONFIG_FILE).is_file() {
-        ManagedYaml::load(Path::new(utils::CONFIG_DIR))?.into_legacy(true)?;
+        let snapshot = ManagedYaml::load(Path::new(utils::CONFIG_DIR))?;
+        let state = snapshot.state(true)?;
+        snapshot.check_copies_for_migration(&state.profiles)?;
+        ensure_servers_match_state(&snapshot.servers, &state.profiles)?;
     }
     Ok(())
 }
@@ -2388,16 +2391,16 @@ fn load_servers(path: &Path) -> Result<Vec<ServerConfig>> {
 pub async fn ensure_profile_files() -> Result<bool> {
     utils::require_linux_root()?;
     let _lock = utils::exclusive_lock(Path::new(utils::LOCK_FILE))?;
-    ensure_profile_files_at(Path::new(utils::CONFIG_DIR)).await
+    ensure_profile_files_at(Path::new(utils::CONFIG_DIR), true).await
 }
 
-async fn ensure_profile_files_at(directory: &Path) -> Result<bool> {
+async fn ensure_profile_files_at(directory: &Path, validate_with_shoes: bool) -> Result<bool> {
     let config_path = &directory.join("config.yaml");
     let state_path = &directory.join("ping-rust-state.json");
     if !config_path.exists() && !state_path.exists() {
         return Ok(false);
     }
-    let mut snapshot = ManagedYaml::load(directory)?;
+    let snapshot = ManagedYaml::load(directory)?;
     let state = snapshot.state(true)?;
     let complete = snapshot.check_copies(&state.profiles)?;
     ensure_servers_match_state(&snapshot.servers, &state.profiles)?;
@@ -2405,46 +2408,38 @@ async fn ensure_profile_files_at(directory: &Path) -> Result<bool> {
     if complete && !socks5::listen_migration_pending(state_path)? {
         return Ok(false);
     }
-    snapshot.ensure_lossless_legacy_write()?;
-    let yaml = render_legacy(&snapshot.servers, &state.profiles)?;
-    if !snapshot.servers.is_empty() {
+    let has_servers = !snapshot.servers.is_empty();
+    let (yaml, rollback) = snapshot.prepare(&state.profiles)?;
+    if has_servers && validate_with_shoes {
         validate_candidate_with_shoes(&yaml.aggregate, directory).await?;
     }
-    commit_prepared(directory, &yaml, &state, snapshot.rollback_mut())?;
+    commit_prepared(directory, &yaml, &state, &rollback)?;
     Ok(true)
 }
 
 pub(crate) fn prepare_managed_snapshot(directory: &Path) -> Result<bool> {
-    let config_path = directory.join("config.yaml");
     let state_path = directory.join("ping-rust-state.json");
     if !state_path.exists() {
         return Ok(false);
     }
-    let snapshot = ManagedYaml::load(directory)?;
+    let mut snapshot = ManagedYaml::load(directory)?;
     let state = snapshot.state(true)?;
-    snapshot.guard_legacy(&state.profiles)?;
-    let servers = snapshot.servers;
-    ensure_servers_match_state(&servers, &state.profiles).context("备份内容不一致")?;
-    ensure_chain_proxy_matches_state(&servers, &state).context("备份内容不一致")?;
+    let complete = snapshot.check_copies_for_migration(&state.profiles)?;
+    ensure_servers_match_state(&snapshot.servers, &state.profiles).context("备份内容不一致")?;
+    ensure_chain_proxy_matches_state(&snapshot.servers, &state).context("备份内容不一致")?;
     ensure_chain_proxy_has_no_direct_udp_path(&state).context("备份内容不安全")?;
-    let documents = profile_documents(&servers, &state.profiles)?;
-    let profiles_path = directory.join("profiles");
     let migrate_listen = socks5::listen_migration_pending(&state_path)?;
-    if profile_documents_are_current(&profiles_path, &documents)? && !migrate_listen {
+    let migrated_rules = snapshot.migrate_rule_syntax(false)?;
+    if complete && !migrate_listen && !migrated_rules {
         return Ok(false);
     }
-    if migrate_listen {
-        commit::commit_managed_with_state_writer(
-            &config_path,
-            &state_path,
-            &profiles_path,
-            &servers,
-            &state,
-            save_state_to,
-        )?;
-    } else {
-        write_profile_documents(&profiles_path, &documents)?;
-    }
+    let (yaml, rollback) = snapshot.prepare(&state.profiles)?;
+    commit_prepared_with_state_writer(directory, &yaml, &state, &rollback, |path, state| {
+        if migrate_listen {
+            save_state_to(path, state)?;
+        }
+        Ok(())
+    })?;
     Ok(true)
 }
 
@@ -2810,32 +2805,30 @@ pub(crate) async fn update_chain_proxy_locked(
     lock: utils::ExclusiveLock,
 ) -> Result<ChainProxyUpdateResult> {
     utils::require_linux_root()?;
-    update_chain_proxy_at(Path::new(utils::CONFIG_DIR), change, lock).await
+    update_chain_proxy_at(Path::new(utils::CONFIG_DIR), change, lock, true).await
 }
 
 async fn update_chain_proxy_at(
     directory: &Path,
     change: ChainProxyChange,
     lock: utils::ExclusiveLock,
+    validate_with_shoes: bool,
 ) -> Result<ChainProxyUpdateResult> {
-    let (mut servers, mut state, rollback, _) = ManagedYaml::load(directory)?.into_legacy(false)?;
-    ensure_chain_proxy_matches_state(&servers, &state)?;
-    let old_rules = servers
-        .iter()
-        .map(|server| server.rules.clone())
-        .collect::<Vec<_>>();
+    let mut snapshot = ManagedYaml::load(directory)?;
+    let mut state = snapshot.state(false)?;
+    snapshot.check_copies(&state.profiles)?;
+    ensure_servers_match_state(&snapshot.servers, &state.profiles)?;
+    ensure_chain_proxy_matches_state(&snapshot.servers, &state)?;
     state.chain_proxy.apply(change)?;
     ensure_chain_proxy_has_no_direct_udp_path(&state)?;
-    apply_chain_proxy_rules(&mut servers, &state);
-    let configuration_changed = servers
-        .iter()
-        .map(|server| server.rules.clone())
-        .collect::<Vec<_>>()
-        != old_rules;
-    let yaml = render_legacy(&servers, &state.profiles)?;
-    if !servers.is_empty() {
+    let configuration_changed = snapshot.replace_rules(&chain_proxy_rules(&state))?;
+    let has_servers = !snapshot.servers.is_empty();
+    let (yaml, rollback) = snapshot.prepare(&state.profiles)?;
+    if has_servers {
         validate_yaml(&yaml.aggregate)?;
-        validate_candidate_with_shoes(&yaml.aggregate, directory).await?;
+        if validate_with_shoes {
+            validate_candidate_with_shoes(&yaml.aggregate, directory).await?;
+        }
     }
     utils::ensure_directory(directory, 0o700)?;
     commit_prepared(directory, &yaml, &state, &rollback)?;
@@ -3291,20 +3284,13 @@ async fn validate_candidate_with_binary(yaml: &str, directory: &Path, binary: &P
 }
 
 pub(crate) fn validate_managed_snapshot(config_path: &Path, state_path: &Path) -> Result<()> {
-    let servers = load_servers(config_path)?;
-    let state = load_state_from(state_path)?;
-    ensure_servers_match_state(&servers, &state.profiles).context("备份内容不一致")?;
-    ensure_chain_proxy_matches_state(&servers, &state).context("备份内容不一致")?;
+    let snapshot = ManagedYaml::load_from(config_path, state_path)?;
+    let state = snapshot.state(true)?;
+    ensure_servers_match_state(&snapshot.servers, &state.profiles).context("备份内容不一致")?;
+    ensure_chain_proxy_matches_state(&snapshot.servers, &state).context("备份内容不一致")?;
     ensure_chain_proxy_has_no_direct_udp_path(&state).context("备份内容不安全")?;
-    let profiles_path = config_path
-        .parent()
-        .context("备份配置没有父目录")?
-        .join("profiles");
-    if profiles_path.exists() {
-        let documents = profile_documents(&servers, &state.profiles)?;
-        if !profile_documents_are_current(&profiles_path, &documents)? {
-            bail!("备份中的节点文件与聚合配置不一致");
-        }
+    if !snapshot.check_copies(&state.profiles)? {
+        bail!("备份中的节点文件与聚合配置不一致");
     }
     Ok(())
 }

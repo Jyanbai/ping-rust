@@ -82,19 +82,90 @@ async fn choosing_socks5_mode_does_not_hold_config_lock() {
 }
 
 #[tokio::test]
-async fn secure_refuses_when_another_profile_has_unmodeled_fields() {
-    use crate::config::managed_yaml_tests::{assert_refused_without_writes, hashes, write_fixture};
+async fn secure_preserves_unmodeled_fields_from_the_latest_snapshot() {
+    use crate::config::managed_yaml_tests::write_fixture;
+    use serde_json::{json, Value};
+
+    for mode in [SecureMode::Auth, SecureMode::Local] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path();
+        let (state, mut entries) = write_fixture(path).await;
+        let lock_path = path.join("lock");
+        let config = path.join("config.yaml");
+        let other = profile_path(path, &state.profiles[0]);
+        let target = profile_path(path, &state.profiles[1]);
+        entries[1]["protocol"]["hand_added"] = json!({"preserve": true});
+        fs::write(&config, crate::yaml::to_string(&entries).unwrap()).unwrap();
+        fs::write(&target, crate::yaml::to_string(&entries[1]).unwrap()).unwrap();
+        let (plan, _lock) =
+            prepare_locked(path, &state.profiles[1].name, &lock_path, false, || {
+                let _other_lock = utils::exclusive_lock(&lock_path)?;
+                entries[0]["protocol"]["encryption_limits"]["updated"] = json!(true);
+                fs::write(&config, crate::yaml::to_string(&entries)?)?;
+                fs::write(&other, crate::yaml::to_string(&entries[0])?)?;
+                Ok(Some(mode))
+            })
+            .unwrap()
+            .unwrap();
+        let previous = fs::read(&other).unwrap();
+        let state_path = path.join("ping-rust-state.json");
+        let previous_state = fs::read(&state_path).unwrap();
+        let hardened = plan
+            .commit(path, |_| {
+                assert_eq!(fs::read(&state_path).unwrap(), previous_state);
+                Ok(())
+            })
+            .unwrap();
+        assert!(hardened.socks5_risk_warning().is_none());
+        let actual: Vec<Value> = crate::yaml::from_slice(&fs::read(&config).unwrap()).unwrap();
+        assert!(actual[0] == entries[0] && actual[2] == entries[2]);
+        assert_eq!(fs::read(&other).unwrap(), previous);
+        let target_copy: Value = crate::yaml::from_slice(&fs::read(&target).unwrap()).unwrap();
+        assert!(target_copy == actual[1]);
+        match mode {
+            SecureMode::Auth => {
+                assert!(actual[1]["protocol"]["username"].is_string());
+                assert!(actual[1]["protocol"]["password"].is_string());
+                entries[1]["protocol"]["username"] = actual[1]["protocol"]["username"].clone();
+                entries[1]["protocol"]["password"] = actual[1]["protocol"]["password"].clone();
+            }
+            SecureMode::Local => entries[1]["address"] = json!("127.0.0.1:1080"),
+        }
+        assert!(actual[1] == entries[1]);
+        validate_managed_snapshot(&config, &state_path).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn secure_refuses_a_conflicting_copy_or_a_stale_plan() {
+    use crate::config::managed_yaml_tests::{hashes, write_fixture};
+    use serde_json::json;
 
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path();
-    let (state, _) = write_fixture(path).await;
-    let lock_path = path.join("lock");
-    drop(utils::exclusive_lock(&lock_path).unwrap());
+    let (state, mut entries) = write_fixture(path).await;
+    let profile = &state.profiles[1];
+    let plan = prepare(path, profile, SecureMode::Local);
+    let config = path.join("config.yaml");
+    let copy = profile_path(path, &state.profiles[0]);
+    entries[0]["protocol"]["encryption_limits"]["updated"] = json!(true);
+    fs::write(&config, crate::yaml::to_string(&entries).unwrap()).unwrap();
     let before = hashes(path);
-    let result = prepare_locked(path, &state.profiles[1].name, &lock_path, false, || {
-        Ok(Some(SecureMode::Auth))
-    });
-    assert_refused_without_writes(result.err().unwrap(), path, &before);
+    let error = SecureTarget::load(path, &profile.name).err().unwrap();
+    let error = format!("{error:#}");
+    assert!(error.contains("config.yaml 第 1 项"));
+    assert!(error.contains("protocol.encryption_limits.<字段>"));
+    assert!(!error.contains("updated"));
+    assert_eq!(hashes(path), before);
+
+    fs::write(&copy, crate::yaml::to_string(&entries[0]).unwrap()).unwrap();
+    let before = hashes(path);
+    let error = plan
+        .commit(path, |_| panic!("旧候选配置不能激活"))
+        .err()
+        .unwrap();
+    assert!(format!("{error:#}").contains("受管配置在校验期间已变更"));
+    assert_eq!(hashes(path), before);
 }
 
 #[tokio::test]
@@ -542,7 +613,7 @@ async fn repaired_socks5_authenticates_and_loopback_rejects_remote_connections()
         drop(reservation);
 
         let plan = prepare(path, &original, mode);
-        validate_candidate_with_binary(&plan.runtime, path, &binary)
+        validate_candidate_with_binary(&plan.yaml.aggregate, path, &binary)
             .await
             .unwrap();
         let repaired = plan.commit(path, |_| Ok(())).unwrap();
