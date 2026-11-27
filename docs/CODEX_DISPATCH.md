@@ -158,7 +158,7 @@ Dispatch（含 `/codex` 和回修）、Code Review 和 Architecture Plan 共用 
 
 #### ChatGPT 登录
 
-要继续使用 ChatGPT 登录，在 environment `codex` 设置变量 `CODEX_PROVIDER=chatgpt`，并准备 CI 专用的 secret `CODEX_AUTH_JSON`。已有有效登录凭据时可沿用。走 chatgpt 时不会使用 `CODEX_DISPATCH_MODEL`、`CODEX_REVIEW_MODEL`、`CODEX_PLAN_MODEL`（它们可能是只有 CPA 认识的模型别名），只使用 `CODEX_MODEL`，也不会传入 CPA 密钥和基址。
+要继续使用 ChatGPT 登录，在 environment `codex` 设置变量 `CODEX_PROVIDER=chatgpt`，并准备 CI 专用的 secret `CODEX_AUTH_JSON`。已有有效登录凭据时可沿用。走 chatgpt 时不会使用 `CODEX_DISPATCH_MODEL`、`CODEX_REVIEW_MODEL`、`CODEX_PLAN_MODEL`（它们可能是只有 CPA 认识的模型别名），只使用 `CODEX_MODEL`，也不会传入 CPA 密钥和基址。**切回 chatgpt 时还要同时检查 `CODEX_MODEL`：把它改成 ChatGPT 登录支持的模型，或者清空它（清空后使用 ChatGPT 套餐默认模型）。** 如果它仍是只有 CPA 认识的模型名，三条流程都会在调用模型时失败。
 
 在自己的电脑上做一次（Windows PowerShell，需要已安装 Node.js）：
 

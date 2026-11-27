@@ -305,11 +305,14 @@ jobs:
           rc=0
           codex "${args[@]}" - < "$RUNNER_TEMP/review-prompt.txt" \
             > "$RUNNER_TEMP/codex-events.jsonl" 2> "$RUNNER_TEMP/codex-stderr.log" || rc=$?
+          # Codex 之后的步骤：PATH 写死为系统目录，命令用绝对路径，不会调用沙箱可写目录（如 ~/.cargo/bin）里的同名程序。
+          PATH=/usr/bin:/bin
+          export PATH
           echo "codex exit code: $rc"
           if [ -n "${CODEX_CPA_API_KEY:-}" ] && [ -f "$RUNNER_TEMP/review.json" ] && \
-            grep -qF -e "$CODEX_CPA_API_KEY" "$RUNNER_TEMP/review.json"; then
+            /usr/bin/grep -qF -e "$CODEX_CPA_API_KEY" "$RUNNER_TEMP/review.json"; then
             echo '::error::审查输出包含 CPA 密钥，拒绝继续'
-            rm -f "$RUNNER_TEMP/review.json"
+            /usr/bin/rm -f "$RUNNER_TEMP/review.json"
             exit 1
           fi
           # 完整输出不进入公开日志，也不作为 artifact 上传；失败时只打印归类标签，不打印 stderr 原文。
@@ -328,10 +331,10 @@ jobs:
             messages="$RUNNER_TEMP/codex-class-messages.txt"
             : > "$messages"
             if [ -f "$events" ]; then
-              tail -c 65536 "$events" | jq -rR 'fromjson? | if .type == "turn.failed" then (.error.message // empty) elif .type == "error" then (.message // empty) else empty end' >> "$messages" 2>/dev/null || true
+              /usr/bin/tail -c 65536 "$events" | /usr/bin/jq -rR 'fromjson? | if .type == "turn.failed" then (.error.message // empty) elif .type == "error" then (.message // empty) else empty end' >> "$messages" 2>/dev/null || true
             fi
             echo '::group::Codex 失败归类'
-            python3 - "$log" "$messages" <<'PY' 2>/dev/null || echo 'unknown'
+            /usr/bin/python3 -I - "$log" "$messages" <<'PY' 2>/dev/null || echo 'unknown'
           import sys
           MAX_FILE = 64 * 1024
           MAX_LINE = 4 * 1024
@@ -505,7 +508,7 @@ jobs:
           except Exception:
               print("unknown")
           PY
-            rm -f "$messages"
+            /usr/bin/rm -f "$messages"
             echo '::endgroup::'
             # end-codex-failure-class
             exit "$rc"
@@ -513,10 +516,13 @@ jobs:
 
       - name: Render review
         if: steps.target.outputs.review == 'true'
-        shell: bash
+        shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
         run: |
+          # Codex 之后的步骤：PATH 写死为系统目录，命令用绝对路径，不会调用沙箱可写目录（如 ~/.cargo/bin）里的同名程序。
+          PATH=/usr/bin:/bin
+          export PATH
           set -euo pipefail
-          jq -e '
+          /usr/bin/jq -e '
             type == "object" and keys == ["findings", "read_check", "review_complete", "summary"] and
             (.review_complete | type == "boolean") and
             (.read_check | type == "string") and
@@ -534,84 +540,100 @@ jobs:
             exit 1
           }
           test -s "$GITHUB_WORKSPACE/review-read-check.txt"
-          expected="$(cat "$GITHUB_WORKSPACE/review-read-check.txt")"
+          expected="$(/usr/bin/cat "$GITHUB_WORKSPACE/review-read-check.txt")"
           [[ "$expected" =~ ^[0-9a-f]{64}$ ]] || exit 1
-          jq -e --arg expected "$expected" '.review_complete == true and .read_check == $expected' \
+          /usr/bin/jq -e --arg expected "$expected" '.review_complete == true and .read_check == $expected' \
             "$RUNNER_TEMP/review.json" >/dev/null || {
             echo '::error::Codex 未完成审查或未成功读取校验文件，不发布、不回派'
             exit 1
           }
-          jq -r '.summary, (.findings[] |
+          /usr/bin/jq -r '.summary, (.findings[] |
             "\n### [P\(.priority)] \(.title)\n\n`\(.file):\(.line)`\n\n\(.body)")' \
             "$RUNNER_TEMP/review.json" > "$RUNNER_TEMP/review.md"
 
       - name: Publish review
         id: publish
         if: steps.target.outputs.review == 'true'
-        shell: bash
+        shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
         env:
           GH_TOKEN: ${{ github.token }}
           NUMBER: ${{ steps.target.outputs.number }}
           HEAD_SHA: ${{ steps.target.outputs.head_sha }}
           BASE_SHA: ${{ steps.target.outputs.base_sha }}
           CODEX_CPA_API_KEY: ${{ steps.auth.outputs.provider == 'cpa' && secrets.CODEX_CPA_API_KEY || '' }}
+          CODEX_API_BASE_URL: ${{ steps.auth.outputs.provider == 'cpa' && secrets.CODEX_API_BASE_URL || '' }}
           REVIEW_RUN_ID: ${{ github.run_id }}
           REVIEW_RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
+          # Codex 之后的步骤：PATH 写死为系统目录，命令用绝对路径，不会调用沙箱可写目录（如 ~/.cargo/bin）里的同名程序。
+          PATH=/usr/bin:/bin
+          export PATH
           set -euo pipefail
-          gh() { timeout 60s gh "$@"; }
+          gh() { /usr/bin/timeout 60s /usr/bin/gh "$@"; }
           test -s "$RUNNER_TEMP/review.md"
-          test "$(wc -c < "$RUNNER_TEMP/review.md")" -le 58000
+          test "$(/usr/bin/wc -c < "$RUNNER_TEMP/review.md")" -le 58000
           : > "$RUNNER_TEMP/new-tokens.txt"
           # cpa 时没有 auth.json；chatgpt 时照旧检查刷新后的 token。
           if [ "${CODEX_PROVIDER_RESOLVED:-chatgpt}" != cpa ]; then
-            jq -r '.tokens // {} | .[] | strings | select(length >= 16)' \
+            /usr/bin/jq -r '.tokens // {} | .[] | strings | select(length >= 16)' \
               "$CODEX_HOME/auth.json" > "$RUNNER_TEMP/new-tokens.txt"
           fi
-          cat "$RUNNER_TEMP/seed-tokens.txt" "$RUNNER_TEMP/new-tokens.txt" \
-            | sort -u > "$RUNNER_TEMP/all-tokens.txt"
+          /usr/bin/cat "$RUNNER_TEMP/seed-tokens.txt" "$RUNNER_TEMP/new-tokens.txt" \
+            | /usr/bin/sort -u > "$RUNNER_TEMP/all-tokens.txt"
           if [ -s "$RUNNER_TEMP/all-tokens.txt" ] && \
-            grep -qF -f "$RUNNER_TEMP/all-tokens.txt" "$RUNNER_TEMP/review.md"; then
+            /usr/bin/grep -qF -f "$RUNNER_TEMP/all-tokens.txt" "$RUNNER_TEMP/review.md"; then
             echo '::error::审查输出包含登录凭据，拒绝发布'
             exit 1
           fi
-          if [ -n "${CODEX_CPA_API_KEY:-}" ] && grep -qF -e "$CODEX_CPA_API_KEY" "$RUNNER_TEMP/review.md"; then
-            echo '::error::审查输出包含 CPA 密钥，拒绝发布'
+          # CPA 密钥和 base_url（含主机名）都不得出现在审查输出里；检查失败时不打印地址。
+          cpa_base="${CODEX_API_BASE_URL:-}"
+          cpa_base="${cpa_base#"${cpa_base%%[![:space:]]*}"}"
+          cpa_base="${cpa_base%"${cpa_base##*[![:space:]]}"}"
+          cpa_host="${cpa_base#*://}"
+          cpa_host="${cpa_host%%/*}"
+          cpa_host="${cpa_host##*@}"
+          cpa_host="${cpa_host%:*}"
+          cpa_needles=()
+          [ -z "${CODEX_CPA_API_KEY:-}" ] || cpa_needles+=(-e "$CODEX_CPA_API_KEY")
+          [ -z "$cpa_base" ] || cpa_needles+=(-e "$cpa_base")
+          [ "${#cpa_host}" -lt 4 ] || cpa_needles+=(-e "$cpa_host")
+          if [ "${#cpa_needles[@]}" -gt 0 ] && /usr/bin/grep -qF "${cpa_needles[@]}" "$RUNNER_TEMP/review.md"; then
+            echo '::error::审查输出包含 CPA 密钥或 CPA 地址，拒绝发布'
             exit 1
           fi
           current="$(gh api "repos/$REPO/pulls/$NUMBER")"
-          if ! jq -e --arg head "$HEAD_SHA" --arg base "$BASE_SHA" \
+          if ! /usr/bin/jq -e --arg head "$HEAD_SHA" --arg base "$BASE_SHA" \
             '.state == "open" and .head.sha == $head and .base.sha == $base' <<< "$current" >/dev/null; then
             echo 'PR 已关闭或提交已变化，不发布过期审查。'
             exit 0
           fi
           {
             printf '## Codex Code Review\n\n提交：`%s`\n\n' "$HEAD_SHA"
-            cat "$RUNNER_TEMP/review.md"
+            /usr/bin/cat "$RUNNER_TEMP/review.md"
             printf '\n\n[运行日志](%s)\n<!-- codex-review sha=%s base=%s status=complete -->\n' "$RUN_URL" "$HEAD_SHA" "$BASE_SHA"
             printf '<!-- codex-review-verdict sha=%s base=%s findings=%s run=%s attempt=%s -->\n' \
-              "$HEAD_SHA" "$BASE_SHA" "$(jq '.findings | length' "$RUNNER_TEMP/review.json")" "$REVIEW_RUN_ID" "$REVIEW_RUN_ATTEMPT"
+              "$HEAD_SHA" "$BASE_SHA" "$(/usr/bin/jq '.findings | length' "$RUNNER_TEMP/review.json")" "$REVIEW_RUN_ID" "$REVIEW_RUN_ATTEMPT"
           } > "$RUNNER_TEMP/review-comment.md"
-          jq -n --rawfile body "$RUNNER_TEMP/review-comment.md" '{body: $body}' > "$RUNNER_TEMP/review-comment.json"
+          /usr/bin/jq -n --rawfile body "$RUNNER_TEMP/review-comment.md" '{body: $body}' > "$RUNNER_TEMP/review-comment.json"
           # 用 run/attempt 的精确 verdict 标记去重，仅避免重复发评论；
           # 不跳过模型审查、产物生成或证明上传。
-          marker="<!-- codex-review-verdict sha=$HEAD_SHA base=$BASE_SHA findings=$(jq '.findings | length' "$RUNNER_TEMP/review.json") run=$REVIEW_RUN_ID attempt=$REVIEW_RUN_ATTEMPT -->"
+          marker="<!-- codex-review-verdict sha=$HEAD_SHA base=$BASE_SHA findings=$(/usr/bin/jq '.findings | length' "$RUNNER_TEMP/review.json") run=$REVIEW_RUN_ID attempt=$REVIEW_RUN_ATTEMPT -->"
           existing="$(gh api "repos/$REPO/issues/$NUMBER/comments" --paginate --jq \
             '.[] | select(.user.login == "github-actions[bot]") | .body')"
-          if grep -Fxq -- "$marker" <<< "$existing"; then
+          if /usr/bin/grep -Fxq -- "$marker" <<< "$existing"; then
             echo '当前 run/attempt 的相同 Review 评论已发布，继续生成可信证明。'
           else
             gh api "repos/$REPO/issues/$NUMBER/comments" --input "$RUNNER_TEMP/review-comment.json" >/dev/null
           fi
-          jq -n --arg head "$HEAD_SHA" --arg base "$BASE_SHA" \
-            --argjson findings "$(jq '.findings | length' "$RUNNER_TEMP/review.json")" \
+          /usr/bin/jq -n --arg head "$HEAD_SHA" --arg base "$BASE_SHA" \
+            --argjson findings "$(/usr/bin/jq '.findings | length' "$RUNNER_TEMP/review.json")" \
             --argjson run "$REVIEW_RUN_ID" --argjson attempt "$REVIEW_RUN_ATTEMPT" \
             '{head: $head, base: $base, findings: $findings, run: $run, attempt: $attempt}' \
             > "$RUNNER_TEMP/review-attestation.json"
-          cat "$RUNNER_TEMP/review-comment.md" >> "$GITHUB_STEP_SUMMARY"
+          /usr/bin/cat "$RUNNER_TEMP/review-comment.md" >> "$GITHUB_STEP_SUMMARY"
           {
             echo 'posted=true'
-            echo "findings=$(jq '.findings | length' "$RUNNER_TEMP/review.json")"
+            echo "findings=$(/usr/bin/jq '.findings | length' "$RUNNER_TEMP/review.json")"
           } >> "$GITHUB_OUTPUT"
 
       - name: Upload review attestation
@@ -626,22 +648,25 @@ jobs:
       - name: Persist refreshed auth
         # 只有 chatgpt 登录会刷新并写回 CODEX_AUTH_JSON；cpa 不读、不写它。
         if: always() && steps.auth.outputs.ok == 'true' && steps.auth.outputs.provider == 'chatgpt'
-        shell: bash
+        shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
         env:
           GH_TOKEN: ${{ secrets.CODEX_BOT_TOKEN }}
         run: |
+          # Codex 之后的步骤：PATH 写死为系统目录，命令用绝对路径，不会调用沙箱可写目录（如 ~/.cargo/bin）里的同名程序。
+          PATH=/usr/bin:/bin
+          export PATH
           set -euo pipefail
           file="$CODEX_HOME/auth.json"
-          new_sha="$(sha256sum "$file" | cut -d' ' -f1)"
-          [ "$new_sha" != "$(cat "$RUNNER_TEMP/auth.seed.sha256")" ] || exit 0
-          jq -e '.auth_mode == "chatgpt" and ((.tokens.refresh_token // "") != "")' "$file" >/dev/null
-          timeout 60s gh secret set CODEX_AUTH_JSON --env codex --repo "$REPO" < "$file"
+          new_sha="$(/usr/bin/sha256sum "$file" | /usr/bin/cut -d' ' -f1)"
+          [ "$new_sha" != "$(/usr/bin/cat "$RUNNER_TEMP/auth.seed.sha256")" ] || exit 0
+          /usr/bin/jq -e '.auth_mode == "chatgpt" and ((.tokens.refresh_token // "") != "")' "$file" >/dev/null
+          /usr/bin/timeout 60s /usr/bin/gh secret set CODEX_AUTH_JSON --env codex --repo "$REPO" < "$file"
 
       - name: Queue review fixes
         if: >-
           steps.publish.outputs.posted == 'true' &&
           steps.publish.outputs.findings != '0' && vars.CODEX_REVIEW_FIX != 'off'
-        shell: bash
+        shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
         env:
           GH_TOKEN: ${{ secrets.CODEX_BOT_TOKEN }}
           NUMBER: ${{ steps.target.outputs.number }}
@@ -649,15 +674,18 @@ jobs:
           BASE_SHA: ${{ steps.target.outputs.base_sha }}
           MAX_ATTEMPTS: ${{ vars.CODEX_REVIEW_FIX_MAX || '2' }}
         run: |
+          # Codex 之后的步骤：PATH 写死为系统目录，命令用绝对路径，不会调用沙箱可写目录（如 ~/.cargo/bin）里的同名程序。
+          PATH=/usr/bin:/bin
+          export PATH
           set -euo pipefail
-          gh() { timeout 60s gh "$@"; }
-          [ "$(jq '.findings | length' "$RUNNER_TEMP/review.json")" -gt 0 ] || exit 0
+          gh() { /usr/bin/timeout 60s /usr/bin/gh "$@"; }
+          [ "$(/usr/bin/jq '.findings | length' "$RUNNER_TEMP/review.json")" -gt 0 ] || exit 0
           [[ "$MAX_ATTEMPTS" =~ ^[1-9][0-9]?$ ]] && [ "$MAX_ATTEMPTS" -le 10 ] || {
             echo '::error::CODEX_REVIEW_FIX_MAX 必须为 1 至 10 的整数'
             exit 1
           }
           current="$(gh api "repos/$REPO/pulls/$NUMBER")"
-          if ! jq -e --arg head "$HEAD_SHA" --arg base "$BASE_SHA" --arg repo "$REPO" --arg owner "$OWNER" '
+          if ! /usr/bin/jq -e --arg head "$HEAD_SHA" --arg base "$BASE_SHA" --arg repo "$REPO" --arg owner "$OWNER" '
             .state == "open" and .draft == false and .head.sha == $head and .base.sha == $base and
             .head.repo.full_name == $repo and .base.ref == "main" and
             .user.login == $owner and .author_association == "OWNER" and
@@ -667,17 +695,17 @@ jobs:
             exit 0
           fi
           gh api "repos/$REPO/issues/$NUMBER/comments" --paginate > "$RUNNER_TEMP/fix-comments.json"
-          jq -sr --arg owner "$OWNER" '
+          /usr/bin/jq -sr --arg owner "$OWNER" '
             add | map(select(.user.login == $owner and .author_association == "OWNER") | .body) | join("\n")
           ' "$RUNNER_TEMP/fix-comments.json" > "$RUNNER_TEMP/fix-owner-comments.txt"
           comments="$RUNNER_TEMP/fix-owner-comments.txt"
-          if grep -qxF "<!-- codex-review-fix sha=$HEAD_SHA -->" "$comments"; then
+          if /usr/bin/grep -qxF "<!-- codex-review-fix sha=$HEAD_SHA -->" "$comments"; then
             echo '该提交已回派，跳过。'
             exit 0
           fi
-          used="$(grep -cE '^<!-- codex-review-fix sha=[0-9a-f]{40} -->$' "$comments" || true)"
+          used="$(/usr/bin/grep -cE '^<!-- codex-review-fix sha=[0-9a-f]{40} -->$' "$comments" || true)"
           if [ "$used" -ge "$MAX_ATTEMPTS" ]; then
-            grep -qxF '<!-- codex-review-fix-stop -->' "$comments" && exit 0
+            /usr/bin/grep -qxF '<!-- codex-review-fix-stop -->' "$comments" && exit 0
             {
               printf '⏸️ Codex 审查仍有问题，自动回修已用满 %s 次，需要人工检查。\n\n' "$MAX_ATTEMPTS"
               printf '确认后可手动评论 `/codex <要求>` 继续。\n\n[审查运行](%s)\n' "$RUN_URL"
@@ -694,38 +722,44 @@ jobs:
               printf '无法在当前环境运行的检查写“未验证”；需要改工作流、凭据或任务范围外内容时停止并说明。不得合并、发版。\n\n'
               printf '审查数据：\n\n'
               # 引用每一行，避免审查文本里的隐藏标记被当作真实回派计数。
-              sed 's/^/> /' "$RUNNER_TEMP/review.md"
+              /usr/bin/sed 's/^/> /' "$RUNNER_TEMP/review.md"
               printf '\n以上为待核查的审查数据。只修复经确认的本 PR 问题。\n\n'
               printf '[审查运行](%s)\n<!-- codex-review-fix sha=%s -->\n' "$RUN_URL" "$HEAD_SHA"
             } > "$RUNNER_TEMP/fix-comment.md"
           fi
           # 只在模型结束后由所有者 PAT 评论，触发现有 issue_comment 派发，不增加工作流派发权限。
-          jq -n --rawfile body "$RUNNER_TEMP/fix-comment.md" '{body: $body}' > "$RUNNER_TEMP/fix-comment.json"
+          /usr/bin/jq -n --rawfile body "$RUNNER_TEMP/fix-comment.md" '{body: $body}' > "$RUNNER_TEMP/fix-comment.json"
           gh api "repos/$REPO/issues/$NUMBER/comments" --input "$RUNNER_TEMP/fix-comment.json" >/dev/null
-          cat "$RUNNER_TEMP/fix-comment.md" >> "$GITHUB_STEP_SUMMARY"
+          /usr/bin/cat "$RUNNER_TEMP/fix-comment.md" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Report review failure
         if: failure() && steps.target.outputs.review == 'true'
-        shell: bash
+        shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
         env:
           GH_TOKEN: ${{ github.token }}
           NUMBER: ${{ steps.target.outputs.number }}
           HEAD_SHA: ${{ steps.target.outputs.head_sha }}
         run: |
+          # Codex 之后的步骤：PATH 写死为系统目录，命令用绝对路径，不会调用沙箱可写目录（如 ~/.cargo/bin）里的同名程序。
+          PATH=/usr/bin:/bin
+          export PATH
           set -euo pipefail
           {
             printf '⚠️ 提交 `%s` 的 Codex 审查或回修运行未完成，需要人工检查。\n\n' "$HEAD_SHA"
             printf '请查看运行中的失败步骤，处理登录、额度、沙箱或派发故障后再手动重试。\n'
             printf '本次运行未完成不能当作审查通过，已发布的具体意见见本 PR。\n\n[运行日志](%s)\n' "$RUN_URL"
           } > "$RUNNER_TEMP/failure-comment.md"
-          jq -n --rawfile body "$RUNNER_TEMP/failure-comment.md" '{body: $body}' > "$RUNNER_TEMP/failure-comment.json"
-          timeout 60s gh api "repos/$REPO/issues/$NUMBER/comments" --input "$RUNNER_TEMP/failure-comment.json" >/dev/null
+          /usr/bin/jq -n --rawfile body "$RUNNER_TEMP/failure-comment.md" '{body: $body}' > "$RUNNER_TEMP/failure-comment.json"
+          /usr/bin/timeout 60s /usr/bin/gh api "repos/$REPO/issues/$NUMBER/comments" --input "$RUNNER_TEMP/failure-comment.json" >/dev/null
 
       - name: Remove local credentials
         if: always()
-        shell: bash
+        shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
         run: |
-          rm -rf "$RUNNER_TEMP/codex-home"
-          rm -f "$RUNNER_TEMP"/*-tokens.txt "$RUNNER_TEMP/codex-events.jsonl" \
+          # Codex 之后的步骤：PATH 写死为系统目录，命令用绝对路径，不会调用沙箱可写目录（如 ~/.cargo/bin）里的同名程序。
+          PATH=/usr/bin:/bin
+          export PATH
+          /usr/bin/rm -rf "$RUNNER_TEMP/codex-home"
+          /usr/bin/rm -f "$RUNNER_TEMP"/*-tokens.txt "$RUNNER_TEMP/codex-events.jsonl" \
             "$RUNNER_TEMP/codex-stderr.log" "$RUNNER_TEMP/review.md" "$RUNNER_TEMP/review.json"
-          rm -f "$GITHUB_WORKSPACE/review-read-check.txt"
+          /usr/bin/rm -f "$GITHUB_WORKSPACE/review-read-check.txt"

@@ -14,6 +14,8 @@ import textwrap
 import unittest
 from pathlib import Path
 
+import codex_hardening
+
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github/workflows/codex-plan.yml"
 REPO = "owner/example"
@@ -67,7 +69,7 @@ def render_config(flow, provider):
         return (Path(temporary) / "config.toml").read_text(encoding="utf-8")
 
 
-def step_script(name):
+def step_script(name, pinned=False):
     lines = WORKFLOW.read_text(encoding="utf-8").splitlines()
     start = lines.index(f"      - name: {name}")
     run = next(i for i in range(start + 1, len(lines)) if lines[i] == "        run: |")
@@ -76,7 +78,26 @@ def step_script(name):
         if line.strip() and not line.startswith(" " * 10):
             break
         body.append(line)
-    return textwrap.dedent("\n".join(body)) + "\n"
+    script = textwrap.dedent("\n".join(body)) + "\n"
+    # 旧的行为测试用 PATH 里的假命令；Codex 之后的加固单独用 hardened_run 验证。
+    return script if pinned else codex_hardening.unpin(script)
+
+
+def hardened_run(test, script, env, cwd=None):
+    """按 runner 的样子运行 Codex 之后的步骤：沙箱可写的 ~/.cargo/bin 排在 PATH 最前面，
+    里面放满同名假程序；脚本里只有 /usr/bin/gh 换成测试的假 gh（真 gh 会联网）。"""
+    home = test.work / "hijack-home"
+    log = test.work / "hijack.log"
+    hijack = codex_hardening.install_hijack_bin(home / ".cargo/bin", log)
+    script = script.replace("/usr/bin/gh ", f"{test.work / 'bin' / 'gh'} ")
+    env = {**env, "HOME": str(home), "PATH": f"{hijack}{os.pathsep}{env['PATH']}"}
+    result = subprocess.run(["/usr/bin/bash", "-e", "-o", "pipefail", "-c", script],
+                            env=env, cwd=cwd, text=True, capture_output=True, check=False)
+    calls = log.read_text(encoding="utf-8") if log.exists() else ""
+    test.assertEqual(calls, "", "Codex 之后的步骤调用了 PATH 里的同名程序")
+    return result
+
+POST_CODEX_STEPS = frozenset(s["name"] for s in codex_hardening.run_steps("codex-plan.yml")) - {"Run Codex plan"}
 
 
 STEPS = (
@@ -220,6 +241,8 @@ class PlanStepTest(unittest.TestCase):
 
     def run_step(self, name, cwd=None):
         (self.work / "api.json").write_text(json.dumps(self.api))
+        if name in POST_CODEX_STEPS:
+            return hardened_run(self, step_script(name, pinned=True), self.env, cwd=cwd)
         return subprocess.run(["bash", "-e", "-o", "pipefail", "-c", step_script(name)],
                               env=self.env, cwd=cwd, text=True, capture_output=True, check=False)
 
@@ -469,6 +492,27 @@ class PlanStepTest(unittest.TestCase):
         result = self.run_step("Publish plan")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse((self.work / "posted.json").exists())
+
+    def test_cpa_key_and_base_url_are_never_posted(self):
+        key, base = "fake-cpa-key-0123456789abcdef", "https://cpa.invalid:8443/v1"
+        for leaked in (key, base, "cpa.invalid", "cpa.invalid:8443"):
+            with self.subTest(leaked=leaked):
+                self.prepare_plan()
+                self.assertEqual(self.run_step("Render plan").returncode, 0)
+                with (self.work / "plan.md").open("a", encoding="utf-8") as plan:
+                    plan.write(f"\n地址 {leaked}\n")
+                self.env.update({"CODEX_CPA_API_KEY": key, "CODEX_API_BASE_URL": f" {base}\n"})
+                result = self.run_step("Publish plan")
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("CPA 密钥或 CPA 地址", result.stdout)
+                self.assertNotIn("cpa.invalid", result.stdout + result.stderr)
+                self.assertFalse((self.work / "posted.json").exists())
+        # chatgpt 时两项都为空，照常发布。
+        self.prepare_plan()
+        self.assertEqual(self.run_step("Render plan").returncode, 0)
+        self.env.update({"CODEX_CPA_API_KEY": "", "CODEX_API_BASE_URL": ""})
+        self.assertEqual(self.run_step("Publish plan").returncode, 0)
+        self.assertTrue((self.work / "posted.json").exists())
 
     def test_marker_from_other_author_does_not_suppress_post(self):
         self.prepare_plan()

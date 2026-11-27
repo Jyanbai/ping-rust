@@ -371,7 +371,15 @@ jobs:
       - name: Install Codex CLI
         if: steps.req.outputs.mode != 'skip' && steps.req.outputs.empty != 'true'
         shell: bash
-        run: npm install -g "@openai/codex@${CODEX_CLI_VERSION}" >/dev/null && codex --version
+        run: |
+          set -euo pipefail
+          npm install -g "@openai/codex@${CODEX_CLI_VERSION}" >/dev/null
+          # 记下 node 和 Codex 入口的绝对路径：Codex 之后的自检不再经 PATH 查找（沙箱可写 ~/.cargo/bin）。
+          node_bin="$(readlink -f "$(command -v node)")"
+          codex_js="$(readlink -f "$(command -v codex)")"
+          echo "CODEX_NODE_BIN=$node_bin" >> "$GITHUB_ENV"
+          echo "CODEX_JS=$codex_js" >> "$GITHUB_ENV"
+          "$node_bin" "$codex_js" --version
 
       - name: Checkout Codex provider script
         if: steps.req.outputs.mode != 'skip' && steps.req.outputs.empty != 'true'
@@ -534,8 +542,11 @@ jobs:
           rc=0
           codex "${args[@]}" - < "$RUNNER_TEMP/prompt.txt" \
             > "$RUNNER_TEMP/codex-events.jsonl" 2> "$RUNNER_TEMP/codex-stderr.log" || rc=$?
+          # Codex 之后的步骤：PATH 写死为系统目录，命令用绝对路径，不会调用沙箱可写目录（如 ~/.cargo/bin）里的同名程序。
+          PATH=/usr/bin:/bin
+          export PATH
           # 运行中如果刷新了 token，新 token 也要遮蔽（cpa 时没有 auth.json，列表为空）。
-          jq -r '.tokens // {} | .[] | strings | select(length >= 16)' "$CODEX_HOME/auth.json" > "$RUNNER_TEMP/new-tokens.txt" 2>/dev/null || true
+          /usr/bin/jq -r '.tokens // {} | .[] | strings | select(length >= 16)' "$CODEX_HOME/auth.json" > "$RUNNER_TEMP/new-tokens.txt" 2>/dev/null || true
           while IFS= read -r t; do printf '::add-mask::%s\n' "$t"; done < "$RUNNER_TEMP/new-tokens.txt"
           echo "codex exit code: $rc"
           if [ "$rc" -ne 0 ]; then
@@ -553,10 +564,10 @@ jobs:
             messages="$RUNNER_TEMP/codex-class-messages.txt"
             : > "$messages"
             if [ -f "$events" ]; then
-              tail -c 65536 "$events" | jq -rR 'fromjson? | if .type == "turn.failed" then (.error.message // empty) elif .type == "error" then (.message // empty) else empty end' >> "$messages" 2>/dev/null || true
+              /usr/bin/tail -c 65536 "$events" | /usr/bin/jq -rR 'fromjson? | if .type == "turn.failed" then (.error.message // empty) elif .type == "error" then (.message // empty) else empty end' >> "$messages" 2>/dev/null || true
             fi
             echo '::group::Codex 失败归类'
-            python3 - "$log" "$messages" <<'PY' 2>/dev/null || echo 'unknown'
+            /usr/bin/python3 -I - "$log" "$messages" <<'PY' 2>/dev/null || echo 'unknown'
           import sys
           MAX_FILE = 64 * 1024
           MAX_LINE = 4 * 1024
@@ -730,7 +741,7 @@ jobs:
           except Exception:
               print("unknown")
           PY
-            rm -f "$messages"
+            /usr/bin/rm -f "$messages"
             echo '::endgroup::'
             # end-codex-failure-class
             exit "$rc"
@@ -739,48 +750,64 @@ jobs:
       - name: Collect diff
         id: collect
         if: steps.run.outcome == 'success'
-        shell: bash
+        shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
         env:
           CODEX_CPA_API_KEY: ${{ steps.auth.outputs.provider == 'cpa' && secrets.CODEX_CPA_API_KEY || '' }}
+          CODEX_API_BASE_URL: ${{ steps.auth.outputs.provider == 'cpa' && secrets.CODEX_API_BASE_URL || '' }}
         run: |
+          # Codex 之后的步骤：PATH 写死为系统目录，命令用绝对路径，不会调用沙箱可写目录（如 ~/.cargo/bin）里的同名程序。
+          PATH=/usr/bin:/bin
+          export PATH
           set -euo pipefail
           out_dir="$RUNNER_TEMP/codex-result"
-          mkdir -p "$out_dir"
-          g=(git --git-dir="$RUNNER_TEMP/pristine.git" --work-tree="$GITHUB_WORKSPACE/work"
+          /usr/bin/mkdir -p "$out_dir"
+          g=(/usr/bin/git --git-dir="$RUNNER_TEMP/pristine.git" --work-tree="$GITHUB_WORKSPACE/work"
              -c core.fsmonitor=false -c core.hooksPath=/dev/null)
           "${g[@]}" add -A
           "${g[@]}" diff --cached --binary > "$out_dir/task.patch"
-          cp "$RUNNER_TEMP/last-message.md" "$out_dir/summary.md" 2>/dev/null || : > "$out_dir/summary.md"
+          /usr/bin/cp "$RUNNER_TEMP/last-message.md" "$out_dir/summary.md" 2>/dev/null || : > "$out_dir/summary.md"
 
           # 任何 token 出现在 diff 或总结里都中止（防止通过改动把凭据带出去）。
-          cat "$RUNNER_TEMP/seed-tokens.txt" "$RUNNER_TEMP/new-tokens.txt" 2>/dev/null | sort -u > "$RUNNER_TEMP/all-tokens.txt"
-          if [ -s "$RUNNER_TEMP/all-tokens.txt" ] && grep -rqF -f "$RUNNER_TEMP/all-tokens.txt" "$out_dir"; then
+          /usr/bin/cat "$RUNNER_TEMP/seed-tokens.txt" "$RUNNER_TEMP/new-tokens.txt" 2>/dev/null | /usr/bin/sort -u > "$RUNNER_TEMP/all-tokens.txt"
+          if [ -s "$RUNNER_TEMP/all-tokens.txt" ] && /usr/bin/grep -rqF -f "$RUNNER_TEMP/all-tokens.txt" "$out_dir"; then
             echo "::error::Codex 的输出里包含登录凭据，已中止。"
-            rm -rf "$out_dir"
+            /usr/bin/rm -rf "$out_dir"
             exit 1
           fi
-          if [ -n "${CODEX_CPA_API_KEY:-}" ]; then
+          # CPA 密钥和 base_url（含主机名）都不得出现在改动和总结里；检查失败时不打印地址。
+          cpa_base="${CODEX_API_BASE_URL:-}"
+          cpa_base="${cpa_base#"${cpa_base%%[![:space:]]*}"}"
+          cpa_base="${cpa_base%"${cpa_base##*[![:space:]]}"}"
+          cpa_host="${cpa_base#*://}"
+          cpa_host="${cpa_host%%/*}"
+          cpa_host="${cpa_host##*@}"
+          cpa_host="${cpa_host%:*}"
+          cpa_needles=()
+          [ -z "${CODEX_CPA_API_KEY:-}" ] || cpa_needles+=(-e "$CODEX_CPA_API_KEY")
+          [ -z "$cpa_base" ] || cpa_needles+=(-e "$cpa_base")
+          [ "${#cpa_host}" -lt 4 ] || cpa_needles+=(-e "$cpa_host")
+          if [ "${#cpa_needles[@]}" -gt 0 ]; then
             # 二进制文件在 --binary 补丁里是编码后的内容，还要按原始内容检查暂存区里的每个文件。
             staged_rc=0
-            "${g[@]}" grep --cached -q -a -F -e "$CODEX_CPA_API_KEY" || staged_rc=$?
-            if [ "$staged_rc" -ne 1 ] || grep -rqF -e "$CODEX_CPA_API_KEY" "$out_dir"; then
-              echo "::error::Codex 的输出里包含 CPA 密钥（或无法完成检查），已中止。"
-              rm -rf "$out_dir"
+            "${g[@]}" grep --cached -q -a -F "${cpa_needles[@]}" || staged_rc=$?
+            if [ "$staged_rc" -ne 1 ] || /usr/bin/grep -rqF "${cpa_needles[@]}" "$out_dir"; then
+              echo "::error::Codex 的输出里包含 CPA 密钥或 CPA 地址（或无法完成检查），已中止。"
+              /usr/bin/rm -rf "$out_dir"
               exit 1
             fi
           fi
-          if grep -qE '^(diff --git a/|--- a/|\+\+\+ b/|rename (from|to) |copy (from|to) )\.github/(workflows|actions)/' "$out_dir/task.patch"; then
+          if /usr/bin/grep -qE '^(diff --git a/|--- a/|\+\+\+ b/|rename (from|to) |copy (from|to) )\.github/(workflows|actions)/' "$out_dir/task.patch"; then
             echo "::error::Codex 的改动涉及 .github/workflows/ 或 .github/actions/，已拒绝。"
             exit 1
           fi
           if [ -s "$out_dir/task.patch" ]; then
             echo "has_diff=true" >> "$GITHUB_OUTPUT"
-            "${g[@]}" diff --cached --stat | tail -n 1
+            "${g[@]}" diff --cached --stat | /usr/bin/tail -n 1
           else
             echo "has_diff=false" >> "$GITHUB_OUTPUT"
           fi
           echo '### Codex 总结' >> "$GITHUB_STEP_SUMMARY"
-          cat "$out_dir/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          /usr/bin/cat "$out_dir/summary.md" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload result
         if: steps.collect.outcome == 'success'
@@ -793,31 +820,39 @@ jobs:
 
       - name: Self-check (auth and write-back)
         if: steps.req.outputs.mode == 'maintenance' && steps.auth.outputs.ok == 'true'
-        shell: bash
+        shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
         env:
           CODEX_CPA_API_KEY: ${{ steps.auth.outputs.provider == 'cpa' && secrets.CODEX_CPA_API_KEY || '' }}
         run: |
+          # Codex 之后的步骤：PATH 写死为系统目录，命令用绝对路径，不会调用沙箱可写目录（如 ~/.cargo/bin）里的同名程序。
+          PATH=/usr/bin:/bin
+          export PATH
           set -uo pipefail
           # 一次最小的调用：验证登录（或 CPA 密钥）可用；chatgpt 时让 Codex 按需刷新 token。
           [ -z "${CODEX_CPA_API_KEY:-}" ] || printf '::add-mask::%s\n' "$CODEX_CPA_API_KEY"
           # 沿用已探测过的 ci 权限配置（default_permissions）；不能传 -s，否则会切回旧沙箱设置。
           # 调用前先确认 shell/命令工具已关闭，否则模型返回的工具调用会在沙箱里执行。
           # 用与下面 exec 相同的 -c 覆盖查询，确认实际生效的值（正式 Run Codex 步骤的配置不关这个工具）。
-          features_out="$(codex -c features.shell_tool=false features list 2>/dev/null)" || features_out=""
-          shell_tool_state="$(printf '%s\n' "$features_out" | awk '$1 == "shell_tool" { print $NF }')"
+          if [[ "${CODEX_NODE_BIN:-}" != /* || "${CODEX_JS:-}" != /* ]] || [ ! -x "$CODEX_NODE_BIN" ] || [ ! -f "$CODEX_JS" ]; then
+            echo '::error::没有记录 Codex 的绝对路径（Install Codex CLI），已停止。'
+            exit 1
+          fi
+          codex_cli() { "$CODEX_NODE_BIN" "$CODEX_JS" "$@"; }
+          features_out="$(codex_cli -c features.shell_tool=false features list 2>/dev/null)" || features_out=""
+          shell_tool_state="$(printf '%s\n' "$features_out" | /usr/bin/awk '$1 == "shell_tool" { print $NF }')"
           if [ "$shell_tool_state" != "false" ]; then
             echo '::error::无法确认 Codex 的 shell/命令工具已关闭（features.shell_tool），已停止，不调用模型。'
             exit 1
           fi
           work="$GITHUB_WORKSPACE/selfcheck-work"
-          mkdir -p "$work"
+          /usr/bin/mkdir -p "$work"
           rc=0
-          codex exec -C "$work" --skip-git-repo-check --ephemeral --ignore-rules \
+          codex_cli exec -C "$work" --skip-git-repo-check --ephemeral --ignore-rules \
             -c approval_policy='"never"' -c features.shell_tool=false \
             -o "$RUNNER_TEMP/selfcheck.txt" "只回复 OK" > /dev/null 2> "$RUNNER_TEMP/selfcheck.err" || rc=$?
-          rm -rf "$work"
+          /usr/bin/rm -rf "$work"
           if [ -f "$CODEX_HOME/auth.json" ]; then
-            jq -r '.tokens // {} | .[] | strings | select(length >= 16)' "$CODEX_HOME/auth.json" \
+            /usr/bin/jq -r '.tokens // {} | .[] | strings | select(length >= 16)' "$CODEX_HOME/auth.json" \
               | while IFS= read -r t; do printf '::add-mask::%s\n' "$t"; done
           fi
           if [ "$rc" -ne 0 ]; then
@@ -825,27 +860,36 @@ jobs:
               echo "::error::Codex CPA 调用不可用（exit $rc），请检查 environment codex 的 CODEX_CPA_API_KEY 和 CPA 变量"
             else
               echo "::error::Codex 登录不可用（exit $rc），可能需要重新 seed CODEX_AUTH_JSON"
-              tail -n 5 "$RUNNER_TEMP/selfcheck.err" || true
+              /usr/bin/tail -n 5 "$RUNNER_TEMP/selfcheck.err" || true
             fi
             exit 1
           fi
           if [ "${CODEX_PROVIDER_RESOLVED:-chatgpt}" = cpa ]; then
             # CPA 回复不进日志：截断的片段无法被完整密钥的遮蔽规则覆盖。
-            echo "✅ Codex CPA 调用成功（回复内容不打印）。"
+            # 与独立冒烟测试一致：回复必须恰好是单独一行 OK（允许结尾换行），否则失败。
+            if ! /usr/bin/python3 -I -c 'import sys; sys.exit(0 if open(sys.argv[1], "rb").read() in (b"OK", b"OK\n", b"OK\r\n") else 1)' \
+              "$RUNNER_TEMP/selfcheck.txt" 2>/dev/null; then
+              echo '::error::Codex CPA 自检回复不是单独一行 OK（回复内容不打印），请检查 CPA 模型和接口。'
+              exit 1
+            fi
+            echo "✅ Codex CPA 调用成功，回复为 OK（回复内容不打印）。"
           else
-            echo "✅ Codex 登录有效（回复：$(head -c 40 "$RUNNER_TEMP/selfcheck.txt" | tr -d '\n')）"
+            echo "✅ Codex 登录有效（回复：$(/usr/bin/head -c 40 "$RUNNER_TEMP/selfcheck.txt" | /usr/bin/tr -d '\n')）"
           fi
 
       - name: Check write-back permission
         # 写回只服务于 chatgpt 登录刷新；cpa 不写 CODEX_AUTH_JSON。
         if: steps.req.outputs.mode == 'maintenance' && steps.auth.outputs.ok == 'true' && steps.auth.outputs.provider == 'chatgpt'
-        shell: bash
+        shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
         env:
           GH_TOKEN: ${{ secrets.CODEX_BOT_TOKEN }}
         run: |
+          # Codex 之后的步骤：PATH 写死为系统目录，命令用绝对路径，不会调用沙箱可写目录（如 ~/.cargo/bin）里的同名程序。
+          PATH=/usr/bin:/bin
+          export PATH
           set -euo pipefail
           # 真写一次 environment secret，确认 CODEX_BOT_TOKEN 有写回权限且没过期。
-          if ! date -u +%FT%TZ | gh secret set CODEX_WRITEBACK_CHECK --env codex --repo "$REPO"; then
+          if ! /usr/bin/date -u +%FT%TZ | /usr/bin/gh secret set CODEX_WRITEBACK_CHECK --env codex --repo "$REPO"; then
             echo "::error::CODEX_BOT_TOKEN 无法写 environment secret（权限不足或已过期），刷新后的凭据将无法保存。"
             exit 1
           fi
@@ -854,49 +898,59 @@ jobs:
       - name: Persist refreshed auth
         # 只有 chatgpt 登录会刷新并写回 CODEX_AUTH_JSON；cpa 不读、不写它。
         if: always() && steps.auth.outputs.ok == 'true' && steps.auth.outputs.provider == 'chatgpt'
-        shell: bash
+        shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
         env:
           GH_TOKEN: ${{ secrets.CODEX_BOT_TOKEN }}
         run: |
+          # Codex 之后的步骤：PATH 写死为系统目录，命令用绝对路径，不会调用沙箱可写目录（如 ~/.cargo/bin）里的同名程序。
+          PATH=/usr/bin:/bin
+          export PATH
           set -euo pipefail
           file="$CODEX_HOME/auth.json"
           # 只有 Codex 真的刷新过（文件变了）才写回，避免并行任务用旧文件覆盖新 token。
-          new_sha="$(sha256sum "$file" | cut -d' ' -f1)"
-          if [ "$new_sha" = "$(cat "$RUNNER_TEMP/auth.seed.sha256")" ]; then
+          new_sha="$(/usr/bin/sha256sum "$file" | /usr/bin/cut -d' ' -f1)"
+          if [ "$new_sha" = "$(/usr/bin/cat "$RUNNER_TEMP/auth.seed.sha256")" ]; then
             echo "auth.json 未变化，无需写回。"
             exit 0
           fi
-          if ! jq -e '.auth_mode == "chatgpt" and ((.tokens.refresh_token // "") != "")' "$file" >/dev/null; then
+          if ! /usr/bin/jq -e '.auth_mode == "chatgpt" and ((.tokens.refresh_token // "") != "")' "$file" >/dev/null; then
             echo "::error::刷新后的 auth.json 不完整，未写回；下次运行可能需要重新 seed。"
             exit 1
           fi
-          gh secret set CODEX_AUTH_JSON --env codex --repo "$REPO" < "$file"
+          /usr/bin/gh secret set CODEX_AUTH_JSON --env codex --repo "$REPO" < "$file"
           echo "已把刷新后的 auth.json 写回 environment codex。"
 
       - name: Remove local credentials
         if: always()
-        shell: bash
-        run: rm -rf "$RUNNER_TEMP/codex-home" "$RUNNER_TEMP"/*-tokens.txt "$RUNNER_TEMP/codex-events.jsonl" "$RUNNER_TEMP/codex-stderr.log"
+        shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+        run: |
+          # Codex 之后的步骤：PATH 写死为系统目录，命令用绝对路径，不会调用沙箱可写目录（如 ~/.cargo/bin）里的同名程序。
+          PATH=/usr/bin:/bin
+          export PATH
+          /usr/bin/rm -rf "$RUNNER_TEMP/codex-home" "$RUNNER_TEMP"/*-tokens.txt "$RUNNER_TEMP/codex-events.jsonl" "$RUNNER_TEMP/codex-stderr.log"
 
       - name: Report (no change or failure)
         if: always() && steps.status.outputs.id != '' && (failure() || steps.collect.outputs.has_diff == 'false')
-        shell: bash
+        shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
         env:
           GH_TOKEN: ${{ github.token }}
           COMMENT_ID: ${{ steps.status.outputs.id }}
           HAS_DIFF: ${{ steps.collect.outputs.has_diff }}
         run: |
+          # Codex 之后的步骤：PATH 写死为系统目录，命令用绝对路径，不会调用沙箱可写目录（如 ~/.cargo/bin）里的同名程序。
+          PATH=/usr/bin:/bin
+          export PATH
           set -euo pipefail
           if [ "$HAS_DIFF" = "false" ]; then
             result="ℹ️ Codex 完成了，但没有产生代码改动。"
             if [ -s "$RUNNER_TEMP/codex-result/summary.md" ]; then
-              result+=$'\n\n'"$(head -c 3000 "$RUNNER_TEMP/codex-result/summary.md")"
+              result+=$'\n\n'"$(/usr/bin/head -c 3000 "$RUNNER_TEMP/codex-result/summary.md")"
             fi
           else
             result="❌ 失败，详见运行日志。"
           fi
           body="🤖 Codex 任务结果："$'\n\n'"$result"$'\n\n'"[运行日志]($RUN_URL)"
-          gh api -X PATCH "repos/$REPO/issues/comments/$COMMENT_ID" -f body="$body" >/dev/null
+          /usr/bin/gh api -X PATCH "repos/$REPO/issues/comments/$COMMENT_ID" -f body="$body" >/dev/null
 
   push:
     needs: codex

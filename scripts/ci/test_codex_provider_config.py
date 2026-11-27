@@ -13,6 +13,8 @@ import textwrap
 import unittest
 from pathlib import Path
 
+import codex_hardening
+
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts/ci/codex_provider_config.py"
 WORKFLOWS = ROOT / ".github/workflows"
@@ -307,6 +309,15 @@ class ConfigurationGuideTest(unittest.TestCase):
             with self.subTest(setting=setting):
                 self.assertIn(f"`{setting}`", setup)
 
+    def test_switching_back_to_chatgpt_mentions_codex_model(self):
+        guide = (ROOT / "docs/CODEX_DISPATCH.md").read_text(encoding="utf-8")
+        setup = guide.split("\n## 一次性配置\n", 1)[1].split("\n### 4. 自检\n", 1)[0]
+        chatgpt = next(p for p in setup.split("\n\n") if "`CODEX_PROVIDER=chatgpt`" in p)
+        # 切回 chatgpt 时 CODEX_MODEL 可能仍是 CPA 专用模型名：必须改成 ChatGPT 支持的模型或清空。
+        self.assertIn("切回 chatgpt 时还要同时检查 `CODEX_MODEL`", chatgpt)
+        self.assertIn("ChatGPT 登录支持的模型", chatgpt)
+        self.assertIn("清空它", chatgpt)
+
 
 class WorkflowWiringTest(unittest.TestCase):
     def test_secrets_only_reach_their_provider(self):
@@ -335,7 +346,12 @@ class WorkflowWiringTest(unittest.TestCase):
                 self.assertIn(
                     "CODEX_API_BASE_URL: ${{ (vars.CODEX_PROVIDER || 'cpa') == 'cpa' && secrets.CODEX_API_BASE_URL || '' }}", block)
                 self.assertNotIn("vars.CODEX_API_BASE_URL", text)
-                self.assertEqual(text.count("secrets.CODEX_API_BASE_URL"), 1)
+                # 另一处是发布 / 收集结果前的泄露检查，同样只在 cpa 时传入。
+                scan = {"review": "Publish review", "plan": "Publish plan", "dispatch": "Collect diff"}[flow]
+                self.assertIn(
+                    "CODEX_API_BASE_URL: ${{ steps.auth.outputs.provider == 'cpa' && secrets.CODEX_API_BASE_URL || '' }}",
+                    step_block(workflow, scan))
+                self.assertEqual(text.count("secrets.CODEX_API_BASE_URL"), 2)
                 self.assertIn(f"codex_provider_config.py --flow {flow}", block)
                 self.assertNotIn("cli_auth_credentials_store", text)
 
@@ -366,8 +382,9 @@ class WorkflowWiringTest(unittest.TestCase):
         # 审查规则仍取 main，不随共用脚本改变。
         self.assertIn("ref: main", step_block("codex-code-review.yml", "Checkout review policy"))
 
-    def run_self_check(self, provider, shell_tool_state="false"):
-        reply = "SECRET-REPLY-FRAGMENT-" + "x" * 40
+    def run_self_check(self, provider, shell_tool_state="false", reply=None, record_codex=True):
+        if reply is None:
+            reply = "OK\n" if provider == "cpa" else "SECRET-REPLY-FRAGMENT-" + "x" * 40
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         work = Path(temporary.name)
@@ -387,24 +404,57 @@ class WorkflowWiringTest(unittest.TestCase):
         codex.chmod(0o755)
         workspace = work / "workspace"
         workspace.mkdir()
-        env = {"PATH": f"{work / 'bin'}{os.pathsep}{os.environ['PATH']}",
+        # 沙箱可写的 ~/.cargo/bin 排在最前面，里面放同名假程序；自检只能用记录下的绝对路径。
+        home = work / "home"
+        hijack_log = work / "hijack.log"
+        hijack = codex_hardening.install_hijack_bin(home / ".cargo/bin", hijack_log)
+        env = {"PATH": f"{hijack}{os.pathsep}{work / 'bin'}{os.pathsep}{os.environ['PATH']}",
+               "HOME": str(home),
                "RUNNER_TEMP": str(work), "GITHUB_WORKSPACE": str(workspace),
                "CODEX_HOME": str(work / "codex-home"), "CODEX_LOG": str(log),
                "CODEX_PROVIDER_RESOLVED": provider, "REPLY_TEXT": reply, "SHELL_TOOL": shell_tool_state,
                "CODEX_CPA_API_KEY": CPA_KEY if provider == "cpa" else ""}
+        if record_codex:
+            # Install Codex CLI 记录的绝对路径：node 解释器和 Codex 入口脚本（这里用 bash 跑假 codex）。
+            env.update({"CODEX_NODE_BIN": "/usr/bin/bash", "CODEX_JS": str(codex)})
         result = subprocess.run(
-            ["bash", "-c", step_script("codex-dispatch.yml", "Self-check (auth and write-back)")],
+            ["/usr/bin/bash", "-c", step_script("codex-dispatch.yml", "Self-check (auth and write-back)")],
             env=env, text=True, capture_output=True, check=False)
+        self.assertEqual(hijack_log.read_text() if hijack_log.exists() else "", "")
         calls = log.read_text().splitlines() if log.exists() else []
         return result, calls, workspace
 
     def test_dispatch_self_check_does_not_print_cpa_reply(self):
-        for provider, printed in (("cpa", False), ("chatgpt", True)):
-            with self.subTest(provider=provider):
-                result, _, _ = self.run_self_check(provider)
+        reply = "SECRET-REPLY-FRAGMENT-" + "x" * 40
+        result, _, _ = self.run_self_check("chatgpt", reply=reply)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("SECRET-REPLY", result.stdout)
+        # cpa：回复不是 OK 时失败，且不打印回复内容。
+        result, _, _ = self.run_self_check("cpa", reply=reply)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertNotIn("SECRET-REPLY", result.stdout + result.stderr)
+        self.assertNotIn(CPA_KEY, result.stdout.replace(f"::add-mask::{CPA_KEY}", ""))
+
+    def test_dispatch_cpa_self_check_requires_exactly_ok(self):
+        # 与独立冒烟测试一致：整段回复必须恰好是一行 OK（可带 LF / CRLF 结尾）。
+        for reply in ("OK", "OK\n", "OK\r\n"):
+            with self.subTest(reply=reply):
+                result, _, _ = self.run_self_check("cpa", reply=reply)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                self.assertEqual("SECRET-REPLY" in result.stdout, printed)
-                self.assertNotIn(CPA_KEY, result.stdout.replace(f"::add-mask::{CPA_KEY}", ""))
+                self.assertIn("回复为 OK", result.stdout)
+        for reply in ("", "ok\n", "OK.\n", " OK\n", "OK\n\n", "OK\nOK\n", "OK, done\n", "NOT OK\n", "OKAY\n"):
+            with self.subTest(reply=reply):
+                result, _, _ = self.run_self_check("cpa", reply=reply)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("不是单独一行 OK", result.stdout)
+                self.assertNotIn("✅", result.stdout)
+
+    def test_dispatch_self_check_needs_recorded_codex_path(self):
+        for provider in ("cpa", "chatgpt"):
+            with self.subTest(provider=provider):
+                result, calls, _ = self.run_self_check(provider, record_codex=False)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(calls, [])
 
     def test_dispatch_self_check_uses_ci_sandbox_and_disables_shell_tool(self):
         # 手动空白派发和 3 天定时自检都走这一步；两种 provider 一样。
@@ -457,6 +507,137 @@ class WorkflowWiringTest(unittest.TestCase):
                 self.assertEqual(evaluate(expression, {"provider": "chatgpt", "CODEX_MODEL": ""}), "")
 
 
+class PostCodexHardeningTest(unittest.TestCase):
+    """Codex 运行时沙箱可写 ~/.cargo/bin（PATH 里排在 /usr/bin 前）：之后带密钥的步骤不能调用那里的同名程序。"""
+
+    def all_steps(self):
+        for workflow in codex_hardening.FLOWS:
+            for step in codex_hardening.run_steps(workflow):
+                yield workflow, step
+
+    def test_every_post_codex_step_is_covered(self):
+        names = {wf: [s["name"] for s in codex_hardening.run_steps(wf)] for wf in codex_hardening.FLOWS}
+        self.assertEqual(names["codex-dispatch.yml"], [
+            "Run Codex", "Collect diff", "Self-check (auth and write-back)", "Check write-back permission",
+            "Persist refreshed auth", "Remove local credentials", "Report (no change or failure)"])
+        self.assertEqual(names["codex-code-review.yml"], [
+            "Run Codex review", "Render review", "Publish review", "Persist refreshed auth",
+            "Queue review fixes", "Report review failure", "Remove local credentials"])
+        self.assertEqual(names["codex-plan.yml"], [
+            "Run Codex plan", "Render plan", "Publish plan", "Persist refreshed auth",
+            "Report plan failure", "Remove local credentials"])
+
+    def test_steps_use_absolute_shell_and_fix_path_first(self):
+        for workflow, step in self.all_steps():
+            with self.subTest(workflow=workflow, step=step["name"]):
+                first = codex_hardening.FLOWS[workflow][1]
+                if step["name"] == first:
+                    # Codex 本身需要原来的 PATH（cargo 等）；它一返回就立刻固定 PATH。
+                    script = step["run"]
+                    call = re.search(r'^codex "\$\{args\[@\]\}".*\n.*\|\| rc=\$\?\n', script, re.M)
+                    self.assertIsNotNone(call)
+                    after = script[call.end():]
+                    after = re.sub(r"^#.*\n", "", after, count=1)
+                    self.assertTrue(after.startswith(codex_hardening.PATH_RESET), after[:120])
+                    self.assertEqual(script.count('codex "${args[@]}"'), 1)
+                    continue
+                self.assertEqual(step["shell"], codex_hardening.HARDENED_SHELL)
+                body = re.sub(r"^#.*\n", "", step["run"], count=1)
+                self.assertTrue(body.startswith(codex_hardening.PATH_RESET), body[:120])
+                self.assertEqual(step["run"].count("PATH="), 1)
+
+    def test_steps_call_external_commands_by_absolute_path(self):
+        for workflow, step in self.all_steps():
+            with self.subTest(workflow=workflow, step=step["name"]):
+                words = codex_hardening.command_words(codex_hardening.hardened_part(workflow, step))
+                bare = sorted({w for w in words if w in codex_hardening.PINNED or w in codex_hardening.HIJACK_NAMES
+                               and w not in ("echo", "printf", "test", "true")})
+                self.assertEqual(bare, [])
+                for word in words:
+                    if "/" in word:
+                        self.assertRegex(word, r"^/usr/bin/[a-z0-9]+$")
+        # 词法检查本身能发现裸命令（含 $(...)、if !、管道）。
+        self.assertEqual(
+            [w for w in codex_hardening.command_words(
+                "if ! jq . f; then x=\"$(git log | grep a)\"; fi\ncat <<'E'\ngh x\nE\n'sort\nsort'\n")
+             if w in codex_hardening.PINNED], ["jq", "git", "grep", "cat"])
+
+    def test_absolute_commands_exist_on_runner(self):
+        used = set()
+        for workflow, step in self.all_steps():
+            used |= {w for w in codex_hardening.command_words(codex_hardening.hardened_part(workflow, step)) if "/" in w}
+        used.add(codex_hardening.HARDENED_SHELL.split()[0])
+        self.assertIn("/usr/bin/gh", used)
+        on_actions = os.environ.get("GITHUB_ACTIONS") == "true"
+        for path in sorted(used):
+            with self.subTest(path=path):
+                if not on_actions and not os.path.exists(path):
+                    self.skipTest(f"本机没有 {path}；GitHub ubuntu runner 上必须存在（CI 里会检查）")
+                self.assertTrue(os.path.isfile(path) and os.access(path, os.X_OK), path)
+
+    def hijack_env(self, work):
+        log = work / "hijack.log"
+        hijack = codex_hardening.install_hijack_bin(work / "home/.cargo/bin", log)
+        trusted = work / "trusted"
+        trusted.mkdir()
+        (trusted / "gh").write_text("#!/bin/sh\necho \"$*\" >> \"$TRUSTED_LOG\"\necho '{}'\n", encoding="utf-8")
+        (trusted / "codex").write_text(
+            'echo "$*" >> "$TRUSTED_LOG"\n'
+            'case "$*" in *"features list"*) echo "shell_tool  stable  false"; exit 0;; esac\n'
+            'while [ "$#" -gt 0 ]; do [ "$1" = -o ] && printf OK > "$2"; shift; done\n', encoding="utf-8")
+        for name in ("gh", "codex"):
+            (trusted / name).chmod(0o755)
+        for name in ("workspace/work", "codex-home", "codex-result"):
+            (work / name).mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "init", "-q", "--bare", str(work / "pristine.git")], check=True)
+        for name, text in (("review.md", "ok\n"), ("plan.md", "ok\n"), ("review.json", "{}"), ("plan.json", "{}"),
+                           ("seed-tokens.txt", ""), ("new-tokens.txt", ""), ("last-message.md", "done\n"),
+                           ("auth.seed.sha256", "0" * 64), ("codex-home/auth.json", AUTH_JSON),
+                           ("codex-stderr.log", "401 Unauthorized\n"), ("codex-events.jsonl", "{}\n"),
+                           ("workspace/review-read-check.txt", "e" * 64)):
+            (work / name).write_text(text, encoding="utf-8")
+        env = {
+            "PATH": f"{hijack}{os.pathsep}{os.environ['PATH']}", "HOME": str(work / "home"),
+            "RUNNER_TEMP": str(work), "GITHUB_WORKSPACE": str(work / "workspace"),
+            "GITHUB_OUTPUT": str(work / "output"), "GITHUB_ENV": str(work / "github_env"),
+            "GITHUB_STEP_SUMMARY": str(work / "summary"), "CODEX_HOME": str(work / "codex-home"),
+            "TRUSTED_LOG": str(work / "trusted.log"), "CODEX_NODE_BIN": "/usr/bin/bash",
+            "CODEX_JS": str(trusted / "codex"), "GH_TOKEN": "fake-gh-token", "REPO": "owner/example",
+            "OWNER": "owner", "NUMBER": "7", "HEAD_SHA": "a" * 40, "BASE_SHA": "b" * 40, "MAIN_SHA": "c" * 40,
+            "RUN_URL": "https://example.com/run/1", "CODEX_CPA_API_KEY": CPA_KEY, "CODEX_API_BASE_URL": BASE_URL,
+            "MAX_ATTEMPTS": "2", "MODE": "task", "RESULT": "failure", "REVIEW_RUN_ID": "1", "REVIEW_RUN_ATTEMPT": "1",
+            "PLAN_RUN_ID": "1", "PLAN_RUN_ATTEMPT": "1", "HAS_DIFF": "false", "COMMENT_ID": "5",
+        }
+        return env, log, trusted
+
+    def run_hardened(self, script, provider):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        work = Path(temporary.name)
+        env, log, trusted = self.hijack_env(work)
+        env["CODEX_PROVIDER_RESOLVED"] = provider
+        script = script.replace("/usr/bin/gh ", f"{trusted / 'gh'} ")
+        result = subprocess.run(["/usr/bin/bash", "-e", "-o", "pipefail", "-c", script], cwd=work,
+                                env=env, text=True, capture_output=True, check=False, timeout=60)
+        return result, (log.read_text() if log.exists() else "")
+
+    def test_no_post_codex_step_runs_programs_planted_in_path(self):
+        # 每一步按真实脚本运行（只有 gh 换成路径固定的假 gh，避免联网），两种 provider 各一次。
+        for workflow, step in self.all_steps():
+            script = codex_hardening.hardened_part(workflow, step)
+            if step["name"] == codex_hardening.FLOWS[workflow][1]:
+                script = "rc=1\n" + script  # Codex 返回失败：走失败归类分支
+            for provider in ("cpa", "chatgpt"):
+                with self.subTest(workflow=workflow, step=step["name"], provider=provider):
+                    result, calls = self.run_hardened(script, provider)
+                    self.assertEqual(calls, "", result.stdout + result.stderr)
+
+    def test_hijack_check_detects_unhardened_script(self):
+        result, calls = self.run_hardened("jq -n . >/dev/null || :; git --version || :\n", "cpa")
+        self.assertIn("/jq ", calls)
+        self.assertIn("/git ", calls)
+
+
 class DispatchCollectTest(unittest.TestCase):
     """Collect diff 必须按原始内容检查暂存文件，二进制补丁不能绕过 CPA 密钥检查。"""
 
@@ -482,16 +663,51 @@ class DispatchCollectTest(unittest.TestCase):
             "GITHUB_OUTPUT": str(self.work / "output"),
             "GITHUB_STEP_SUMMARY": str(self.work / "summary"),
             "CODEX_CPA_API_KEY": CPA_KEY,
+            "CODEX_API_BASE_URL": BASE_URL,
         }
         (self.work / "seed-tokens.txt").write_text("")
         (self.work / "new-tokens.txt").write_text("")
         (self.work / "last-message.md").write_text("done\n")
 
     def collect(self):
-        return subprocess.run(
-            ["bash", "-e", "-o", "pipefail", "-c", step_script("codex-dispatch.yml", "Collect diff")],
-            cwd=self.work, env=self.env, text=True, capture_output=True, check=False,
+        # 沙箱可写的 ~/.cargo/bin 排在 PATH 最前面，里面的同名 git / grep 等不能被调用。
+        log = self.work / "hijack.log"
+        hijack = codex_hardening.install_hijack_bin(self.work / ".cargo/bin", log)
+        env = {**self.env, "PATH": f"{hijack}{os.pathsep}{self.env['PATH']}"}
+        result = subprocess.run(
+            ["/usr/bin/bash", "-e", "-o", "pipefail", "-c", step_script("codex-dispatch.yml", "Collect diff")],
+            cwd=self.work, env=env, text=True, capture_output=True, check=False,
         )
+        self.assertEqual(log.read_text() if log.exists() else "", "")
+        return result
+
+    def test_base_url_or_host_in_change_is_rejected(self):
+        for leaked, binary in (("https://cpa.invalid/v1", False), ("cpa.invalid", False), ("cpa.invalid", True)):
+            with self.subTest(leaked=leaked, binary=binary):
+                target = self.tree / ("blob.bin" if binary else "notes.txt")
+                if binary:
+                    target.write_bytes(b"\x00\x01" + leaked.encode() + b"\x00\xff")
+                else:
+                    target.write_text(f"base={leaked}\n")
+                result = self.collect()
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("CPA 地址", result.stdout)
+                self.assertNotIn("cpa.invalid", result.stdout + result.stderr)
+                self.assertFalse((self.work / "codex-result").exists())
+                target.unlink()
+
+    def test_base_url_in_summary_is_rejected(self):
+        (self.tree / "notes.txt").write_text("ok\n")
+        (self.work / "last-message.md").write_text("连到了 cpa.invalid\n")
+        result = self.collect()
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertFalse((self.work / "codex-result").exists())
+
+    def test_chatgpt_collect_has_no_cpa_needles(self):
+        self.env.update({"CODEX_CPA_API_KEY": "", "CODEX_API_BASE_URL": ""})
+        (self.tree / "notes.txt").write_text("ok\n")
+        result = self.collect()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_key_inside_binary_file_is_rejected(self):
         (self.tree / "blob.bin").write_bytes(b"\x00\x01\x02" + CPA_KEY.encode() + b"\x00\xff")
