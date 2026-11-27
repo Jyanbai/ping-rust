@@ -146,6 +146,10 @@
     "C2 Ubuntu 24.04 upgrade": [
       "Install current source under test",
       "Exercise official legacy Release upgrade"
+    ],
+    "SOCKS5 secure from v0.3.2 on Ubuntu 24.04": [
+      "Install current source under test",
+      "Harden legacy public no-auth SOCKS5 on real systemd"
     ]
   },
   "ubuntu-acceptance.yml": {
