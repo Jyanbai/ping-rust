@@ -3269,18 +3269,26 @@ async fn validate_candidate_with_shoes(yaml: &str, directory: &Path) -> Result<(
 }
 
 async fn validate_candidate_with_binary(yaml: &str, directory: &Path, binary: &Path) -> Result<()> {
+    let mut candidate = create_candidate(directory)?;
+    write_candidate(&mut candidate, yaml)?;
+    validate_with_binary(binary, candidate.path()).await
+}
+
+fn create_candidate(directory: &Path) -> Result<tempfile::NamedTempFile> {
     fs::create_dir_all(directory)
         .with_context(|| format!("创建候选配置目录 {} 失败", directory.display()))?;
-    let mut candidate = tempfile::Builder::new()
+    tempfile::Builder::new()
         .prefix(".ping-rust-candidate-")
         .suffix(".yaml")
         .tempfile_in(directory)
-        .context("创建候选配置失败")?;
+        .context("创建候选配置失败")
+}
+
+fn write_candidate(candidate: &mut tempfile::NamedTempFile, yaml: &str) -> Result<()> {
     candidate
         .write_all(yaml.as_bytes())
         .context("写入候选配置失败")?;
-    candidate.as_file().sync_all().context("同步候选配置失败")?;
-    validate_with_binary(binary, candidate.path()).await
+    candidate.as_file().sync_all().context("同步候选配置失败")
 }
 
 pub(crate) fn validate_managed_snapshot(config_path: &Path, state_path: &Path) -> Result<()> {
@@ -3300,11 +3308,20 @@ pub async fn validate_with_shoes(config_path: &Path) -> Result<()> {
 }
 
 pub(crate) async fn validate_with_binary(binary: &Path, config_path: &Path) -> Result<()> {
+    validate_with_binary_inner(binary, config_path, false).await
+}
+
+async fn validate_with_binary_inner(
+    binary: &Path,
+    config_path: &Path,
+    kill_on_drop: bool,
+) -> Result<()> {
     let _timer = performance::stage("shoes_dry_run");
     if !binary.is_file() {
         bail!("shoes 尚未安装，无法执行 --dry-run 验证");
     }
     let output = Command::new(binary)
+        .kill_on_drop(kill_on_drop)
         .arg("--dry-run")
         .arg(config_path)
         .output()

@@ -267,6 +267,90 @@ async fn dry_run_redacts_specific_ipv4_and_ipv6_bindings() {
 
 #[tokio::test]
 #[cfg(target_os = "linux")]
+async fn signals_remove_socks5_preflight_candidate() {
+    use sha2::{Digest, Sha256};
+    use std::{os::unix::fs::PermissionsExt, process::Command};
+
+    const CHILD: &str = "PING_RUST_TEST_SOCKS5_PREFLIGHT_DIR";
+    const SIGNAL: &str = "PING_RUST_TEST_SOCKS5_PREFLIGHT_SIGNAL";
+    if let Some(path) = std::env::var_os(CHILD) {
+        let path = PathBuf::from(path);
+        let state = load_state_from(&path.join("ping-rust-state.json")).unwrap();
+        let plan = prepare(&path, &state.profiles[0], SecureMode::Auth);
+        let mut interrupt = signal(SignalKind::interrupt()).unwrap();
+        tokio::spawn(async move {
+            while interrupt.recv().await.is_some() {
+                if let Ok(_guard) = crate::INTERRUPT_EXIT.try_lock() {
+                    crate::restore_cursor_and_exit();
+                }
+            }
+        });
+        commit_with_signal_protection(
+            async {
+                validate_secure_candidate(&plan.yaml.aggregate, &path, &path.join("shoes")).await
+            },
+            |()| panic!("预检收到信号后不应提交"),
+        )
+        .await
+        .unwrap();
+        panic!("预检收到信号后不应继续执行");
+    }
+
+    for (signal, code) in [("HUP", 129), ("INT", 130), ("TERM", 143)] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path();
+        let profile = legacy(path, 1080, "0.0.0.0").await;
+        let files = [
+            path.join("config.yaml"),
+            path.join("ping-rust-state.json"),
+            profile_path(path, &profile),
+        ];
+        let snapshot = || {
+            files
+                .each_ref()
+                .map(|file| Sha256::digest(fs::read(file).unwrap()))
+        };
+        let before = snapshot();
+        let shoes = path.join("shoes");
+        fs::write(
+            &shoes,
+            r#"#!/bin/sh
+test "$1" = --dry-run && test -s "$2" || exit 2
+stat -c '%a' -- "$2" > "${2%/*}/candidate-mode" || exit 3
+kill -s "$PING_RUST_TEST_SOCKS5_PREFLIGHT_SIGNAL" "$PPID" || exit 4
+exec sleep 10
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&shoes, fs::Permissions::from_mode(0o700)).unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "config::socks5::secure::tests::signals_remove_socks5_preflight_candidate",
+            ])
+            .env(CHILD, path)
+            .env(SIGNAL, signal)
+            .output()
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(path.join("candidate-mode")).unwrap(),
+            "600\n"
+        );
+        assert_eq!(snapshot(), before, "SIG{signal} 改写了受管文件");
+        assert!(
+            !path.read_dir().unwrap().any(|entry| entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".ping-rust-candidate-")),
+            "SIG{signal} 遗留了候选配置"
+        );
+        assert_eq!(output.status.code(), Some(code), "SIG{signal}");
+    }
+}
+
+#[tokio::test]
+#[cfg(target_os = "linux")]
 async fn signals_do_not_interrupt_socks5_rollback() {
     use std::{
         io::BufRead,
@@ -293,7 +377,7 @@ async fn signals_do_not_interrupt_socks5_rollback() {
             .profiles
             .remove(0);
         let plan = prepare(&path, &profile, SecureMode::Local);
-        let result = commit_with_signal_protection(move || {
+        let result = commit_with_signal_protection(std::future::ready(Ok(())), move |()| {
             let terminate = std::env::var(SIGNAL).unwrap() == "TERM";
             if !terminate {
                 commit::AFTER_PROFILE_REPLACE.set(Some(signal_and_wait));

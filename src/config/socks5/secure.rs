@@ -1,5 +1,6 @@
 use std::{
     fmt::Write as _,
+    future::Future,
     io::{self, Read},
     net::{Ipv4Addr, Ipv6Addr, TcpStream},
     thread,
@@ -47,23 +48,29 @@ pub(crate) async fn secure(
 
     service::check_socks5_restart_scope()?;
     let pid = verify_running(&plan.original).context("无法确认原服务正常，请恢复原监听后重试")?;
-    validate_candidate_with_shoes(&plan.yaml.aggregate, directory)
-        .await
-        .map_err(|_| {
-            anyhow::anyhow!("shoes --dry-run 校验失败，配置未提交；请检查 shoes 安装和当前受管配置")
-        })?;
-    if plan.mode == SecureMode::Local {
-        let target = socket_address(plan.profile())?;
-        if !service::tcp_listener_available_after_restart(pid, target)
-            .context("无法检查目标回环 TCP 监听，配置未提交；请检查 shoes.service 后重试")?
-        {
-            bail!("目标回环 TCP 监听 {target} 已被其他进程占用，配置未提交；请释放该监听后重试");
-        }
-    }
-
-    eprintln!("将重启受管 shoes.service，同机节点的连接可能短暂中断。");
     let mode = plan.mode;
-    let profile = commit_with_signal_protection(move || {
+    let preflight = async move {
+        validate_secure_candidate(&plan.yaml.aggregate, directory, Path::new(utils::SHOES_BIN))
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "shoes --dry-run 校验失败，配置未提交；请检查 shoes 安装和当前受管配置"
+                )
+            })?;
+        if mode == SecureMode::Local {
+            let target = socket_address(plan.profile())?;
+            if !service::tcp_listener_available_after_restart(pid, target)
+                .context("无法检查目标回环 TCP 监听，配置未提交；请检查 shoes.service 后重试")?
+            {
+                bail!(
+                    "目标回环 TCP 监听 {target} 已被其他进程占用，配置未提交；请释放该监听后重试"
+                );
+            }
+        }
+        eprintln!("将重启受管 shoes.service，同机节点的连接可能短暂中断。");
+        Ok(plan)
+    };
+    let profile = commit_with_signal_protection(preflight, move |plan| {
         plan.commit(directory, |profile| {
             service::restart_and_verify()?;
             verify_running(profile).map(|_| ())
@@ -142,8 +149,33 @@ fn prepare_locked(
     Ok(None)
 }
 
-async fn commit_with_signal_protection(
-    commit: impl FnOnce() -> Result<ManagedProfile> + Send + 'static,
+struct SecureCandidate(Option<tempfile::NamedTempFile>);
+
+impl Drop for SecureCandidate {
+    fn drop(&mut self) {
+        if let Some(candidate) = self.0.take() {
+            let path = candidate.path().to_path_buf();
+            if let Err(error) = candidate.close() {
+                let _ = writeln!(
+                    io::stderr(),
+                    "无法删除 SOCKS5 候选配置，请手动删除 {}：{error}",
+                    path.display()
+                );
+            }
+        }
+    }
+}
+
+async fn validate_secure_candidate(yaml: &str, directory: &Path, binary: &Path) -> Result<()> {
+    let mut candidate = SecureCandidate(Some(create_candidate(directory)?));
+    let file = candidate.0.as_mut().expect("候选配置尚未清理");
+    write_candidate(file, yaml)?;
+    validate_with_binary_inner(binary, file.path(), true).await
+}
+
+async fn commit_with_signal_protection<T: Send + 'static>(
+    preflight: impl Future<Output = Result<T>>,
+    commit: impl FnOnce(T) -> Result<ManagedProfile> + Send + 'static,
 ) -> Result<ManagedProfile> {
     #[cfg(target_os = "linux")]
     let result = {
@@ -152,34 +184,59 @@ async fn commit_with_signal_protection(
         let mut hangup = install(SignalKind::hangup())?;
         let mut interrupt = install(SignalKind::interrupt())?;
         let _guard = crate::INTERRUPT_EXIT.lock().await;
-        let mut task = tokio::task::spawn_blocking(commit);
-        let result = tokio::select! {
+        let abort_preflight = |(name, code)| -> ! {
+            let _ = writeln!(io::stderr(), "收到 {name}，SOCKS5 预检已中断，配置未提交。");
+            exit_after_signal(code)
+        };
+        let preflight_result = tokio::select! {
             biased;
-            (name, code) = next_commit_signal(&mut terminate, &mut hangup, &mut interrupt) => {
-                let _ = writeln!(io::stderr(), "收到 {name}，等待 SOCKS5 加固完成或回滚。");
-                let _ = match task.await {
-                    Ok(Ok(_)) => writeln!(io::stderr(), "SOCKS5 加固已提交并验证，请用 sudo prs info 查看结果。"),
-                    Ok(Err(error)) => writeln!(io::stderr(), "{error:#}"),
-                    Err(error) => writeln!(io::stderr(), "SOCKS5 配置提交任务异常结束：{error}"),
+            received = next_secure_signal(&mut terminate, &mut hangup, &mut interrupt) => abort_preflight(received),
+            result = preflight => result,
+        };
+        tokio::select! {
+            biased;
+            received = next_secure_signal(&mut terminate, &mut hangup, &mut interrupt) => abort_preflight(received),
+            () = std::future::ready(()) => {},
+        }
+        let result = match preflight_result {
+            Ok(prepared) => {
+                let mut task = tokio::task::spawn_blocking(move || commit(prepared));
+                let result = tokio::select! {
+                    biased;
+                    (name, code) = next_secure_signal(&mut terminate, &mut hangup, &mut interrupt) => {
+                        let _ = writeln!(io::stderr(), "收到 {name}，等待 SOCKS5 加固完成或回滚。");
+                        let _ = match task.await {
+                            Ok(Ok(_)) => writeln!(io::stderr(), "SOCKS5 加固已提交并验证，请用 sudo prs info 查看结果。"),
+                            Ok(Err(error)) => writeln!(io::stderr(), "{error:#}"),
+                            Err(error) => writeln!(io::stderr(), "SOCKS5 配置提交任务异常结束：{error}"),
+                        };
+                        exit_after_signal(code);
+                    }
+                    result = &mut task => result,
                 };
-                exit_after_signal(code);
+                result.context("SOCKS5 配置提交任务异常结束")
             }
-            result = &mut task => result,
+            Err(error) => Err(error),
         };
         // Tokio keeps the signal handler installed after dropping the receiver.
         tokio::spawn(async move {
-            let (_, code) = next_commit_signal(&mut terminate, &mut hangup, &mut interrupt).await;
+            let (_, code) = next_secure_signal(&mut terminate, &mut hangup, &mut interrupt).await;
             exit_after_signal(code);
         });
         result
     };
     #[cfg(not(target_os = "linux"))]
-    let result = tokio::task::spawn_blocking(commit).await;
-    result.context("SOCKS5 配置提交任务异常结束")?
+    let result = {
+        let prepared = preflight.await?;
+        tokio::task::spawn_blocking(move || commit(prepared))
+            .await
+            .context("SOCKS5 配置提交任务异常结束")
+    };
+    result?
 }
 
 #[cfg(target_os = "linux")]
-async fn next_commit_signal(
+async fn next_secure_signal(
     terminate: &mut Signal,
     hangup: &mut Signal,
     interrupt: &mut Signal,
