@@ -164,11 +164,10 @@ fn vless_enc_rejects_options_on_other_protocols() {
 #[cfg(unix)]
 #[tokio::test]
 async fn vless_enc_dry_run_failure_does_not_echo_secret() {
-    use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let binary = dir.path().join("shoes");
-    fs::write(&binary, "#!/bin/sh\necho secret-sentinel >&2\nexit 1\n").unwrap();
-    fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+    crate::test_executable::write_test_script(&binary, "echo secret-sentinel >&2\nexit 1\n")
+        .unwrap();
     let config = dir.path().join("config.yaml");
     fs::write(
         &config,

@@ -1,5 +1,8 @@
 #![cfg(target_os = "linux")]
 
+#[path = "support/test_executable.rs"]
+mod test_executable;
+
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde_json::Value;
 use std::{
@@ -509,8 +512,7 @@ fn bounded_diagnostic(text: &str) -> String {
 fn dry_run_failure_preserves_stderr_and_redacted_yaml() {
     let root = tempfile::tempdir().unwrap();
     let shoes = root.path().join("shoes");
-    fs::write(&shoes, "#!/bin/sh\necho 'schema rejected' >&2\nexit 7\n").unwrap();
-    fs::set_permissions(&shoes, fs::Permissions::from_mode(0o700)).unwrap();
+    test_executable::write_test_script(&shoes, "echo 'schema rejected' >&2\nexit 7\n").unwrap();
     let config = root.path().join("client.yaml");
     fs::write(
         &config,

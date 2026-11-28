@@ -269,7 +269,7 @@ async fn dry_run_redacts_specific_ipv4_and_ipv6_bindings() {
 #[cfg(target_os = "linux")]
 async fn signals_remove_socks5_preflight_candidate() {
     use sha2::{Digest, Sha256};
-    use std::{os::unix::fs::PermissionsExt, process::Command};
+    use std::process::Command;
 
     const CHILD: &str = "PING_RUST_TEST_SOCKS5_PREFLIGHT_DIR";
     const SIGNAL: &str = "PING_RUST_TEST_SOCKS5_PREFLIGHT_SIGNAL";
@@ -312,17 +312,15 @@ async fn signals_remove_socks5_preflight_candidate() {
         };
         let before = snapshot();
         let shoes = path.join("shoes");
-        fs::write(
+        crate::test_executable::write_test_script(
             &shoes,
-            r#"#!/bin/sh
-test "$1" = --dry-run && test -s "$2" || exit 2
+            r#"test "$1" = --dry-run && test -s "$2" || exit 2
 stat -c '%a' -- "$2" > "${2%/*}/candidate-mode" || exit 3
 kill -s "$PING_RUST_TEST_SOCKS5_PREFLIGHT_SIGNAL" "$PPID" || exit 4
 exec sleep 10
 "#,
         )
         .unwrap();
-        fs::set_permissions(&shoes, fs::Permissions::from_mode(0o700)).unwrap();
         let output = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",

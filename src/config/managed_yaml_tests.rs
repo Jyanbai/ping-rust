@@ -308,10 +308,9 @@ async fn shoes_migration_changes_only_legacy_aliases_and_wildcard_masks() {
     let state_path = path.join("ping-rust-state.json");
     save_state_to(&state_path, &state).unwrap();
     let binary = path.join("mock-shoes");
-    utils::atomic_write(
+    crate::test_executable::write_test_script(
         &binary,
-        b"#!/bin/sh\ntest \"$1\" = --dry-run && grep -q 'client_chains:' \"$2\" && ! grep -q 'client_chain:' \"$2\" && grep -q 'domain_pattern:' \"$2\" && grep -q 'encryption_limits:' \"$2\"\n",
-        0o700,
+        "test \"$1\" = --dry-run && grep -q 'client_chains:' \"$2\" && ! grep -q 'client_chain:' \"$2\" && grep -q 'domain_pattern:' \"$2\" && grep -q 'encryption_limits:' \"$2\"\n",
     )
     .unwrap();
     migrate_managed_config_at(path, &binary)
