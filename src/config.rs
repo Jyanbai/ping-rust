@@ -3012,7 +3012,7 @@ fn random_secret(bytes: usize) -> String {
     URL_SAFE_NO_PAD.encode(value)
 }
 
-fn validate_naive_component(label: &str, value: &str) -> Result<()> {
+pub(crate) fn validate_naive_component(label: &str, value: &str) -> Result<()> {
     if value.is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
         bail!("NaiveProxy {label}不能为空、不能超过 256 字符或包含控制字符");
     }
@@ -3239,7 +3239,7 @@ fn validate_request(request: &GenerationRequest) -> Result<()> {
     Ok(())
 }
 
-fn validate_socks5_component(label: &str, value: &str) -> Result<()> {
+pub(crate) fn validate_socks5_component(label: &str, value: &str) -> Result<()> {
     if value.is_empty() || value.len() > 255 || value.chars().any(char::is_control) {
         bail!("SOCKS5 {label}必须为 1..=255 字节且不能包含控制字符");
     }

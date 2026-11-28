@@ -198,11 +198,6 @@ fn finish(
             "全部 SNI 候选检测失败（{failures}）；请用 prs add reality --server-name <域名> 重试"
         );
     }
-    writeln!(
-        output,
-        "全部 SNI 候选检测失败。输入 SNI 域名，或输入 0 取消"
-    )?;
-    output.flush()?;
     manual()
 }
 
@@ -224,19 +219,39 @@ pub(crate) async fn check(domain: &str) -> ProbeResult {
     probe(domain, public_tls_config()).await
 }
 
+async fn probe_defaults() -> Vec<ProbeResult> {
+    let config = public_tls_config();
+    join_all(
+        config::reality_server_names()
+            .into_iter()
+            .map(|domain| probe(domain, config.clone())),
+    )
+    .await
+}
+
+pub(crate) async fn resolve_for_menu(explicit: Option<String>) -> Result<String> {
+    if let Some(domain) = explicit {
+        if let Err(reason) = check(&domain).await.outcome {
+            bail!("SNI {domain} 检测失败（{reason}）");
+        }
+        return Ok(domain);
+    }
+    finish(
+        &probe_defaults().await,
+        true,
+        &mut rand::rng(),
+        &mut io::stderr(),
+        || bail!("全部 SNI 候选检测失败"),
+    )
+}
+
 pub(crate) async fn resolve(explicit: Option<String>, interactive: bool) -> Result<String> {
     if let Some(domain) = explicit {
         config::validate_server_name(&domain)?;
         check_manual(&domain).await;
         return Ok(domain);
     }
-    let config = public_tls_config();
-    let results = join_all(
-        config::reality_server_names()
-            .into_iter()
-            .map(|domain| probe(domain, config.clone())),
-    )
-    .await;
+    let results = probe_defaults().await;
     let interactive = interactive && io::stdin().is_terminal();
     let chosen = finish(
         &results,
@@ -244,6 +259,7 @@ pub(crate) async fn resolve(explicit: Option<String>, interactive: bool) -> Resu
         &mut rand::rng(),
         &mut io::stderr(),
         || {
+            eprintln!("全部 SNI 候选检测失败。输入 SNI 域名，或输入 0 取消");
             crate::menu::input::read_text(
                 &mut io::stdin().lock(),
                 &mut io::stderr(),

@@ -274,17 +274,19 @@ pub(crate) fn checked_text(
 }
 
 pub(crate) fn file_path(prompt: &str) -> Result<String> {
-    checked_text(prompt, None, false, |value| {
-        std::fs::File::open(value)
-            .and_then(|file| {
-                if file.metadata()?.is_file() {
-                    Ok(())
-                } else {
-                    Err(io::Error::other("路径不是文件"))
-                }
-            })
-            .context("无法读取文件，请检查路径及权限")
-    })
+    checked_text(prompt, None, false, validate_file_path)
+}
+
+pub(super) fn validate_file_path(value: &str) -> Result<()> {
+    std::fs::metadata(value)
+        .and_then(|metadata| {
+            if metadata.is_file() {
+                std::fs::File::open(value).map(drop)
+            } else {
+                Err(io::Error::other("路径不是文件"))
+            }
+        })
+        .context("无法读取文件，请检查路径及权限")
 }
 
 pub(crate) fn confirm(prompt: impl AsRef<str>, default: bool) -> Result<bool> {

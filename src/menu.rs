@@ -521,9 +521,9 @@ async fn prompt_probed_sni(label: &str, mode: crate::sni::Mode) -> Result<String
                 (0, "返回"),
             ],
         )?;
-        match choice {
+        let result = match choice {
             0 => return Err(input::back()),
-            1 => return crate::sni_probe::resolve(None, true).await,
+            1 => crate::sni_probe::resolve_for_menu(None).await,
             2 => match recommend_sni(mode).await {
                 Ok(Some(domain)) => return Ok(domain),
                 Ok(None) => continue,
@@ -532,16 +532,29 @@ async fn prompt_probed_sni(label: &str, mode: crate::sni::Mode) -> Result<String
             },
             _ => {
                 let domain = input::checked_text(label, None, false, config::validate_server_name)?;
-                return crate::sni_probe::resolve(Some(domain), true).await;
+                crate::sni_probe::resolve_for_menu(Some(domain)).await
+            }
+        };
+        match result {
+            Ok(domain) => return Ok(domain),
+            Err(error) if is_step_exit(&error) => return Err(error),
+            Err(error) => {
+                eprintln!("错误：{error:#}\n请检查域名及网络，或改选其他 SNI 方式。");
             }
         }
     }
 }
 
+fn is_step_exit(error: &anyhow::Error) -> bool {
+    input::is_back(error)
+        || crate::is_interrupted(error)
+        || control_after_error(error) == MenuControl::Exit
+}
+
 async fn recommend_sni(mode: crate::sni::Mode) -> Result<Option<String>> {
     use crate::sni;
-    loop {
-        let Some(source) = select_numbered(
+    let choose_source = || {
+        select_numbered(
             "检测与推荐 SNI：选择候选来源",
             &[
                 "默认名单",
@@ -550,25 +563,22 @@ async fn recommend_sni(mode: crate::sni::Mode) -> Result<Option<String>> {
                 "在自己电脑上扫描并导入 CSV（推荐）",
                 "在 VPS 上扫描（需确认风险）",
             ],
-        )?
-        else {
-            return Ok(None);
-        };
+        )
+    };
+    recommend_sni_with(choose_source, |source| async move {
         let candidates = match source {
-            0 | 1 => sni::defaults(Some(mode))?
-                .into_iter()
-                .filter(|c| (c.source == "默认名单") == (source == 0))
-                .collect(),
-            2 => input::validated_text("输入 SNI 域名，空格分隔", None, false, |value| {
-                sni::manual(value, mode)
-            })?,
+            0 => sni::default_candidates(mode),
+            1 => sni::existing_candidates(Some(mode))?,
+            2 => sni::manual(&input::text("输入 SNI 域名，空格分隔", None, false)?, mode)?,
             3 => {
                 match sni::local_scanner_command().await {
                     Ok(command) => println!("在自己电脑上运行（需先安装 RealiTLScanner v0.2.3）：\n{command}"),
+                    Err(error) if is_step_exit(&error) => return Err(error),
                     Err(error) => println!("{error:#}\n在自己电脑上运行（将占位符换成 VPS IPv4）：\nRealiTLScanner -addr <VPS 的 IPv4>/24 -port 443 -thread 5 -timeout 5 -out out.csv"),
                 }
                 println!("上传 out.csv 到 VPS 后输入路径。该 XTLS 项目采用 MPL-2.0 许可。导入不在 VPS 上运行扫描器。");
-                let path = input::file_path("CSV 文件路径")?;
+                let path = input::text("CSV 文件路径", None, false)?;
+                input::validate_file_path(&path)?;
                 let subnet = input::validated_text(
                     "CSV 实际扫描的 IPv4/24 网段",
                     None,
@@ -581,9 +591,8 @@ async fn recommend_sni(mode: crate::sni::Mode) -> Result<Option<String>> {
         };
         let reports = sni::check(candidates).await;
         sni::print_reports(&reports);
-        if reports.is_empty() {
-            println!("没有候选，请选择其他来源。");
-            continue;
+        if !reports.iter().any(|report| report.passed) {
+            bail!("没有候选通过检测，请检查网络或选择其他来源");
         }
         println!("输入通过条目的编号选择 SNI，输入 0 返回上一步。");
         loop {
@@ -593,11 +602,30 @@ async fn recommend_sni(mode: crate::sni::Mode) -> Result<Option<String>> {
                     Ok(domain) => return Ok(Some(domain)),
                     Err(error) => println!("{error}"),
                 },
-                Some(None) => break,
+                Some(None) => return Ok(None),
                 None => println!("无效序号！"),
             }
         }
+    })
+    .await
+}
+
+async fn recommend_sni_with<Fut>(
+    mut choose_source: impl FnMut() -> Result<Option<usize>>,
+    mut try_source: impl FnMut(usize) -> Fut,
+) -> Result<Option<String>>
+where
+    Fut: std::future::Future<Output = Result<Option<String>>>,
+{
+    while let Some(source) = choose_source()? {
+        match try_source(source).await {
+            Ok(Some(domain)) => return Ok(Some(domain)),
+            Ok(None) => continue,
+            Err(error) if is_step_exit(&error) => return Err(error),
+            Err(error) => eprintln!("错误：{error:#}"),
+        }
     }
+    Ok(None)
 }
 
 async fn change_config_menu() -> Result<()> {
@@ -1537,10 +1565,15 @@ async fn fast_add_config_menu_once() -> Result<MenuControl> {
             AnyTlsMode::default()
         };
         let port = match input::validated_text("请输入端口", Some("随机"), true, |value| {
-            if value == "随机" {
-                return Ok(PortChoice::Random);
+            match if value == "随机" {
+                PortChoice::Random
+            } else {
+                parse_port_choice(value).context("请输入 1 到 65535 的端口")?
+            } {
+                PortChoice::Back => Err(input::back()),
+                PortChoice::Random => fast_add::select_port(protocol, None),
+                PortChoice::Fixed(port) => fast_add::select_port(protocol, Some(port)),
             }
-            parse_port_choice(value).context("请输入 1 到 65535 的端口")
         }) {
             Err(error)
                 if input::is_back(&error)
@@ -1550,11 +1583,7 @@ async fn fast_add_config_menu_once() -> Result<MenuControl> {
             }
             result => result?,
         };
-        let port = match port {
-            PortChoice::Back => return Ok(MenuControl::Continue),
-            PortChoice::Random => None,
-            PortChoice::Fixed(port) => Some(port),
-        };
+        let port = Some(port);
         if protocol == Protocol::NaiveProxy {
             let server_name =
                 input::checked_text("请输入域名/SNI", None, false, config::validate_server_name)?;
@@ -1572,7 +1601,7 @@ async fn fast_add_config_menu_once() -> Result<MenuControl> {
             } else {
                 (None, None)
             };
-            cli::ensure_shoes_for_add(true).await?;
+            ensure_menu_shoes().await?;
             let server_address = resolve_menu_server_address().await?;
             let result = fast_add::execute(fast_add::AddRequest {
                 interactive: true,
@@ -1866,7 +1895,7 @@ async fn deploy_fast_config(
     } else {
         Default::default()
     };
-    cli::ensure_shoes_for_add(true).await?;
+    ensure_menu_shoes().await?;
     let server_name = if protocol.uses_reality(anytls_mode) {
         Some(prompt_probed_sni("Reality SNI", crate::sni::Mode::Reality).await?)
     } else if shadowsocks_mode == config::ShadowsocksMode::ShadowTlsV3 {
@@ -1909,16 +1938,37 @@ async fn deploy_fast_config(
     Ok(control_after_success(1))
 }
 
+async fn ensure_menu_shoes() -> Result<()> {
+    loop {
+        match cli::ensure_shoes_for_add(true).await {
+            Err(error)
+                if io::stdin().is_terminal()
+                    && !is_step_exit(&error)
+                    && error.is::<installer::InstallRestored>() =>
+            {
+                eprintln!("错误：{error:#}");
+                if !input::confirm("请检查网络或安装环境，重试安装 shoes？", false)?
+                {
+                    return Err(input::back());
+                }
+            }
+            result => return result,
+        }
+    }
+}
+
 async fn resolve_menu_server_address() -> Result<String> {
     match fast_add::resolve_server_address(None).await {
         Ok(address) => Ok(address),
+        Err(error) if is_step_exit(&error) => Err(error),
         Err(error) => {
             eprintln!("自动检测公网地址失败：{error:#}");
-            let entered =
-                input::checked_text("请输入 VPS 公网域名或 IP", None, false, |value| {
-                    client::normalize_server_address(value).map(|_| ())
-                })?;
-            fast_add::resolve_server_address(Some(&entered)).await
+            input::validated_text(
+                "请输入 VPS 公网域名或 IP",
+                None,
+                false,
+                client::normalize_server_address,
+            )
         }
     }
 }
@@ -1941,11 +1991,59 @@ async fn advanced_add_config_menu() -> Result<()> {
     }
 }
 
+fn prompt_optional_password(
+    label: &str,
+    validate: impl Fn(&str) -> Result<()>,
+) -> Result<Option<String>> {
+    loop {
+        let value = input::password(format!("{label}（默认：随机生成）"), true)?;
+        if value.is_empty() {
+            return Ok(None);
+        }
+        match validate(&value) {
+            Ok(()) => return Ok(Some(value)),
+            Err(error) => eprintln!("错误！{error:#}"),
+        }
+    }
+}
+
+fn validate_password_text(value: &str) -> Result<()> {
+    if value.chars().any(char::is_control) {
+        bail!("密码不能包含控制字符");
+    }
+    Ok(())
+}
+
+fn prompt_named_credentials(
+    protocol: &str,
+    validate: impl Fn(&str, &str) -> Result<()>,
+) -> Result<(Option<String>, Option<String>)> {
+    let name = input::checked_text(
+        format!("{protocol} 用户名（默认：随机生成）"),
+        None,
+        true,
+        |value| validate("用户名", value),
+    )?;
+    let password = prompt_optional_password(&format!("{protocol} 密码"), |value| {
+        validate("密码", value)
+    })?;
+    Ok(((!name.is_empty()).then_some(name), password))
+}
+
+fn prompt_listen_port(sockets: (bool, bool)) -> Result<u16> {
+    input::validated_text("监听端口", Some("443"), false, |value| {
+        let port = value.trim().parse().context("请输入 1 到 65535 的端口")?;
+        fast_add::ensure_port_available(sockets, port, None)?;
+        Ok(port)
+    })
+}
+
 async fn advanced_add_protocol(protocol: Protocol) -> Result<()> {
     let name = input::checked_text("配置名称", Some(protocol.slug()), false, |name| {
         config::validate_profile_name(name, &config::load_state()?.profiles, None)
     })?;
-    let port = input::port("监听端口", Some(443))?;
+    let (tcp, udp) = protocol.required_sockets();
+    let mut port = prompt_listen_port((tcp, udp && protocol != Protocol::Shadowsocks))?;
     let mut options = GenerationOptions::default();
     if protocol == Protocol::VlessEnc {
         let Some(selected) = prompt_vless_enc_options()? else {
@@ -1971,6 +2069,12 @@ async fn advanced_add_protocol(protocol: Protocol) -> Result<()> {
             } else {
                 config::ShadowsocksMode::Plain
             };
+            if let Some(Err(error)) =
+                (mode == 0).then(|| fast_add::ensure_port_available((false, true), port, None))
+            {
+                eprintln!("错误！{error:#}");
+                port = prompt_listen_port((true, true))?;
+            }
             let ciphers = if options.shadowsocks_mode == config::ShadowsocksMode::ShadowTlsV3 {
                 vec![
                     "2022-blake3-aes-256-gcm",
@@ -1999,11 +2103,11 @@ async fn advanced_add_protocol(protocol: Protocol) -> Result<()> {
                 _ => ShadowsocksCipher::Chacha20IetfPoly1305,
             };
             if options.shadowsocks_mode == config::ShadowsocksMode::ShadowTlsV3 {
-                let password = input::password("SS2022 密钥（默认：随机生成）", true)?;
-                options.shadowsocks_password = (!password.is_empty()).then_some(password);
-                let shadow_password = input::password("ShadowTLS 密码（默认：随机生成）", true)?;
+                options.shadowsocks_password = prompt_optional_password("SS2022 密钥", |value| {
+                    config::validate_shadowsocks_password(options.shadowsocks_cipher, value)
+                })?;
                 options.shadowtls_password =
-                    (!shadow_password.is_empty()).then_some(shadow_password);
+                    prompt_optional_password("ShadowTLS 密码", validate_password_text)?;
                 let sni = prompt_probed_sni("ShadowTLS SNI", crate::sni::Mode::ShadowTls).await?;
                 shadowtls_server_name = Some(sni.clone());
                 let handshake = input::checked_text(
@@ -2023,8 +2127,7 @@ async fn advanced_add_protocol(protocol: Protocol) -> Result<()> {
             return Ok(());
         };
         options.snell_cipher = cipher;
-        let password = input::password("Snell v3 密码（默认：随机生成）", true)?;
-        options.snell_password = (!password.is_empty()).then_some(password);
+        options.snell_password = prompt_optional_password("Snell v3 密码", validate_password_text)?;
         options.udp_enabled = input::confirm("启用 Snell UDP-over-TCP？", true)?;
     }
     if matches!(protocol, Protocol::Socks5) {
@@ -2033,10 +2136,8 @@ async fn advanced_add_protocol(protocol: Protocol) -> Result<()> {
             return Ok(());
         };
         if authentication == 0 {
-            let username = input::text("SOCKS5 用户名（默认：随机生成）", None, true)?;
-            options.socks5_username = (!username.is_empty()).then_some(username);
-            let password = input::password("SOCKS5 密码（默认：随机生成）", true)?;
-            options.socks5_password = (!password.is_empty()).then_some(password);
+            (options.socks5_username, options.socks5_password) =
+                prompt_named_credentials("SOCKS5", config::validate_socks5_component)?;
         } else {
             options.socks5_no_auth = true;
         }
@@ -2053,15 +2154,21 @@ async fn advanced_add_protocol(protocol: Protocol) -> Result<()> {
             } else {
                 format!("user{}", options.anytls_users.len() + 1)
             };
-            let user_name = input::text("AnyTLS 用户名", Some(&default_name), false)?;
-            let password = input::password("AnyTLS 密码（默认：随机生成）", true)?;
-            options.anytls_users.push(if password.is_empty() {
-                config::generated_anytls_user(user_name)
-            } else {
+            let user_name =
+                input::checked_text("AnyTLS 用户名", Some(&default_name), false, |name| {
+                    if name.len() > 64 || name.chars().any(char::is_control) {
+                        bail!("AnyTLS 用户名不能超过 64 字符或包含控制字符");
+                    }
+                    Ok(())
+                })?;
+            let password = prompt_optional_password("AnyTLS 密码", validate_password_text)?;
+            options.anytls_users.push(if let Some(password) = password {
                 AnyTlsUser {
                     name: user_name,
                     password,
                 }
+            } else {
+                config::generated_anytls_user(user_name)
             });
             if !input::confirm("继续添加 AnyTLS 用户？", false)? {
                 break;
@@ -2084,10 +2191,8 @@ async fn advanced_add_protocol(protocol: Protocol) -> Result<()> {
         }
     }
     if protocol == Protocol::NaiveProxy {
-        let username = input::text("NaiveProxy 用户名（默认：随机生成）", None, true)?;
-        options.naive_username = (!username.is_empty()).then_some(username);
-        let password = input::password("NaiveProxy 密码（默认：随机生成）", true)?;
-        options.naive_password = (!password.is_empty()).then_some(password);
+        (options.naive_username, options.naive_password) =
+            prompt_named_credentials("NaiveProxy", config::validate_naive_component)?;
         options.naive_padding = input::confirm("启用 NaiveProxy padding？", true)?;
         if input::confirm("配置静态 fallback 目录？", false)? {
             options.naive_fallback = Some(input::checked_text(
@@ -2154,6 +2259,7 @@ async fn advanced_add_protocol(protocol: Protocol) -> Result<()> {
     };
 
     let server_address = resolve_menu_server_address().await?;
+    ensure_menu_shoes().await?;
     let result = deployment::generate_and_activate(GenerationRequest {
         name: Some(name),
         protocol,
@@ -2311,6 +2417,25 @@ fn uninstall_menu() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn failed_sni_source_allows_default_source_to_complete() {
+        let mut choices = [3, 0].into_iter();
+        let selected = recommend_sni_with(
+            || Ok(Some(choices.next().expect("应回到候选来源选择"))),
+            |source| async move {
+                match source {
+                    3 => bail!("无法打开 CSV，请检查上传路径和文件权限"),
+                    0 => Ok(Some("example.com".to_owned())),
+                    _ => panic!("意外的候选来源"),
+                }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(selected.as_deref(), Some("example.com"));
+        assert_eq!(choices.next(), None);
+    }
 
     #[test]
     fn self_update_without_replacement_continues_without_pausing_or_restarting() {

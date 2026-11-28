@@ -70,10 +70,20 @@ impl Candidate {
 }
 
 pub(crate) fn defaults(mode: Option<Mode>) -> Result<Vec<Candidate>> {
-    let mut candidates: Vec<_> = crate::config::reality_server_names()
+    let mut candidates = default_candidates(mode.unwrap_or(Mode::Reality));
+    candidates.extend(existing_candidates(mode)?);
+    Ok(candidates)
+}
+
+pub(crate) fn default_candidates(mode: Mode) -> Vec<Candidate> {
+    crate::config::reality_server_names()
         .into_iter()
-        .map(|d| Candidate::new(d, "默认名单", mode.unwrap_or(Mode::Reality)))
-        .collect();
+        .map(|domain| Candidate::new(domain, "默认名单", mode))
+        .collect()
+}
+
+pub(crate) fn existing_candidates(mode: Option<Mode>) -> Result<Vec<Candidate>> {
+    let mut candidates = Vec::new();
     if Path::new(crate::utils::STATE_FILE).exists() {
         for profile in crate::config::load_state()?.profiles {
             let domain = profile.server_name();
@@ -134,7 +144,7 @@ pub(crate) struct Report {
     redirect: String,
     cloudflare: &'static str,
     shoes: &'static str,
-    passed: bool,
+    pub(crate) passed: bool,
     detail: String,
 }
 

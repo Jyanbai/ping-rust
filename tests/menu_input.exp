@@ -1,9 +1,10 @@
 #!/usr/bin/expect -f
-# 运行条件见 tests/menu_input_e2e.rs；不创建、删除或更改节点。
+# 默认模式不改动节点（见 tests/menu_input_e2e.rs）。
+# --sni-retry <空闲端口> 模式会添加节点并启动服务，只在一次性测试机运行。
 set timeout 30
 log_user 1
 if {$argc != 3 && $argc != 2} {
-    puts stderr "usage: menu_input.exp <ping-rust> <first-profile-port> <profile-count> | <ping-rust> <legacy-socks5-id>"
+    puts stderr "usage: menu_input.exp <ping-rust> <first-profile-port> <profile-count> | <ping-rust> <legacy-socks5-id> | <ping-rust> --sni-retry <free-port>"
     exit 2
 }
 set binary [lindex $argv 0]
@@ -105,6 +106,55 @@ proc result_page {} {
 proc back_to_main {advanced} {
     if {$advanced} { tools_menu; send_choice 0 }
     main_menu
+}
+if {$argc == 3 && $port eq "--sni-retry"} {
+    set timeout 240
+    log_user 0
+    spawn $binary
+    match_max 65536
+    main_menu
+    expect_before -re {按回车返回主菜单\.\.\.} {
+        puts stderr "添加完成前错误地返回主菜单"
+        exit 1
+    }
+    enter_protocol_menu 1
+    send_choice 1
+    expect_or_fail {配置名称（默认：reality，输入 0 返回）：} "SNI retry name"
+    send_choice menu-sni-retry
+    expect_or_fail {监听端口（默认：443，输入 0 返回）：} "SNI retry port"
+    send_choice $profile_count
+    expect_or_fail {请选择 \[0-3\]: } "SNI method prompt"
+    send_choice 2
+    expect_or_fail {请选择 \[0-5\]: } "candidate sources"
+    send_choice 4
+    expect_or_fail {CSV 文件路径（输入 0 返回）：} "CSV path"
+    send_choice /dev/null/nonexistent.csv
+    expect_or_fail {错误：无法读取文件，请检查路径及权限.*请选择 \[0-5\]: } "candidate sources after CSV failure"
+    send_choice 1
+    expect {
+        -re {(?:^|\n)([0-9]+)\t[^\t]+\t默认名单\t(?:[^\t\r\n]*\t){5}通过\t} {
+            set candidate $expect_out(1,string)
+        }
+        -re {没有候选通过检测} { puts stderr "默认名单没有通过项"; exit 1 }
+        eof { exit 1 }
+        timeout { puts stderr "默认名单检测超时"; exit 1 }
+    }
+    expect_or_fail {输入通过条目的编号选择 SNI} "candidate selection"
+    send_choice $candidate
+    expect_or_fail {Reality fallback（默认：[^\r\n]+，输入 0 返回）：} "original Reality flow"
+    expect_before
+    send_choice ""
+    expect {
+        -re {请输入 VPS 公网域名或 IP（输入 0 返回）：} { send_choice example.com; exp_continue }
+        -re {配置添加成功。} {}
+        -re {按回车返回主菜单\.\.\.} { puts stderr "添加完成前错误地返回主菜单"; exit 1 }
+        eof { puts stderr "添加配置时菜单提前退出"; exit 1 }
+        timeout { puts stderr "添加配置未完成"; exit 1 }
+    }
+    result_page
+    send_choice 0
+    successful_exit
+    exit 0
 }
 if {$argc == 2} {
     set selector [lindex $argv 1]
