@@ -198,11 +198,6 @@ fn finish(
             "全部 SNI 候选检测失败（{failures}）；请用 prs add reality --server-name <域名> 重试"
         );
     }
-    writeln!(
-        output,
-        "全部 SNI 候选检测失败。输入 SNI 域名，或输入 0 取消"
-    )?;
-    output.flush()?;
     manual()
 }
 
@@ -224,19 +219,37 @@ pub(crate) async fn check(domain: &str) -> ProbeResult {
     probe(domain, public_tls_config()).await
 }
 
+async fn probe_defaults() -> Vec<ProbeResult> {
+    let config = public_tls_config();
+    join_all(
+        config::reality_server_names()
+            .into_iter()
+            .map(|domain| probe(domain, config.clone())),
+    )
+    .await
+}
+
+pub(crate) async fn resolve_for_menu(explicit: Option<String>) -> Result<String> {
+    if let Some(domain) = explicit {
+        check_manual(&domain).await;
+        return Ok(domain);
+    }
+    finish(
+        &probe_defaults().await,
+        true,
+        &mut rand::rng(),
+        &mut io::stderr(),
+        || bail!("全部 SNI 候选检测失败"),
+    )
+}
+
 pub(crate) async fn resolve(explicit: Option<String>, interactive: bool) -> Result<String> {
     if let Some(domain) = explicit {
         config::validate_server_name(&domain)?;
         check_manual(&domain).await;
         return Ok(domain);
     }
-    let config = public_tls_config();
-    let results = join_all(
-        config::reality_server_names()
-            .into_iter()
-            .map(|domain| probe(domain, config.clone())),
-    )
-    .await;
+    let results = probe_defaults().await;
     let interactive = interactive && io::stdin().is_terminal();
     let chosen = finish(
         &results,
@@ -244,6 +257,7 @@ pub(crate) async fn resolve(explicit: Option<String>, interactive: bool) -> Resu
         &mut rand::rng(),
         &mut io::stderr(),
         || {
+            eprintln!("全部 SNI 候选检测失败。输入 SNI 域名，或输入 0 取消");
             crate::menu::input::read_text(
                 &mut io::stdin().lock(),
                 &mut io::stderr(),
@@ -507,6 +521,15 @@ mod tests {
             assert!(warning.contains(&stage.to_string()));
             assert!(warning.contains("仍使用手动指定值"));
         }
+    }
+
+    #[tokio::test]
+    async fn menu_keeps_manual_sni_when_tls_probe_fails() {
+        let domain = "127.0.0.1".to_owned();
+        assert_eq!(
+            resolve_for_menu(Some(domain.clone())).await.unwrap(),
+            domain
+        );
     }
 
     #[tokio::test]

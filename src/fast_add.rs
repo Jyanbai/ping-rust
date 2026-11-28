@@ -270,7 +270,7 @@ fn is_private_address(address: IpAddr) -> bool {
     }
 }
 
-fn select_port(protocol: Protocol, requested: Option<u16>) -> Result<u16> {
+pub(crate) fn select_port(protocol: Protocol, requested: Option<u16>) -> Result<u16> {
     select_port_excluding(protocol, requested, None)
 }
 
@@ -291,22 +291,32 @@ fn select_port_excluding(
     requested: Option<u16>,
     excluded_profile: Option<uuid::Uuid>,
 ) -> Result<u16> {
+    let sockets = protocol.required_sockets();
     if let Some(port) = requested {
-        ensure_port_available(protocol, port, excluded_profile)?;
+        ensure_port_available(sockets, port, excluded_profile)?;
         return Ok(port);
     }
     let mut random = rand::rng();
     for _ in 0..RANDOM_PORT_ATTEMPTS {
         let port = random.random_range(RANDOM_PORT_MIN..=u16::MAX);
-        if ensure_port_available(protocol, port, excluded_profile).is_ok() {
+        if ensure_port_available(sockets, port, excluded_profile).is_ok() {
             return Ok(port);
         }
     }
     bail!("自动获取可用端口失败次数达到 233 次，请检查端口占用情况")
 }
 
-fn ensure_port_available(
-    protocol: Protocol,
+pub(crate) fn ensure_port_available(
+    sockets: (bool, bool),
+    port: u16,
+    excluded_profile: Option<uuid::Uuid>,
+) -> Result<()> {
+    ensure_port_available_at("0.0.0.0", sockets, port, excluded_profile)
+}
+
+pub(crate) fn ensure_port_available_at(
+    host: &str,
+    (tcp, udp): (bool, bool),
     port: u16,
     excluded_profile: Option<uuid::Uuid>,
 ) -> Result<()> {
@@ -325,8 +335,7 @@ fn ensure_port_available(
     // socket activation 的 LISTEN_FDS，因此这里的检查只能用于尽早报错。
     // 检查结束到 shoes 绑定之间仍可能发生竞争；激活失败由 deployment
     // 的配置与服务快照回滚兜底。
-    let (tcp, udp) = protocol.required_sockets();
-    let status = operations::check_port(port, tcp, udp);
+    let status = operations::check_port_at(host, port, tcp, udp);
     if status.tcp_available.is_some_and(|result| result.is_err()) {
         bail!("TCP 端口 {port} 已被占用或无法绑定");
     }

@@ -19,14 +19,18 @@ pub struct PortStatus {
 }
 
 pub fn check_port(port: u16, tcp: bool, udp: bool) -> PortStatus {
+    check_port_at("0.0.0.0", port, tcp, udp)
+}
+
+pub(crate) fn check_port_at(host: &str, port: u16, tcp: bool, udp: bool) -> PortStatus {
     PortStatus {
         tcp_available: tcp.then(|| {
-            TcpListener::bind(("0.0.0.0", port))
+            TcpListener::bind((host, port))
                 .map(drop)
                 .map_err(|error| error.to_string())
         }),
         udp_available: udp.then(|| {
-            UdpSocket::bind(("0.0.0.0", port))
+            UdpSocket::bind((host, port))
                 .map(drop)
                 .map_err(|error| error.to_string())
         }),
@@ -264,6 +268,31 @@ mod tests {
         let status = check_port(0, true, false);
         assert!(matches!(status.tcp_available, Some(Ok(()))));
         assert!(status.udp_available.is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn loopback_port_check_ignores_other_specific_addresses() {
+        let other = TcpListener::bind(("127.0.0.2", 0)).unwrap();
+        let port = other.local_addr().unwrap().port();
+        assert!(matches!(
+            check_port_at("127.0.0.1", port, true, false).tcp_available,
+            Some(Ok(()))
+        ));
+        assert!(matches!(
+            check_port(port, true, false).tcp_available,
+            Some(Err(_))
+        ));
+
+        let loopback = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let wildcard = TcpListener::bind(("0.0.0.0", 0)).unwrap();
+        for listener in [&loopback, &wildcard] {
+            let port = listener.local_addr().unwrap().port();
+            assert!(matches!(
+                check_port_at("127.0.0.1", port, true, false).tcp_available,
+                Some(Err(_))
+            ));
+        }
     }
 
     #[test]

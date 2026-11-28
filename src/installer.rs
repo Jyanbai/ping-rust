@@ -32,6 +32,15 @@ const MAX_ARCHIVE_SIZE: u64 = 128 * 1024 * 1024;
 const MAX_BINARY_SIZE: u64 = 128 * 1024 * 1024;
 const LOW_MEMORY_THRESHOLD_KIB: u64 = 1024 * 1024;
 
+#[derive(Debug)]
+pub(crate) struct InstallRestored;
+
+impl std::fmt::Display for InstallRestored {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("shoes 安装失败，原二进制状态已恢复")
+    }
+}
+
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum InstallMethod {
     /// 下载 GitHub Release 预编译文件
@@ -346,7 +355,7 @@ async fn install_locked_inner(
             Ok(report)
         }
         Err(installation) => match rollback.restore() {
-            Ok(()) => Err(installation.context("shoes 安装失败，原二进制状态已恢复")),
+            Ok(()) => Err(installation.context(InstallRestored)),
             Err(restore) => {
                 bail!("shoes 安装失败且原二进制恢复失败：安装={installation:#}；回滚={restore:#}")
             }

@@ -33,6 +33,20 @@ pub(super) fn socks5_is_loopback(address: &str) -> bool {
     ip(address).is_some_and(|ip| ip.is_loopback())
 }
 
+pub(crate) fn socks5_listen_host(no_auth: bool, server_address: Option<&str>) -> &'static str {
+    if !no_auth {
+        "0.0.0.0"
+    } else if server_address.is_some_and(|host| {
+        host.trim_matches(['[', ']'])
+            .parse::<std::net::Ipv6Addr>()
+            .is_ok()
+    }) {
+        "::1"
+    } else {
+        "127.0.0.1"
+    }
+}
+
 pub(super) fn socks5_address(host: &str, port: u16) -> String {
     match ip(host) {
         Some(IpAddr::V6(_)) if !host.starts_with('[') => format!("[{host}]:{port}"),

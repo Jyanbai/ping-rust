@@ -1513,6 +1513,14 @@ pub(crate) fn share_uri_with_qr_text(uri: &str) -> Result<String> {
 }
 
 pub(crate) async fn ensure_shoes_for_add(yes: bool) -> Result<()> {
+    ensure_shoes_for_add_inner(yes, false).await
+}
+
+pub(crate) async fn ensure_shoes_binary_for_menu_add() -> Result<()> {
+    ensure_shoes_for_add_inner(true, true).await
+}
+
+async fn ensure_shoes_for_add_inner(yes: bool, defer_unit: bool) -> Result<()> {
     if Path::new(crate::utils::SHOES_BIN).is_file() {
         return Ok(());
     }
@@ -1525,9 +1533,23 @@ pub(crate) async fn ensure_shoes_for_add(yes: bool) -> Result<()> {
     if !approved {
         bail!("shoes 尚未安装；请先运行 ping-rust install，或添加 --yes 自动安装");
     }
-    let report = installer::install(InstallMethod::Release, false).await?;
-    service::install_unit(false)?;
-    let _ = report;
+    finish_add_install(
+        installer::install(InstallMethod::Release, false),
+        defer_unit,
+        || service::install_unit(false),
+    )
+    .await
+}
+
+async fn finish_add_install<Installed>(
+    install: impl std::future::Future<Output = Result<Installed>>,
+    defer_unit: bool,
+    install_unit: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    let _installed = install.await?;
+    if !defer_unit {
+        install_unit()?;
+    }
     Ok(())
 }
 
@@ -2103,6 +2125,15 @@ fn print_certificate_notice(result: &config::GenerationResult) {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn menu_install_defers_unit_until_candidate_validation() {
+        super::finish_add_install(async { Ok(()) }, true, || {
+            panic!("候选配置尚未校验，不应写入 unit")
+        })
+        .await
+        .unwrap();
+    }
+
     #[test]
     fn xhttp_reality_cli_accepts_paths_and_rejects_invalid_paths() {
         for command in ["add", "generate"] {
