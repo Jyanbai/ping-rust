@@ -18,9 +18,10 @@ import time
 import traceback
 import uuid
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Protocol as TypingProtocol
 
 
 LOOPBACK = "127.0.0.1"
@@ -32,6 +33,7 @@ CONFIG_DIR = Path("/etc/shoes")
 UNIT = "shoes.service"
 SUDO = ("sudo", "-n")
 PIN_FIELD = "certificate_public_key_sha256"
+REJECTED_CURL_CODES = {35, 52, 55, 56, 97}
 POSITIVE, AUTH, CERTIFICATE, DIFFERENT_KEY = CASES = (
     "self-signed-pinned", "wrong-credentials", "untrusted-certificate", "different-key-certificate",
 )
@@ -42,6 +44,21 @@ class Protocol:
     outbound_type: str
     auth_fields: tuple[str, ...]
     network: str = "tcp"
+
+
+@dataclass(frozen=True)
+class ManagedNode:
+    slug: str
+    protocol: Protocol
+    name: str
+    port: int
+    profile: str
+    pid: str
+
+    @property
+    def certificate(self):
+        cert, _ = certificate_files(self.profile)
+        return cert
 
 
 PROTOCOLS = {
@@ -67,15 +84,17 @@ class Failure(Exception):
 
 
 class Results:
-    def __init__(self, output):
+    def __init__(self, output, *, client_version=("sing_box_version", SING_BOX_VERSION)):
         self.output = output
+        self.client_version = client_version
         self.rows = []
 
     def record(self, protocol, case, phase, started, status):
+        version_field, version = self.client_version
         row = {
             "protocol": protocol if protocol in PROTOCOLS else "-",
             "case": case if case in CASES else "-",
-            "shoes_version": SHOES_VERSION, "sing_box_version": SING_BOX_VERSION,
+            "shoes_version": SHOES_VERSION, version_field: version,
             "phase": phase if phase in PHASES else "internal",
             "elapsed_ms": int((time.monotonic() - started) * 1000),
             "verdict": "fail" if status else "pass",
@@ -130,6 +149,16 @@ class Observation:
     rejection: str | None = None
 
 
+class ClientBackend(TypingProtocol):
+    """Keep client configs opaque to the matrix and return evidence, not verdicts."""
+
+    def export(self, ping_rust, work, node: ManagedNode): ...
+
+    def variant(self, config, field): ...
+
+    def observe(self, case, config, work, label, server, pid) -> Observation: ...
+
+
 def verdict(case, observed):
     if not observed.positive_ok:
         return 1, "positive-control"
@@ -147,13 +176,14 @@ def verdict(case, observed):
             return 1, "request"
     else:
         expected = {AUTH: "credentials", CERTIFICATE: "certificate", DIFFERENT_KEY: "pin-mismatch"}[case]
-        if not (observed.curl_code in {35, 52, 55, 56, 97} and observed.outbound_attempt
+        if not (observed.curl_code in REJECTED_CURL_CODES and observed.outbound_attempt
                 and observed.rejection == expected):
             return 1, "rejection-unconfirmed"
     return 0, "acceptance"
 
 
 def rejection_signal(client_log, curl_error):
+    """Recognize transport symptoms; a credentials candidate is not proof."""
     if re.search(r"\bunrecognized remote public key: [A-Za-z0-9+/]{43}=(?![A-Za-z0-9+/=])|"
                  r"(?:unmatched|no matching|unrecognized) (?:remote |peer )?certificate public key|"
                  r"certificate public key[^\r\n]*(?:mismatch|did not match|does not match)", client_log, re.I):
@@ -166,6 +196,41 @@ def rejection_signal(client_log, curl_error):
         r"stream \d+ canceled by remote|connection reset by peer|\beof\b",
         client_log, re.I,
     ) or re.search(r"empty reply from server|connection reset by peer|connection to proxy closed", curl_error, re.I):
+        return "credentials"
+    return None
+
+
+TCP_AUTH_ERRORS = {
+    "trojan": r"invalid password hash",
+    "vless": r"unknown user id",
+    "vmess": r"AEAD auth ID decryption failed|AEAD authentication failed: checksum mismatch",
+    "anytls": r"authentication failed(?: \(prefix mismatch\))?",
+}
+PRE_AUTH_ERROR = re.compile(r"(?:TLS|websocket) handshake(?::| (?:failed|failure|error|timeout)\b)", re.I)
+
+
+def sing_box_rejection(outbound, client_log, curl_error, journal=""):
+    signal = rejection_signal(client_log, curl_error)
+    if signal in {"pin-mismatch", "certificate"}:
+        return signal
+    if PRE_AUTH_ERROR.search(client_log):
+        return None
+    if outbound == "hysteria2" and re.search(
+        r"authentication (?:error, (?:HTTP )?|failed, )status code: 404\b", client_log,
+    ):
+        return "credentials"
+    if outbound == "tuic":
+        if (re.search(r"application error 0x[0-9a-f]+ \(remote\): auth failed[ \t]*$", client_log, re.I | re.M)
+                or re.search(r"Connection ended with error: "
+                             r"(?:Invalid UUID|Authentication token mismatch|incorrect credentials)[ \t]*$",
+                             journal, re.M)):
+            return "credentials"
+    expected = TCP_AUTH_ERRORS.get(outbound)
+    if expected and re.search(
+        rf'(?<![\w.:])127\.0\.0\.1:\d+ finished with error:[^\r\n]*'
+        rf'failed to setup server stream: (?:{expected})(?:" \}})?[ \t]*$',
+        journal, re.I | re.M,
+    ):
         return "credentials"
     return None
 
@@ -225,7 +290,7 @@ def sockets(phase, privileged=False):
 
 def preflight(ping_rust):
     if not ping_rust.is_file() or not os.access(ping_rust, os.X_OK) or any(
-        shutil.which(tool) is None for tool in ("curl", "sudo", "ss", "systemctl", "pgrep", "openssl")
+        shutil.which(tool) is None for tool in ("curl", "sudo", "ss", "systemctl", "pgrep", "openssl", "journalctl")
     ):
         raise Failure("missing-binary")
     if (os.geteuid() == 0 or platform.machine() != "x86_64" or sys.platform != "linux"
@@ -279,6 +344,22 @@ def service_pid():
     return pid[1]
 
 
+def require_service_pid(pid):
+    if service_pid() != pid:
+        raise Failure("service-health")
+
+
+def sync_journal():
+    checked([*SUDO, "journalctl", "--sync"], "rejection-unconfirmed")
+
+
+def auth_journal(pid, since):
+    """Read evidence for the single in-flight local probe, not earlier probes."""
+    sync_journal()
+    return checked([*SUDO, "journalctl", "--boot", "--unit", UNIT, f"_PID={pid}",
+                    "--since", f"@{since:.6f}", "--output=cat", "--no-pager"], "rejection-unconfirmed")
+
+
 def certificate_files(profile):
     suffix = uuid.UUID(profile).hex[:8]
     return CONFIG_DIR / f"cert-{suffix}.pem", CONFIG_DIR / f"key-{suffix}.pem"
@@ -327,7 +408,7 @@ def different_certificate(work, profile, protocol, port):
             checked([*SUDO, "systemctl", "restart", UNIT], "restore-certificate")
 
 
-def managed_export(ping_rust, work, slug, protocol, port):
+def generate_node(ping_rust, work, slug, protocol, port):
     name = f"tls-e2e-{slug}-{secrets.token_hex(5)}"
     options = ["--anytls-mode", "tls"] if slug == "anytls" else []
     require_free_ports({port})
@@ -338,24 +419,30 @@ def managed_export(ping_rust, work, slug, protocol, port):
     try:
         profile, = re.findall(r"^配置 ID：([0-9a-f-]{36})$", generated, re.M)
         profile = str(uuid.UUID(profile))
-        exported = json.loads(checked([*SUDO, ping_rust, "export", "sing-box", "--profile", profile,
+    except ValueError:
+        raise Failure("export") from None
+    return ManagedNode(slug, protocol, name, port, profile, pid)
+
+
+def sing_box_export(ping_rust, work, node):
+    try:
+        exported = json.loads(checked([*SUDO, ping_rust, "export", "sing-box", "--profile", node.profile,
                                       "--server", LOOPBACK], "export", log=work / "export"))
         wrapped = wrap_export(exported, SOCKS_PORT)
         outbound, = wrapped["outbounds"]
         tls = outbound["tls"]
-        cert, _ = certificate_files(profile)
-        if (outbound["type"] != protocol.outbound_type or outbound["tag"] != name
-                or outbound["server"] != LOOPBACK or outbound["server_port"] != port
+        if (outbound["type"] != node.protocol.outbound_type or outbound["tag"] != node.name
+                or outbound["server"] != LOOPBACK or outbound["server_port"] != node.port
                 or "detour" in outbound or set(tls) - {"enabled", "server_name", PIN_FIELD, "alpn"}
                 or tls["enabled"] is not True or tls["server_name"] != SERVER_NAME
-                or tls[PIN_FIELD] != [public_key_pin(cert, "export")]
-                or not all(isinstance(outbound[field], str) and outbound[field] for field in protocol.auth_fields)
-                or (slug == "vless-tls" and outbound.get("flow") != "xtls-rprx-vision")
-                or (slug.endswith("-ws-tls") and outbound["transport"]["type"] != "ws")):
+                or tls[PIN_FIELD] != [public_key_pin(node.certificate, "export")]
+                or not all(isinstance(outbound[field], str) and outbound[field] for field in node.protocol.auth_fields)
+                or (node.slug == "vless-tls" and outbound.get("flow") != "xtls-rprx-vision")
+                or (node.slug.endswith("-ws-tls") and outbound["transport"]["type"] != "ws")):
             raise Failure("export")
     except (KeyError, ValueError, TypeError):
         raise Failure("export") from None
-    return wrapped, pid, profile
+    return wrapped
 
 
 class Origin(ThreadingHTTPServer):
@@ -404,10 +491,10 @@ def http_origin(work):
 
 
 @contextmanager
-def running_client(binary, config, log, env):
+def running_client(args, log, env):
     with log.open("w", encoding="utf-8") as stream:
         try:
-            process = subprocess.Popen([binary, "run", "-c", config], stdin=subprocess.DEVNULL,
+            process = subprocess.Popen(args, stdin=subprocess.DEVNULL,
                                        stdout=stream, stderr=subprocess.STDOUT, env=env)
         except OSError:
             raise Failure("client-ready") from None
@@ -422,47 +509,77 @@ def running_client(binary, config, log, env):
                 process.wait()
 
 
-def probe(case, config, work, label, sing_box, server, pid):
-    path, log = work / f"{label}.json", work / f"{label}.log"
-    path.write_text(json.dumps(config), encoding="utf-8")
-    env = {key: value for key, value in os.environ.items() if key not in {"SSL_CERT_FILE", "SSL_CERT_DIR"}}
-    env.update(NO_COLOR="1", TERM="dumb")
-    check = command([sing_box, "check", "-c", path], "check", log=work / f"{label}-check", env=env)
-    if check.returncode:
-        return verdict(case, Observation(check_ok=False))
-    require_free_ports({SOCKS_PORT}, ignore_time_wait=True)
-    server.marker_path, server.marker = f"/{secrets.token_hex(16)}", secrets.token_hex(32)
-    before = len(server.hits)
-    with running_client(sing_box, path, log, env) as client:
-        wait_port("tcp", SOCKS_PORT, client.pid, "client-ready", alive=lambda: client.poll() is None)
-        if service_pid() != pid:
-            raise Failure("service-health")
-        result = command(["curl", "-q", "--fail", "--silent", "--show-error", "--noproxy", "",
-                          "--proxy", f"socks5h://{LOOPBACK}:{SOCKS_PORT}", "--max-time", "8",
-                          f"http://{LOOPBACK}:{ORIGIN_PORT}{server.marker_path}"],
-                         "request", log=work / f"{label}-curl", timeout=12)
-        alive = client.poll() is None
-        if service_pid() != pid:
-            raise Failure("service-health")
-        trace = re.sub(r"\x1b\[[0-9;]*m", "", log.read_text(encoding="utf-8", errors="replace"))
-    outbound, = config["outbounds"]
-    dispatch = f"outbound/{outbound['type']}[{outbound['tag']}]: outbound connection to {LOOPBACK}:{ORIGIN_PORT}"
-    _, dispatched, after_dispatch = trace.partition(dispatch)
+def request_via_socks(work, label, server, pid, client):
+    result = command(["curl", "-q", "--fail", "--silent", "--show-error", "--noproxy", "",
+                      "--proxy", f"socks5h://{LOOPBACK}:{SOCKS_PORT}", "--max-time", "8",
+                      f"http://{LOOPBACK}:{ORIGIN_PORT}{server.marker_path}"],
+                     "request", log=work / f"{label}-curl", timeout=12)
+    alive = client.poll() is None
+    require_service_pid(pid)
+    return result, alive
+
+
+def observe_origin(case, server, before, result, alive):
     hits = server.hits[before:]
     marker_received = (server.marker == result.stdout and hits == [server.marker_path]
                        if case == POSITIVE else server.marker in result.stdout)
-    return verdict(case, Observation(
-        curl_code=result.returncode, client_alive=alive, outbound_attempt=bool(dispatched),
-        marker_received=marker_received, origin_hits=len(hits),
-        rejection=rejection_signal(after_dispatch, result.stderr),
-    ))
+    return Observation(curl_code=result.returncode, client_alive=alive,
+                       marker_received=marker_received, origin_hits=len(hits))
 
 
-def run_protocol(slug, protocol, port, ping_rust, work, sing_box, server, results):
+@dataclass(frozen=True)
+class SingBox:
+    binary: Path
+
+    @classmethod
+    def prepare(cls, work):
+        package = f"sing-box-{SING_BOX_VERSION[1:]}-linux-amd64"
+        return cls(download(work, "sing-box", f"SagerNet/sing-box/releases/download/{SING_BOX_VERSION}/{package}.tar.gz",
+                            f"{package}/sing-box", "a684484d7477d1437282ee411f4d131d0340aaad60a7868841ebd5d87dd8a0c6"))
+
+    export = staticmethod(sing_box_export)
+    variant = staticmethod(negative_copy)
+
+    def observe(self, case, config, work, label, server, pid):
+        path, log = work / f"{label}.json", work / f"{label}.log"
+        path.write_text(json.dumps(config), encoding="utf-8")
+        env = {key: value for key, value in os.environ.items() if key not in {"SSL_CERT_FILE", "SSL_CERT_DIR"}}
+        env.update(NO_COLOR="1", TERM="dumb")
+        check = command([self.binary, "check", "-c", path], "check", log=work / f"{label}-check", env=env)
+        if check.returncode:
+            return Observation(check_ok=False)
+        require_free_ports({SOCKS_PORT}, ignore_time_wait=True)
+        server.marker_path, server.marker = f"/{secrets.token_hex(16)}", secrets.token_hex(32)
+        before = len(server.hits)
+        outbound, = config["outbounds"]
+        outbound_type = outbound["type"]
+        with running_client([self.binary, "run", "-c", path], log, env) as client:
+            wait_port("tcp", SOCKS_PORT, client.pid, "client-ready", alive=lambda: client.poll() is None)
+            since = None
+            if case == AUTH and (outbound_type in TCP_AUTH_ERRORS or outbound_type == "tuic"):
+                sync_journal()
+                since = time.time()
+            require_service_pid(pid)
+            result, alive = request_via_socks(work, label, server, pid, client)
+            trace = re.sub(r"\x1b\[[0-9;]*m", "", log.read_text(encoding="utf-8", errors="replace"))
+        dispatch = f"outbound/{outbound_type}[{outbound['tag']}]: outbound connection to {LOOPBACK}:{ORIGIN_PORT}"
+        _, dispatched, after_dispatch = trace.partition(dispatch)
+        observed = observe_origin(case, server, before, result, alive)
+        rejection = sing_box_rejection(outbound_type, after_dispatch, result.stderr)
+        if (since is not None and dispatched and rejection is None and alive
+                and not observed.marker_received and not observed.origin_hits
+                and result.returncode in REJECTED_CURL_CODES and not PRE_AUTH_ERROR.search(after_dispatch)):
+            rejection = sing_box_rejection(outbound_type, after_dispatch, result.stderr, auth_journal(pid, since))
+            observed = observe_origin(case, server, before, result, alive)
+        return replace(observed, outbound_attempt=bool(dispatched), rejection=rejection)
+
+
+def run_protocol(slug, protocol, port, ping_rust, work, backend: ClientBackend, server, results):
     started = time.monotonic()
     work.mkdir(mode=0o700)
     try:
-        config, pid, profile = managed_export(ping_rust, work, slug, protocol, port)
+        node = generate_node(ping_rust, work, slug, protocol, port)
+        config = backend.export(ping_rust, work, node)
     except Failure as error:
         if str(error) == "port-conflict":
             raise
@@ -476,8 +593,8 @@ def run_protocol(slug, protocol, port, ping_rust, work, sing_box, server, result
         status, phase = verdict(case, Observation(positive_ok=False))
         if case == DIFFERENT_KEY and positive_ok:
             try:
-                with different_certificate(work, profile, protocol, port) as alternate_pid:
-                    status, phase = probe(case, config, work, case, sing_box, server, alternate_pid)
+                with different_certificate(work, node.profile, protocol, port) as alternate_pid:
+                    status, phase = verdict(case, backend.observe(case, config, work, case, server, alternate_pid))
             except Failure as error:
                 if str(error) == "port-conflict":
                     raise
@@ -486,9 +603,10 @@ def run_protocol(slug, protocol, port, ping_rust, work, sing_box, server, result
             fields = {POSITIVE: (None,), AUTH: protocol.auth_fields, CERTIFICATE: ("certificate",)}[case]
             status, phase = 0, "acceptance"
             for field in fields:
-                variant = negative_copy(config, field) if field else config
+                variant = backend.variant(config, field) if field else config
                 try:
-                    code, stage = probe(case, variant, work, f"{case}-{field}" if field else case, sing_box, server, pid)
+                    label = f"{case}-{field}" if field else case
+                    code, stage = verdict(case, backend.observe(case, variant, work, label, server, node.pid))
                 except Failure as error:
                     if str(error) == "port-conflict":
                         raise
@@ -500,13 +618,11 @@ def run_protocol(slug, protocol, port, ping_rust, work, sing_box, server, result
             positive_ok = status == 0
 
 
-def accept(ping_rust, work, results):
+def accept(ping_rust, work, results, prepare_backend=SingBox.prepare):
     preflight(ping_rust)
     shoes = download(work, "shoes", f"cfal/shoes/releases/download/{SHOES_VERSION}/shoes-x86_64-unknown-linux-musl.tar.gz",
                      "shoes", "c594d7b30b474b6b3ab4cd30cc0996ba39aac2e66ffaadd725894037866a2705")
-    package = f"sing-box-{SING_BOX_VERSION[1:]}-linux-amd64"
-    sing_box = download(work, "sing-box", f"SagerNet/sing-box/releases/download/{SING_BOX_VERSION}/{package}.tar.gz",
-                        f"{package}/sing-box", "a684484d7477d1437282ee411f4d131d0340aaad60a7868841ebd5d87dd8a0c6")
+    backend = prepare_backend(work)
     preflight(ping_rust)
     with http_origin(work) as server:
         if not CONFIG_DIR.exists():
@@ -514,7 +630,7 @@ def accept(ping_rust, work, results):
         checked([*SUDO, "install", "-m", "0755", shoes, SHOES_BIN], "install")
         try:
             for index, (slug, protocol) in enumerate(PROTOCOLS.items(), FIRST_NODE_PORT):
-                run_protocol(slug, protocol, index, ping_rust, work / slug, sing_box, server, results)
+                run_protocol(slug, protocol, index, ping_rust, work / slug, backend, server, results)
         finally:
             started = time.monotonic()
             try:
