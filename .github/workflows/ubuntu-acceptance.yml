@@ -788,7 +788,7 @@ jobs:
           scheme = os.environ['SHARE_SCHEME']
           if os.environ.get('EXPECT_REFUSAL') == '1':
               # #187 阶段 3a：自签 TLS 节点在菜单查看页只显示拒绝原因，无链接、无二维码。
-              assert '未生成标准分享链接：无法固定自签证书，继续导出会使客户端不校验服务器身份；请使用 prs export sing-box … 或改用受信证书' in details
+              assert '未生成标准分享链接：无法固定自签证书，继续导出会使客户端不校验服务器身份；请使用 prs export clash-meta … 或 prs export sing-box …，或改用受信证书' in details
               assert scheme + '://' not in details
               assert '二维码 (QR)' not in details and not any(block in details for block in '▀▄█')
           elif scheme == 'snell':
@@ -1497,9 +1497,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # #187 阶段 3a（方案 C）：受管自签 TLS 节点默认拒绝 Clash Meta / NekoBox 导出，
-          # 需精确拒绝文案、非零退出且不生成输出文件；显式 --allow-insecure 才恢复旧输出。
-          refusal='无法固定自签证书，继续导出会使客户端不校验服务器身份；请使用 prs export sing-box … 或改用受信证书。若明确接受风险，可加 --allow-insecure'
+          # #187 阶段 3a/3b（方案 C）：受管自签 TLS 节点默认拒绝 NekoBox 导出（精确拒绝文案、非零退出、
+          # 不生成输出文件）；Clash Meta 默认固定叶证书 DER SHA-256，不跳过校验。
+          refusal='无法固定自签证书，继续导出会使客户端不校验服务器身份；请使用 prs export clash-meta … 或 prs export sing-box …，或改用受信证书。若明确接受风险，可加 --allow-insecure'
           expect_refusal() {
             local output="$1" log="$2"
             shift 2
@@ -1538,14 +1538,27 @@ jobs:
               fi
               grep -Fq "当前 Mihomo H2MUX 存在已知兼容问题" "$RUNNER_TEMP/$name-clash.log"
             elif [ "$self_signed" = 1 ]; then
-              expect_refusal "$RUNNER_TEMP/$name-clash.yaml" "$RUNNER_TEMP/$name-clash.log" \
-                export clash-meta --profile "$profile" --server 127.0.0.1
-              sudo "$PING_RUST" export clash-meta --allow-insecure \
+              # #187 阶段 3b：不加 --allow-insecure 即成功，fingerprint 与 OpenSSL 独立计算的叶证书 DER SHA-256 精确相等。
+              sudo "$PING_RUST" export clash-meta \
                 --profile "$profile" \
                 --server 127.0.0.1 \
-                --output "$RUNNER_TEMP/$name-clash.yaml" \
-                2>"$RUNNER_TEMP/$name-clash-insecure.log"
-              test -s "$RUNNER_TEMP/$name-clash-insecure.log"
+                --output "$RUNNER_TEMP/$name-clash.yaml"
+              sudo env PROFILE_ID="$profile" CLASH="$RUNNER_TEMP/$name-clash.yaml" python3 - <<'PYPIN'
+          import json, os, re, subprocess
+          from pathlib import Path
+          profiles = json.loads(Path('/etc/shoes/ping-rust-state.json').read_text())['profiles']
+          profile = next(item for item in profiles if item['id'] == os.environ['PROFILE_ID'])
+          assert profile['self_signed_certificate'] is True
+          der = subprocess.run(['openssl', 'x509', '-in', profile['certificate_path'], '-outform', 'DER'],
+                               check=True, capture_output=True, timeout=30).stdout
+          expected = subprocess.run(['openssl', 'dgst', '-sha256', '-r'], input=der,
+                                    check=True, capture_output=True, timeout=30).stdout.split()[0].decode()
+          clash = Path(os.environ['CLASH']).read_text()
+          pins = re.findall(r'^\s*fingerprint:\s*["\']?([0-9A-Fa-f:]+)["\']?\s*$', clash, re.M)
+          assert pins == [expected], (pins, expected)
+          assert re.search(r'^\s*skip-cert-verify:\s*false\s*$', clash, re.M)
+          assert not re.search(r'^\s*skip-cert-verify:\s*true\s*$', clash, re.M)
+          PYPIN
             else
               sudo "$PING_RUST" export clash-meta \
                 --profile "$profile" \
@@ -1608,7 +1621,7 @@ jobs:
             echo "- Reality deployment: ${{ steps.reality.outputs.elapsed }} seconds"
             echo '- systemd: enabled, active, restart verified'
             echo '- Protocol listeners: all ten menu presets'
-            echo '- Client exports: all ten to sing-box; Clash Meta / Nekobox succeed for trusted/Reality presets, self-signed TLS presets refused by default (Clash Meta allowed with --allow-insecure); H2MUX Mihomo rejection verified'
+            echo '- Client exports: all ten to sing-box; Clash Meta pins self-signed TLS leaf certificates (fingerprint verified with OpenSSL); Nekobox refuses self-signed TLS by default; H2MUX Mihomo rejection verified'
             echo '- Operations: logs, backup, restore, update, restart, info'
           } >> "$GITHUB_STEP_SUMMARY"
 
