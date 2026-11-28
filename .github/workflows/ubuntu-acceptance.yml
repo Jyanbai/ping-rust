@@ -1273,7 +1273,10 @@ jobs:
               assert tls['enabled'] is True
               assert tls['server_name'] == credentials['server_name']
               if mode == '1':
-                  assert tls['insecure'] is True
+                  # #155：自签 TLS 改为固定证书公钥，不再跳过证书校验。
+                  assert 'insecure' not in tls
+                  pins = tls['certificate_public_key_sha256']
+                  assert isinstance(pins, list) and len(pins) == 1 and pins[0]
                   assert 'reality' not in tls
               else:
                   reality = credentials['security']['Reality']

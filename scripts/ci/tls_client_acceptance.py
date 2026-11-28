@@ -259,15 +259,16 @@ def require_free_ports(ports, *, ignore_time_wait=False):
 def wait_port(network, port, pid, phase, *, privileged=False, alive=lambda: True):
     expected = network, "LISTEN" if network == "tcp" else "UNCONN", port
     deadline = time.monotonic() + 6
+    foreign = False
     while time.monotonic() < deadline and alive():
         listeners = [set(owners) for found_network, state, found_port, owners in sockets(phase, privileged)
                      if (found_network, state, found_port) == expected]
-        if listeners:
-            if any(owners != {str(pid)} for owners in listeners):
-                raise Failure("port-conflict")
+        # 服务重启时旧进程可能短暂仍持有同一监听；超时后仍有其他进程才算冲突。
+        foreign = any(owners != {str(pid)} for owners in listeners)
+        if listeners and not foreign:
             return
         time.sleep(0.1)
-    raise Failure(phase)
+    raise Failure("port-conflict" if foreign else phase)
 
 
 def service_pid():

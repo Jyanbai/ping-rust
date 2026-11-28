@@ -190,6 +190,15 @@ class TlsClientAcceptanceTests(unittest.TestCase):
             with self.assertRaisesRegex(acceptance.Failure, "port-conflict"):
                 acceptance.require_free_ports({12345})
 
+    def test_restart_overlap_with_old_listener_is_not_a_conflict(self):
+        both = ("udp UNCONN 0 0 0.0.0.0:12345 0.0.0.0:* users:((\"shoes\",pid=100,fd=10))\n"
+                "udp UNCONN 0 0 0.0.0.0:12345 0.0.0.0:* users:((\"shoes\",pid=101,fd=10))\n")
+        new_only = "udp UNCONN 0 0 0.0.0.0:12345 0.0.0.0:* users:((\"shoes\",pid=101,fd=10))\n"
+        with patch.object(acceptance, "checked", side_effect=[both, both, new_only]) as listing, \
+                patch.object(acceptance.time, "sleep"):
+            acceptance.wait_port("udp", 12345, "101", "server-ready", privileged=True)
+        self.assertEqual(listing.call_count, 3)
+
     def test_download_verifies_digest_before_extracting_binary(self):
         with tempfile.TemporaryDirectory() as root:
             work = Path(root)
