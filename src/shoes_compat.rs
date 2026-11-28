@@ -109,11 +109,9 @@ mod tests {
 
     #[cfg(unix)]
     async fn probe_script(script: &str) -> Result<bool> {
-        use std::os::unix::fs::PermissionsExt;
         let directory = tempfile::tempdir().unwrap();
         let binary = directory.path().join("shoes");
-        std::fs::write(&binary, format!("#!/bin/sh\n{script}\n")).unwrap();
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_executable::write_test_script(&binary, format!("{script}\n")).unwrap();
         supports_sudoku(&binary).await
     }
 
@@ -131,6 +129,56 @@ mod tests {
         assert!(probe_script("echo 'permission denied' >&2; exit 1")
             .await
             .is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn fake_executable_retries_after_text_file_busy() {
+        use std::{fs, io::ErrorKind, os::unix::fs::OpenOptionsExt, process::Command};
+
+        let directory = tempfile::tempdir().unwrap();
+        let binary = directory.path().join("shoes");
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o700)
+            .open(&binary)
+            .unwrap();
+        file.write_all(b"#!/bin/sh\nexit 0\n").unwrap();
+        file.sync_all().unwrap();
+        let mut writer = Some(file);
+
+        let status = crate::test_executable::retry_text_file_busy(|| {
+            let result = Command::new(&binary).status();
+            if let Some(file) = writer.take() {
+                assert_eq!(
+                    result.as_ref().unwrap_err().kind(),
+                    ErrorKind::ExecutableFileBusy
+                );
+                drop(file);
+            }
+            result
+        });
+        assert!(status.unwrap().success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fake_executable_retries_only_text_file_busy_and_at_most_twenty_times() {
+        use std::io::{Error, ErrorKind};
+
+        for (kind, expected_attempts) in [
+            (ErrorKind::ExecutableFileBusy, 20),
+            (ErrorKind::PermissionDenied, 1),
+        ] {
+            let mut attempts = 0;
+            let result = crate::test_executable::retry_text_file_busy(|| {
+                attempts += 1;
+                Err::<(), _>(Error::from(kind))
+            });
+            assert_eq!(result.unwrap_err().kind(), kind);
+            assert_eq!(attempts, expected_attempts);
+        }
     }
 
     #[tokio::test]

@@ -27,6 +27,9 @@ mod yaml;
 mod shoes_e2e;
 #[cfg(test)]
 mod shoes_e2e_tests;
+#[cfg(all(test, unix))]
+#[path = "../tests/support/test_executable.rs"]
+mod test_executable;
 
 use anyhow::Result;
 use clap::Parser;

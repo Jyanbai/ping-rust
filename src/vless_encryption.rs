@@ -230,19 +230,20 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn vless_encryption_generator_passes_explicit_defaults_and_hides_failed_output() {
-        use std::{fs, os::unix::fs::PermissionsExt};
+        use crate::test_executable::write_test_script;
+
         let dir = tempfile::tempdir().unwrap();
         let binary = dir.path().join("shoes");
         let script = format!(
-            "#!/bin/sh\n[ \"$*\" = 'generate-vless-encryption --auth x25519 --mode native --rtt 0rtt --lifetime 600s' ] || exit 2\ncat <<'OUTPUT'\n{}OUTPUT\n",
+            "[ \"$*\" = 'generate-vless-encryption --auth x25519 --mode native --rtt 0rtt --lifetime 600s' ] || exit 2\ncat <<'OUTPUT'\n{}OUTPUT\n",
             output("native", "x25519"),
         );
-        fs::write(&binary, script).unwrap();
-        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        write_test_script(&binary, script).unwrap();
         assert!(generate_with_binary(&binary, "native", "x25519").is_ok());
-        fs::write(
+        let binary = dir.path().join("broken-shoes");
+        write_test_script(
             &binary,
-            "#!/bin/sh\necho secret-sentinel\necho secret-sentinel >&2\nexit 1\n",
+            "echo secret-sentinel\necho secret-sentinel >&2\nexit 1\n",
         )
         .unwrap();
         let error = generate_with_binary(&binary, "native", "x25519")
