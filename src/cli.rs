@@ -144,7 +144,7 @@ pub enum Command {
         server: String,
         #[arg(long)]
         output: Option<PathBuf>,
-        /// 允许导出不校验自签 TLS 服务器身份的客户端配置
+        /// 允许 NekoBox 导出跳过自签 TLS 服务器身份校验（不影响 Clash Meta 或 sing-box）
         #[arg(long)]
         allow_insecure: bool,
     },
@@ -2357,7 +2357,7 @@ mod tests {
                 panic!("expected add command");
             };
             assert_eq!(run_add(*args).await.unwrap_err().to_string(),
-                "无法固定自签证书，继续导出会使客户端不校验服务器身份；请使用 prs export sing-box … 或改用受信证书。若明确接受风险，可加 --allow-insecure", "{protocol}");
+                "无法固定自签证书，继续导出会使客户端不校验服务器身份；请使用 prs export clash-meta … 或 prs export sing-box …，或改用受信证书。若明确接受风险，可加 --allow-insecure", "{protocol}");
         }
     }
 

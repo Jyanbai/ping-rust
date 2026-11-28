@@ -562,21 +562,21 @@ sudo ping-rust export nekobox --profile <配置-UUID> --server 203.0.113.10
 
 只有一个配置时可以省略 `--profile`。SOCKS5 可导出 percent-encoded `socks5://` URI、终端 QR、sing-box `type: socks` 和 Clash Meta/Mihomo `type: socks5`；IPv6 地址会使用方括号。NekoBox 没有在本项目核实到稳定、明确的专用 SOCKS5 导入 schema，因此 `export nekobox` 会明确拒绝，不把普通 URI 冒充已验证的 NekoBox 格式。
 
-sing-box 导出为自签 TLS 节点写入 `tls.certificate_public_key_sha256`：它是节点叶证书公钥（DER SubjectPublicKeyInfo）的 SHA-256，按标准 Base64 编码。请使用支持该字段的客户端；更换证书密钥后要重新导出。公有证书缺失、不可读或无法解析时，导出会报错，不会回退到 `insecure`。NaiveProxy 仍嵌入公有 PEM；`--cert`/`--key` 提供的证书仍走正常证书验证。
+Clash Meta 和 sing-box 默认为下表中的自签 TLS 节点固定证书。Clash Meta（Mihomo v1.19.33 已验证）写入 `fingerprint`（证书链中首张叶证书完整 DER 的 SHA-256，64 位小写十六进制）和 `skip-cert-verify: false`；即使用原密钥重签，换证后也要重新导出并导入。sing-box 写入 `tls.certificate_public_key_sha256`（叶证书公钥 DER SubjectPublicKeyInfo 的 SHA-256，标准 Base64）；更换证书密钥后要重新导出并导入。请使用支持对应字段的客户端。公有证书缺失、不可读或无法解析时，这两个导出都会报错，不会跳过证书校验。NaiveProxy 的 sing-box 导出仍嵌入公有 PEM；`--cert`/`--key` 提供的证书仍走正常证书验证。
 
 以下规则只适用于 ping-rust 管理的自签普通 TLS 节点：
 
 | 协议 | sing-box JSON | Clash Meta | 分享链接 / 二维码 | NekoBox |
 | --- | --- | --- | --- | --- |
-| Trojan-TLS | SPKI 固定 | 默认拒绝 | 默认拒绝 | 默认拒绝 |
-| VLESS-TLS-Vision | SPKI 固定 | 默认拒绝 | 默认拒绝 | 默认拒绝 |
-| VLESS-WS-TLS | SPKI 固定 | 默认拒绝 | 默认拒绝 | 默认拒绝 |
-| VMess-WS-TLS | SPKI 固定 | 默认拒绝 | 默认拒绝 | 默认拒绝 |
-| Hysteria2 | SPKI 固定 | 默认拒绝 | 默认拒绝 | 默认拒绝 |
-| TUIC | SPKI 固定 | 默认拒绝 | 默认拒绝 | 默认拒绝 |
-| AnyTLS-TLS | SPKI 固定 | 默认拒绝 | 默认拒绝 | 默认拒绝 |
+| Trojan-TLS | SPKI 固定 | 叶证书 DER 固定 | 默认拒绝 | 默认拒绝 |
+| VLESS-TLS-Vision | SPKI 固定 | 叶证书 DER 固定 | 默认拒绝 | 默认拒绝 |
+| VLESS-WS-TLS | SPKI 固定 | 叶证书 DER 固定 | 默认拒绝 | 默认拒绝 |
+| VMess-WS-TLS | SPKI 固定 | 叶证书 DER 固定（H2MUX 仍拒绝） | 默认拒绝 | 默认拒绝 |
+| Hysteria2 | SPKI 固定 | 叶证书 DER 固定 | 默认拒绝 | 默认拒绝 |
+| TUIC | SPKI 固定 | 叶证书 DER 固定 | 默认拒绝 | 默认拒绝 |
+| AnyTLS-TLS | SPKI 固定 | 叶证书 DER 固定 | 默认拒绝 | 默认拒绝 |
 
-尚未验证这些格式能固定自签证书，请使用 `prs export sing-box …` 或改用受信证书。仅在明确接受客户端不校验服务器身份的风险时，才给 `export`、`url`、`qr` 或 `add` 加 `--allow-insecure`：它恢复旧输出，并向 stderr 打印风险警告，不解除格式本身的限制。菜单和 `info` 不生成这类链接。普通 `add` 仍可部署节点，但会提示未生成链接；`add --plain` 默认在部署前拒绝，显式放行时 stdout 仍只输出一行 URI。
+尚未验证分享链接、二维码或 NekoBox 导入能固定自签证书，请使用 `prs export clash-meta …` 或 `prs export sing-box …`，或改用受信证书。仅在明确接受客户端不校验服务器身份的风险时，才给 `export nekobox`、`url`、`qr` 或 `add` 加 `--allow-insecure`：它恢复旧输出，并向 stderr 打印风险警告，不解除格式本身的限制。该参数不影响 Clash Meta 和 sing-box 导出。菜单查看页和 `info` 不生成这类链接。普通 `add` 仍可部署节点，但会提示未生成链接；`add --plain` 默认在部署前拒绝，显式放行时 stdout 仍只输出一行 URI。
 
 VMess-WS-TLS 导出明确使用 `aes-128-gcm`，不再依赖客户端的 `auto` 模式。已有受管节点不需要重建、修改服务端配置或重启 shoes；升级后重新导出并导入客户端，或重新生成分享链接、二维码。
 

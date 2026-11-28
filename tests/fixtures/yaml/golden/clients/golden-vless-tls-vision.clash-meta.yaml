@@ -3,13 +3,14 @@ proxies:
   - h2
   - http/1.1
   client-fingerprint: chrome
+  fingerprint: 87dd23dd1434af333a9f0783742f9c6f0adfd61c173b9407d12b816b116f2aa1
   flow: xtls-rprx-vision
   name: golden-vless-tls-vision
   network: tcp
   port: 20005
   server: 203.0.113.10
   servername: www.cloudflare.com
-  skip-cert-verify: true
+  skip-cert-verify: false
   tls: true
   type: vless
   udp: true

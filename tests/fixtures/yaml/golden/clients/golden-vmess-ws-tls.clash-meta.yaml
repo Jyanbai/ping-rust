@@ -4,12 +4,13 @@ proxies:
   alterId: 0
   cipher: aes-128-gcm
   client-fingerprint: chrome
+  fingerprint: 87dd23dd1434af333a9f0783742f9c6f0adfd61c173b9407d12b816b116f2aa1
   name: golden-vmess-ws-tls
   network: ws
   port: 20009
   server: 203.0.113.10
   servername: www.cloudflare.com
-  skip-cert-verify: true
+  skip-cert-verify: false
   tls: true
   type: vmess
   udp: true
