@@ -27,7 +27,7 @@ from typing import Protocol as TypingProtocol
 LOOPBACK = "127.0.0.1"
 SERVER_NAME = "node.example.com"
 ORIGIN_PORT, SOCKS_PORT, FIRST_NODE_PORT = 24860, 24861, 24862
-SHOES_VERSION, SING_BOX_VERSION = "v0.3.7", "v1.14.2"
+SHOES_VERSION, SING_BOX_VERSION = "v0.3.8", "v1.14.2"
 SHOES_BIN = Path("/usr/local/bin/shoes")
 CONFIG_DIR = Path("/etc/shoes")
 UNIT = "shoes.service"
@@ -635,7 +635,7 @@ def run_protocol(slug, protocol, port, ping_rust, work, backend: ClientBackend, 
 def accept(ping_rust, work, results, prepare_backend=SingBox.prepare, run_node=run_protocol):
     preflight(ping_rust)
     shoes = download(work, "shoes", f"cfal/shoes/releases/download/{SHOES_VERSION}/shoes-x86_64-unknown-linux-musl.tar.gz",
-                     "shoes", "c594d7b30b474b6b3ab4cd30cc0996ba39aac2e66ffaadd725894037866a2705")
+                     "shoes", "83a31e39a622b0a28d74b8c73488bb8aa42b1758251b355685f65c80f484e5a6")
     backend = prepare_backend(work)
     preflight(ping_rust)
     with http_origin(work) as server:

@@ -52,7 +52,7 @@ bash <(curl --proto '=https' --tlsv1.2 -fsSL \
 
 ## 功能
 
-- 默认安装经过验收的固定 shoes Release（当前 `v0.3.7`，见 `src/installer.rs` 的 `SHOES_RELEASE_TAG`），不跟随上游 latest；上游有更新 Release 时 Update Center 仅提示“未经验证”，不会自动安装
+- 默认安装固定的 shoes Release（当前源码为 `v0.3.8`，见 `src/installer.rs` 的 `SHOES_RELEASE_TAG`），不跟随上游 latest；上游有更新 Release 时 Update Center 仅提示“未经验证”，不会自动安装
 - 从 GitHub Release 下载 shoes，自动匹配 x86_64/aarch64 与 GNU/musl，强制校验官方 SHA-256 digest；GNU 资产不兼容时安全回退 static musl
 - 使用 cargo 从与 schema CI 相同的 cfal/shoes 固定源码提交编译安装；低于 1 GiB 内存时自动单任务并关闭 LTO，避免换页风暴
 - 生成经过固定 shoes schema 验证的协议预设；每项均是可直接部署的完整协议栈
@@ -294,7 +294,7 @@ shoes: • running
 
 ### Hot Reload
 
-热重载要求 shoes 来源为 `verified-pin`，revision 等于 `ee44a397e6850193e86a1ae66639f037f963822d`（v0.3.7），服务已运行、unit 内容与加载路径未被修改、没有 drop-in。shoes v0.3.7 监听配置父目录，源码中的去抖窗口为 5 秒（`src/process.rs` 的 `RELOAD_DEBOUNCE`，与 v0.3.6 相同）；默认一键安装使用 GitHub Release 来源，因此不启用 Verified Hot Reload。
+热重载要求 shoes 来源为 `verified-pin`，revision 等于 `7680938b96a245a21d9e481ad009205b956e4436`（v0.3.8），服务已运行、unit 内容与加载路径未被修改、没有 drop-in。默认一键安装使用 GitHub Release 来源，因此不启用 Verified Hot Reload。watcher 的行为以[固定 pin 的热重载验收](docs/SHOES_PIN_UPGRADE.md)为准。
 
 在 `prs → 6) 更新 → shoes 内核` 中选择已验证固定 pin，或执行：
 
@@ -632,7 +632,7 @@ TLS_ACCEPTANCE_RESULTS_DIR="$RUNNER_TEMP/tls-results" \
 
 两个目录须为绝对路径、互不包含且尚未创建。只上传结果目录的 `results.jsonl`，不要上传私有目录或 systemd 日志。全部 28 行用例通过才退出 `0`；准备失败、用例缺失、纯超时或拒绝证据不足均退出 `1`，可按 `phase` 排查。正例要求原样导出可通，且用 OpenSSL 独立核对公钥指纹。错误凭据用例中，TUIC 的密码和 UUID 两种独立变体都必须被拒；未知证书用例移除固定字段且不提供信任材料；异钥用例保留原始导出、SNI 和凭据，仅替换服务端自签证书及密钥，要求因公钥不匹配被拒。任一负例收到 marker 或命中 HTTP 源站都是失败。
 
-验收固定 shoes v0.3.7（x86_64 Linux musl）和 sing-box v1.14.2（Linux amd64），下载有限时和重试，提取前校验 SHA-256。更新版本时同步更新脚本中的摘要、拒绝预期和本节说明。
+验收固定 shoes v0.3.8（x86_64 Linux musl）和 sing-box v1.14.2（Linux amd64），下载有限时和重试，提取前校验 SHA-256。更新版本时同步更新脚本中的摘要、拒绝预期和本节说明。
 
 ## 仓库结构
 
@@ -752,7 +752,11 @@ ping-rust/
 
 
 
-### shoes v0.3.7 升级说明
+### shoes v0.3.8 pin
+
+当前源码默认使用 shoes v0.3.8 的 GitHub Release，源码安装固定到 commit `7680938b96a245a21d9e481ad009205b956e4436`。`shoes --version` 仍为版本、`target:`、`compiler:` 三行，ping-rust 只读取首行。取证范围和兼容验收要求见 [shoes pin 升级检查清单](docs/SHOES_PIN_UPGRADE.md)。
+
+### shoes v0.3.7 升级记录
 
 v0.3.1 起，默认 shoes Release 和源码 pin 升级到 v0.3.7（commit `ee44a397e6850193e86a1ae66639f037f963822d`）。v0.3.7 带来 Xray 兼容的 Sudoku TCP 掩码 `sudoku_mask`（上游 #246、#252，只支持 TCP），可通过 VLESS-ENC 的 `--sudoku` 选项启用；`shoes --version` 在版本行之后追加 `target:` / `compiler:` 两行，ping-rust 只读取第一行；watcher 去抖窗口和 REALITY 目标握手记录布局要求与 v0.3.6 相同。
 

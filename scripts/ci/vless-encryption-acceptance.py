@@ -318,7 +318,7 @@ def main():
         except Exception:
             print("Secret audit failed; raw output has been withheld.", flush=True)
             status = 1
-        report = {"xray": "v26.6.27", "mihomo": "v1.19.33", "shoes": "v0.3.7", "cases": RESULTS, "vless_sudoku_cases": VLESS_SUDOKU_RESULTS, "downgrade": DOWNGRADE, "artifact_secret_audit": status == 0}
+        report = {"xray": "v26.6.27", "mihomo": "v1.19.33", "shoes": "v0.3.8", "cases": RESULTS, "vless_sudoku_cases": VLESS_SUDOKU_RESULTS, "downgrade": DOWNGRADE, "artifact_secret_audit": status == 0}
         (RECORDS / "results.json").write_text(json.dumps(report, indent=2) + "\n")
         endpoint.shutdown()
         subprocess.run(["systemctl", "stop", "shoes"], capture_output=True, timeout=30)

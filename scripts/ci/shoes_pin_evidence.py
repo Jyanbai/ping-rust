@@ -15,10 +15,9 @@ import tempfile
 
 REPOSITORY = "https://github.com/cfal/shoes"
 API = "https://api.github.com/repos/cfal/shoes"
-BASELINE = "v0.3.7"
-BASELINE_COMMIT = "ee44a397e6850193e86a1ae66639f037f963822d"
-BASELINE_MUSL_SHA256 = "c594d7b30b474b6b3ab4cd30cc0996ba39aac2e66ffaadd725894037866a2705"
-CANDIDATE = "v0.3.8"
+BASELINE = "v0.3.8"
+BASELINE_COMMIT = "7680938b96a245a21d9e481ad009205b956e4436"
+BASELINE_MUSL_SHA256 = "83a31e39a622b0a28d74b8c73488bb8aa42b1758251b355685f65c80f484e5a6"
 LIMIT = 128 * 1024 * 1024
 SUPPORTED_ASSETS = {
     f"shoes-{arch}-unknown-linux-{libc}.tar.gz": (arch, libc)
@@ -166,14 +165,21 @@ def collect(tag, expected_commit):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--candidate-tag", help="额外核对指定候选 Release（默认只取证基线）")
     parser.add_argument("--expected-candidate-commit", help="从首次取证结果复核候选 tag")
     args = parser.parse_args()
     runner_arch = platform.machine()
     if (os.environ.get("GITHUB_ACTIONS") != "true" or platform.system() != "Linux"
             or runner_arch not in {"x86_64", "aarch64"}):
         parser.error("请在 GitHub Actions 的 x86_64/aarch64 Linux runner 上执行取证")
-    if args.expected_candidate_commit and not re.fullmatch(r"[0-9a-f]{40}", args.expected_candidate_commit):
-        parser.error("候选 commit 必须是完整的 40 位小写 SHA")
+    if args.candidate_tag is not None and (
+            args.candidate_tag == BASELINE or not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", args.candidate_tag)):
+        parser.error("候选 tag 必须是区别于基线的 v主版本.次版本.补丁版本")
+    if args.expected_candidate_commit is not None:
+        if args.candidate_tag is None:
+            parser.error("复核候选 commit 必须指定 --candidate-tag")
+        if not re.fullmatch(r"[0-9a-f]{40}", args.expected_candidate_commit):
+            parser.error("候选 commit 必须是完整的 40 位小写 SHA")
     try:
         checkout = subprocess.run(["git", "rev-parse", "HEAD"], check=True, capture_output=True,
                                   text=True, timeout=10).stdout.strip()
@@ -185,8 +191,10 @@ def main():
             "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
             "job": os.environ["GITHUB_JOB"],
             "runner_arch": runner_arch,
-            "releases": [collect(BASELINE, BASELINE_COMMIT), collect(CANDIDATE, args.expected_candidate_commit)],
+            "releases": [collect(BASELINE, BASELINE_COMMIT)],
         }
+        if args.candidate_tag is not None:
+            report["releases"].append(collect(args.candidate_tag, args.expected_candidate_commit))
     except (ValueError, OSError, subprocess.SubprocessError, tarfile.TarError, KeyError) as error:
         parser.exit(1, f"来源取证失败，停止切换 pin：{error}\n")
     print(json.dumps(report, ensure_ascii=False, indent=2))

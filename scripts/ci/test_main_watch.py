@@ -89,11 +89,11 @@ CURL_ATTEMPT_504 = [
 ]
 
 
-def download_step(status="504", url="https://github.com/cfal/shoes/releases/download/v0.3.7/shoes-x86_64-unknown-linux-musl.tar.gz"):
+def download_step(status="504", url="https://github.com/cfal/shoes/releases/download/v0.3.8/shoes-x86_64-unknown-linux-musl.tar.gz"):
     step = [
         ("run", "set -euo pipefail"),
         ("cmd", "set -euo pipefail"),
-        ("cmd", 'archive="$RUNNER_TEMP/shoes-v0.3.7.tar.gz"'),
+        ("cmd", 'archive="$RUNNER_TEMP/shoes-v0.3.8.tar.gz"'),
         ("cmd", "curl --fail --location --retry 3 --proto '=https' --tlsv1.2 \\"),
         ("cmd", '  --output "$archive" \\'),
         ("cmd", f"  {url}"),
@@ -138,7 +138,7 @@ REQWEST_504 = [
         "out",
         "    - x86_64-unknown-linux-musl: 下载 shoes-x86_64-unknown-linux-musl.tar.gz 时服务器返回错误: "
         "HTTP status server error (504 Gateway Time-out) for url "
-        "(https://github.com/cfal/shoes/releases/download/v0.3.7/shoes-x86_64-unknown-linux-musl.tar.gz)",
+        "(https://github.com/cfal/shoes/releases/download/v0.3.8/shoes-x86_64-unknown-linux-musl.tar.gz)",
     ),
     ("error", "Process completed with exit code 1."),
 ]
@@ -264,7 +264,7 @@ class ClassifyTest(unittest.TestCase):
         self.assertEqual(kind_of(REQWEST_504), mw.INFRA)
 
     def test_reqwest_5xx_from_local_server_is_not_infra(self):
-        local = [(k, t.replace("https://github.com/cfal/shoes/releases/download/v0.3.7", "http://127.0.0.1:18080"))
+        local = [(k, t.replace("https://github.com/cfal/shoes/releases/download/v0.3.8", "http://127.0.0.1:18080"))
                  for k, t in REQWEST_504]
         self.assertEqual(kind_of(local), mw.UNKNOWN)
 
@@ -276,7 +276,7 @@ class ClassifyTest(unittest.TestCase):
     def test_curl_403_and_429_from_github_download_are_infra(self):
         for status in ("403", "429"):
             with self.subTest(status=status):
-                step = download_step(status, "https://api.github.com/repos/cfal/shoes/releases/tags/v0.3.7")
+                step = download_step(status, "https://api.github.com/repos/cfal/shoes/releases/tags/v0.3.8")
                 verdict = mw.classify_job(mw.parse_log(raw_log(step)))
                 self.assertEqual(verdict.kind, mw.INFRA)
                 self.assertEqual(verdict.hits[0].label, "下载被限流（HTTP 403/429）")

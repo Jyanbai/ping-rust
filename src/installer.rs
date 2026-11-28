@@ -24,10 +24,10 @@ use crate::{config, performance, utils};
 
 const RELEASE_TAG_API_PREFIX: &str = "https://api.github.com/repos/cfal/shoes/releases/tags/";
 /// 经过验收的 shoes GitHub Release；默认安装、bootstrap 与 `update --method release` 只安装此 tag。
-pub const SHOES_RELEASE_TAG: &str = "v0.3.7";
+pub const SHOES_RELEASE_TAG: &str = "v0.3.8";
 const SHOES_GIT_REPOSITORY: &str = "https://github.com/cfal/shoes";
-const SHOES_SCHEMA_REVISION: &str = "ee44a397e6850193e86a1ae66639f037f963822d";
-const SHOES_SCHEMA_VERSION: &str = "0.3.7";
+const SHOES_SCHEMA_REVISION: &str = "7680938b96a245a21d9e481ad009205b956e4436";
+const SHOES_SCHEMA_VERSION: &str = "0.3.8";
 const MAX_ARCHIVE_SIZE: u64 = 128 * 1024 * 1024;
 const MAX_BINARY_SIZE: u64 = 128 * 1024 * 1024;
 const LOW_MEMORY_THRESHOLD_KIB: u64 = 1024 * 1024;
@@ -758,8 +758,8 @@ mod tests {
         std::fs::write(&destination, b"installed shoes").unwrap();
         assert!(destination.is_file());
         assert!(!dir.path().join("shoes-install.json").exists());
-        assert!(!downgrade_allowed(None, Some("v0.3.7"), false));
-        let message = unknown_shoes_source_message("v0.3.7");
+        assert!(!downgrade_allowed(None, Some(SHOES_RELEASE_TAG), false));
+        let message = unknown_shoes_source_message(SHOES_RELEASE_TAG);
         assert!(
             message.contains("无法确认当前 shoes 的安装来源"),
             "{message}"
@@ -795,18 +795,27 @@ mod tests {
             .unwrap(),
             "shoes 0.3.7"
         );
+        assert_eq!(
+            parse_version_output(
+                b"shoes 0.3.8\ntarget: x86_64-unknown-linux-musl\ncompiler: rustc 1.100.0 (0ef1bc386 2026-11-09)\n",
+                b""
+            )
+            .unwrap(),
+            "shoes 0.3.8"
+        );
         assert!(parse_version_output(b"\n", b"\n").is_err());
     }
     #[test]
     fn unverified_release_notice_only_for_newer_github_release() {
-        let notice = unverified_installed_notice(&release_provenance("0.3.8")).unwrap();
+        let notice = unverified_installed_notice(&release_provenance("0.3.9")).unwrap();
         assert_eq!(
             notice,
             format!(
-                "当前 shoes v0.3.8 未经 ping-rust 验证；可执行 sudo ping-rust update --method release --allow-downgrade 回到 {SHOES_RELEASE_TAG}"
+                "当前 shoes v0.3.9 未经 ping-rust 验证；可执行 sudo ping-rust update --method release --allow-downgrade 回到 {SHOES_RELEASE_TAG}"
             )
         );
-        assert!(notice.ends_with("回到 v0.3.7"));
+        assert!(notice.ends_with("回到 v0.3.8"));
+        assert!(unverified_installed_notice(&release_provenance("0.3.8")).is_none());
         assert!(unverified_installed_notice(&release_provenance("0.3.7")).is_none());
         assert!(unverified_installed_notice(&release_provenance("0.3.6")).is_none());
         assert!(unverified_installed_notice(&release_provenance("0.2.7")).is_none());
@@ -815,21 +824,27 @@ mod tests {
         pin.source = "verified-pin".to_owned();
         assert!(unverified_installed_notice(&pin).is_none());
         assert!(unverified_installed_notice(&ShoesProvenance::default()).is_none());
-        let mut tagged = release_provenance("v0.3.8");
-        tagged.version = Some("v0.3.8".to_owned());
+        let mut tagged = release_provenance("0.3.9");
+        tagged.version = Some("v0.3.9".to_owned());
         assert!(unverified_installed_notice(&tagged)
             .unwrap()
-            .contains("shoes v0.3.8 "));
+            .contains("shoes v0.3.9 "));
     }
 
     #[test]
     fn release_install_is_pinned_to_verified_tag() {
-        assert_eq!(SHOES_RELEASE_TAG, "v0.3.7");
+        assert_eq!(SHOES_RELEASE_TAG, "v0.3.8");
         assert_eq!(
             pinned_release_api(),
-            "https://api.github.com/repos/cfal/shoes/releases/tags/v0.3.7"
+            "https://api.github.com/repos/cfal/shoes/releases/tags/v0.3.8"
         );
         assert!(!pinned_release_api().contains("latest"));
+    }
+
+    #[test]
+    fn verified_pin_uses_the_release_commit_and_version() {
+        assert_eq!(verified_pin(), "7680938b96a245a21d9e481ad009205b956e4436");
+        assert_eq!(SHOES_SCHEMA_VERSION, "0.3.8");
     }
 
     #[test]
@@ -847,15 +862,21 @@ mod tests {
 
     #[test]
     fn pinned_release_metadata_must_match_tag() {
-        assert!(ensure_pinned_release_tag("v0.3.7").is_ok());
+        assert!(ensure_pinned_release_tag("v0.3.8").is_ok());
+        assert!(ensure_pinned_release_tag("v0.3.9").is_err());
+        assert!(ensure_pinned_release_tag("v0.3.7").is_err());
         assert!(ensure_pinned_release_tag("v0.3.6").is_err());
         assert!(ensure_pinned_release_tag("v0.3.2").is_err());
     }
 
     #[test]
     fn upstream_newer_release_notice_is_informational_only() {
-        let notice = newer_upstream_release_notice("v0.3.8").unwrap();
-        assert!(notice.contains("v0.3.8") && notice.contains("未经验证"));
+        let notice = newer_upstream_release_notice("v0.3.9").unwrap();
+        assert_eq!(
+            notice,
+            "上游有更新版本 v0.3.9（未经验证）；默认安装仍使用 v0.3.8，不会自动安装"
+        );
+        assert!(newer_upstream_release_notice("v0.3.8").is_none());
         assert!(newer_upstream_release_notice("v0.3.7").is_none());
         assert!(newer_upstream_release_notice("v0.3.6").is_none());
         assert!(newer_upstream_release_notice("v0.2.6").is_none());
@@ -910,6 +931,21 @@ mod tests {
 
     #[test]
     fn known_release_downgrade_is_blocked_unless_explicitly_allowed() {
+        assert!(!downgrade_allowed(
+            Some("0.3.9"),
+            Some(SHOES_RELEASE_TAG),
+            false
+        ));
+        assert!(downgrade_allowed(
+            Some("0.3.9"),
+            Some(SHOES_RELEASE_TAG),
+            true
+        ));
+        assert!(downgrade_allowed(
+            Some("0.3.7"),
+            Some(SHOES_RELEASE_TAG),
+            false
+        ));
         assert!(!downgrade_allowed(Some("0.3.7"), Some("0.3.6"), false));
         assert!(downgrade_allowed(Some("0.3.6"), Some("0.3.7"), false));
         assert!(downgrade_allowed(Some("0.3.7"), Some("0.3.7"), false));

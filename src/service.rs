@@ -894,7 +894,14 @@ mod tests {
             hot_reload_unavailable_reason(true, true, &release, ""),
             Some(HotReloadReason::ShoesSourceUnsupported(_))
         ));
+        release.release_tag = Some(installer::SHOES_RELEASE_TAG.into());
+        release.version = Some(installer::SHOES_RELEASE_TAG.trim_start_matches('v').into());
+        assert!(matches!(
+            hot_reload_unavailable_reason(true, true, &release, ""),
+            Some(HotReloadReason::ShoesSourceUnsupported(_))
+        ));
         release.release_tag = Some("v0.3.6".into());
+        release.version = Some("0.3.6".into());
         release.binary_sha256 = None;
         assert!(matches!(
             hot_reload_unavailable_reason(true, true, &release, ""),
