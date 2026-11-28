@@ -1277,6 +1277,20 @@ jobs:
                   assert 'insecure' not in tls
                   pins = tls['certificate_public_key_sha256']
                   assert isinstance(pins, list) and len(pins) == 1 and pins[0]
+                  # #184 P3：用 openssl 独立计算节点证书叶子 SPKI 的 SHA-256，精确比对。
+                  pubkey = subprocess.run(
+                      ['openssl', 'x509', '-in', profile['certificate_path'],
+                       '-pubkey', '-noout'],
+                      check=True, capture_output=True, timeout=30).stdout
+                  spki_der = subprocess.run(
+                      ['openssl', 'pkey', '-pubin', '-outform', 'DER'],
+                      input=pubkey, check=True, capture_output=True,
+                      timeout=30).stdout
+                  import base64
+                  import hashlib
+                  expected = base64.b64encode(
+                      hashlib.sha256(spki_der).digest()).decode()
+                  assert pins[0] == expected, 'AnyTLS 导出的证书公钥 pin 与节点证书不一致'
                   assert 'reality' not in tls
               else:
                   reality = credentials['security']['Reality']
