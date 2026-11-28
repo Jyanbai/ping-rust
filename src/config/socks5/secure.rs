@@ -11,6 +11,11 @@ use super::*;
 use crate::config::managed_yaml::PreparedYaml;
 use crate::service;
 #[cfg(target_os = "linux")]
+use std::sync::{
+    atomic::{AtomicI32, Ordering},
+    Arc,
+};
+#[cfg(target_os = "linux")]
 use tokio::signal::unix::{signal, Signal, SignalKind};
 
 #[cfg(test)]
@@ -173,6 +178,63 @@ async fn validate_secure_candidate(yaml: &str, directory: &Path, binary: &Path) 
     validate_with_binary_inner(binary, file.path(), true).await
 }
 
+#[cfg(target_os = "linux")]
+const TERMINATE: (SignalKind, &str, i32) = (SignalKind::terminate(), "SIGTERM", 143);
+#[cfg(target_os = "linux")]
+const HANGUP: (SignalKind, &str, i32) = (SignalKind::hangup(), "SIGHUP", 129);
+#[cfg(target_os = "linux")]
+const INTERRUPT: (SignalKind, &str, i32) = (SignalKind::interrupt(), "SIGINT", 130);
+#[cfg(target_os = "linux")]
+const SECURE_SIGNALS: [(SignalKind, &str, i32); 3] = [TERMINATE, HANGUP, INTERRUPT];
+#[cfg(target_os = "linux")]
+const PREFLIGHT_FINISHED: i32 = -1;
+
+#[cfg(target_os = "linux")]
+struct SecureCancellation {
+    status: Arc<AtomicI32>,
+    hooks: Vec<signal_hook_registry::SigId>,
+}
+
+#[cfg(target_os = "linux")]
+impl SecureCancellation {
+    fn install() -> Result<Self> {
+        let mut cancellation = Self {
+            status: Arc::new(AtomicI32::new(0)),
+            hooks: Vec::with_capacity(SECURE_SIGNALS.len()),
+        };
+        for (kind, _, code) in SECURE_SIGNALS {
+            let status = Arc::clone(&cancellation.status);
+            let hook = unsafe {
+                signal_hook_registry::register(kind.as_raw_value(), move || {
+                    let _ = status.compare_exchange(0, code, Ordering::SeqCst, Ordering::SeqCst);
+                })
+            }
+            .context("无法安装加固取消标记，配置未提交")?;
+            cancellation.hooks.push(hook);
+        }
+        Ok(cancellation)
+    }
+
+    fn finish_preflight(&self) -> Option<(&'static str, i32)> {
+        let received = self
+            .status
+            .compare_exchange(0, PREFLIGHT_FINISHED, Ordering::SeqCst, Ordering::SeqCst)
+            .err()?;
+        SECURE_SIGNALS
+            .into_iter()
+            .find_map(|(_, name, code)| (code == received).then_some((name, code)))
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for SecureCancellation {
+    fn drop(&mut self) {
+        for hook in self.hooks.drain(..) {
+            signal_hook_registry::unregister(hook);
+        }
+    }
+}
+
 async fn commit_with_signal_protection<T: Send + 'static>(
     preflight: impl Future<Output = Result<T>>,
     commit: impl FnOnce(T) -> Result<ManagedProfile> + Send + 'static,
@@ -180,10 +242,11 @@ async fn commit_with_signal_protection<T: Send + 'static>(
     #[cfg(target_os = "linux")]
     let result = {
         let install = |kind| signal(kind).context("无法安装加固信号处理，配置未提交");
-        let mut terminate = install(SignalKind::terminate())?;
-        let mut hangup = install(SignalKind::hangup())?;
-        let mut interrupt = install(SignalKind::interrupt())?;
+        let mut terminate = install(TERMINATE.0)?;
+        let mut hangup = install(HANGUP.0)?;
+        let mut interrupt = install(INTERRUPT.0)?;
         let _guard = crate::INTERRUPT_EXIT.lock().await;
+        let cancellation = SecureCancellation::install()?;
         let abort_preflight = |(name, code)| -> ! {
             let _ = writeln!(io::stderr(), "收到 {name}，SOCKS5 预检已中断，配置未提交。");
             exit_after_signal(code)
@@ -195,8 +258,15 @@ async fn commit_with_signal_protection<T: Send + 'static>(
         };
         tokio::select! {
             biased;
-            received = next_secure_signal(&mut terminate, &mut hangup, &mut interrupt) => abort_preflight(received),
+            received = next_secure_signal(&mut terminate, &mut hangup, &mut interrupt) => {
+                drop(preflight_result);
+                abort_preflight(received);
+            }
             () = std::future::ready(()) => {},
+        }
+        if let Some(received) = cancellation.finish_preflight() {
+            drop(preflight_result);
+            abort_preflight(received);
         }
         let result = match preflight_result {
             Ok(prepared) => {
@@ -241,11 +311,12 @@ async fn next_secure_signal(
     hangup: &mut Signal,
     interrupt: &mut Signal,
 ) -> (&'static str, i32) {
-    tokio::select! {
-        _ = terminate.recv() => ("SIGTERM", 143),
-        _ = hangup.recv() => ("SIGHUP", 129),
-        _ = interrupt.recv() => ("SIGINT", 130),
-    }
+    let (_, name, code) = tokio::select! {
+        _ = terminate.recv() => TERMINATE,
+        _ = hangup.recv() => HANGUP,
+        _ = interrupt.recv() => INTERRUPT,
+    };
+    (name, code)
 }
 
 #[cfg(target_os = "linux")]

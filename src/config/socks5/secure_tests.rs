@@ -349,6 +349,87 @@ exec sleep 10
     }
 }
 
+#[tokio::test(flavor = "current_thread")]
+#[cfg(target_os = "linux")]
+async fn signals_at_socks5_preflight_completion_prevent_commit() {
+    use sha2::{Digest, Sha256};
+    use std::{ffi::c_int, process::Command};
+
+    const CHILD: &str = "PING_RUST_TEST_SOCKS5_HANDOFF_DIR";
+    const SIGNAL: &str = "PING_RUST_TEST_SOCKS5_HANDOFF_SIGNAL";
+    extern "C" {
+        fn raise(signal: c_int) -> c_int;
+    }
+
+    if let Some(path) = std::env::var_os(CHILD) {
+        let path = PathBuf::from(path);
+        let state = load_state_from(&path.join("ping-rust-state.json")).unwrap();
+        let plan = prepare(&path, &state.profiles[0], SecureMode::Auth);
+        let kind = match std::env::var(SIGNAL).unwrap().as_str() {
+            "HUP" => SignalKind::hangup(),
+            "INT" => SignalKind::interrupt(),
+            "TERM" => SignalKind::terminate(),
+            name => panic!("意外的测试信号：{name}"),
+        };
+        let commit_path = path.clone();
+        commit_with_signal_protection(
+            async {
+                let mut candidate = SecureCandidate(Some(create_candidate(&path).unwrap()));
+                write_candidate(candidate.0.as_mut().unwrap(), &plan.yaml.aggregate).unwrap();
+                assert_eq!(unsafe { raise(kind.as_raw_value()) }, 0);
+                Ok(plan)
+            },
+            move |plan| {
+                fs::write(commit_path.join("commit-started"), b"").unwrap();
+                plan.commit(&commit_path, |_| Ok(()))
+            },
+        )
+        .await
+        .unwrap();
+        panic!("预检结束时收到信号后不应继续执行");
+    }
+
+    for (signal, code) in [("HUP", 129), ("INT", 130), ("TERM", 143)] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path();
+        let profile = legacy(path, 1080, "0.0.0.0").await;
+        let files = [
+            path.join("config.yaml"),
+            path.join("ping-rust-state.json"),
+            profile_path(path, &profile),
+        ];
+        let snapshot = || {
+            files
+                .each_ref()
+                .map(|file| Sha256::digest(fs::read(file).unwrap()))
+        };
+        let before = snapshot();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "config::socks5::secure::tests::signals_at_socks5_preflight_completion_prevent_commit",
+            ])
+            .env(CHILD, path)
+            .env(SIGNAL, signal)
+            .output()
+            .unwrap();
+        assert!(
+            !path.join("commit-started").exists(),
+            "SIG{signal} 启动了提交"
+        );
+        assert_eq!(snapshot(), before, "SIG{signal} 改写了受管文件");
+        assert!(
+            !path.read_dir().unwrap().any(|entry| entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".ping-rust-candidate-")),
+            "SIG{signal} 遗留了候选配置"
+        );
+        assert_eq!(output.status.code(), Some(code), "SIG{signal}");
+    }
+}
+
 #[tokio::test]
 #[cfg(target_os = "linux")]
 async fn signals_do_not_interrupt_socks5_rollback() {
