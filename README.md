@@ -294,7 +294,7 @@ shoes: • running
 
 ### Hot Reload
 
-热重载要求 shoes 来源为 `verified-pin`，revision 等于 `7680938b96a245a21d9e481ad009205b956e4436`（v0.3.8），服务已运行、unit 内容与加载路径未被修改、没有 drop-in。默认一键安装使用 GitHub Release 来源，因此不启用 Verified Hot Reload。watcher 的行为以[固定 pin 的热重载验收](docs/SHOES_PIN_UPGRADE.md)为准。
+热重载要求 shoes 来源为 `verified-pin`，revision 等于 `7680938b96a245a21d9e481ad009205b956e4436`（v0.3.8）或 `ee44a397e6850193e86a1ae66639f037f963822d`（v0.3.7）。只更新 ping-rust 不会使已装的 v0.3.7 源码构建失去热重载资格。热重载仍要求服务已运行、unit 内容与加载路径未被修改、没有 drop-in。默认一键安装使用 GitHub Release 来源，因此不启用 Verified Hot Reload。watcher 的行为以[固定 pin 的热重载验收](docs/SHOES_PIN_UPGRADE.md)为准。
 
 在 `prs → 6) 更新 → shoes 内核` 中选择已验证固定 pin，或执行：
 

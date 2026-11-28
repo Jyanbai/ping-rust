@@ -20,6 +20,7 @@ const RESET_FAILED_COMMAND: &[&str] = &["reset-failed", SERVICE_NAME];
 const ENABLE_NOW_COMMAND: &[&str] = &["enable", "--now", SERVICE_NAME];
 const START_COMMAND: &[&str] = &["start", SERVICE_NAME];
 const RESTART_COMMAND: &[&str] = &["restart", SERVICE_NAME];
+const SHOES_V037_HOT_RELOAD_REVISION: &str = "ee44a397e6850193e86a1ae66639f037f963822d";
 
 pub struct ServiceSnapshot {
     unit_contents: Option<Vec<u8>>,
@@ -112,7 +113,10 @@ impl HotReloadReadiness {
 }
 
 fn hot_reload_supported(shoes: &installer::ShoesProvenance) -> bool {
-    shoes.source == "verified-pin" && shoes.revision.as_deref() == Some(installer::verified_pin())
+    shoes.source == "verified-pin"
+        && shoes.revision.as_deref().is_some_and(|revision| {
+            revision == installer::verified_pin() || revision == SHOES_V037_HOT_RELOAD_REVISION
+        })
 }
 
 fn hot_reload_unavailable_reason(
@@ -915,6 +919,31 @@ mod tests {
             revision: Some(installer::verified_pin().into()),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn hot_reload_remains_available_for_v037_source_pin_after_manager_update() {
+        let previous_pin = installer::ShoesProvenance {
+            source: "verified-pin".into(),
+            version: Some("0.3.7".into()),
+            revision: Some("ee44a397e6850193e86a1ae66639f037f963822d".into()),
+            binary_sha256: Some("a".repeat(64)),
+            ..Default::default()
+        };
+        assert_eq!(
+            hot_reload_unavailable_reason(true, true, &previous_pin, ""),
+            None
+        );
+
+        let release = installer::ShoesProvenance {
+            source: "github-release".into(),
+            release_tag: Some("v0.3.7".into()),
+            ..previous_pin
+        };
+        assert_eq!(
+            hot_reload_unavailable_reason(true, true, &release, ""),
+            Some(HotReloadReason::ShoesSourceUnsupported(release))
+        );
     }
 
     #[test]
