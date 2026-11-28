@@ -1,5 +1,9 @@
 //! 只读 CLI 回归，不联网、不绑定端口、不依赖 shoes。
-use std::{process::Stdio, time::Duration};
+use std::{
+    path::Path,
+    process::{Output, Stdio},
+    time::Duration,
+};
 use tokio::process::Command;
 
 #[tokio::test]
@@ -25,17 +29,12 @@ async fn nonterminal_scan_without_yes_exits_without_reading_stdin() {
     assert!(output.stdout.is_empty());
 }
 
-#[tokio::test]
-async fn csv_check_reports_skipped_candidates_without_touching_input() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("out.csv");
-    let original = b"IP,CERT,ISSUER,ORIGIN\n203.0.113.2,*.example.com,\"Example, CA\",\n";
-    std::fs::write(&path, original).unwrap();
-    let output = tokio::time::timeout(
+async fn check_csv(path: &Path) -> Output {
+    tokio::time::timeout(
         Duration::from_secs(5),
         Command::new(env!("CARGO_BIN_EXE_ping-rust"))
             .args(["sni", "check", "--csv"])
-            .arg(&path)
+            .arg(path)
             .args(["--subnet", "203.0.113.0/24"])
             .stdin(Stdio::null())
             .kill_on_drop(true)
@@ -43,7 +42,26 @@ async fn csv_check_reports_skipped_candidates_without_touching_input() {
     )
     .await
     .unwrap()
-    .unwrap();
+    .unwrap()
+}
+
+#[tokio::test]
+async fn csv_check_reports_skipped_candidates_without_touching_input() {
+    let original = b"IP,ORIGIN,CERT_DOMAIN,CERT_ISSUER,GEO_CODE\n203.0.113.2,,*.example.com,\"Example, CA\",US\n";
+    assert_skipped_csv_check(original).await;
+}
+
+#[tokio::test]
+async fn legacy_csv_check_reports_skipped_candidates_without_touching_input() {
+    let original = b"IP,CERT,ISSUER,ORIGIN\n203.0.113.2,*.example.com,\"Example, CA\",\n";
+    assert_skipped_csv_check(original).await;
+}
+
+async fn assert_skipped_csv_check(original: &[u8]) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("out.csv");
+    std::fs::write(&path, original).unwrap();
+    let output = check_csv(&path).await;
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
     for column in [
@@ -65,4 +83,16 @@ async fn csv_check_reports_skipped_candidates_without_touching_input() {
     assert!(stdout.contains("选之前先在浏览器打开"));
     assert_eq!(std::fs::read(&path).unwrap(), original);
     assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+}
+
+#[tokio::test]
+async fn csv_check_reports_no_candidates_for_header_only() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("out.csv");
+    std::fs::write(&path, "IP,ORIGIN,CERT_DOMAIN,CERT_ISSUER,GEO_CODE\n").unwrap();
+    let output = check_csv(&path).await;
+    assert!(output.status.success());
+    assert!(String::from_utf8(output.stdout)
+        .unwrap()
+        .contains("没有候选"));
 }

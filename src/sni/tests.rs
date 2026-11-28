@@ -1,6 +1,32 @@
 use super::*;
 
 #[test]
+fn scanner_csv_accepts_realitlscanner_headers() {
+    let input = concat!(
+        "IP,ORIGIN,CERT_DOMAIN,CERT_ISSUER,GEO_CODE\r\n",
+        "203.0.113.8,www.example.com,*.example.com,\"Example, \"\"CA\"\"\",US\r\n",
+        "203.0.113.9,203.0.113.9,example.net,Example CA,US\r\n",
+    );
+    let subnet = "203.0.113.0/24".parse().unwrap();
+    let rows = parse_csv(input, subnet, Mode::Reality, false).unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].domain, "www.example.com");
+    assert!(rows[0].skip.is_none());
+    assert_eq!(rows[0].subnet, Some(subnet));
+    assert_eq!(rows[1].domain, "example.net");
+    assert!(rows[1].skip.is_none());
+}
+
+#[test]
+fn scanner_csv_accepts_header_only_as_no_candidates() {
+    let input = "IP,ORIGIN,CERT_DOMAIN,CERT_ISSUER,GEO_CODE\n";
+    let subnet = "203.0.113.0/24".parse().unwrap();
+    assert!(parse_csv(input, subnet, Mode::Reality, false)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
 fn scanner_csv_handles_quoted_issuer_and_escaped_quotes() {
     let rows = parse_csv("IP,CERT,ISSUER,ORIGIN\r\n203.0.113.8,*.example.com,\"Example, \"\"CA\"\"\",www.example.com\r\n203.0.113.9,*.example.com,CA,\r\n", "203.0.113.0/24".parse().unwrap(), Mode::Reality, false).unwrap();
     assert_eq!(rows.len(), 2);
