@@ -8,9 +8,11 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import tls_client_acceptance as acceptance
 
@@ -109,6 +111,172 @@ class TlsClientAcceptanceTests(unittest.TestCase):
         self.assertEqual(acceptance.verdict(CASES[2], observation), (1, "rejection-unconfirmed"))
         self.assertIsNone(acceptance.rejection_signal("unrecognized remote public key: configured", ""))
 
+    def test_wrong_credentials_requires_evidence_beyond_client_disconnect(self):
+        for outbound, trace, curl_error in (
+            ("trojan", "TLS handshake: EOF", "curl: (52) Empty reply from server"),
+            ("vless", "websocket handshake: connection reset by peer", ""),
+            ("vmess", "read response header: EOF", ""),
+            ("anytls", "connection reset by peer", ""),
+            ("tuic", "Application error 0x1 (remote)", ""),
+            ("tuic", "Application error 0x0 (remote): auth timeout", ""),
+            ("hysteria2", "authentication error: stream 4 canceled by remote", ""),
+        ):
+            with self.subTest(outbound=outbound, trace=trace):
+                rejection = acceptance.sing_box_rejection(outbound, trace, curl_error)
+                observed = acceptance.Observation(curl_code=52, outbound_attempt=True, rejection=rejection)
+                self.assertEqual(acceptance.verdict(CASES[1], observed), (1, "rejection-unconfirmed"))
+
+    def test_wrong_credentials_accepts_explicit_protocol_rejections(self):
+        for outbound, trace in (
+            ("hysteria2", "authentication error, HTTP status code: 404"),
+            ("hysteria2", "authentication failed, status code: 404"),
+            ("tuic", "Application error 0x0 (remote): auth failed"),
+            ("tuic", "Application error 0x1 (remote): auth failed"),
+        ):
+            with self.subTest(outbound=outbound):
+                self.assertEqual(acceptance.sing_box_rejection(outbound, trace, ""), "credentials")
+        for outbound, message in (
+            ("trojan", "Invalid password hash"),
+            ("vless", "Unknown user id"),
+            ("vmess", "AEAD authentication failed: checksum mismatch"),
+            ("anytls", "authentication failed (prefix mismatch)"),
+        ):
+            with self.subTest(outbound=outbound):
+                journal = f'127.0.0.1:12345 finished with error: Custom {{ error: "failed to setup server stream: {message}" }}'
+                classifier = acceptance.sing_box_rejection
+                self.assertEqual(classifier(outbound, "read: EOF", "", journal), "credentials")
+                self.assertIsNone(classifier(outbound, "read: EOF", "", journal.replace("127.0.0.1", "203.0.113.5")))
+                self.assertIsNone(classifier(outbound, "read: EOF", "", journal.replace(message, "unexpected EOF")))
+                self.assertEqual(classifier(outbound, "x509: certificate signed by unknown authority", "", journal),
+                                 "certificate")
+        for reason in ("Invalid UUID", "Authentication token mismatch"):
+            with self.subTest(reason=reason):
+                self.assertEqual(acceptance.sing_box_rejection(
+                    "tuic", "", "", f"Connection ended with error: {reason}",
+                ), "credentials")
+        self.assertIsNone(acceptance.sing_box_rejection(
+            "tuic", "", "", "Connection ended with error: authentication timeout",
+        ))
+
+    def test_backend_observations_cannot_bypass_shared_verdict(self):
+        rejected = acceptance.Observation(curl_code=52, outbound_attempt=True, rejection="credentials")
+        for changes, phase in (
+            ({"marker_received": True}, "unexpected-traffic"),
+            ({"origin_hits": 1}, "unexpected-traffic"),
+            ({"curl_code": 28}, "request-timeout"),
+        ):
+            with self.subTest(changes=changes), tempfile.TemporaryDirectory() as root:
+                work = Path(root)
+                protocol = acceptance.PROTOCOLS["anytls"]
+                node = acceptance.ManagedNode("anytls", protocol, "node", 12345, "profile", "100")
+                config, wrong_auth, unpinned = object(), object(), object()
+                backend = Mock(spec=acceptance.ClientBackend)
+                backend.export.return_value = config
+                backend.variant.side_effect = [wrong_auth, unpinned]
+                backend.observe.side_effect = [
+                    acceptance.Observation(curl_code=0, outbound_attempt=True, marker_received=True, origin_hits=1),
+                    replace(rejected, **changes), replace(rejected, rejection="certificate"),
+                    replace(rejected, rejection="pin-mismatch"),
+                ]
+                results = acceptance.Results(work / "results.jsonl")
+                with (patch.object(acceptance, "generate_node", return_value=node),
+                      patch.object(acceptance, "different_certificate") as rotate, patch("builtins.print")):
+                    rotate.return_value.__enter__.return_value = "101"
+                    acceptance.run_protocol("anytls", protocol, 12345, None, work / "private", backend, None, results)
+                backend.export.assert_called_once_with(None, work / "private", node)
+                self.assertEqual([call.args for call in backend.variant.call_args_list],
+                                 [(config, "password"), (config, "certificate")])
+                self.assertEqual([call.args[1] for call in backend.observe.call_args_list],
+                                 [config, wrong_auth, unpinned, config])
+                self.assertEqual([call.args[-1] for call in backend.observe.call_args_list],
+                                 ["100", "100", "100", "101"])
+                self.assertEqual([(row["verdict"], row["phase"]) for row in results.rows],
+                                 [("pass", "acceptance"), ("fail", phase), ("pass", "acceptance"), ("pass", "acceptance")])
+
+    def test_backend_missing_binary_does_not_run_negative_controls(self):
+        with tempfile.TemporaryDirectory() as root:
+            work = Path(root)
+            protocol = acceptance.PROTOCOLS["anytls"]
+            node = acceptance.ManagedNode("anytls", protocol, "node", 12345, "profile", "100")
+            backend = Mock(spec=acceptance.ClientBackend)
+            backend.observe.side_effect = acceptance.Failure("missing-binary")
+            results = acceptance.Results(work / "results.jsonl")
+            with (patch.object(acceptance, "generate_node", return_value=node),
+                  patch.object(acceptance, "different_certificate") as rotate, patch("builtins.print")):
+                acceptance.run_protocol("anytls", protocol, 12345, None, work / "private", backend, None, results)
+            backend.observe.assert_called_once()
+            backend.variant.assert_not_called()
+            rotate.assert_not_called()
+            self.assertEqual([row["verdict"] for row in results.rows], ["fail"] * 4)
+            self.assertEqual([row["phase"] for row in results.rows], ["missing-binary"] + ["positive-control"] * 3)
+
+    def test_sing_box_observe_uses_only_current_shoes_pid_and_request_window(self):
+        outbound = {"type": "trojan", "tag": "node"}
+        dispatch = "outbound/trojan[node]: outbound connection to 127.0.0.1:24860"
+        auth_error = '127.0.0.1:12345 finished with error: Custom { error: "failed to setup server stream: Invalid password hash" }'
+        for trace, journal, curl_code, expect_journal, expected in (
+            (dispatch, auth_error, 52, True, (0, "acceptance")),
+            (f"{dispatch}\nread: EOF", "", 52, True, (1, "rejection-unconfirmed")),
+            (f"{dispatch}\nTLS handshake: EOF", auth_error, 52, False, (1, "rejection-unconfirmed")),
+            ("read: EOF", auth_error, 52, False, (1, "rejection-unconfirmed")),
+            (f"{dispatch}\nread: EOF", auth_error, 28, False, (1, "request-timeout")),
+        ):
+            with self.subTest(trace=trace, journal=bool(journal), curl_code=curl_code), tempfile.TemporaryDirectory() as root:
+                work = Path(root)
+                backend = acceptance.SingBox(work / "sing-box")
+                server = SimpleNamespace(hits=[])
+                client = Mock(pid=101)
+                client.poll.return_value = None
+
+                @contextmanager
+                def running_client(args, log, env):
+                    self.assertEqual(args, [backend.binary, "run", "-c", work / "auth.json"])
+                    log.write_text(trace)
+                    yield client
+
+                with (patch.object(acceptance, "running_client", side_effect=running_client),
+                      patch.object(acceptance, "require_free_ports"), patch.object(acceptance, "wait_port"),
+                      patch.object(acceptance, "service_pid", return_value="100") as service_pid,
+                      patch.object(acceptance.time, "time", return_value=12345.5),
+                      patch.object(acceptance, "checked", side_effect=["", "", journal]) as checked,
+                      patch.object(acceptance, "command", side_effect=[
+                          subprocess.CompletedProcess([], 0, "", ""),
+                          subprocess.CompletedProcess([], curl_code, "", ""),
+                      ]) as command):
+                    observed = backend.observe(CASES[1], {"outbounds": [outbound]}, work, "auth", server, "100")
+                self.assertEqual(acceptance.verdict(CASES[1], observed), expected)
+                self.assertEqual(service_pid.call_count, 2)
+                self.assertEqual(command.call_args_list[0].args[0], [backend.binary, "check", "-c", work / "auth.json"])
+                if expect_journal:
+                    checked.assert_called_with(["sudo", "-n", "journalctl", "--boot", "--unit", "shoes.service",
+                                                "_PID=100", "--since", "@12345.500000", "--output=cat", "--no-pager"],
+                                               "rejection-unconfirmed")
+                else:
+                    checked.assert_called_once_with(["sudo", "-n", "journalctl", "--sync"], "rejection-unconfirmed")
+
+    def test_sing_box_export_requires_exact_independent_pin(self):
+        protocol = acceptance.PROTOCOLS["anytls"]
+        profile = "00000000-0000-4000-8000-000000000001"
+        node = acceptance.ManagedNode("anytls", protocol, "node", 12345, profile, "100")
+        path = Path("private")
+        backend = acceptance.SingBox(Path("sing-box"))
+        for pins, valid in (([PIN], True), ([], False), ([PIN, PIN], False), (["different"], False)):
+            with self.subTest(pins=pins):
+                exported = {"outbounds": [{
+                    "type": "anytls", "tag": "node", "server": "127.0.0.1", "server_port": 12345,
+                    "password": SECRET, "tls": {"enabled": True, "server_name": "node.example.com", PIN_FIELD: pins},
+                }]}
+                with (patch.object(acceptance, "checked", return_value=json.dumps(exported)) as command,
+                      patch.object(acceptance, "public_key_pin", return_value=PIN) as read_pin):
+                    if valid:
+                        self.assertEqual(backend.export("ping-rust", path, node)["outbounds"], exported["outbounds"])
+                    else:
+                        with self.assertRaisesRegex(acceptance.Failure, "export"):
+                            backend.export("ping-rust", path, node)
+                read_pin.assert_called_once_with(Path("/etc/shoes/cert-00000000.pem"), "export")
+                command.assert_called_once_with(["sudo", "-n", "ping-rust", "export", "sing-box", "--profile", profile,
+                                                 "--server", "127.0.0.1"], "export", log=path / "export")
+
     def test_tuic_credentials_require_both_mutations(self):
         with tempfile.TemporaryDirectory() as root:
             work = Path(root)
@@ -116,16 +284,24 @@ class TlsClientAcceptanceTests(unittest.TestCase):
                 "password": SECRET, "uuid": "00000000-0000-4000-8000-000000000001", "tls": {PIN_FIELD: [PIN]},
             }]}
             results = acceptance.Results(work / "results.jsonl")
-            with (patch.object(acceptance, "managed_export", return_value=(config, "100", "profile")),
+            protocol = acceptance.PROTOCOLS["tuic"]
+            node = acceptance.ManagedNode("tuic", protocol, "node", 12345, "profile", "100")
+            backend = Mock(spec=acceptance.ClientBackend)
+            backend.export.return_value = config
+            backend.variant.side_effect = acceptance.negative_copy
+            rejected = acceptance.Observation(curl_code=97, outbound_attempt=True, rejection="credentials")
+            backend.observe.side_effect = [
+                acceptance.Observation(curl_code=0, outbound_attempt=True, marker_received=True, origin_hits=1),
+                rejected, replace(rejected, curl_code=28),
+                replace(rejected, rejection="certificate"), replace(rejected, rejection="pin-mismatch"),
+            ]
+            probe = backend.observe
+            with (patch.object(acceptance, "generate_node", return_value=node),
                   patch.object(acceptance, "different_certificate") as rotate,
-                  patch.object(acceptance, "probe", side_effect=[
-                      (0, "acceptance"), (0, "acceptance"), (1, "request-timeout"),
-                      (0, "acceptance"), (0, "acceptance"),
-                  ]) as probe,
                   patch("builtins.print")):
                 rotate.return_value.__enter__.return_value = "101"
                 acceptance.run_protocol("tuic", acceptance.PROTOCOLS["tuic"], 12345, None,
-                                        work / "private", None, None, results)
+                                        work / "private", backend, None, results)
             self.assertEqual([call.args[3] for call in probe.call_args_list], [
                 CASES[0], f"{CASES[1]}-password", f"{CASES[1]}-uuid", f"{CASES[2]}-certificate", CASES[3],
             ])
