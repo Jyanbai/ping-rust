@@ -72,6 +72,16 @@ fn client_export_value(format: ClientFormat, text: &str) -> Json {
     }
 }
 
+fn golden_client_profile(profile: &ManagedProfile) -> ManagedProfile {
+    let mut profile = profile.clone();
+    if profile.self_signed_certificate
+        && !matches!(profile.credentials, Credentials::NaiveProxy { .. })
+    {
+        profile.certificate_path = Some(fixture_root().join("../tls/self-signed.pem"));
+    }
+    profile
+}
+
 #[test]
 fn yaml_fixtures_parse_to_their_recorded_values() {
     for relative in [
@@ -185,9 +195,10 @@ fn golden_client_exports_are_semantically_unchanged() {
     let golden = read_json("golden/clients.json");
     let mut seen = 0;
     for profile in &state.profiles {
+        let profile = golden_client_profile(profile);
         for (format, label) in FORMATS {
             let key = format!("{}.{label}", profile.name);
-            match client::render(profile, format, EXPORT_SERVER) {
+            match client::render(&profile, format, EXPORT_SERVER) {
                 Ok(text) => {
                     assert_eq!(client_export_value(format, &text), golden[&key], "{key}");
                     seen += 1;
@@ -622,8 +633,9 @@ fn derive_yaml_fixtures() {
     let _ = fs::remove_dir_all(out.join("golden/clients"));
     let mut clients = serde_json::Map::new();
     for profile in &state.profiles {
+        let profile = golden_client_profile(profile);
         for (format, label) in FORMATS {
-            if let Ok(text) = client::render(profile, format, EXPORT_SERVER) {
+            if let Ok(text) = client::render(&profile, format, EXPORT_SERVER) {
                 if matches!(format, ClientFormat::ClashMeta) {
                     write(
                         &format!("golden/clients/{}.{label}.yaml", profile.name),

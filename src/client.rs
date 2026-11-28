@@ -6,7 +6,12 @@ use base64::{
     Engine,
 };
 use clap::ValueEnum;
+use rustls::{
+    pki_types::{pem::PemObject, CertificateDer},
+    server::ParsedCertificate,
+};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use url::form_urlencoded::{byte_serialize, Serializer};
 use uuid::Uuid;
 
@@ -410,15 +415,66 @@ fn clash_meta(profile: &ManagedProfile, server: &str) -> Result<String> {
     crate::yaml::to_string(&json!({ "proxies": [proxy] })).context("生成 Clash Meta YAML 失败")
 }
 
+fn read_self_signed_certificates(profile: &ManagedProfile) -> Result<Vec<CertificateDer<'static>>> {
+    let path = profile
+        .certificate_path
+        .as_ref()
+        .filter(|path| Some(*path) != profile.certificate_key_path.as_ref())
+        .context("缺少公有证书路径或路径指向私钥；请检查节点配置中的证书路径")?;
+    let certificates = CertificateDer::pem_file_iter(path)
+        .with_context(|| {
+            format!(
+                "读取自签名公有证书失败：{}；请检查文件和权限",
+                path.display()
+            )
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .context("解析自签名公有证书失败；请检查节点引用的 PEM 证书文件")?;
+    if certificates.is_empty() {
+        bail!("解析自签名公有证书失败；请检查节点引用的 PEM 文件是否包含证书");
+    }
+    Ok(certificates)
+}
+
+fn parse_self_signed_certificate<'a>(der: &'a CertificateDer<'a>) -> Result<ParsedCertificate<'a>> {
+    ParsedCertificate::try_from(der).context("解析自签名公有证书失败；请检查节点引用的 X.509 证书")
+}
+
+fn sing_box_tls(profile: &ManagedProfile, server_name: &str, alpn: &[String]) -> Result<Value> {
+    let mut tls = json!({"enabled": true, "server_name": server_name, "alpn": alpn});
+    if profile.self_signed_certificate {
+        let certificates = read_self_signed_certificates(profile)?;
+        let leaf = parse_self_signed_certificate(&certificates[0])?;
+        let pin = STANDARD.encode(Sha256::digest(leaf.subject_public_key_info().as_ref()));
+        tls["certificate_public_key_sha256"] = json!([pin]);
+    } else {
+        tls["insecure"] = json!(false);
+    }
+    Ok(tls)
+}
+
+fn sing_box_naive_tls(profile: &ManagedProfile, server_name: &str) -> Result<Value> {
+    let mut tls = json!({"enabled": true, "server_name": server_name});
+    if profile.self_signed_certificate {
+        let certificates = read_self_signed_certificates(profile)?;
+        let mut pem = String::new();
+        for der in &certificates {
+            parse_self_signed_certificate(der)?;
+            pem.push_str("-----BEGIN CERTIFICATE-----\n");
+            let encoded = STANDARD.encode(der.as_ref());
+            for start in (0..encoded.len()).step_by(64) {
+                pem.push_str(&encoded[start..(start + 64).min(encoded.len())]);
+                pem.push('\n');
+            }
+            pem.push_str("-----END CERTIFICATE-----\n");
+        }
+        tls["certificate"] = json!([pem]);
+    }
+    Ok(tls)
+}
+
 fn sing_box(profile: &ManagedProfile, server: &str) -> Result<String> {
-    let tls = |server_name: &str, insecure: bool, alpn: &[String]| {
-        json!({
-            "enabled": true,
-            "server_name": server_name,
-            "insecure": insecure,
-            "alpn": alpn
-        })
-    };
+    let tls = |server_name: &str, alpn: &[String]| sing_box_tls(profile, server_name, alpn);
     if let Credentials::Shadowsocks {
         cipher,
         password,
@@ -494,7 +550,7 @@ fn sing_box(profile: &ManagedProfile, server: &str) -> Result<String> {
             "server": server,
             "server_port": profile.port,
             "password": password,
-            "tls": tls(server_name, profile.self_signed_certificate, alpn_protocols)
+            "tls": tls(server_name, alpn_protocols)?
         }),
         Credentials::Tuic {
             user_id,
@@ -511,7 +567,7 @@ fn sing_box(profile: &ManagedProfile, server: &str) -> Result<String> {
             "password": password,
             "congestion_control": "bbr",
             "zero_rtt_handshake": zero_rtt_handshake,
-            "tls": tls(server_name, profile.self_signed_certificate, alpn_protocols)
+            "tls": tls(server_name, alpn_protocols)?
         }),
         Credentials::Shadowsocks {
             cipher, password, ..
@@ -545,16 +601,7 @@ fn sing_box(profile: &ManagedProfile, server: &str) -> Result<String> {
             udp_enabled,
             ..
         } => {
-            let mut tls = json!({ "enabled": true, "server_name": server_name });
-            if profile.self_signed_certificate {
-                let cert = profile
-                    .certificate_path
-                    .as_ref()
-                    .context("自签名 NaiveProxy 缺少证书路径")?;
-                let pem =
-                    std::fs::read_to_string(cert).context("读取自签名 NaiveProxy 公钥证书失败")?;
-                tls["certificate"] = json!([pem]);
-            }
+            let tls = sing_box_naive_tls(profile, server_name)?;
             json!({
                 "type": "naive",
                 "tag": profile.name,
@@ -578,9 +625,7 @@ fn sing_box(profile: &ManagedProfile, server: &str) -> Result<String> {
         } => {
             let password = single_anytls_password(users)?;
             let tls = match security {
-                config::AnyTlsSecurity::Tls => {
-                    tls(server_name, profile.self_signed_certificate, alpn_protocols)
-                }
+                config::AnyTlsSecurity::Tls => tls(server_name, alpn_protocols)?,
                 config::AnyTlsSecurity::Reality {
                     public_key,
                     short_id,
@@ -618,7 +663,7 @@ fn sing_box(profile: &ManagedProfile, server: &str) -> Result<String> {
                 "server": server,
                 "server_port": profile.port,
                 "uuid": user_id,
-                "tls": tls(server_name, profile.self_signed_certificate, alpn_protocols)
+                "tls": tls(server_name, alpn_protocols)?
             });
             if *vision {
                 outbound["flow"] = json!("xtls-rprx-vision");
@@ -639,9 +684,7 @@ fn sing_box(profile: &ManagedProfile, server: &str) -> Result<String> {
             security,
         } => {
             let tls = match security {
-                config::TlsSecurity::Tls => {
-                    tls(server_name, profile.self_signed_certificate, alpn_protocols)
-                }
+                config::TlsSecurity::Tls => tls(server_name, alpn_protocols)?,
                 config::TlsSecurity::Reality {
                     public_key,
                     short_id,
@@ -679,7 +722,7 @@ fn sing_box(profile: &ManagedProfile, server: &str) -> Result<String> {
             "uuid": user_id,
             "security": VMESS_WS_TLS_CIPHER,
             "alter_id": 0,
-            "tls": tls(server_name, profile.self_signed_certificate, alpn_protocols),
+            "tls": tls(server_name, alpn_protocols)?,
             "transport": {
                 "type": "ws",
                 "path": websocket_path,
@@ -1058,6 +1101,12 @@ mod tests {
         AnyTlsSecurity, AnyTlsUser, Credentials, ShadowsocksCipher, SnellCipher, TlsSecurity,
     };
 
+    const PUBLIC_CERT: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/tls/self-signed.pem"
+    );
+    const PUBLIC_KEY_PIN: &str = "D/lae0s9n5SmUSmF60tlNBHKv68taHjTkVQ53Wh8yxo=";
+
     fn reality_profile() -> ManagedProfile {
         ManagedProfile {
             h2mux: Default::default(),
@@ -1083,6 +1132,7 @@ mod tests {
     fn vmess_ws_tls_exports_explicit_aead_cipher() {
         let mut profile = reality_profile();
         profile.self_signed_certificate = true;
+        profile.certificate_path = Some(PUBLIC_CERT.into());
         profile.credentials = Credentials::VmessTls {
             user_id: Uuid::nil(),
             server_name: "vmess.example.com".to_owned(),
@@ -1099,7 +1149,7 @@ mod tests {
         assert!(outbound.get("global_padding").is_none());
         assert_eq!(
             outbound["tls"],
-            json!({"enabled": true, "server_name": "vmess.example.com", "insecure": true, "alpn": ["http/1.1"]})
+            json!({"enabled": true, "server_name": "vmess.example.com", "certificate_public_key_sha256": [PUBLIC_KEY_PIN], "alpn": ["http/1.1"]})
         );
         let websocket = json!({"path": "/vmess", "headers": {"Host": "vmess.example.com"}});
         assert_eq!(outbound["transport"]["type"], "ws");
@@ -1263,7 +1313,7 @@ mod tests {
                 port: 443,
                 server_address: None,
                 credentials,
-                certificate_path: None,
+                certificate_path: self_signed_certificate.then(|| PUBLIC_CERT.into()),
                 certificate_key_path: None,
                 self_signed_certificate,
                 naive_certificate_validity: None,
@@ -1419,7 +1469,7 @@ mod tests {
     }
 
     #[test]
-    fn exports_hysteria2_self_signed_warning_flag() {
+    fn exports_hysteria2_self_signed_pin_only_in_sing_box() {
         let profile = ManagedProfile {
             h2mux: Default::default(),
             id: Uuid::nil(),
@@ -1431,7 +1481,7 @@ mod tests {
                 server_name: "proxy.example.com".to_owned(),
                 alpn_protocols: vec!["h3".to_owned()],
             },
-            certificate_path: None,
+            certificate_path: Some(PUBLIC_CERT.into()),
             certificate_key_path: None,
             self_signed_certificate: true,
             naive_certificate_validity: None,
@@ -1439,7 +1489,14 @@ mod tests {
         let clash = render(&profile, ClientFormat::ClashMeta, "203.0.113.2").unwrap();
         let sing_box = render(&profile, ClientFormat::SingBox, "203.0.113.2").unwrap();
         assert!(clash.contains("skip-cert-verify: true"));
-        assert!(sing_box.contains("\"insecure\": true"));
+        let sing_box: Value = serde_json::from_str(&sing_box).unwrap();
+        assert_eq!(
+            sing_box["outbounds"][0]["tls"],
+            json!({
+                "enabled": true, "server_name": "proxy.example.com", "alpn": ["h3"],
+                "certificate_public_key_sha256": [PUBLIC_KEY_PIN],
+            })
+        );
     }
 
     #[test]
@@ -1595,9 +1652,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cert = dir.path().join("cert.pem");
         let key = dir.path().join("key.pem");
+        let public_pem = std::fs::read_to_string(PUBLIC_CERT).unwrap();
         std::fs::write(
             &cert,
-            "-----BEGIN CERTIFICATE-----\nPUBLIC-CERT\n-----END CERTIFICATE-----\n",
+            format!(
+                "{public_pem}-----BEGIN PRIVATE KEY-----\nZHVtbXk=\n-----END PRIVATE KEY-----\n"
+            ),
         )
         .unwrap();
         std::fs::write(&key, "NEVER-EXPORT-PRIVATE-KEY").unwrap();
@@ -1621,7 +1681,11 @@ mod tests {
             naive_certificate_validity: None,
         };
         let exported = render(&profile, ClientFormat::SingBox, "203.0.113.9").unwrap();
-        assert!(exported.contains("PUBLIC-CERT"));
+        let config: Value = serde_json::from_str(&exported).unwrap();
+        assert_eq!(
+            config["outbounds"][0]["tls"]["certificate"],
+            json!([public_pem])
+        );
         assert!(!exported.contains("NEVER-EXPORT-PRIVATE-KEY"));
         assert!(!exported.contains("\"insecure\""));
     }
@@ -1736,12 +1800,20 @@ mod tests {
 
     #[test]
     fn exports_anytls_tls_and_rejects_unsupported_reality_formats() {
-        let tls = anytls_profile(AnyTlsSecurity::Tls);
+        let mut tls = anytls_profile(AnyTlsSecurity::Tls);
+        tls.certificate_path = Some(PUBLIC_CERT.into());
         let clash = render(&tls, ClientFormat::ClashMeta, "203.0.113.5").unwrap();
         let sing_box = render(&tls, ClientFormat::SingBox, "203.0.113.5").unwrap();
         let uri = render(&tls, ClientFormat::Nekobox, "203.0.113.5").unwrap();
         crate::yaml::from_str::<serde_json::Value>(&clash).unwrap();
-        serde_json::from_str::<Value>(&sing_box).unwrap();
+        let value = serde_json::from_str::<Value>(&sing_box).unwrap();
+        assert_eq!(
+            value["outbounds"][0]["tls"],
+            json!({
+                "enabled": true, "server_name": "proxy.example.com", "alpn": ["h2", "http/1.1"],
+                "certificate_public_key_sha256": [PUBLIC_KEY_PIN],
+            })
+        );
         url::Url::parse(&uri).unwrap();
         assert!(uri.contains("sni=proxy.example.com"));
         assert!(!clash.contains("server-private"));
@@ -1758,6 +1830,40 @@ mod tests {
         serde_json::from_str::<Value>(&sing_box).unwrap();
         assert!(sing_box.contains("public-key"));
         assert!(!sing_box.contains("never-export-this-private-key"));
+    }
+
+    #[test]
+    fn sing_box_requires_a_valid_self_signed_leaf_but_does_not_read_external_certificates() {
+        let mut profile = anytls_profile(AnyTlsSecurity::Tls);
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.pem");
+        let corrupt = dir.path().join("corrupt.pem");
+        std::fs::write(
+            &corrupt,
+            "-----BEGIN CERTIFICATE-----\nYQ==\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+        let export =
+            |profile: &ManagedProfile| render(profile, ClientFormat::SingBox, "203.0.113.5");
+        for (path, expected) in [
+            (None, "缺少公有证书路径"),
+            (Some(missing.clone()), "读取自签名公有证书失败"),
+            (Some(corrupt), "解析自签名公有证书失败"),
+        ] {
+            profile.certificate_path = path;
+            assert!(export(&profile).unwrap_err().to_string().contains(expected));
+        }
+
+        profile.self_signed_certificate = false;
+        profile.certificate_path = Some(missing);
+        let value: Value = serde_json::from_str(&export(&profile).unwrap()).unwrap();
+        assert_eq!(
+            value["outbounds"][0]["tls"],
+            json!({
+                "enabled": true, "server_name": "proxy.example.com", "alpn": ["h2", "http/1.1"],
+                "insecure": false,
+            })
+        );
     }
 
     #[test]
