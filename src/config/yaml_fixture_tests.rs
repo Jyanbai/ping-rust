@@ -198,8 +198,8 @@ fn golden_client_exports_are_semantically_unchanged() {
         let profile = golden_client_profile(profile);
         for (format, label) in FORMATS {
             let key = format!("{}.{label}", profile.name);
-            match client::render_with_tls(&profile, format, EXPORT_SERVER, TlsExport::AllowInsecure)
-            {
+            let tls = TlsExport::from(matches!(format, ClientFormat::Nekobox));
+            match client::render_with_tls(&profile, format, EXPORT_SERVER, tls) {
                 Ok(text) => {
                     assert_eq!(client_export_value(format, &text), golden[&key], "{key}");
                     seen += 1;
@@ -641,9 +641,8 @@ fn derive_yaml_fixtures() {
     for profile in &state.profiles {
         let profile = golden_client_profile(profile);
         for (format, label) in FORMATS {
-            if let Ok(text) =
-                client::render_with_tls(&profile, format, EXPORT_SERVER, TlsExport::AllowInsecure)
-            {
+            let tls = TlsExport::from(matches!(format, ClientFormat::Nekobox));
+            if let Ok(text) = client::render_with_tls(&profile, format, EXPORT_SERVER, tls) {
                 if matches!(format, ClientFormat::ClashMeta) {
                     write(
                         &format!("golden/clients/{}.{label}.yaml", profile.name),

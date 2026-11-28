@@ -33,7 +33,7 @@ pub enum ClientFormat {
     Nekobox,
 }
 
-const SELF_SIGNED_TLS_REFUSAL: &str = "无法固定自签证书，继续导出会使客户端不校验服务器身份；请使用 prs export sing-box … 或改用受信证书";
+const SELF_SIGNED_TLS_REFUSAL: &str = "无法固定自签证书，继续导出会使客户端不校验服务器身份；请使用 prs export clash-meta … 或 prs export sing-box …，或改用受信证书";
 const INSECURE_TLS_WARNING: &str =
     "警告：已允许跳过自签证书校验，客户端不会校验服务器身份，连接可能遭受中间人攻击。";
 
@@ -139,7 +139,7 @@ fn export_profile(
     if let Some(notice) = export_notice(profile, format) {
         let _ = writeln!(stderr, "{notice}");
     }
-    if !matches!(format, ClientFormat::SingBox) {
+    if matches!(format, ClientFormat::Nekobox) {
         tls.warn(profile, stderr);
     }
     Ok(content)
@@ -248,7 +248,6 @@ pub(crate) fn render_with_tls(
             if profile.h2mux.enabled {
                 bail!("当前 Mihomo H2MUX 存在已知兼容问题；请使用 sing-box 导出，或关闭 H2MUX preference 后导出普通 Mihomo 节点");
             }
-            tls.check_profile(profile)?;
             clash_meta(profile, &server)
         }
         ClientFormat::SingBox => sing_box(profile, &server),
@@ -263,7 +262,7 @@ pub(crate) fn render_with_tls(
 }
 
 fn clash_meta(profile: &ManagedProfile, server: &str) -> Result<String> {
-    let proxy = match &profile.credentials {
+    let mut proxy = match &profile.credentials {
         Credentials::VlessSudoku { .. } => bail!(crate::sudoku::UNSUPPORTED),
         Credentials::VlessXhttpReality { .. } => {
             bail!("该客户端不支持 XHTTP，请用分享链接导入 v2rayN 或 Xray")
@@ -317,7 +316,7 @@ fn clash_meta(profile: &ManagedProfile, server: &str) -> Result<String> {
             "password": password,
             "sni": server_name,
             "alpn": alpn_protocols,
-            "skip-cert-verify": profile.self_signed_certificate
+            "skip-cert-verify": false
         }),
         Credentials::Tuic {
             user_id,
@@ -337,7 +336,7 @@ fn clash_meta(profile: &ManagedProfile, server: &str) -> Result<String> {
             "reduce-rtt": zero_rtt_handshake,
             "congestion-controller": "bbr",
             "udp-relay-mode": "native",
-            "skip-cert-verify": profile.self_signed_certificate
+            "skip-cert-verify": false
         }),
         Credentials::Shadowsocks {
             cipher,
@@ -430,7 +429,7 @@ fn clash_meta(profile: &ManagedProfile, server: &str) -> Result<String> {
                 "udp": udp_enabled,
                 "sni": server_name,
                 "alpn": alpn_protocols,
-                "skip-cert-verify": profile.self_signed_certificate
+                "skip-cert-verify": false
             })
         }
         Credentials::VlessTls {
@@ -451,7 +450,7 @@ fn clash_meta(profile: &ManagedProfile, server: &str) -> Result<String> {
                 "servername": server_name,
                 "alpn": alpn_protocols,
                 "client-fingerprint": config::REALITY_FINGERPRINT,
-                "skip-cert-verify": profile.self_signed_certificate,
+                "skip-cert-verify": false,
                 "network": if websocket_path.is_some() { "ws" } else { "tcp" }
             });
             if *vision {
@@ -485,7 +484,7 @@ fn clash_meta(profile: &ManagedProfile, server: &str) -> Result<String> {
             });
             match security {
                 config::TlsSecurity::Tls => {
-                    proxy["skip-cert-verify"] = json!(profile.self_signed_certificate);
+                    proxy["skip-cert-verify"] = json!(false);
                 }
                 config::TlsSecurity::Reality {
                     public_key,
@@ -516,7 +515,7 @@ fn clash_meta(profile: &ManagedProfile, server: &str) -> Result<String> {
             "servername": server_name,
             "alpn": alpn_protocols,
             "client-fingerprint": config::REALITY_FINGERPRINT,
-            "skip-cert-verify": profile.self_signed_certificate,
+            "skip-cert-verify": false,
             "network": "ws",
             "ws-opts": {
                 "path": websocket_path,
@@ -524,15 +523,39 @@ fn clash_meta(profile: &ManagedProfile, server: &str) -> Result<String> {
             }
         }),
     };
+    if self_signed_tls(profile) {
+        proxy["fingerprint"] = json!(clash_meta_certificate_fingerprint(profile)?);
+    }
     crate::yaml::to_string(&json!({ "proxies": [proxy] })).context("生成 Clash Meta YAML 失败")
 }
 
-fn read_self_signed_certificates(profile: &ManagedProfile) -> Result<Vec<CertificateDer<'static>>> {
-    let path = profile
+fn self_signed_certificate_path(profile: &ManagedProfile) -> Result<&Path> {
+    profile
         .certificate_path
-        .as_ref()
-        .filter(|path| Some(*path) != profile.certificate_key_path.as_ref())
-        .context("缺少公有证书路径或路径指向私钥；请检查节点配置中的证书路径")?;
+        .as_deref()
+        .filter(|path| Some(*path) != profile.certificate_key_path.as_deref())
+        .context("缺少公有证书路径或路径指向私钥；请检查节点配置中的证书路径")
+}
+
+fn clash_meta_certificate_fingerprint(profile: &ManagedProfile) -> Result<String> {
+    let path = self_signed_certificate_path(profile)?;
+    let leaf = CertificateDer::pem_file_iter(path)
+        .with_context(|| {
+            format!(
+                "读取自签名公有证书失败：{}；请检查文件和权限",
+                path.display()
+            )
+        })?
+        .next()
+        .transpose()
+        .context("解析自签名公有证书失败；请检查节点引用的 PEM 证书文件")?
+        .context("解析自签名公有证书失败；请检查节点引用的 PEM 文件是否包含证书，而非私钥")?;
+    parse_self_signed_certificate(&leaf)?;
+    Ok(hex::encode(Sha256::digest(leaf.as_ref())))
+}
+
+fn read_self_signed_certificates(profile: &ManagedProfile) -> Result<Vec<CertificateDer<'static>>> {
+    let path = self_signed_certificate_path(profile)?;
     let certificates = CertificateDer::pem_file_iter(path)
         .with_context(|| {
             format!(
@@ -1231,8 +1254,10 @@ mod tests {
         "/tests/fixtures/tls/self-signed.pem"
     );
     const PUBLIC_KEY_PIN: &str = "D/lae0s9n5SmUSmF60tlNBHKv68taHjTkVQ53Wh8yxo=";
+    const CERTIFICATE_PIN: &str =
+        "87dd23dd1434af333a9f0783742f9c6f0adfd61c173b9407d12b816b116f2aa1";
 
-    const TLS_EXPORT_REJECTION: &str = "无法固定自签证书，继续导出会使客户端不校验服务器身份；请使用 prs export sing-box … 或改用受信证书。若明确接受风险，可加 --allow-insecure";
+    const TLS_EXPORT_REJECTION: &str = "无法固定自签证书，继续导出会使客户端不校验服务器身份；请使用 prs export clash-meta … 或 prs export sing-box …，或改用受信证书。若明确接受风险，可加 --allow-insecure";
 
     fn insecure_render(
         profile: &ManagedProfile,
@@ -1247,7 +1272,7 @@ mod tests {
     }
 
     #[test]
-    fn managed_self_signed_tls_rejects_unsafe_formats_by_default() {
+    fn managed_self_signed_tls_pins_safe_formats_and_rejects_unsafe_defaults() {
         let state: config::ManagedState =
             serde_json::from_str(include_str!("../tests/fixtures/yaml/compat/state.json")).unwrap();
         for name in [
@@ -1268,7 +1293,6 @@ mod tests {
             let server = "203.0.113.10";
             for result in [
                 share_uri(&profile, server),
-                render(&profile, ClientFormat::ClashMeta, server),
                 render(&profile, ClientFormat::Nekobox, server),
             ] {
                 assert_eq!(
@@ -1279,40 +1303,64 @@ mod tests {
             }
             let directory = tempfile::tempdir().unwrap();
             let path = directory.path().join("client-config");
-            for (format, legacy) in [
-                (
-                    ClientFormat::ClashMeta,
-                    clash_meta(&profile, server).unwrap(),
-                ),
-                (
+            let legacy = legacy_share_uri(&profile, server).unwrap();
+            std::fs::write(&path, "existing output").unwrap();
+            let mut stderr = Vec::new();
+            let capture = |tls, stderr: &mut Vec<u8>| {
+                export_profile(
+                    &profile,
                     ClientFormat::Nekobox,
-                    legacy_share_uri(&profile, server).unwrap(),
-                ),
-            ] {
-                std::fs::write(&path, "existing output").unwrap();
-                let mut stderr = Vec::new();
-                let capture = |tls, stderr: &mut Vec<u8>| {
-                    export_profile(&profile, format, server, Some(&path), tls, stderr)
-                };
-                assert_eq!(
-                    capture(TlsExport::Verify, &mut stderr)
-                        .unwrap_err()
-                        .to_string(),
-                    TLS_EXPORT_REJECTION
-                );
-                assert_eq!(std::fs::read_to_string(&path).unwrap(), "existing output");
-                assert!(stderr.is_empty());
-                assert_eq!(
-                    capture(TlsExport::AllowInsecure, &mut stderr).unwrap(),
-                    legacy
-                );
-                assert_eq!(std::fs::read_to_string(&path).unwrap(), legacy);
-                assert_eq!(
-                    String::from_utf8(stderr).unwrap(),
-                    format!("{INSECURE_TLS_WARNING}\n")
-                );
-            }
+                    server,
+                    Some(&path),
+                    tls,
+                    stderr,
+                )
+            };
+            assert_eq!(
+                capture(TlsExport::Verify, &mut stderr)
+                    .unwrap_err()
+                    .to_string(),
+                TLS_EXPORT_REJECTION
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "existing output");
+            assert!(stderr.is_empty());
+            assert_eq!(
+                capture(TlsExport::AllowInsecure, &mut stderr).unwrap(),
+                legacy
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), legacy);
+            assert_eq!(stderr, format!("{INSECURE_TLS_WARNING}\n").as_bytes());
+            stderr.clear();
+
             profile.certificate_path = Some(PUBLIC_CERT.into());
+            let capture = |tls, stderr: &mut Vec<u8>| {
+                export_profile(
+                    &profile,
+                    ClientFormat::ClashMeta,
+                    server,
+                    Some(&path),
+                    tls,
+                    stderr,
+                )
+            };
+            let clash = capture(TlsExport::Verify, &mut stderr)
+                .unwrap_or_else(|error| panic!("{name}: {error:#}"));
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), clash);
+            assert!(stderr.is_empty(), "{name}");
+            let pinned: Value = crate::yaml::from_str(&clash).unwrap();
+            assert_eq!(
+                pinned["proxies"][0]["fingerprint"], CERTIFICATE_PIN,
+                "{name}"
+            );
+            assert_eq!(pinned["proxies"][0]["skip-cert-verify"], false, "{name}");
+            assert!(!clash.contains("skip-cert-verify: true"), "{name}");
+            assert_eq!(
+                capture(TlsExport::AllowInsecure, &mut stderr).unwrap(),
+                clash,
+                "{name}"
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), clash);
+            assert!(stderr.is_empty(), "{name}");
             let sing_box = render(&profile, ClientFormat::SingBox, server).unwrap();
             let json: Value = serde_json::from_str(&sing_box).unwrap();
             assert_eq!(
@@ -1321,14 +1369,95 @@ mod tests {
             );
 
             profile.self_signed_certificate = false;
+            profile.certificate_path = Some(directory.path().join("missing.pem"));
             assert!(share_uri(&profile, server).is_ok(), "{name}");
             let clash = render(&profile, ClientFormat::ClashMeta, server).unwrap();
             let value: Value = crate::yaml::from_str(&clash).unwrap();
             assert_eq!(value["proxies"][0]["skip-cert-verify"], false, "{name}");
+            let mut expected = pinned;
+            expected["proxies"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("fingerprint");
+            assert_eq!(value, expected, "{name}");
             assert!(
                 render(&profile, ClientFormat::Nekobox, server).is_ok(),
                 "{name}"
             );
+        }
+    }
+
+    #[test]
+    fn clash_meta_pins_only_the_first_certificate_in_the_pem_chain() {
+        let mut profile = anytls_profile(AnyTlsSecurity::Tls);
+        let directory = tempfile::tempdir().unwrap();
+        let chain = directory.path().join("chain.pem");
+        let alternate = rcgen::generate_simple_self_signed(vec!["example.com".to_owned()]).unwrap();
+        std::fs::write(
+            &chain,
+            format!(
+                "{}\n{}",
+                include_str!("../tests/fixtures/tls/self-signed.pem"),
+                alternate.cert.pem()
+            ),
+        )
+        .unwrap();
+        profile.certificate_path = Some(chain);
+        let clash = render(&profile, ClientFormat::ClashMeta, "example.com").unwrap();
+        let value: Value = crate::yaml::from_str(&clash).unwrap();
+        assert_eq!(value["proxies"][0]["fingerprint"], CERTIFICATE_PIN);
+    }
+
+    #[test]
+    fn clash_meta_rejects_unusable_certificates_without_overwriting_output() {
+        let mut profile = anytls_profile(AnyTlsSecurity::Tls);
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("client.yaml");
+        std::fs::write(&output, "existing output").unwrap();
+        let corrupt = directory.path().join("corrupt.pem");
+        std::fs::write(
+            &corrupt,
+            "-----BEGIN CERTIFICATE-----\nYQ==\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+        let private = directory.path().join("key.pem");
+        std::fs::write(
+            &private,
+            "-----BEGIN PRIVATE KEY-----\nYQ==\n-----END PRIVATE KEY-----\n",
+        )
+        .unwrap();
+        for (certificate, key, expected) in [
+            (None, None, "缺少公有证书路径"),
+            (
+                Some(directory.path().join("missing.pem")),
+                None,
+                "读取自签名公有证书失败",
+            ),
+            (Some(corrupt), None, "解析自签名公有证书失败"),
+            (
+                Some(private.clone()),
+                None,
+                "请检查节点引用的 PEM 文件是否包含证书",
+            ),
+            (Some(private.clone()), Some(private), "路径指向私钥"),
+        ] {
+            profile.certificate_path = certificate;
+            profile.certificate_key_path = key;
+            for tls in [TlsExport::Verify, TlsExport::AllowInsecure] {
+                let mut stderr = Vec::new();
+                let error = export_profile(
+                    &profile,
+                    ClientFormat::ClashMeta,
+                    "example.com",
+                    Some(&output),
+                    tls,
+                    &mut stderr,
+                )
+                .unwrap_err();
+                assert!(error.to_string().contains(expected), "{error:#}");
+                assert_eq!(std::fs::read_to_string(&output).unwrap(), "existing output");
+                assert!(stderr.is_empty());
+            }
         }
     }
 
@@ -1408,6 +1537,12 @@ mod tests {
         assert_eq!(payload["path"], "/vmess");
         assert_eq!(payload["sni"], "vmess.example.com");
         assert_eq!(payload["alpn"], "http/1.1");
+        profile.h2mux.enabled = true;
+        profile.certificate_path = None;
+        let error = render(&profile, ClientFormat::ClashMeta, server).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("当前 Mihomo H2MUX 存在已知兼容问题"));
     }
 
     #[test]
@@ -1695,7 +1830,7 @@ mod tests {
     }
 
     #[test]
-    fn exports_hysteria2_self_signed_pin_only_in_sing_box() {
+    fn exports_hysteria2_with_distinct_certificate_and_public_key_pins() {
         let profile = ManagedProfile {
             h2mux: Default::default(),
             id: Uuid::nil(),
@@ -1712,9 +1847,11 @@ mod tests {
             self_signed_certificate: true,
             naive_certificate_validity: None,
         };
-        let clash = insecure_render(&profile, ClientFormat::ClashMeta, "203.0.113.2").unwrap();
+        let clash = render(&profile, ClientFormat::ClashMeta, "203.0.113.2").unwrap();
         let sing_box = render(&profile, ClientFormat::SingBox, "203.0.113.2").unwrap();
-        assert!(clash.contains("skip-cert-verify: true"));
+        let clash: Value = crate::yaml::from_str(&clash).unwrap();
+        assert_eq!(clash["proxies"][0]["fingerprint"], CERTIFICATE_PIN);
+        assert_eq!(clash["proxies"][0]["skip-cert-verify"], false);
         let sing_box: Value = serde_json::from_str(&sing_box).unwrap();
         assert_eq!(
             sing_box["outbounds"][0]["tls"],

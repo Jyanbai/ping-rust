@@ -1,10 +1,11 @@
 proxies:
 - alpn:
   - h3
+  fingerprint: 87dd23dd1434af333a9f0783742f9c6f0adfd61c173b9407d12b816b116f2aa1
   name: golden-hysteria2
   password: pwDkRYFmt6HOv4jQXELszg7uBIpwDKRA
   port: 20001
   server: 203.0.113.10
-  skip-cert-verify: true
+  skip-cert-verify: false
   sni: www.cloudflare.com
   type: hysteria2

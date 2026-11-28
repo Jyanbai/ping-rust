@@ -11,7 +11,7 @@ set binary [lindex $argv 0]
 set flow [lindex $argv 1]
 set mode [lindex $argv 2]
 set port [lindex $argv 3]
-set tls_refusal {无法固定自签证书，继续导出会使客户端不校验服务器身份；请使用 prs export sing-box … 或改用受信证书}
+set tls_refusal {无法固定自签证书，继续导出会使客户端不校验服务器身份；请使用 prs export clash-meta … 或 prs export sing-box …，或改用受信证书}
 if {$flow ni {quick advanced} || $mode ni {1 2}} {
     puts stderr "invalid AnyTLS menu flow or mode"
     exit 2
