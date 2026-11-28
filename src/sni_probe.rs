@@ -231,9 +231,7 @@ async fn probe_defaults() -> Vec<ProbeResult> {
 
 pub(crate) async fn resolve_for_menu(explicit: Option<String>) -> Result<String> {
     if let Some(domain) = explicit {
-        if let Err(reason) = check(&domain).await.outcome {
-            bail!("SNI {domain} 检测失败（{reason}）");
-        }
+        check_manual(&domain).await;
         return Ok(domain);
     }
     finish(
@@ -523,6 +521,15 @@ mod tests {
             assert!(warning.contains(&stage.to_string()));
             assert!(warning.contains("仍使用手动指定值"));
         }
+    }
+
+    #[tokio::test]
+    async fn menu_keeps_manual_sni_when_tls_probe_fails() {
+        let domain = "127.0.0.1".to_owned();
+        assert_eq!(
+            resolve_for_menu(Some(domain.clone())).await.unwrap(),
+            domain
+        );
     }
 
     #[tokio::test]

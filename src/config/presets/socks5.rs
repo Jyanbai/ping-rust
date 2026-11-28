@@ -3,7 +3,7 @@ use std::path::Path;
 use anyhow::Result;
 use uuid::Uuid;
 
-use super::super::{socks5_address, Socks5Listen};
+use super::super::{socks5_address, socks5_listen_host, Socks5Listen};
 use super::{
     super::{
         direct_rules, generated_password, generated_socks5_username, Credentials, ServerConfig,
@@ -17,19 +17,10 @@ pub(super) fn generate(
     _parent: &Path,
     _profile_id: Uuid,
 ) -> Result<GeneratedPreset> {
-    let host = if request.options.socks5_no_auth {
-        if request.server_address.as_deref().is_some_and(|host| {
-            host.trim_matches(['[', ']'])
-                .parse::<std::net::Ipv6Addr>()
-                .is_ok()
-        }) {
-            "::1"
-        } else {
-            "127.0.0.1"
-        }
-    } else {
-        "0.0.0.0"
-    };
+    let host = socks5_listen_host(
+        request.options.socks5_no_auth,
+        request.server_address.as_deref(),
+    );
     let (username, password) = if request.options.socks5_no_auth {
         (None, None)
     } else {

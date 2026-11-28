@@ -1940,7 +1940,7 @@ async fn deploy_fast_config(
 
 async fn ensure_menu_shoes() -> Result<()> {
     loop {
-        match cli::ensure_shoes_for_add(true).await {
+        match cli::ensure_shoes_binary_for_menu_add().await {
             Err(error)
                 if io::stdin().is_terminal()
                     && !is_step_exit(&error)
@@ -2030,10 +2030,10 @@ fn prompt_named_credentials(
     Ok(((!name.is_empty()).then_some(name), password))
 }
 
-fn prompt_listen_port(sockets: (bool, bool)) -> Result<u16> {
+fn prompt_listen_port(host: &str, sockets: (bool, bool)) -> Result<u16> {
     input::validated_text("监听端口", Some("443"), false, |value| {
         let port = value.trim().parse().context("请输入 1 到 65535 的端口")?;
-        fast_add::ensure_port_available(sockets, port, None)?;
+        fast_add::ensure_port_available_at(host, sockets, port, None)?;
         Ok(port)
     })
 }
@@ -2042,9 +2042,24 @@ async fn advanced_add_protocol(protocol: Protocol) -> Result<()> {
     let name = input::checked_text("配置名称", Some(protocol.slug()), false, |name| {
         config::validate_profile_name(name, &config::load_state()?.profiles, None)
     })?;
-    let (tcp, udp) = protocol.required_sockets();
-    let mut port = prompt_listen_port((tcp, udp && protocol != Protocol::Shadowsocks))?;
     let mut options = GenerationOptions::default();
+    let mut server_address = None;
+    let listen_host = if protocol == Protocol::Socks5 {
+        let Some(authentication) = select_numbered("认证", &["用户名 + 密码", "无认证"])?
+        else {
+            return Ok(());
+        };
+        options.socks5_no_auth = authentication != 0;
+        if options.socks5_no_auth {
+            server_address = Some(resolve_menu_server_address().await?);
+        }
+        config::socks5_listen_host(options.socks5_no_auth, server_address.as_deref())
+    } else {
+        "0.0.0.0"
+    };
+    let (tcp, udp) = protocol.required_sockets();
+    let mut port =
+        prompt_listen_port(listen_host, (tcp, udp && protocol != Protocol::Shadowsocks))?;
     if protocol == Protocol::VlessEnc {
         let Some(selected) = prompt_vless_enc_options()? else {
             return Ok(());
@@ -2073,7 +2088,7 @@ async fn advanced_add_protocol(protocol: Protocol) -> Result<()> {
                 (mode == 0).then(|| fast_add::ensure_port_available((false, true), port, None))
             {
                 eprintln!("错误！{error:#}");
-                port = prompt_listen_port((true, true))?;
+                port = prompt_listen_port(listen_host, (true, true))?;
             }
             let ciphers = if options.shadowsocks_mode == config::ShadowsocksMode::ShadowTlsV3 {
                 vec![
@@ -2131,15 +2146,9 @@ async fn advanced_add_protocol(protocol: Protocol) -> Result<()> {
         options.udp_enabled = input::confirm("启用 Snell UDP-over-TCP？", true)?;
     }
     if matches!(protocol, Protocol::Socks5) {
-        let Some(authentication) = select_numbered("认证", &["用户名 + 密码", "无认证"])?
-        else {
-            return Ok(());
-        };
-        if authentication == 0 {
+        if !options.socks5_no_auth {
             (options.socks5_username, options.socks5_password) =
                 prompt_named_credentials("SOCKS5", config::validate_socks5_component)?;
-        } else {
-            options.socks5_no_auth = true;
         }
         options.udp_enabled = input::confirm("启用 UDP ASSOCIATE？", true)?;
     }
@@ -2258,7 +2267,10 @@ async fn advanced_add_protocol(protocol: Protocol) -> Result<()> {
         (None, None)
     };
 
-    let server_address = resolve_menu_server_address().await?;
+    let server_address = match server_address {
+        Some(address) => address,
+        None => resolve_menu_server_address().await?,
+    };
     ensure_menu_shoes().await?;
     let result = deployment::generate_and_activate(GenerationRequest {
         name: Some(name),

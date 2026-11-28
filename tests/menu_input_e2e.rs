@@ -3,14 +3,14 @@
 //!
 //! 需要 Linux、root、expect，以及 /etc/shoes 下至少一份已初始化且节点文件齐全的
 //! 当前版本受管配置（使用专用测试机），含一个绑定 IPv4 通配地址的 SOCKS5 节点。
-//! 加固回归在 shoes 停止时临时写入旧版无认证格式并恢复。测试只发送取消或无效输入，
-//! 无需 systemd，也不访问网络。若需迁移节点文件则先在测试机
-//! 完成迁移（那一步需要 shoes）。测试前后逐字节比较聚合配置、state 和节点文件。
+//! 取消和加固回归逐字节比较聚合配置、state 和节点文件；加固回归要求 shoes 停止。
+//! 最后的 CSV 重试回归需要外网和 systemd，会添加 Reality 节点并启动 shoes。
 #![cfg(target_os = "linux")]
 
 use std::{
     collections::BTreeMap,
     fs,
+    net::TcpListener,
     path::Path,
     process::{Command, Stdio},
 };
@@ -176,5 +176,42 @@ fn menu_input_returns_retries_defaults_to_no_and_handles_eof() {
     assert!(
         snapshot(directory) == before,
         "旧版 SOCKS5 测试文件未完整恢复"
+    );
+
+    let port = loop {
+        let listener = TcpListener::bind(("0.0.0.0", 0)).expect("查找 Reality 测试端口");
+        let port = listener.local_addr().unwrap().port();
+        if profiles.iter().all(|profile| profile["port"] != port) {
+            break port;
+        }
+    };
+    let output = Command::new("expect")
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/menu_input.exp"))
+        .arg(env!("CARGO_BIN_EXE_ping-rust"))
+        .arg("--sni-retry")
+        .arg(port.to_string())
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("运行 SNI CSV 重试终端回归");
+    assert!(
+        output.status.success(),
+        "SNI CSV 重试终端回归失败：{}\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(Command::new("systemctl")
+        .args(["stop", "shoes.service"])
+        .status()
+        .expect("停止测试 shoes 服务")
+        .success());
+    let state: Value =
+        serde_json::from_slice(&fs::read(directory.join("ping-rust-state.json")).unwrap()).unwrap();
+    assert!(
+        state["profiles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|profile| profile["name"] == "menu-sni-retry" && profile["port"] == port),
+        "CSV 失败后改选默认名单没有添加节点"
     );
 }

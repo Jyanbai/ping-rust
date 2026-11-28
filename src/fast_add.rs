@@ -307,6 +307,15 @@ fn select_port_excluding(
 }
 
 pub(crate) fn ensure_port_available(
+    sockets: (bool, bool),
+    port: u16,
+    excluded_profile: Option<uuid::Uuid>,
+) -> Result<()> {
+    ensure_port_available_at("0.0.0.0", sockets, port, excluded_profile)
+}
+
+pub(crate) fn ensure_port_available_at(
+    host: &str,
     (tcp, udp): (bool, bool),
     port: u16,
     excluded_profile: Option<uuid::Uuid>,
@@ -326,7 +335,7 @@ pub(crate) fn ensure_port_available(
     // socket activation 的 LISTEN_FDS，因此这里的检查只能用于尽早报错。
     // 检查结束到 shoes 绑定之间仍可能发生竞争；激活失败由 deployment
     // 的配置与服务快照回滚兜底。
-    let status = operations::check_port(port, tcp, udp);
+    let status = operations::check_port_at(host, port, tcp, udp);
     if status.tcp_available.is_some_and(|result| result.is_err()) {
         bail!("TCP 端口 {port} 已被占用或无法绑定");
     }

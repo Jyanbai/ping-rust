@@ -36,7 +36,9 @@ mod routing;
 mod schema;
 mod socks5;
 pub use socks5::Socks5Listen;
-pub(crate) use socks5::{secure as secure_socks5, SecureMode as Socks5SecureMode};
+pub(crate) use socks5::{
+    secure as secure_socks5, socks5_listen_host, SecureMode as Socks5SecureMode,
+};
 use socks5::{socks5_address, socks5_is_loopback};
 mod state;
 mod transaction;
