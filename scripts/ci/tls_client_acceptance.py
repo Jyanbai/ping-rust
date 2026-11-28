@@ -221,7 +221,8 @@ def sing_box_rejection(outbound, client_log, curl_error, journal=""):
         return "credentials"
     if outbound == "tuic":
         if (re.search(r"application error 0x[0-9a-f]+ \(remote\): auth failed[ \t]*$", client_log, re.I | re.M)
-                or re.search(r"Connection ended with error: (?:Invalid UUID|Authentication token mismatch)[ \t]*$",
+                or re.search(r"Connection ended with error: "
+                             r"(?:Invalid UUID|Authentication token mismatch|incorrect credentials)[ \t]*$",
                              journal, re.M)):
             return "credentials"
     expected = TCP_AUTH_ERRORS.get(outbound)

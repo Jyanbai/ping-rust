@@ -158,6 +158,19 @@ class TlsClientAcceptanceTests(unittest.TestCase):
             "tuic", "", "", "Connection ended with error: authentication timeout",
         ))
 
+    def test_tuic_recognizes_unified_shoes_credential_rejection(self):
+        journal = "Connection ended with error: incorrect credentials"
+        for outbound, trace, evidence, expected in (
+            ("tuic", "read: EOF", journal, (0, "acceptance")),
+            ("tuic", "read: EOF", journal + " in configuration", (1, "rejection-unconfirmed")),
+            ("tuic", "TLS handshake: EOF", journal, (1, "rejection-unconfirmed")),
+            ("trojan", "read: EOF", journal, (1, "rejection-unconfirmed")),
+        ):
+            with self.subTest(outbound=outbound, trace=trace, evidence=evidence):
+                rejection = acceptance.sing_box_rejection(outbound, trace, "", evidence)
+                observed = acceptance.Observation(curl_code=52, outbound_attempt=True, rejection=rejection)
+                self.assertEqual(acceptance.verdict(CASES[1], observed), expected)
+
     def test_backend_observations_cannot_bypass_shared_verdict(self):
         rejected = acceptance.Observation(curl_code=52, outbound_attempt=True, rejection="credentials")
         for changes, phase in (
