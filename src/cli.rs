@@ -11,7 +11,7 @@ use qrcode::{render::unicode, QrCode};
 use uuid::Uuid;
 
 use crate::{
-    client::{self, ClientFormat},
+    client::{self, ClientFormat, TlsExport},
     config::{
         self, AnyTlsMode, AnyTlsUser, GenerationOptions, GenerationRequest, Protocol,
         ShadowsocksCipher, ShadowsocksMode, SnellCipher,
@@ -110,6 +110,9 @@ pub enum Command {
         /// 覆盖保存的服务器公网 IP 或域名
         #[arg(long)]
         server_address: Option<String>,
+        /// 允许输出不校验自签 TLS 服务器身份的链接
+        #[arg(long)]
+        allow_insecure: bool,
     },
     /// 显示配置分享链接的终端二维码
     Qr {
@@ -118,6 +121,9 @@ pub enum Command {
         /// 覆盖保存的服务器公网 IP 或域名
         #[arg(long)]
         server_address: Option<String>,
+        /// 允许输出不校验自签 TLS 服务器身份的二维码
+        #[arg(long)]
+        allow_insecure: bool,
     },
     /// 删除一个由 ping-rust 管理的配置
     Delete {
@@ -138,6 +144,9 @@ pub enum Command {
         server: String,
         #[arg(long)]
         output: Option<PathBuf>,
+        /// 允许导出不校验自签 TLS 服务器身份的客户端配置
+        #[arg(long)]
+        allow_insecure: bool,
     },
     /// 查看服务日志
     Logs {
@@ -234,6 +243,9 @@ pub struct AddArgs {
     /// stdout 只输出一行分享 URI（Snell v3 无标准 URI，不支持）
     #[arg(long)]
     pub plain: bool,
+    /// 允许输出不校验自签 TLS 服务器身份的分享链接
+    #[arg(long)]
+    pub allow_insecure: bool,
     /// 显式创建 Shadowsocks 2022 + ShadowTLS v3（TCP-only）
     #[arg(long)]
     pub shadowtls: bool,
@@ -638,11 +650,23 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Url {
             profile,
             server_address,
-        } => print_saved_url(profile.as_deref(), server_address.as_deref()),
+            allow_insecure,
+        } => print_saved_share(
+            profile.as_deref(),
+            server_address.as_deref(),
+            allow_insecure.into(),
+            false,
+        ),
         Command::Qr {
             profile,
             server_address,
-        } => print_saved_qr(profile.as_deref(), server_address.as_deref()),
+            allow_insecure,
+        } => print_saved_share(
+            profile.as_deref(),
+            server_address.as_deref(),
+            allow_insecure.into(),
+            true,
+        ),
         Command::Delete { profile, yes } => {
             if !yes {
                 anyhow::bail!("删除配置需要显式添加 --yes；也可使用交互菜单确认");
@@ -656,8 +680,15 @@ pub async fn run(cli: Cli) -> Result<()> {
             profile,
             server,
             output,
+            allow_insecure,
         } => {
-            let content = client::export(profile, format, &server, output.as_deref())?;
+            let content = client::export(
+                profile,
+                format,
+                &server,
+                output.as_deref(),
+                allow_insecure.into(),
+            )?;
             if let Some(path) = output {
                 println!("客户端配置已写入：{}", path.display());
             } else {
@@ -918,9 +949,15 @@ async fn run_add_inner(mut args: AddArgs) -> Result<()> {
             bail!("NaiveProxy --self-signed cannot be combined with --cert/--key");
         }
     }
-    ensure_shoes_for_add(args.yes).await?;
-    let result = fast_add::execute(fast_add::AddRequest {
-        anytls_mode: AnyTlsMode::default(),
+    let tls = TlsExport::from(args.allow_insecure);
+    let anytls_mode = AnyTlsMode::default();
+    let plain_tls = args.plain && client::uses_ordinary_tls(args.protocol, anytls_mode);
+    if plain_tls {
+        tls.check(args.cert.is_none())?;
+    }
+    ensure_shoes_for_add_inner(args.yes, false, !plain_tls).await?;
+    let request = fast_add::AddRequest {
+        anytls_mode,
         interactive: true,
         vless_enc: args.vless_enc,
         xhttp_path: args.xhttp_path,
@@ -953,19 +990,34 @@ async fn run_add_inner(mut args: AddArgs) -> Result<()> {
         },
         naive_padding: args.padding || !args.no_padding,
         naive_fallback: args.fallback,
-    })
-    .await?;
+    };
+    let result = fast_add::execute_with_tls(request, tls).await?;
     if args.plain {
-        println!(
-            "{}",
-            result
-                .share_uri
-                .as_deref()
-                .context("该协议没有标准分享 URI")?
+        return write_plain_add_uri(
+            &result.generation.profile,
+            result.share_uri,
+            tls,
+            io::stdout().lock(),
+            io::stderr().lock(),
         );
-        return Ok(());
+    }
+    if matches!(&result.share_uri, Ok(Some(_))) {
+        tls.warn(&result.generation.profile, io::stderr().lock());
     }
     print_add_result(&result);
+    Ok(())
+}
+
+fn write_plain_add_uri(
+    profile: &config::ManagedProfile,
+    uri: Result<Option<String>>,
+    tls: TlsExport,
+    mut stdout: impl io::Write,
+    stderr: impl io::Write,
+) -> Result<()> {
+    let uri = uri?.context("该协议没有标准分享 URI")?;
+    tls.warn(profile, stderr);
+    writeln!(stdout, "{uri}")?;
     Ok(())
 }
 
@@ -1073,7 +1125,21 @@ fn bootstrap_required(config: &Path, state: &Path) -> bool {
 pub(crate) fn print_add_result(result: &fast_add::AddResult) {
     let profile = &result.generation.profile;
     println!("{}", "部署成功，shoes 服务已启动。".green().bold());
-    print_profile_details_with_qr(profile, result.share_uri.as_deref());
+    let (uri, notice) = add_share_output(&result.share_uri);
+    print_profile_details_with_qr(profile, uri);
+    if let Some(notice) = notice {
+        println!("{notice}");
+    }
+}
+
+fn add_share_output(share_uri: &Result<Option<String>>) -> (Option<&str>, Option<String>) {
+    match share_uri {
+        Ok(uri) => (uri.as_deref(), None),
+        Err(error) => (
+            None,
+            Some(format!("节点已部署，但未生成分享链接：{error:#}")),
+        ),
+    }
 }
 
 pub(crate) fn print_profile_details_with_qr(
@@ -1090,6 +1156,14 @@ pub(crate) fn print_profile_details_with_qr(
 }
 
 fn profile_details_lines(profile: &config::ManagedProfile, share_uri: Option<&str>) -> Vec<String> {
+    let insecure_setting = || {
+        (!profile.self_signed_certificate || share_uri.is_some()).then(|| {
+            format!(
+                "跳过证书验证 (allowInsecure) = {}",
+                profile.self_signed_certificate
+            )
+        })
+    };
     let mut lines = vec![format!(
         "\n-------------- {} -------------",
         profile.config_file_name()
@@ -1183,10 +1257,7 @@ fn profile_details_lines(profile: &config::ManagedProfile, share_uri: Option<&st
                 alpn_protocols.join(",")
             ));
             lines.push(format!("SNI (serverName)        = {server_name}"));
-            lines.push(format!(
-                "跳过证书验证 (allowInsecure) = {}",
-                profile.self_signed_certificate
-            ));
+            lines.extend(insecure_setting());
         }
         config::Credentials::Tuic {
             user_id,
@@ -1206,10 +1277,7 @@ fn profile_details_lines(profile: &config::ManagedProfile, share_uri: Option<&st
                 alpn_protocols.join(",")
             ));
             lines.push(format!("SNI (serverName)        = {server_name}"));
-            lines.push(format!(
-                "跳过证书验证 (allowInsecure) = {}",
-                profile.self_signed_certificate
-            ));
+            lines.extend(insecure_setting());
             lines.push("拥塞控制算法 (congestion_control) = bbr".to_owned());
             lines.push(format!("0-RTT                   = {zero_rtt_handshake}"));
         }
@@ -1341,10 +1409,7 @@ fn profile_details_lines(profile: &config::ManagedProfile, share_uri: Option<&st
             match security {
                 config::AnyTlsSecurity::Tls => {
                     lines.push("传输层安全 (TLS)        = tls".to_owned());
-                    lines.push(format!(
-                        "跳过证书验证 (allowInsecure) = {}",
-                        profile.self_signed_certificate
-                    ));
+                    lines.extend(insecure_setting());
                 }
                 config::AnyTlsSecurity::Reality {
                     public_key,
@@ -1513,19 +1578,20 @@ pub(crate) fn share_uri_with_qr_text(uri: &str) -> Result<String> {
 }
 
 pub(crate) async fn ensure_shoes_for_add(yes: bool) -> Result<()> {
-    ensure_shoes_for_add_inner(yes, false).await
+    ensure_shoes_for_add_inner(yes, false, true).await
 }
 
 pub(crate) async fn ensure_shoes_binary_for_menu_add() -> Result<()> {
-    ensure_shoes_for_add_inner(true, true).await
+    ensure_shoes_for_add_inner(true, true, true).await
 }
 
-async fn ensure_shoes_for_add_inner(yes: bool, defer_unit: bool) -> Result<()> {
+async fn ensure_shoes_for_add_inner(yes: bool, defer_unit: bool, interactive: bool) -> Result<()> {
     if Path::new(crate::utils::SHOES_BIN).is_file() {
         return Ok(());
     }
     let approved = yes
-        || (io::stdin().is_terminal()
+        || (interactive
+            && io::stdin().is_terminal()
             && input::confirm(
                 "shoes 尚未安装，是否从 GitHub Release 自动安装并继续？",
                 true,
@@ -1781,12 +1847,14 @@ pub async fn show_info(selector: Option<&str>) -> Result<()> {
                     );
                     println!("  传输加密：无");
                 }
-                if let Some(server) = profile
+                let server = profile
                     .socks5_loopback()
-                    .or(profile.server_address.as_deref())
-                {
+                    .or(profile.server_address.as_deref());
+                if let Some(server) = server {
                     println!("  客户端地址：{server}");
-                    match client::share_uri(profile, server) {
+                }
+                if server.is_some() || client::self_signed_tls(profile) {
+                    match client::stored_share_uri(profile, None) {
                         Ok(uri) => println!("  URL：{uri}"),
                         Err(error) => println!("  URL：无法生成（{error}）"),
                     }
@@ -1799,27 +1867,52 @@ pub async fn show_info(selector: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn print_saved_url(selector: Option<&str>, server_address: Option<&str>) -> Result<()> {
+fn print_saved_share(
+    selector: Option<&str>,
+    server_address: Option<&str>,
+    tls: TlsExport,
+    qr: bool,
+) -> Result<()> {
     let state = config::load_state()?;
     let profile = client::select_profile(&state.profiles, selector)?;
-    println!("{}", client::stored_share_uri(profile, server_address)?);
-    if profile.h2mux.enabled {
-        eprintln!("提示：标准 URI 不包含 H2MUX 客户端偏好；此链接仍可用于普通连接。");
-    }
-    Ok(())
+    write_saved_share(
+        profile,
+        server_address,
+        tls,
+        qr,
+        io::stdout().lock(),
+        io::stderr().lock(),
+    )
 }
 
-fn print_saved_qr(selector: Option<&str>, server_address: Option<&str>) -> Result<()> {
-    let state = config::load_state()?;
-    let profile = client::select_profile(&state.profiles, selector)?;
-    let uri = client::stored_share_uri(profile, server_address)?;
-    let (output, error) = terminal_qr_or_url_text(&uri);
-    println!("{output}");
+fn write_saved_share(
+    profile: &config::ManagedProfile,
+    server_address: Option<&str>,
+    tls: TlsExport,
+    qr: bool,
+    mut stdout: impl io::Write,
+    mut stderr: impl io::Write,
+) -> Result<()> {
+    let uri = client::stored_share_uri_with_tls(profile, server_address, tls)?;
+    tls.warn(profile, &mut stderr);
+    let (output, error) = if qr {
+        terminal_qr_or_url_text(&uri)
+    } else {
+        (uri, None)
+    };
+    writeln!(stdout, "{output}")?;
     if profile.h2mux.enabled {
-        eprintln!("提示：二维码不包含 H2MUX 客户端偏好；此链接仍可用于普通连接。");
+        let kind = if qr { "二维码" } else { "标准 URI" };
+        let _ = writeln!(
+            stderr,
+            "提示：{kind} 不包含 H2MUX 客户端偏好；此链接仍可用于普通连接。"
+        );
     }
     if let Some(error) = error {
-        eprintln!("二维码生成失败：{error}；已改为输出原始 URL，可直接复制。");
+        let _ = writeln!(
+            stderr,
+            "二维码生成失败：{error}；已改为输出原始 URL，可直接复制。"
+        );
     }
     Ok(())
 }
@@ -2239,6 +2332,109 @@ mod tests {
         assert!(super::terminal_qr_text(&"x".repeat(1201)).is_err());
     }
     use super::*;
+
+    #[tokio::test]
+    async fn self_signed_add_plain_refuses_before_install_or_deploy() {
+        for protocol in [
+            "trojan-tls",
+            "vless-tls-vision",
+            "vless-ws-tls",
+            "vmess-ws-tls",
+            "hysteria2",
+            "tuic",
+            "anytls",
+        ] {
+            let cli = Cli::try_parse_from([
+                "prs",
+                "add",
+                protocol,
+                "--plain",
+                "--server-address",
+                "invalid/address",
+            ])
+            .unwrap();
+            let Some(Command::Add(args)) = cli.command else {
+                panic!("expected add command");
+            };
+            assert_eq!(run_add(*args).await.unwrap_err().to_string(),
+                "无法固定自签证书，继续导出会使客户端不校验服务器身份；请使用 prs export sing-box … 或改用受信证书。若明确接受风险，可加 --allow-insecure", "{protocol}");
+        }
+    }
+
+    #[test]
+    fn self_signed_cli_outputs_keep_warnings_off_stdout() {
+        let state: config::ManagedState =
+            serde_json::from_str(include_str!("../tests/fixtures/yaml/compat/state.json")).unwrap();
+        let profile = client::select_profile(&state.profiles, Some("golden-hysteria2")).unwrap();
+        assert!(!profile_details_text(profile, None).contains("allowInsecure"));
+        let server = "203.0.113.10";
+        let expected = serde_json::from_str::<serde_json::Value>(include_str!(
+            "../tests/fixtures/yaml/golden/clients.json"
+        ))
+        .unwrap();
+        let legacy = expected["golden-hysteria2.nekobox"].as_str().unwrap();
+        let warning =
+            "警告：已允许跳过自签证书校验，客户端不会校验服务器身份，连接可能遭受中间人攻击。\n";
+        for (command, qr) in [("url", false), ("qr", true)] {
+            let cli = Cli::try_parse_from(["prs", command, "--allow-insecure"]).unwrap();
+            let allow = match cli.command.unwrap() {
+                Command::Url { allow_insecure, .. } | Command::Qr { allow_insecure, .. } => {
+                    allow_insecure
+                }
+                _ => panic!("expected URL or QR command"),
+            };
+            let capture = |tls| {
+                let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+                let result =
+                    write_saved_share(profile, Some(server), tls, qr, &mut stdout, &mut stderr);
+                (result, stdout, stderr)
+            };
+            let (result, stdout, stderr) = capture(TlsExport::Verify);
+            assert!(stdout.is_empty() && stderr.is_empty());
+            let denied = Err(result.unwrap_err());
+            let (uri, notice) = add_share_output(&denied);
+            assert!(uri.is_none());
+            assert!(notice
+                .unwrap()
+                .starts_with("节点已部署，但未生成分享链接：无法固定自签证书"));
+            let (result, stdout, stderr) = capture(allow.into());
+            result.unwrap();
+            let content = if qr {
+                terminal_qr_text(legacy).unwrap()
+            } else {
+                legacy.to_owned()
+            };
+            assert_eq!(stdout, format!("{content}\n").as_bytes());
+            assert_eq!(stderr, warning.as_bytes());
+        }
+        assert!(matches!(
+            Cli::try_parse_from([
+                "prs",
+                "export",
+                "clash-meta",
+                "--server",
+                server,
+                "--allow-insecure"
+            ])
+            .unwrap()
+            .command,
+            Some(Command::Export {
+                allow_insecure: true,
+                ..
+            })
+        ));
+        let cli = Cli::try_parse_from(["prs", "add", "hysteria2", "--plain", "--allow-insecure"])
+            .unwrap();
+        let Some(Command::Add(args)) = cli.command else {
+            panic!("expected add command")
+        };
+        let tls = TlsExport::from(args.allow_insecure);
+        let uri = client::share_uri_with_tls(profile, server, tls).map(Some);
+        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+        write_plain_add_uri(profile, uri, tls, &mut stdout, &mut stderr).unwrap();
+        assert_eq!(stdout, format!("{legacy}\n").as_bytes());
+        assert_eq!(stderr, warning.as_bytes());
+    }
 
     #[test]
     fn version_output_includes_git_commit() {
@@ -2795,7 +2991,9 @@ mod tests {
             self_signed_certificate: true,
             naive_certificate_validity: None,
         };
-        let hysteria2_uri = client::share_uri(&hysteria2, "203.0.113.8").unwrap();
+        let hysteria2_uri =
+            client::share_uri_with_tls(&hysteria2, "203.0.113.8", TlsExport::AllowInsecure)
+                .unwrap();
         let hysteria2_output = profile_details_text(&hysteria2, Some(&hysteria2_uri));
         for expected in [
             "协议 (protocol)         = hysteria2",
@@ -2825,7 +3023,8 @@ mod tests {
             self_signed_certificate: true,
             naive_certificate_validity: None,
         };
-        let tuic_uri = client::share_uri(&tuic, "203.0.113.8").unwrap();
+        let tuic_uri =
+            client::share_uri_with_tls(&tuic, "203.0.113.8", TlsExport::AllowInsecure).unwrap();
         let tuic_output = profile_details_text(&tuic, Some(&tuic_uri));
         for expected in [
             "协议 (protocol)         = tuic",
@@ -2858,7 +3057,8 @@ mod tests {
             self_signed_certificate: true,
             naive_certificate_validity: None,
         };
-        let anytls_uri = client::share_uri(&anytls, "203.0.113.8").unwrap();
+        let anytls_uri =
+            client::share_uri_with_tls(&anytls, "203.0.113.8", TlsExport::AllowInsecure).unwrap();
         let anytls_output = profile_details_text(&anytls, Some(&anytls_uri));
         for expected in [
             "协议 (protocol)         = anytls",

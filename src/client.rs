@@ -1,4 +1,8 @@
-use std::{net::IpAddr, path::Path};
+use std::{
+    io::{self, Write},
+    net::IpAddr,
+    path::Path,
+};
 
 use anyhow::{bail, Context, Result};
 use base64::{
@@ -29,11 +33,83 @@ pub enum ClientFormat {
     Nekobox,
 }
 
+const SELF_SIGNED_TLS_REFUSAL: &str = "无法固定自签证书，继续导出会使客户端不校验服务器身份；请使用 prs export sing-box … 或改用受信证书";
+const INSECURE_TLS_WARNING: &str =
+    "警告：已允许跳过自签证书校验，客户端不会校验服务器身份，连接可能遭受中间人攻击。";
+
+#[derive(Clone, Copy)]
+pub(crate) enum TlsExport {
+    Verify,
+    AllowInsecure,
+    Menu,
+}
+
+impl From<bool> for TlsExport {
+    fn from(allow_insecure: bool) -> Self {
+        if allow_insecure {
+            Self::AllowInsecure
+        } else {
+            Self::Verify
+        }
+    }
+}
+
+impl TlsExport {
+    pub(crate) fn check(self, needs_opt_in: bool) -> Result<()> {
+        if needs_opt_in {
+            match self {
+                Self::Verify => {
+                    bail!("{SELF_SIGNED_TLS_REFUSAL}。若明确接受风险，可加 --allow-insecure")
+                }
+                Self::Menu => bail!(SELF_SIGNED_TLS_REFUSAL),
+                Self::AllowInsecure => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn check_profile(self, profile: &ManagedProfile) -> Result<()> {
+        let self_signed = self_signed_tls(profile);
+        if self_signed {
+            if let Credentials::AnyTls { users, .. } = &profile.credentials {
+                single_anytls_password(users)?;
+            }
+        }
+        self.check(self_signed)
+    }
+
+    pub(crate) fn warn(self, profile: &ManagedProfile, mut stderr: impl Write) {
+        if matches!(self, Self::AllowInsecure) && self_signed_tls(profile) {
+            let _ = writeln!(stderr, "{INSECURE_TLS_WARNING}");
+        }
+    }
+}
+
+pub(crate) fn uses_ordinary_tls(protocol: config::Protocol, mode: config::AnyTlsMode) -> bool {
+    protocol != config::Protocol::NaiveProxy && protocol.requires_certificate(mode)
+}
+
+pub(crate) fn self_signed_tls(profile: &ManagedProfile) -> bool {
+    let mode = if matches!(
+        profile.credentials,
+        Credentials::AnyTls {
+            security: config::AnyTlsSecurity::Reality { .. },
+            ..
+        }
+    ) {
+        config::AnyTlsMode::Reality
+    } else {
+        config::AnyTlsMode::Tls
+    };
+    profile.self_signed_certificate && uses_ordinary_tls(profile.protocol(), mode)
+}
+
 pub fn export(
     profile_id: Option<Uuid>,
     format: ClientFormat,
     server: &str,
     output: Option<&Path>,
+    tls: TlsExport,
 ) -> Result<String> {
     let state = config::load_state()?;
     let profile = match profile_id {
@@ -45,12 +121,26 @@ pub fn export(
         None if state.profiles.len() == 1 => &state.profiles[0],
         None => bail!("存在多个配置，请用 --profile <UUID> 指定导出对象"),
     };
-    let content = render(profile, format, server)?;
-    if let Some(notice) = export_notice(profile, format) {
-        eprintln!("{notice}");
-    }
+    export_profile(profile, format, server, output, tls, io::stderr().lock())
+}
+
+fn export_profile(
+    profile: &ManagedProfile,
+    format: ClientFormat,
+    server: &str,
+    output: Option<&Path>,
+    tls: TlsExport,
+    mut stderr: impl Write,
+) -> Result<String> {
+    let content = render_with_tls(profile, format, server, tls)?;
     if let Some(path) = output {
         utils::atomic_write(path, content.as_bytes(), 0o600)?;
+    }
+    if let Some(notice) = export_notice(profile, format) {
+        let _ = writeln!(stderr, "{notice}");
+    }
+    if !matches!(format, ClientFormat::SingBox) {
+        tls.warn(profile, stderr);
     }
     Ok(content)
 }
@@ -94,11 +184,20 @@ pub fn select_profile<'a>(
 }
 
 pub fn stored_share_uri(profile: &ManagedProfile, override_server: Option<&str>) -> Result<String> {
+    stored_share_uri_with_tls(profile, override_server, TlsExport::Verify)
+}
+
+pub(crate) fn stored_share_uri_with_tls(
+    profile: &ManagedProfile,
+    override_server: Option<&str>,
+    tls: TlsExport,
+) -> Result<String> {
+    tls.check_profile(profile)?;
     let server = override_server
         .or(profile.socks5_loopback())
         .or(profile.server_address.as_deref())
         .context("该配置没有保存公网地址；请使用 --server-address 指定")?;
-    share_uri(profile, server)
+    legacy_share_uri(profile, server)
 }
 
 fn validate_socks5_export(profile: &ManagedProfile, server: &str) -> Result<()> {
@@ -113,7 +212,17 @@ fn validate_socks5_export(profile: &ManagedProfile, server: &str) -> Result<()> 
     Ok(())
 }
 
+#[cfg(test)]
 pub fn render(profile: &ManagedProfile, format: ClientFormat, server: &str) -> Result<String> {
+    render_with_tls(profile, format, server, TlsExport::Verify)
+}
+
+pub(crate) fn render_with_tls(
+    profile: &ManagedProfile,
+    format: ClientFormat,
+    server: &str,
+    tls: TlsExport,
+) -> Result<String> {
     validate_socks5_export(profile, server)?;
     if matches!(profile.credentials, Credentials::VlessXhttpReality { .. }) {
         bail!("该客户端不支持 XHTTP，请用分享链接导入 v2rayN 或 Xray");
@@ -135,7 +244,13 @@ pub fn render(profile: &ManagedProfile, format: ClientFormat, server: &str) -> R
     profile.validate_h2mux()?;
     let server = normalize_server_address(server)?;
     match format {
-        ClientFormat::ClashMeta => clash_meta(profile, &server),
+        ClientFormat::ClashMeta => {
+            if profile.h2mux.enabled {
+                bail!("当前 Mihomo H2MUX 存在已知兼容问题；请使用 sing-box 导出，或关闭 H2MUX preference 后导出普通 Mihomo 节点");
+            }
+            tls.check_profile(profile)?;
+            clash_meta(profile, &server)
+        }
         ClientFormat::SingBox => sing_box(profile, &server),
         ClientFormat::Nekobox if matches!(profile.credentials, Credentials::Socks5 { .. }) => {
             bail!("该导出目标暂不支持 SOCKS5；请使用标准 URI/QR、sing-box 或 Clash Meta 导出")
@@ -143,14 +258,11 @@ pub fn render(profile: &ManagedProfile, format: ClientFormat, server: &str) -> R
         ClientFormat::Nekobox if matches!(profile.credentials, Credentials::NaiveProxy { .. }) => {
             bail!("当前 NekoBox 导入路径未验证 NaiveProxy；请使用包含 Naive 支持的 sing-box JSON")
         }
-        ClientFormat::Nekobox => share_uri(profile, &server),
+        ClientFormat::Nekobox => share_uri_with_tls(profile, &server, tls),
     }
 }
 
 fn clash_meta(profile: &ManagedProfile, server: &str) -> Result<String> {
-    if profile.h2mux.enabled {
-        bail!("当前 Mihomo H2MUX 存在已知兼容问题；请使用 sing-box 导出，或关闭 H2MUX preference 后导出普通 Mihomo 节点");
-    }
     let proxy = match &profile.credentials {
         Credentials::VlessSudoku { .. } => bail!(crate::sudoku::UNSUPPORTED),
         Credentials::VlessXhttpReality { .. } => {
@@ -765,6 +877,19 @@ fn vless_tcp_uri(
 }
 
 pub fn share_uri(profile: &ManagedProfile, server: &str) -> Result<String> {
+    share_uri_with_tls(profile, server, TlsExport::Verify)
+}
+
+pub(crate) fn share_uri_with_tls(
+    profile: &ManagedProfile,
+    server: &str,
+    tls: TlsExport,
+) -> Result<String> {
+    tls.check_profile(profile)?;
+    legacy_share_uri(profile, server)
+}
+
+fn legacy_share_uri(profile: &ManagedProfile, server: &str) -> Result<String> {
     validate_socks5_export(profile, server)?;
     let server = normalize_server_address(server)?;
     let host = authority_host(&server);
@@ -1107,6 +1232,106 @@ mod tests {
     );
     const PUBLIC_KEY_PIN: &str = "D/lae0s9n5SmUSmF60tlNBHKv68taHjTkVQ53Wh8yxo=";
 
+    const TLS_EXPORT_REJECTION: &str = "无法固定自签证书，继续导出会使客户端不校验服务器身份；请使用 prs export sing-box … 或改用受信证书。若明确接受风险，可加 --allow-insecure";
+
+    fn insecure_render(
+        profile: &ManagedProfile,
+        format: ClientFormat,
+        server: &str,
+    ) -> Result<String> {
+        render_with_tls(profile, format, server, TlsExport::AllowInsecure)
+    }
+
+    fn insecure_share_uri(profile: &ManagedProfile, server: &str) -> Result<String> {
+        share_uri_with_tls(profile, server, TlsExport::AllowInsecure)
+    }
+
+    #[test]
+    fn managed_self_signed_tls_rejects_unsafe_formats_by_default() {
+        let state: config::ManagedState =
+            serde_json::from_str(include_str!("../tests/fixtures/yaml/compat/state.json")).unwrap();
+        for name in [
+            "trojan-tls",
+            "vless-tls-vision",
+            "vless-ws-tls",
+            "vmess-ws-tls",
+            "hysteria2",
+            "tuic",
+            "anytls",
+        ] {
+            let mut profile = select_profile(&state.profiles, Some(&format!("golden-{name}")))
+                .unwrap()
+                .clone();
+            if let Credentials::AnyTls { users, .. } = &mut profile.credentials {
+                users.truncate(1);
+            }
+            let server = "203.0.113.10";
+            for result in [
+                share_uri(&profile, server),
+                render(&profile, ClientFormat::ClashMeta, server),
+                render(&profile, ClientFormat::Nekobox, server),
+            ] {
+                assert_eq!(
+                    result.err().map(|error| error.to_string()).as_deref(),
+                    Some(TLS_EXPORT_REJECTION),
+                    "{name}"
+                );
+            }
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("client-config");
+            for (format, legacy) in [
+                (
+                    ClientFormat::ClashMeta,
+                    clash_meta(&profile, server).unwrap(),
+                ),
+                (
+                    ClientFormat::Nekobox,
+                    legacy_share_uri(&profile, server).unwrap(),
+                ),
+            ] {
+                std::fs::write(&path, "existing output").unwrap();
+                let mut stderr = Vec::new();
+                let capture = |tls, stderr: &mut Vec<u8>| {
+                    export_profile(&profile, format, server, Some(&path), tls, stderr)
+                };
+                assert_eq!(
+                    capture(TlsExport::Verify, &mut stderr)
+                        .unwrap_err()
+                        .to_string(),
+                    TLS_EXPORT_REJECTION
+                );
+                assert_eq!(std::fs::read_to_string(&path).unwrap(), "existing output");
+                assert!(stderr.is_empty());
+                assert_eq!(
+                    capture(TlsExport::AllowInsecure, &mut stderr).unwrap(),
+                    legacy
+                );
+                assert_eq!(std::fs::read_to_string(&path).unwrap(), legacy);
+                assert_eq!(
+                    String::from_utf8(stderr).unwrap(),
+                    format!("{INSECURE_TLS_WARNING}\n")
+                );
+            }
+            profile.certificate_path = Some(PUBLIC_CERT.into());
+            let sing_box = render(&profile, ClientFormat::SingBox, server).unwrap();
+            let json: Value = serde_json::from_str(&sing_box).unwrap();
+            assert_eq!(
+                json["outbounds"][0]["tls"]["certificate_public_key_sha256"],
+                json!([PUBLIC_KEY_PIN])
+            );
+
+            profile.self_signed_certificate = false;
+            assert!(share_uri(&profile, server).is_ok(), "{name}");
+            let clash = render(&profile, ClientFormat::ClashMeta, server).unwrap();
+            let value: Value = crate::yaml::from_str(&clash).unwrap();
+            assert_eq!(value["proxies"][0]["skip-cert-verify"], false, "{name}");
+            assert!(
+                render(&profile, ClientFormat::Nekobox, server).is_ok(),
+                "{name}"
+            );
+        }
+    }
+
     fn reality_profile() -> ManagedProfile {
         ManagedProfile {
             h2mux: Default::default(),
@@ -1156,7 +1381,7 @@ mod tests {
         assert_eq!(outbound["transport"]["path"], websocket["path"]);
         assert_eq!(outbound["transport"]["headers"], websocket["headers"]);
 
-        let text = render(&profile, ClientFormat::ClashMeta, server).unwrap();
+        let text = insecure_render(&profile, ClientFormat::ClashMeta, server).unwrap();
         let clash: Value = crate::yaml::from_str(&text).unwrap();
         let proxy = &clash["proxies"][0];
         assert_eq!(proxy["cipher"], "aes-128-gcm");
@@ -1166,9 +1391,10 @@ mod tests {
         assert_eq!(proxy["network"], "ws");
         assert_eq!(proxy["ws-opts"], websocket);
 
-        let uri = stored_share_uri(&profile, Some(server)).unwrap();
+        let uri =
+            stored_share_uri_with_tls(&profile, Some(server), TlsExport::AllowInsecure).unwrap();
         assert_eq!(
-            render(&profile, ClientFormat::Nekobox, server).unwrap(),
+            insecure_render(&profile, ClientFormat::Nekobox, server).unwrap(),
             uri
         );
         let payload = STANDARD
@@ -1383,13 +1609,13 @@ mod tests {
                 ClientFormat::SingBox,
                 ClientFormat::Nekobox,
             ] {
-                let output = render(profile, format, "203.0.113.10").unwrap();
+                let output = insecure_render(profile, format, "203.0.113.10").unwrap();
                 assert!(!output.contains("must-not-export"));
                 assert!(!output.is_empty());
             }
         }
 
-        let vless_ws = share_uri(&profiles[1], "203.0.113.10").unwrap();
+        let vless_ws = insecure_share_uri(&profiles[1], "203.0.113.10").unwrap();
         for marker in [
             "security=tls",
             "type=ws",
@@ -1405,7 +1631,7 @@ mod tests {
                 "missing {marker}: {trojan_reality}"
             );
         }
-        let vmess = share_uri(&profiles[4], "203.0.113.10").unwrap();
+        let vmess = insecure_share_uri(&profiles[4], "203.0.113.10").unwrap();
         let payload = STANDARD
             .decode(vmess.trim_start_matches("vmess://"))
             .unwrap();
@@ -1486,7 +1712,7 @@ mod tests {
             self_signed_certificate: true,
             naive_certificate_validity: None,
         };
-        let clash = render(&profile, ClientFormat::ClashMeta, "203.0.113.2").unwrap();
+        let clash = insecure_render(&profile, ClientFormat::ClashMeta, "203.0.113.2").unwrap();
         let sing_box = render(&profile, ClientFormat::SingBox, "203.0.113.2").unwrap();
         assert!(clash.contains("skip-cert-verify: true"));
         let sing_box: Value = serde_json::from_str(&sing_box).unwrap();
@@ -1500,7 +1726,7 @@ mod tests {
     }
 
     #[test]
-    fn self_signed_share_uris_include_v2rayn_insecure_flags() {
+    fn opted_in_self_signed_share_uris_include_v2rayn_insecure_flags() {
         let hysteria2 = ManagedProfile {
             h2mux: Default::default(),
             id: Uuid::nil(),
@@ -1536,9 +1762,9 @@ mod tests {
             naive_certificate_validity: None,
         };
         for uri in [
-            share_uri(&hysteria2, "203.0.113.2").unwrap(),
-            share_uri(&tuic, "203.0.113.3").unwrap(),
-            share_uri(&anytls_profile(AnyTlsSecurity::Tls), "203.0.113.5").unwrap(),
+            insecure_share_uri(&hysteria2, "203.0.113.2").unwrap(),
+            insecure_share_uri(&tuic, "203.0.113.3").unwrap(),
+            insecure_share_uri(&anytls_profile(AnyTlsSecurity::Tls), "203.0.113.5").unwrap(),
         ] {
             assert!(uri.contains("insecure=1"), "missing insecure flag: {uri}");
             assert!(
@@ -1546,7 +1772,7 @@ mod tests {
                 "missing v2rayN allowInsecure flag: {uri}"
             );
         }
-        let hysteria2_uri = share_uri(&hysteria2, "203.0.113.2").unwrap();
+        let hysteria2_uri = insecure_share_uri(&hysteria2, "203.0.113.2").unwrap();
         assert!(hysteria2_uri.contains("alpn=h3"));
     }
 
@@ -1802,9 +2028,9 @@ mod tests {
     fn exports_anytls_tls_and_rejects_unsupported_reality_formats() {
         let mut tls = anytls_profile(AnyTlsSecurity::Tls);
         tls.certificate_path = Some(PUBLIC_CERT.into());
-        let clash = render(&tls, ClientFormat::ClashMeta, "203.0.113.5").unwrap();
+        let clash = insecure_render(&tls, ClientFormat::ClashMeta, "203.0.113.5").unwrap();
         let sing_box = render(&tls, ClientFormat::SingBox, "203.0.113.5").unwrap();
-        let uri = render(&tls, ClientFormat::Nekobox, "203.0.113.5").unwrap();
+        let uri = insecure_render(&tls, ClientFormat::Nekobox, "203.0.113.5").unwrap();
         crate::yaml::from_str::<serde_json::Value>(&clash).unwrap();
         let value = serde_json::from_str::<Value>(&sing_box).unwrap();
         assert_eq!(

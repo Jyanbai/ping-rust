@@ -12,6 +12,8 @@ test credentials. They are asserted by `src/config/yaml_fixture_tests.rs`.
 - `golden/clients.json`, `golden/clients/*.clash-meta.yaml`: Clash Meta
   (Mihomo), sing-box and NekoBox exports. The sing-box TLS pins use the
   public-only `../tls/self-signed.pem` fixture; historical state is unchanged.
+  Self-signed TLS Clash Meta and NekoBox goldens record the legacy
+  `--allow-insecure` outputs; default rejection is tested separately.
 - Every `*.json` next to a YAML file is its parser-independent
   `serde_json::Value`; tests compare values, not text.
 

@@ -11,7 +11,7 @@ use input::MenuEof;
 use crate::{
     chain_proxy::{self, ChainNode, ChainProxyChange},
     cli,
-    client::{self, ClientFormat},
+    client::{self, ClientFormat, TlsExport},
     config::{
         self, AnyTlsMode, AnyTlsSecurity, AnyTlsUser, Credentials, GenerationOptions,
         GenerationRequest, ProfileChange, Protocol, ShadowsocksCipher, SnellCipher,
@@ -1202,13 +1202,15 @@ fn print_menu_profile_details(profile: &config::ManagedProfile) {
 }
 
 fn share_uri_for_view(profile: &config::ManagedProfile) -> (Option<String>, Option<String>) {
-    let Some(server) = profile
-        .socks5_loopback()
-        .or(profile.server_address.as_deref())
-    else {
+    if !client::self_signed_tls(profile)
+        && profile
+            .socks5_loopback()
+            .or(profile.server_address.as_deref())
+            .is_none()
+    {
         return (None, None);
-    };
-    match client::share_uri(profile, server) {
+    }
+    match client::stored_share_uri_with_tls(profile, None, TlsExport::Menu) {
         Ok(uri) => (Some(uri), None),
         Err(error) => (None, Some(format!("{error:#}"))),
     }
@@ -1516,7 +1518,7 @@ fn export_menu_output(
     format: ClientFormat,
     server: &str,
 ) -> Result<String> {
-    let content = client::render(profile, format, server)?;
+    let content = client::render_with_tls(profile, format, server, TlsExport::Menu)?;
     let mut output = format!("\n{content}\n");
     if let Some(notice) = client::export_notice(profile, format) {
         output.push_str(&format!("{notice}\n"));
@@ -2519,6 +2521,10 @@ mod tests {
             .find(|profile| matches!(profile.credentials, config::Credentials::VmessTls { .. }))
             .expect("兼容夹具包含支持 H2MUX 的 VMess 节点")
             .clone();
+        let error = export_menu_output(&profile, ClientFormat::Nekobox, "example.com").unwrap_err();
+        assert_eq!(error.to_string(), "无法固定自签证书，继续导出会使客户端不校验服务器身份；请使用 prs export sing-box … 或改用受信证书");
+        assert_eq!(control_after_error(&error), MenuControl::Continue);
+        profile.self_signed_certificate = false;
         let notice = "提示：NekoBox 分享链接不包含 H2MUX 客户端偏好；普通节点连接仍可使用。";
         let plain = export_menu_output(&profile, ClientFormat::Nekobox, "example.com").unwrap();
         assert!(!plain.contains(notice), "{plain}");
