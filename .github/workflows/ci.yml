@@ -271,29 +271,29 @@ jobs:
       - name: Install stable shoes for unit and chain traffic acceptance
         shell: bash
         env:
-          SHOES_ARCHIVE_SHA256: c594d7b30b474b6b3ab4cd30cc0996ba39aac2e66ffaadd725894037866a2705
+          SHOES_ARCHIVE_SHA256: 83a31e39a622b0a28d74b8c73488bb8aa42b1758251b355685f65c80f484e5a6
         run: |
           set -euo pipefail
-          archive="$RUNNER_TEMP/shoes-v0.3.7.tar.gz"
-          directory="$RUNNER_TEMP/shoes-v0.3.7"
+          archive="$RUNNER_TEMP/shoes-v0.3.8.tar.gz"
+          directory="$RUNNER_TEMP/shoes-v0.3.8"
           curl --fail --location --retry 3 --proto '=https' --tlsv1.2 \
             --output "$archive" \
-            https://github.com/cfal/shoes/releases/download/v0.3.7/shoes-x86_64-unknown-linux-musl.tar.gz
+            https://github.com/cfal/shoes/releases/download/v0.3.8/shoes-x86_64-unknown-linux-musl.tar.gz
           echo "$SHOES_ARCHIVE_SHA256  $archive" | sha256sum --check --strict
           mkdir -p "$directory"
           tar -xzf "$archive" -C "$directory"
           test -x "$directory/shoes"
       - name: Unit and integration tests
         env:
-          PING_RUST_TEST_SHOES: ${{ runner.temp }}/shoes-v0.3.7/shoes
-          PING_RUST_SHOES_E2E_BIN: ${{ runner.temp }}/shoes-v0.3.7/shoes
+          PING_RUST_TEST_SHOES: ${{ runner.temp }}/shoes-v0.3.8/shoes
+          PING_RUST_SHOES_E2E_BIN: ${{ runner.temp }}/shoes-v0.3.8/shoes
           # 已提供 shoes：需要 shoes 的测试缺变量时直接失败，不允许跳过。
           PING_RUST_REQUIRE_E2E: "1"
         run: cargo test --locked
       - name: Prove stable shoes chain traffic has no direct fallback
         if: matrix.os == 'ubuntu-24.04'
         env:
-          PING_RUST_SHOES_E2E_BIN: ${{ runner.temp }}/shoes-v0.3.7/shoes
+          PING_RUST_SHOES_E2E_BIN: ${{ runner.temp }}/shoes-v0.3.8/shoes
           PING_RUST_REQUIRE_E2E: "1"
         run: cargo test --locked --test chain_proxy_e2e -- --nocapture
       - run: cargo clippy --locked --all-targets -- -D warnings
@@ -450,29 +450,29 @@ jobs:
       - name: Install stable shoes for unit and chain traffic acceptance
         shell: bash
         env:
-          SHOES_ARCHIVE_SHA256: c594d7b30b474b6b3ab4cd30cc0996ba39aac2e66ffaadd725894037866a2705
+          SHOES_ARCHIVE_SHA256: 83a31e39a622b0a28d74b8c73488bb8aa42b1758251b355685f65c80f484e5a6
         run: |
           set -euo pipefail
-          archive="$RUNNER_TEMP/shoes-v0.3.7.tar.gz"
-          directory="$RUNNER_TEMP/shoes-v0.3.7"
+          archive="$RUNNER_TEMP/shoes-v0.3.8.tar.gz"
+          directory="$RUNNER_TEMP/shoes-v0.3.8"
           curl --fail --location --retry 3 --proto '=https' --tlsv1.2 \
             --output "$archive" \
-            https://github.com/cfal/shoes/releases/download/v0.3.7/shoes-x86_64-unknown-linux-musl.tar.gz
+            https://github.com/cfal/shoes/releases/download/v0.3.8/shoes-x86_64-unknown-linux-musl.tar.gz
           echo "$SHOES_ARCHIVE_SHA256  $archive" | sha256sum --check --strict
           mkdir -p "$directory"
           tar -xzf "$archive" -C "$directory"
           test -x "$directory/shoes"
       - name: Unit and integration tests
         env:
-          PING_RUST_TEST_SHOES: ${{ runner.temp }}/shoes-v0.3.7/shoes
-          PING_RUST_SHOES_E2E_BIN: ${{ runner.temp }}/shoes-v0.3.7/shoes
+          PING_RUST_TEST_SHOES: ${{ runner.temp }}/shoes-v0.3.8/shoes
+          PING_RUST_SHOES_E2E_BIN: ${{ runner.temp }}/shoes-v0.3.8/shoes
           # 已提供 shoes：需要 shoes 的测试缺变量时直接失败，不允许跳过。
           PING_RUST_REQUIRE_E2E: "1"
         run: cargo test --locked
       - name: Prove stable shoes chain traffic has no direct fallback
         if: matrix.name == 'Debian 12'
         env:
-          PING_RUST_SHOES_E2E_BIN: ${{ runner.temp }}/shoes-v0.3.7/shoes
+          PING_RUST_SHOES_E2E_BIN: ${{ runner.temp }}/shoes-v0.3.8/shoes
           PING_RUST_REQUIRE_E2E: "1"
         run: cargo test --locked --test chain_proxy_e2e -- --nocapture
       - run: cargo build --locked --release
@@ -697,14 +697,14 @@ jobs:
       - name: Install pinned shoes
         shell: bash
         env:
-          SHOES_ARCHIVE_SHA256: c594d7b30b474b6b3ab4cd30cc0996ba39aac2e66ffaadd725894037866a2705
+          SHOES_ARCHIVE_SHA256: 83a31e39a622b0a28d74b8c73488bb8aa42b1758251b355685f65c80f484e5a6
         run: |
           set -euo pipefail
-          archive="$RUNNER_TEMP/shoes-v0.3.7.tar.gz"
-          directory="$RUNNER_TEMP/shoes-v0.3.7"
+          archive="$RUNNER_TEMP/shoes-v0.3.8.tar.gz"
+          directory="$RUNNER_TEMP/shoes-v0.3.8"
           curl --fail --location --retry 3 --proto '=https' --tlsv1.2 \
             --output "$archive" \
-            https://github.com/cfal/shoes/releases/download/v0.3.7/shoes-x86_64-unknown-linux-musl.tar.gz
+            https://github.com/cfal/shoes/releases/download/v0.3.8/shoes-x86_64-unknown-linux-musl.tar.gz
           echo "$SHOES_ARCHIVE_SHA256  $archive" | sha256sum --check --strict
           mkdir -p "$directory"
           tar -xzf "$archive" -C "$directory"
