@@ -41,9 +41,12 @@ class Results:
             "verdict": "pass" if verdict == "pass" else "fail",
             "evidence": evidence if evidence in EVIDENCE else "internal",
         }
+        line = json.dumps(row)
         with self.output.open("a", encoding="utf-8") as stream:
-            stream.write(json.dumps(row) + "\n")
+            stream.write(line + "\n")
         self.rows.append(row)
+        if row["verdict"] == "fail":
+            print(line, file=sys.stderr, flush=True)
 
     def cleanup_failed(self, _started):
         self.record("-", "-", "fail", "cleanup")
@@ -78,25 +81,36 @@ def candidate_verdict(case, observed):
 
 def route_evidence(trace, outbound):
     origin = rf"{re.escape(tls.LOOPBACK)}:\d+ --> {re.escape(tls.LOOPBACK)}:{tls.ORIGIN_PORT}"
-    routes = re.findall(rf"\[TCP\] (?:dial (\S+) \(match ([^)]*)\) {origin} error: (.*)"
+    routes = re.findall(rf"\[TCP\] (?:dial (\S+) \(match ([^)]*)\) ({origin}) error: (.*)"
                         rf"|{origin} match (\S+) using ([^\s\"]+)\"?[ \t]*$)",
                         trace, re.M)
-    if len(routes) != 1:
-        return False, None
-    failed, failure_rule, reason, success_rule, succeeded = routes[0]
-    if success_rule == "Match" and succeeded == outbound:
+    if len(routes) == 1 and routes[0][-2:] == ("Match", outbound):
         return True, None
-    if failure_rule not in {"Match/", "Match"} or failed != outbound:
+
+    rejections = set()
+    for failed, failure_rule, endpoints, reason, _, _ in routes:
+        if failure_rule not in {"Match/", "Match"} or failed != outbound:
+            return False, None
+        evidence = certificate_rejection(reason)
+        if evidence is None:
+            return False, None
+        rejections.add((endpoints, evidence))
+    if len(rejections) != 1:
         return False, None
+    (_, evidence), = rejections
+    return True, evidence
+
+
+def certificate_rejection(reason):
     if re.search(r"\bfingerprints? (?:mismatch|(?:(?:do(?:es)?|did) )?not match(?:ed)?)\b|"
                  r"\bcertificate (?:do(?:es)?|did) not match (?:the )?(?:expected )?fingerprint\b", reason, re.I):
-        return True, "pin-mismatch"
+        return "pin-mismatch"
     if "x509: certificate signed by unknown authority" in reason:
-        return True, "certificate"
+        return "certificate"
     if re.search(rf"x509: certificate is (?:valid for [^\r\n]+, not |"
                  rf"not valid for any names, but wanted to match ){re.escape(tls.SERVER_NAME)}(?![\w.-])", reason):
-        return True, "hostname"
-    return False, None
+        return "hostname"
+    return None
 
 
 def leaf_digest(cert, phase):

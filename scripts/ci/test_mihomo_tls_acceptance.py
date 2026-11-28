@@ -2,6 +2,7 @@
 
 import gzip
 import hashlib
+import io
 import json
 import subprocess
 import tempfile
@@ -73,6 +74,28 @@ class MihomoAcceptanceTests(unittest.TestCase):
                           "certificate fingerprint mismatch",
                           success + "\n" + failure.replace("dial probe", "dial DIRECT") + "EOF"):
             self.assertEqual(mihomo.route_evidence(unrelated, "probe"), (False, None))
+
+    def test_only_consistent_retries_of_the_same_connection_supply_rejection_evidence(self):
+        dial = (f'time="now" level=warning msg="[TCP] dial probe (match Match/) '
+                f'127.0.0.1:32100 --> 127.0.0.1:{tls.ORIGIN_PORT} error: ')
+        reasons = {
+            "pin-mismatch": "certificate fingerprints do not match",
+            "certificate": "x509: certificate signed by unknown authority",
+            "hostname": f"x509: certificate is valid for other.example.com, not {tls.SERVER_NAME}",
+        }
+        for evidence, reason in reasons.items():
+            with self.subTest(evidence=evidence):
+                first = dial + reason + '"'
+                retry = dial.replace('time="now"', 'time="later"') + f'wrapped: {reason}"'
+                self.assertEqual(mihomo.route_evidence(first + "\n" + retry, "probe"), (True, evidence))
+
+        first = dial + reasons["pin-mismatch"] + '"'
+        for other in (first.replace(":32100", ":32101"), first.replace("dial probe", "dial DIRECT"),
+                      first.replace("(match Match/)", "(match Domain/)"),
+                      dial + reasons["certificate"] + '"', dial + 'unexpected EOF"',
+                      f'[TCP] 127.0.0.1:32100 --> 127.0.0.1:{tls.ORIGIN_PORT} match Match using probe'):
+            with self.subTest(other=other):
+                self.assertEqual(mihomo.route_evidence(first + "\n" + other, "probe"), (False, None))
 
     def test_candidate_is_isolated_and_changes_only_the_fingerprint(self):
         digest = "ab" * 32
@@ -247,12 +270,13 @@ source "$1" --download-mihomo-only "$2"
                     self.assertIn("FAILED", result.stdout)
 
     def test_results_only_write_allowlisted_metadata(self):
-        with tempfile.TemporaryDirectory() as root:
+        with tempfile.TemporaryDirectory() as root, patch("sys.stderr", new_callable=io.StringIO) as stderr:
             path = Path(root, "results.jsonl")
             results = mihomo.Results(path)
             results.record("unknown-secret", "unknown-secret", "unknown-secret", "unknown-secret")
             self.assertEqual(json.loads(path.read_text()),
                              {"protocol": "-", "candidate": "-", "verdict": "fail", "evidence": "internal"})
+            self.assertEqual(stderr.getvalue(), path.read_text())
 
 
 if __name__ == "__main__":
