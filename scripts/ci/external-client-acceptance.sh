@@ -5,7 +5,6 @@
 set -euo pipefail
 
 PING_RUST="${PING_RUST:-target/release/ping-rust}"
-WORK="${WORK:-$RUNNER_TEMP/ping-rust-external-clients}"
 SHOES_SHA256=c594d7b30b474b6b3ab4cd30cc0996ba39aac2e66ffaadd725894037866a2705
 XRAY_26_TAG=v26.6.27
 XRAY_26_SHA256=b3e5902d06d6282fe53cfa2fc426058b9aeaa429b2c812e20887cd47f26d08bf
@@ -14,15 +13,34 @@ XRAY_MIN_SHA256=7679da6a3bb9dc2b3ce82d7f9f64ac1bb0e4bd6c3b9a0926613e5fc88abef25a
 MIHOMO_TAG=v1.19.33
 MIHOMO_SHA256=8ec92e7b2fdc6b853ba00156bab7e4e965c8b0d843b8c4ac8ab98795f02ad524
 export NO_COLOR=1 TERM=dumb
-mkdir -p "$WORK/bin" "$WORK/logs" "$WORK/http"
-printf 'external client acceptance\n' >"$WORK/http/marker"
 
 download_checked() {
   local url="$1" expected="$2" archive="$3"
-  curl --fail --location --retry 3 --proto '=https' --tlsv1.2 \
+  shift 3
+  curl "$@" --fail --location --retry 3 --proto '=https' --tlsv1.2 \
     --output "$archive" "$url"
   echo "$expected  $archive" | sha256sum --check --strict
 }
+
+download_mihomo() {
+  local destination="$1"
+  download_checked \
+    "https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_TAG}/mihomo-linux-amd64-v1-${MIHOMO_TAG}.gz" \
+    "$MIHOMO_SHA256" "$destination/mihomo.gz" \
+    -q --proto-redir '=https' --connect-timeout 10 --max-time 45 --retry-max-time 60
+  gzip -dc "$destination/mihomo.gz" >"$destination/mihomo"
+  chmod 0755 "$destination/mihomo"
+}
+
+if [[ "${1:-}" == --download-mihomo-only ]]; then
+  [[ "$#" == 2 && "$2" == /* && -d "$2" ]]
+  download_mihomo "$2"
+  exit 0
+fi
+
+WORK="${WORK:-$RUNNER_TEMP/ping-rust-external-clients}"
+mkdir -p "$WORK/bin" "$WORK/logs" "$WORK/http"
+printf 'external client acceptance\n' >"$WORK/http/marker"
 
 download_checked \
   "https://github.com/cfal/shoes/releases/download/v0.3.7/shoes-x86_64-unknown-linux-musl.tar.gz" \
@@ -45,11 +63,7 @@ unzip -oq "$WORK/bin/xray-min.zip" xray -d "$WORK/bin/xray-min"
 XRAY_MIN="$WORK/bin/xray-min/xray"
 chmod 0755 "$XRAY_MIN"
 
-download_checked \
-  "https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_TAG}/mihomo-linux-amd64-v1-v1.19.33.gz" \
-  "$MIHOMO_SHA256" "$WORK/bin/mihomo.gz"
-gzip -dc "$WORK/bin/mihomo.gz" >"$WORK/bin/mihomo"
-chmod 0755 "$WORK/bin/mihomo"
+download_mihomo "$WORK/bin"
 MIHOMO="$WORK/bin/mihomo"
 sudo install -m 0755 "$SHOES" /usr/local/bin/shoes
 

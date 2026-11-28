@@ -21,6 +21,12 @@
       "Run pinned Xray and Mihomo acceptance",
       "Upload external client records"
     ],
+    "Mihomo TLS pin evidence for seven protocols": [
+      "Check Mihomo evidence harness unit tests",
+      "Build current ping-rust release binary",
+      "Run Mihomo TLS pin evidence",
+      "Upload Mihomo TLS pin evidence"
+    ],
     "Seven TLS protocols with sing-box client": [
       "Check acceptance harness unit tests",
       "Build current ping-rust release binary",

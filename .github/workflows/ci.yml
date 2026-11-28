@@ -645,6 +645,43 @@ jobs:
           path: ${{ runner.temp }}/tls-results/results.jsonl
           if-no-files-found: warn
 
+  mihomo-tls-pin-evidence:
+    # #187 阶段 2：只做 Mihomo v1.19.33 自签 TLS 证书固定取证，不改变产品导出行为。
+    name: Mihomo TLS pin evidence for seven protocols
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Check Mihomo evidence harness unit tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B scripts/ci/test_mihomo_tls_acceptance.py
+          python3 -B scripts/ci/test_tls_client_acceptance.py
+      - name: Build current ping-rust release binary
+        shell: bash
+        run: cargo build --locked --release
+      - name: Run Mihomo TLS pin evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          PING_RUST="$PWD/target/release/ping-rust" \
+          TLS_ACCEPTANCE_PRIVATE_DIR="$RUNNER_TEMP/mihomo-tls-private" \
+          TLS_ACCEPTANCE_RESULTS_DIR="$RUNNER_TEMP/mihomo-tls-results" \
+            python3 -B scripts/ci/mihomo_tls_acceptance.py </dev/null
+      - name: Upload Mihomo TLS pin evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: mihomo-tls-pin-evidence
+          # 只上传脱敏结果，私有目录（配置、证书、凭据、原始日志）不上传。
+          path: ${{ runner.temp }}/mihomo-tls-results/results.jsonl
+          if-no-files-found: warn
+
   menu-input:
     name: Menu input terminal regression
     runs-on: ubuntu-24.04

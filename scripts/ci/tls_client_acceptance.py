@@ -105,6 +105,9 @@ class Results:
         print(line, flush=True)
         self.rows.append(row)
 
+    def cleanup_failed(self, started):
+        self.record("-", "-", "cleanup", started, 1)
+
 
 def matrix_status(rows):
     expected = {(protocol, case) for protocol in PROTOCOLS for case in CASES}
@@ -382,7 +385,7 @@ def public_key_pin(cert, phase):
 @contextmanager
 def different_certificate(work, profile, protocol, port):
     phase = "replace-certificate"
-    cert, key = certificate_files(profile)
+    cert, _ = certificate_files(profile)
     replacement_cert, replacement_key = work / "alternate-cert.pem", work / "alternate-key.pem"
     checked(["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256",
              "-config", os.devnull, "-noenc", "-days", "1", "-subj", f"/CN={SERVER_NAME}",
@@ -390,9 +393,20 @@ def different_certificate(work, profile, protocol, port):
              "-out", replacement_cert, "-keyout", replacement_key], phase, log=work / phase)
     if public_key_pin(cert, phase) == public_key_pin(replacement_cert, phase):
         raise Failure(phase)
+    with installed_certificate(profile, protocol, port, replacement_cert, replacement_key) as pid:
+        yield pid
+
+
+@contextmanager
+def installed_certificate(profile, protocol, port, replacement_cert, replacement_key=None):
+    phase = "replace-certificate"
+    cert, key = certificate_files(profile)
+    files = [(cert, replacement_cert)]
+    if replacement_key is not None:
+        files.append((key, replacement_key))
     backups = []
     try:
-        for destination, source in ((cert, replacement_cert), (key, replacement_key)):
+        for destination, source in files:
             backup = destination.with_suffix(".pin-test-original")
             checked([*SUDO, "mv", "--", destination, backup], phase)
             backups.append((backup, destination))
@@ -618,7 +632,7 @@ def run_protocol(slug, protocol, port, ping_rust, work, backend: ClientBackend, 
             positive_ok = status == 0
 
 
-def accept(ping_rust, work, results, prepare_backend=SingBox.prepare):
+def accept(ping_rust, work, results, prepare_backend=SingBox.prepare, run_node=run_protocol):
     preflight(ping_rust)
     shoes = download(work, "shoes", f"cfal/shoes/releases/download/{SHOES_VERSION}/shoes-x86_64-unknown-linux-musl.tar.gz",
                      "shoes", "c594d7b30b474b6b3ab4cd30cc0996ba39aac2e66ffaadd725894037866a2705")
@@ -630,7 +644,7 @@ def accept(ping_rust, work, results, prepare_backend=SingBox.prepare):
         checked([*SUDO, "install", "-m", "0755", shoes, SHOES_BIN], "install")
         try:
             for index, (slug, protocol) in enumerate(PROTOCOLS.items(), FIRST_NODE_PORT):
-                run_protocol(slug, protocol, index, ping_rust, work / slug, backend, server, results)
+                run_node(slug, protocol, index, ping_rust, work / slug, backend, server, results)
         finally:
             started = time.monotonic()
             try:
@@ -640,7 +654,7 @@ def accept(ping_rust, work, results, prepare_backend=SingBox.prepare):
                 elif unit.returncode not in {0, 1, 4} or unit.stdout.strip() != "not-found":
                     raise Failure("cleanup")
             except Failure:
-                results.record("-", "-", "cleanup", started, 1)
+                results.cleanup_failed(started)
 
 
 def directories():
