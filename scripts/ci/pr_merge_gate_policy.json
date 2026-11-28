@@ -100,6 +100,11 @@
       "Run cargo build --locked",
       "Probe schema and authenticated data"
     ],
+    "source-matrix / Source matrix (github-release-v0.3.8)": [
+      "Install isolated runtime",
+      "Run cargo build --locked",
+      "Probe schema and authenticated data"
+    ],
     "source-matrix / Source matrix (verified-pin)": [
       "Install isolated runtime",
       "Run cargo build --locked",

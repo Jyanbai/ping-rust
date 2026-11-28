@@ -24,7 +24,7 @@ permissions:
   contents: read
 
 env:
-  SHOES_COMMIT: ee44a397e6850193e86a1ae66639f037f963822d
+  SHOES_COMMIT: 7680938b96a245a21d9e481ad009205b956e4436
 
 jobs:
   ubuntu-24-04:

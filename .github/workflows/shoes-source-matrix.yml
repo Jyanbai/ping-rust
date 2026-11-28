@@ -55,7 +55,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        source: [github-release-v0.3.7, verified-pin]
+        source: [github-release-v0.3.7, github-release-v0.3.8, verified-pin]
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
@@ -71,9 +71,15 @@ jobs:
             echo "c594d7b30b474b6b3ab4cd30cc0996ba39aac2e66ffaadd725894037866a2705  $RUNNER_TEMP/shoes.tar.gz" | sha256sum --check
             tar -xzf "$RUNNER_TEMP/shoes.tar.gz" -C "$RUNNER_TEMP"
             sudo install -m 0755 "$RUNNER_TEMP/shoes" /usr/local/bin/shoes
+          elif [ "$SOURCE" = github-release-v0.3.8 ]; then
+            # #157：新 pin。归档 SHA-256 来自 shoes-pin-evidence 运行 46140347135 的实测取证。
+            curl -fL --retry 3 https://github.com/cfal/shoes/releases/download/v0.3.8/shoes-x86_64-unknown-linux-musl.tar.gz -o "$RUNNER_TEMP/shoes.tar.gz"
+            echo "83a31e39a622b0a28d74b8c73488bb8aa42b1758251b355685f65c80f484e5a6  $RUNNER_TEMP/shoes.tar.gz" | sha256sum --check
+            tar -xzf "$RUNNER_TEMP/shoes.tar.gz" -C "$RUNNER_TEMP"
+            sudo install -m 0755 "$RUNNER_TEMP/shoes" /usr/local/bin/shoes
           else
             pin="$(sed -n 's/^const SHOES_SCHEMA_REVISION: &str = "\([0-9a-f]*\)";$/\1/p' src/installer.rs)"
-            test "$pin" = ee44a397e6850193e86a1ae66639f037f963822d
+            test "$pin" = 7680938b96a245a21d9e481ad009205b956e4436
             cargo install --git https://github.com/cfal/shoes --rev "$pin" --locked --root "$RUNNER_TEMP/shoes-pin"
             sudo install -m 0755 "$RUNNER_TEMP/shoes-pin/bin/shoes" /usr/local/bin/shoes
           fi

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# External client acceptance for shoes v0.3.7. Every downloaded binary is
+# External client acceptance for shoes v0.3.8. Every downloaded binary is
 # pinned to a release and checked before execution. Snell results are recorded
 # per cipher because Mihomo's schema only exposes the AES-128-GCM variant.
 set -euo pipefail
 
 PING_RUST="${PING_RUST:-target/release/ping-rust}"
-SHOES_SHA256=c594d7b30b474b6b3ab4cd30cc0996ba39aac2e66ffaadd725894037866a2705
+SHOES_SHA256=83a31e39a622b0a28d74b8c73488bb8aa42b1758251b355685f65c80f484e5a6
 XRAY_26_TAG=v26.6.27
 XRAY_26_SHA256=b3e5902d06d6282fe53cfa2fc426058b9aeaa429b2c812e20887cd47f26d08bf
 XRAY_MIN_TAG=v25.5.16
@@ -43,7 +43,7 @@ mkdir -p "$WORK/bin" "$WORK/logs" "$WORK/http"
 printf 'external client acceptance\n' >"$WORK/http/marker"
 
 download_checked \
-  "https://github.com/cfal/shoes/releases/download/v0.3.7/shoes-x86_64-unknown-linux-musl.tar.gz" \
+  "https://github.com/cfal/shoes/releases/download/v0.3.8/shoes-x86_64-unknown-linux-musl.tar.gz" \
   "$SHOES_SHA256" "$WORK/bin/shoes.tar.gz"
 tar -xzf "$WORK/bin/shoes.tar.gz" -C "$WORK/bin"
 SHOES="$WORK/bin/shoes"
