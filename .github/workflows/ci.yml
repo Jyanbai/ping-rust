@@ -681,6 +681,31 @@ jobs:
           # 只上传脱敏结果，私有目录（配置、证书、凭据、原始日志）不上传。
           path: ${{ runner.temp }}/mihomo-tls-results/results.jsonl
           if-no-files-found: warn
+      - name: Summarize Mihomo TLS pin evidence
+        # #187 阶段 3 需要可读矩阵：results.jsonl 只含白名单字段（协议、候选、结论、证据类别），
+        # 原样逐行写入日志和 job summary，不含配置、证书、凭据或原始日志。
+        if: always()
+        shell: bash
+        env:
+          RESULTS: ${{ runner.temp }}/mihomo-tls-results/results.jsonl
+        run: |
+          set -euo pipefail
+          if [[ ! -f "$RESULTS" ]]; then
+            echo "未找到 Mihomo 取证结果" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          python3 -I - "$RESULTS" <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          import sys
+
+          allowed = ("protocol", "candidate", "verdict", "evidence")
+          print("| protocol | candidate | verdict | evidence |")
+          print("|---|---|---|---|")
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              for line in stream:
+                  row = json.loads(line)
+                  print("| " + " | ".join(str(row.get(key, "")) for key in allowed) + " |")
+          PY
 
   menu-input:
     name: Menu input terminal regression
