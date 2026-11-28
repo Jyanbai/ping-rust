@@ -362,6 +362,10 @@ pub(crate) async fn run(command: Command) -> Result<()> {
                     subnet.context("导入 CSV 必须指定 --subnet IPv4/24")?,
                     protocol.unwrap_or(Mode::Reality),
                 )?);
+                if candidates.is_empty() {
+                    println!("没有候选，请选择其他来源。");
+                    return Ok(());
+                }
             }
             candidates
         }

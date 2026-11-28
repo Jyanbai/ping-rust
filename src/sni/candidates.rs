@@ -127,8 +127,16 @@ pub(super) fn parse_csv(
             .iter()
             .position(|v| names.iter().any(|n| v.trim().eq_ignore_ascii_case(n)))
     };
-    let cert = column(&["CERT", "DOMAIN", "SNI", "NAME", "COMMON_NAME", "CN"])
-        .context("CSV 缺少 CERT/域名列，请使用 RealiTLScanner 原始 CSV")?;
+    let cert = column(&[
+        "CERT_DOMAIN",
+        "CERT",
+        "DOMAIN",
+        "SNI",
+        "NAME",
+        "COMMON_NAME",
+        "CN",
+    ])
+    .context("CSV 缺少 CERT/域名列，请使用 RealiTLScanner 原始 CSV")?;
     let origin = column(&["ORIGIN"]);
     let ip = column(&["IP", "ADDRESS", "ADDR"]);
     let mut candidates = Vec::new();
