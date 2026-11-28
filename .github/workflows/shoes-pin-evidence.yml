@@ -1,0 +1,41 @@
+name: shoes pin evidence
+
+# #157：在可信 Actions runner 上取证 shoes 候选版本的 tag→commit、资产 URL/大小/摘要与 --version。
+# 只读，不写仓库；输出仅含公开的上游元数据与摘要。
+on:
+  pull_request:
+    paths:
+      - "scripts/ci/shoes_pin_evidence.py"
+      - "scripts/ci/test_shoes_pin_evidence.py"
+      - ".github/workflows/shoes-pin-evidence.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  evidence:
+    name: shoes pin evidence (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - name: Check evidence harness unit tests
+        shell: bash
+        run: python3 -B -m unittest discover -s scripts/ci -p test_shoes_pin_evidence.py
+      - name: Collect shoes Release provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B scripts/ci/shoes_pin_evidence.py </dev/null | tee "$RUNNER_TEMP/shoes-pin-evidence.json"
+      - name: Upload shoes pin evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: shoes-pin-evidence-${{ matrix.runner }}
+          path: ${{ runner.temp }}/shoes-pin-evidence.json
+          if-no-files-found: warn
