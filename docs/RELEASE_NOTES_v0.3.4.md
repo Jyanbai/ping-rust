@@ -6,14 +6,14 @@
 
 - **sing-box 导出固定证书公钥**（#155、#184）：未提供 `--cert/--key` 的 TLS 节点（Hysteria2、TUIC、Trojan-TLS、VLESS-Vision、VLESS-WS、VMess-WS、AnyTLS）使用自签证书。导出 sing-box 时改为 `tls.certificate_public_key_sha256` 固定该节点叶证书的公钥，不再设置 `insecure`；证书文件缺失或损坏时明确报错，不回退为跳过校验。使用外部证书的节点保持系统信任链校验，不受影响。
 - **修复 VMess-WS-TLS 无法连通**（#176、#179）：sing-box 在 TLS 下把 `security: auto` 解析为 `zero`，shoes 不接受；分享链接、二维码、Clash Meta、sing-box、NekoBox 统一导出 `aes-128-gcm`。服务端配置不变。
-- **保留手工添加的 shoes 字段**（#145、#174、#182）：新增、编辑、删除、`socks5 secure`、链式代理规则更新、shoes 升级迁移、菜单补建节点文件和备份恢复，只修改目标条目，其他节点 ping-rust 不认识的字段（例如 VLESS-ENC 节点手工加的 `encryption_limits`）原样保留。聚合配置与节点文件对同一节点不一致时拒绝提交，提示只含文件名、节点序号和脱敏字段路径。
+- **保留手工添加的 shoes 字段**（#145、#174、#182）：新增、编辑、删除、`socks5 secure`、链式代理规则更新、shoes 升级迁移和菜单补建节点文件，只修改目标条目，其他节点 ping-rust 不认识的字段（例如 VLESS-ENC 节点手工加的 `encryption_limits`）原样保留。备份恢复仍会用备份**整体替换** `/etc/shoes`（恢复前的目录另存为 `/etc/shoes.pre-restore-<时间>`），备份之后对任何节点做的修改都不会保留；本版只保证备份中的手工字段在恢复与补建节点文件时不再丢失。聚合配置与节点文件对同一节点不一致时拒绝提交，提示只含文件名、节点序号和脱敏字段路径。
 - **菜单内自更新自动切换**（#168、#170）：更新中心“更新 ping-rust”成功后，按回车直接进入新版本菜单；切换失败时退出并提示重新运行 `sudo prs`。
 - **`socks5 secure` 修复**：不再把其他服务在不相交具体地址上的同号端口当成冲突（#146、#178）；shoes 预检期间按 Ctrl-C 或收到 SIGTERM/SIGHUP 时清理含凭据的候选配置文件（#152、#183）。
 - **CI 与流程**：七种自签 TLS 协议用固定 sing-box v1.14.2 做真实连通、错误凭据、证书校验和异钥证书四类验收，并纳入 PR 合并门禁与 Release 门禁（#156、#173、#175、#184）；修复多处 CI 偶发失败（#161、#164、#167）。不放宽任何门禁。
 
 ## 升级后需要你操作的事项
 
-- **重新导出 sing-box 配置**：v0.3.4 只改变导出结果，已分发的旧配置仍是跳过证书校验。对自签 TLS 节点执行 `sudo prs` → 查看配置，或 `ping-rust export sing-box`，重新导入客户端，才会启用证书固定。sing-box 客户端版本以 CI 实测的 **v1.14.2** 为准；更早版本未验证，可能不识别 `certificate_public_key_sha256`。
+- **重新导出 sing-box 配置**：v0.3.4 只改变导出结果，已分发的旧配置仍是跳过证书校验。证书固定只在 sing-box JSON 导出中生效；“查看配置”里的分享链接和二维码**不会**启用固定。请用 `sudo prs` → 9) 工具 → 1) 导出客户端配置 → 选择 sing-box，或命令行 `sudo ping-rust export sing-box --server <VPS 公网域名或 IP> --profile <节点 UUID>`（只有一个节点时可省略 `--profile`；节点 UUID 可用 `prs info` 查看），把生成的 JSON 重新导入客户端。sing-box 客户端版本以 CI 实测的 **v1.14.2** 为准；更早版本未验证，可能不识别 `certificate_public_key_sha256`。
 - **重新导出 VMess-WS-TLS 节点**：旧导出在 sing-box 中无法连通，升级后重新导出导入即可，无需改服务端。新版 VMess 分享链接带 `scy=aes-128-gcm`，**尚未升级的旧版 ping-rust 链式代理可能无法导入**，请两端都升级到 v0.3.4。个别域名和 WebSocket 路径很长的 VMess 节点，链接变长后可能不再生成终端二维码，可直接复制链接。
 - **从 v0.3.3 在菜单内更新**：v0.3.3 的菜单不会自动切换，更新完成后请退出菜单，重新运行 `sudo prs`。v0.3.4 及以后在菜单内更新会自动切换。
 
