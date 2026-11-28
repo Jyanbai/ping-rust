@@ -56,11 +56,18 @@ impl AddRequest {
 
 pub struct AddResult {
     pub generation: config::GenerationResult,
-    pub share_uri: Option<String>,
+    pub share_uri: Result<Option<String>>,
 }
 
 pub async fn execute(request: AddRequest) -> Result<AddResult> {
-    execute_inner(request, None).await
+    execute_inner(request, None, client::TlsExport::Menu).await
+}
+
+pub(crate) async fn execute_with_tls(
+    request: AddRequest,
+    tls: client::TlsExport,
+) -> Result<AddResult> {
+    execute_inner(request, None, tls).await
 }
 
 /// 菜单已完成自动选择、手动检测或完整推荐检测，复用结果而不重复探测。
@@ -69,10 +76,14 @@ pub(crate) async fn execute_with_sni(
     server_name: String,
 ) -> Result<AddResult> {
     config::validate_server_name(&server_name)?;
-    execute_inner(request, Some(server_name)).await
+    execute_inner(request, Some(server_name), client::TlsExport::Menu).await
 }
 
-async fn execute_inner(request: AddRequest, checked_sni: Option<String>) -> Result<AddResult> {
+async fn execute_inner(
+    request: AddRequest,
+    checked_sni: Option<String>,
+    tls: client::TlsExport,
+) -> Result<AddResult> {
     request.vless_enc.sudoku.validate_for(request.protocol)?;
     utils::require_linux_root()?;
     if !Path::new(utils::SHOES_BIN).is_file() {
@@ -103,7 +114,7 @@ async fn execute_inner(request: AddRequest, checked_sni: Option<String>) -> Resu
         .await,
         port,
     )?;
-    let share_uri = share_uri_after_activation(&generation.profile, &server_address)?;
+    let share_uri = share_uri_after_activation(&generation.profile, &server_address, tls);
     Ok(AddResult {
         generation,
         share_uri,
@@ -177,6 +188,7 @@ fn prepare_generation_request(
 fn share_uri_after_activation(
     profile: &config::ManagedProfile,
     server_address: &str,
+    tls: client::TlsExport,
 ) -> Result<Option<String>> {
     if matches!(
         profile.credentials,
@@ -193,7 +205,12 @@ fn share_uri_after_activation(
     ) {
         Ok(None)
     } else {
-        client::share_uri(profile, profile.socks5_loopback().unwrap_or(server_address)).map(Some)
+        client::share_uri_with_tls(
+            profile,
+            profile.socks5_loopback().unwrap_or(server_address),
+            tls,
+        )
+        .map(Some)
     }
 }
 
@@ -436,7 +453,18 @@ mod tests {
             self_signed_certificate: false,
             naive_certificate_validity: None,
         };
-        let tls = share_uri_after_activation(&profile, "203.0.113.10")
+        profile.self_signed_certificate = true;
+        let rejected =
+            share_uri_after_activation(&profile, "203.0.113.10", client::TlsExport::Verify)
+                .unwrap_err();
+        assert!(rejected.to_string().contains("无法固定自签证书"));
+        let insecure =
+            share_uri_after_activation(&profile, "203.0.113.10", client::TlsExport::AllowInsecure)
+                .unwrap()
+                .unwrap();
+        assert!(insecure.contains("&insecure=1&allowInsecure=1#"));
+        profile.self_signed_certificate = false;
+        let tls = share_uri_after_activation(&profile, "203.0.113.10", client::TlsExport::Verify)
             .unwrap()
             .unwrap();
         assert!(tls.starts_with("anytls://"));
@@ -448,9 +476,11 @@ mod tests {
             public_key: "public-key".into(),
             short_id: "0123456789abcdef".into(),
         };
-        assert!(share_uri_after_activation(&profile, "203.0.113.10")
-            .unwrap()
-            .is_none());
+        assert!(
+            share_uri_after_activation(&profile, "203.0.113.10", client::TlsExport::Verify)
+                .unwrap()
+                .is_none()
+        );
         let error = client::share_uri(&profile, "203.0.113.10").unwrap_err();
         assert!(error.to_string().contains("请改用 sing-box 导出"));
         assert!(client::render(&profile, client::ClientFormat::ClashMeta, "203.0.113.10").is_err());

@@ -11,6 +11,7 @@ set binary [lindex $argv 0]
 set flow [lindex $argv 1]
 set mode [lindex $argv 2]
 set port [lindex $argv 3]
+set tls_refusal {无法固定自签证书，继续导出会使客户端不校验服务器身份；请使用 prs export sing-box … 或改用受信证书}
 if {$flow ni {quick advanced} || $mode ni {1 2}} {
     puts stderr "invalid AnyTLS menu flow or mode"
     exit 2
@@ -95,8 +96,8 @@ expect {
             }
         }
         if {$mode == "1"} {
-            if {!$uri || $unsupported || ![regexp {二维码 \(QR\)} $details] || ![regexp {[▀▄█]} $details]} {
-                puts stderr "AnyTLS TLS add result lost URI or QR"
+            if {$uri || !$unsupported || [regexp {链接 \(URL\)|二维码 \(QR\)|--allow-insecure} $details] || [string first $tls_refusal $details] < 0} {
+                puts stderr "AnyTLS TLS add result did not refuse insecure sharing"
                 exit 1
             }
         } elseif {$uri || !$unsupported || [regexp {二维码 \(QR\)} $details] || ![regexp {传输层安全 \(TLS\)[^\r\n]*= reality} $details]} {
@@ -162,8 +163,8 @@ set details [regsub -all {\x1b\[[0-9;?]*[A-Za-z]} [read $view_file] {}]
 close $view_file
 file delete $view_log
 if {$mode == "1"} {
-    if {![regexp {anytls://} $details] || $sni != 0} {
-        puts stderr "AnyTLS TLS view lost its URI or used Reality SNI"
+    if {[regexp {anytls://|链接 \(URL\)|二维码 \(QR\)|--allow-insecure} $details] || [string first $tls_refusal $details] < 0 || $sni != 0} {
+        puts stderr "AnyTLS TLS view did not refuse insecure sharing or used Reality SNI"
         exit 1
     }
 } else {

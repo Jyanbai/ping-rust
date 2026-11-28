@@ -781,12 +781,17 @@ jobs:
           send "0\r"
           expect { eof {} timeout { puts stderr "timeout waiting for view exit"; exit 26 } }
           EXPECT
-            sudo env SHARE_SCHEME="$scheme" VIEW_LOG="$view_log" python3 - <<'PYVIEW'
+            sudo env SHARE_SCHEME="$scheme" VIEW_LOG="$view_log" EXPECT_REFUSAL="${4:-0}" python3 - <<'PYVIEW'
           import os, re
           from pathlib import Path
           details = re.sub(r'\x1b\[[0-9;?]*[A-Za-z]', '', Path(os.environ['VIEW_LOG']).read_text(encoding='utf-8', errors='replace'))
           scheme = os.environ['SHARE_SCHEME']
-          if scheme == 'snell':
+          if os.environ.get('EXPECT_REFUSAL') == '1':
+              # #187 阶段 3a：自签 TLS 节点在菜单查看页只显示拒绝原因，无链接、无二维码。
+              assert '未生成标准分享链接：无法固定自签证书，继续导出会使客户端不校验服务器身份；请使用 prs export sing-box … 或改用受信证书' in details
+              assert scheme + '://' not in details
+              assert '二维码 (QR)' not in details and not any(block in details for block in '▀▄█')
+          elif scheme == 'snell':
               assert re.search(r'协议 \(protocol\)\s*= snell', details)
               assert 'snell://' not in details
           else:
@@ -867,11 +872,11 @@ jobs:
           PY
           )"
           sudo "$PRS" delete "$shadowtls_fast_profile_id" --yes >/dev/null
-          run_menu_add 9 25451 vless
-          run_menu_add 11 25452 vless
-          run_menu_add 10 25453 trojan
+          run_menu_add 9 25451 vless 1
+          run_menu_add 11 25452 vless 1
+          run_menu_add 10 25453 trojan 1
           run_menu_add 12 25454 trojan
-          run_menu_add 14 25455 vmess
+          run_menu_add 14 25455 vmess 1
           run_menu_add 15 25456 socks5
           run_menu_add 13 25457 snell
           sudo env PRS_COMMAND="$PRS" expect <<'EXPECT'
@@ -1492,6 +1497,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # #187 阶段 3a（方案 C）：受管自签 TLS 节点默认拒绝 Clash Meta / NekoBox 导出，
+          # 需精确拒绝文案、非零退出且不生成输出文件；显式 --allow-insecure 才恢复旧输出。
+          refusal='无法固定自签证书，继续导出会使客户端不校验服务器身份；请使用 prs export sing-box … 或改用受信证书。若明确接受风险，可加 --allow-insecure'
+          expect_refusal() {
+            local output="$1" log="$2"
+            shift 2
+            if sudo "$PING_RUST" "$@" --output "$output" >"$log" 2>&1; then
+              echo "self-signed export unexpectedly succeeded: $*" >&2
+              exit 1
+            fi
+            grep -Fq "$refusal" "$log"
+            sudo test ! -e "$output"
+          }
           for entry in \
             "reality:$REALITY_PROFILE" \
             "hysteria2:$HYSTERIA_PROFILE" \
@@ -1505,6 +1523,10 @@ jobs:
             "vmess-ws-tls:$VMESS_WS_TLS_PROFILE"; do
             name="${entry%%:*}"
             profile="${entry#*:}"
+            case "$name" in
+              hysteria2|tuic|anytls|vless-tls|vless-ws-tls|trojan-tls|vmess-ws-tls) self_signed=1 ;;
+              *) self_signed=0 ;;
+            esac
             if [ "$profile" = "$VMESS_WS_TLS_PROFILE" ]; then
               if sudo "$PING_RUST" export clash-meta \
                 --profile "$profile" \
@@ -1515,6 +1537,15 @@ jobs:
                 exit 1
               fi
               grep -Fq "当前 Mihomo H2MUX 存在已知兼容问题" "$RUNNER_TEMP/$name-clash.log"
+            elif [ "$self_signed" = 1 ]; then
+              expect_refusal "$RUNNER_TEMP/$name-clash.yaml" "$RUNNER_TEMP/$name-clash.log" \
+                export clash-meta --profile "$profile" --server 127.0.0.1
+              sudo "$PING_RUST" export clash-meta --allow-insecure \
+                --profile "$profile" \
+                --server 127.0.0.1 \
+                --output "$RUNNER_TEMP/$name-clash.yaml" \
+                2>"$RUNNER_TEMP/$name-clash-insecure.log"
+              test -s "$RUNNER_TEMP/$name-clash-insecure.log"
             else
               sudo "$PING_RUST" export clash-meta \
                 --profile "$profile" \
@@ -1525,15 +1556,20 @@ jobs:
               --profile "$profile" \
               --server 127.0.0.1 \
               --output "$RUNNER_TEMP/$name-sing-box.json"
-            sudo "$PING_RUST" export nekobox \
-              --profile "$profile" \
-              --server 127.0.0.1 \
-              --output "$RUNNER_TEMP/$name-nekobox.txt"
+            if [ "$self_signed" = 1 ]; then
+              expect_refusal "$RUNNER_TEMP/$name-nekobox.txt" "$RUNNER_TEMP/$name-nekobox.log" \
+                export nekobox --profile "$profile" --server 127.0.0.1
+            else
+              sudo "$PING_RUST" export nekobox \
+                --profile "$profile" \
+                --server 127.0.0.1 \
+                --output "$RUNNER_TEMP/$name-nekobox.txt"
+              sudo test -s "$RUNNER_TEMP/$name-nekobox.txt"
+            fi
             if [ "$profile" != "$VMESS_WS_TLS_PROFILE" ]; then
               sudo test -s "$RUNNER_TEMP/$name-clash.yaml"
             fi
             sudo test -s "$RUNNER_TEMP/$name-sing-box.json"
-            sudo test -s "$RUNNER_TEMP/$name-nekobox.txt"
             sudo python3 -m json.tool \
               "$RUNNER_TEMP/$name-sing-box.json" >/dev/null
           done
@@ -1572,7 +1608,7 @@ jobs:
             echo "- Reality deployment: ${{ steps.reality.outputs.elapsed }} seconds"
             echo '- systemd: enabled, active, restart verified'
             echo '- Protocol listeners: all ten menu presets'
-            echo '- Client exports: nine standard presets to Clash Meta, all ten to sing-box and Nekobox; H2MUX Mihomo rejection verified'
+            echo '- Client exports: all ten to sing-box; Clash Meta / Nekobox succeed for trusted/Reality presets, self-signed TLS presets refused by default (Clash Meta allowed with --allow-insecure); H2MUX Mihomo rejection verified'
             echo '- Operations: logs, backup, restore, update, restart, info'
           } >> "$GITHUB_STEP_SUMMARY"
 

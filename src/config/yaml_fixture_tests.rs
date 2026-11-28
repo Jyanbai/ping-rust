@@ -15,7 +15,7 @@ use crate::{
     chain_proxy::{
         parse_share_uri, ChainDefinition, ChainHop, ChainPool, RouteTarget, RoutingRule,
     },
-    client::{self, ClientFormat},
+    client::{self, ClientFormat, TlsExport},
     shoes_e2e::{shoes_binary, SHOES_E2E_BIN},
 };
 
@@ -198,7 +198,8 @@ fn golden_client_exports_are_semantically_unchanged() {
         let profile = golden_client_profile(profile);
         for (format, label) in FORMATS {
             let key = format!("{}.{label}", profile.name);
-            match client::render(&profile, format, EXPORT_SERVER) {
+            match client::render_with_tls(&profile, format, EXPORT_SERVER, TlsExport::AllowInsecure)
+            {
                 Ok(text) => {
                     assert_eq!(client_export_value(format, &text), golden[&key], "{key}");
                     seen += 1;
@@ -393,7 +394,12 @@ fn yaml_special_strings_round_trip_as_exact_strings() {
                 yaml_to_json(&aggregate),
                 serde_json::to_value([server]).unwrap()
             );
-            if let Ok(clash) = client::render(profile, ClientFormat::ClashMeta, EXPORT_SERVER) {
+            if let Ok(clash) = client::render_with_tls(
+                profile,
+                ClientFormat::ClashMeta,
+                EXPORT_SERVER,
+                TlsExport::AllowInsecure,
+            ) {
                 let mut exported = Vec::new();
                 collect_strings(&yaml_to_json(&clash), &mut exported);
                 assert!(
@@ -635,7 +641,9 @@ fn derive_yaml_fixtures() {
     for profile in &state.profiles {
         let profile = golden_client_profile(profile);
         for (format, label) in FORMATS {
-            if let Ok(text) = client::render(&profile, format, EXPORT_SERVER) {
+            if let Ok(text) =
+                client::render_with_tls(&profile, format, EXPORT_SERVER, TlsExport::AllowInsecure)
+            {
                 if matches!(format, ClientFormat::ClashMeta) {
                     write(
                         &format!("golden/clients/{}.{label}.yaml", profile.name),
