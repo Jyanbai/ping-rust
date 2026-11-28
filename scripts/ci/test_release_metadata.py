@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-VERSION = "0.3.3"
+VERSION = "0.3.4"
 
 
 class ReleaseMetadataTest(unittest.TestCase):
